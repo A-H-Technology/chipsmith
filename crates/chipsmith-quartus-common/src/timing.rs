@@ -53,12 +53,8 @@ pub fn parse_sta_summary(report: &str) -> TimingSummary {
 /// timing still produces a usable .sof, so this warns rather than fails — but it
 /// says so loudly, because "Build complete" on a design that missed setup by 2ns
 /// is exactly the trap this is here to close.
-pub fn report_timing(build_dir: &Path, project_name: &str) {
-    let path = build_dir
-        .join("output_files")
-        .join(format!("{project_name}.sta.summary"));
-
-    let Ok(report) = std::fs::read_to_string(&path) else {
+pub fn report_timing(path: &Path) {
+    let Ok(report) = std::fs::read_to_string(path) else {
         return;
     };
     let summary = parse_sta_summary(&report);

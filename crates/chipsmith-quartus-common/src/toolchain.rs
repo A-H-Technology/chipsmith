@@ -77,14 +77,15 @@ impl Toolchain for QuartusToolchain {
                 &install_dir,
                 step.tool,
                 &step.args,
-                Some(&plan.build_dir),
+                Some(plan.build_dir()),
             )
             .await?;
         }
 
-        timing::report_timing(&plan.build_dir, &manifest.project.name);
+        timing::report_timing(&plan.timing_summary());
 
-        eprintln!("Build complete: {}", plan.output_sof.display());
-        Ok(plan.output_sof)
+        let bitstream = plan.bitstream();
+        eprintln!("Build complete: {}", bitstream.display());
+        Ok(bitstream)
     }
 }

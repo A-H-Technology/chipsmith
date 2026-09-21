@@ -6,6 +6,7 @@ use error::ChipsmithError;
 use manifest::Manifest;
 use toolchain::Toolchain;
 
+use chipsmith_quartus_common::build::BuildLayout;
 use chipsmith_quartus_common::{QuartusProduct, QuartusToolchain};
 
 /// Every Backend chipsmith knows. Adding one means adding a Product here.
@@ -73,10 +74,7 @@ pub async fn flash(
     let manifest = Manifest::load(project_dir)?;
     let backend = resolve_backend(manifest.toolchain.backend())?;
 
-    let default_sof = project_dir
-        .join("build")
-        .join("output_files")
-        .join(format!("{}.sof", manifest.project.name));
+    let default_sof = BuildLayout::new(project_dir, &manifest).bitstream();
     let sof_path = sof.unwrap_or(&default_sof);
 
     backend.flash(sof_path, &manifest, cable).await

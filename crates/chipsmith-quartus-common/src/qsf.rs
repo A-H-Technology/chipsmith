@@ -18,6 +18,7 @@ pub fn generate_qsf(
     manifest: &Manifest,
     sources: &[PathBuf],
     project_dir: &Path,
+    constraints_file: Option<&str>,
 ) -> Result<String, ChipsmithError> {
     let mut qsf = String::new();
 
@@ -66,13 +67,10 @@ pub fn generate_qsf(
         )
         .unwrap();
     }
-    if !manifest.clocks.is_empty() {
-        writeln!(
-            qsf,
-            "set_global_assignment -name SDC_FILE {}.sdc",
-            manifest.project.name
-        )
-        .unwrap();
+    // Whether a Constraints File exists is the Build Plan's decision, not ours;
+    // it passes the name exactly when it is also writing the file.
+    if let Some(name) = constraints_file {
+        writeln!(qsf, "set_global_assignment -name SDC_FILE {name}").unwrap();
     }
     writeln!(qsf).unwrap();
 
@@ -130,7 +128,7 @@ mod tests {
                 sources: vec!["src/*.vhd".to_string()],
             },
             pins: BTreeMap::new(),
-            clocks: BTreeMap::new(),
+            clocks: Vec::new(),
             io_standards: BTreeMap::new(),
         }
     }
@@ -147,7 +145,7 @@ mod tests {
     fn qsf_contains_device_and_family() {
         let manifest = test_manifest();
         let sources = vec![PathBuf::from("/proj/src/blinky.vhd")];
-        let qsf = generate_qsf(&manifest, &sources, Path::new("/proj")).unwrap();
+        let qsf = generate_qsf(&manifest, &sources, Path::new("/proj"), None).unwrap();
 
         assert!(qsf.contains("FAMILY \"Cyclone V\""));
         assert!(qsf.contains("DEVICE 5CSEBA6U23I7"));
@@ -157,15 +155,12 @@ mod tests {
     }
 
     #[test]
-    fn qsf_references_sdc_only_when_clocks_are_declared() {
-        let mut manifest = test_manifest();
-        let without = generate_qsf(&manifest, &[], Path::new("/proj")).unwrap();
+    fn qsf_references_the_sdc_the_plan_says_it_is_writing() {
+        let manifest = test_manifest();
+        let without = generate_qsf(&manifest, &[], Path::new("/proj"), None).unwrap();
         assert!(!without.contains("SDC_FILE"));
 
-        manifest
-            .clocks
-            .insert("clk".to_string(), "50 MHz".to_string());
-        let with = generate_qsf(&manifest, &[], Path::new("/proj")).unwrap();
+        let with = generate_qsf(&manifest, &[], Path::new("/proj"), Some("blinky.sdc")).unwrap();
         assert!(with.contains("set_global_assignment -name SDC_FILE blinky.sdc"));
     }
 
@@ -176,7 +171,7 @@ mod tests {
             .pins
             .insert("clk".to_string(), PinMapping::Single("PIN_Y2".to_string()));
 
-        let qsf = generate_qsf(&manifest, &[], Path::new("/proj")).unwrap();
+        let qsf = generate_qsf(&manifest, &[], Path::new("/proj"), None).unwrap();
         assert!(qsf.contains("set_location_assignment PIN_Y2 -to clk"));
     }
 
@@ -187,7 +182,7 @@ mod tests {
             .pins
             .insert("clk".to_string(), PinMapping::Single("PIN_Y2".to_string()));
 
-        let qsf = generate_qsf(&manifest, &[], Path::new("/proj")).unwrap();
+        let qsf = generate_qsf(&manifest, &[], Path::new("/proj"), None).unwrap();
         assert!(!qsf.contains("IO_STANDARD"));
     }
 
@@ -203,7 +198,7 @@ mod tests {
             PinMapping::Bus(vec!["PIN_V16".to_string(), "PIN_W16".to_string()]),
         );
 
-        let qsf = generate_qsf(&manifest, &[], Path::new("/proj")).unwrap();
+        let qsf = generate_qsf(&manifest, &[], Path::new("/proj"), None).unwrap();
         assert!(qsf.contains("set_instance_assignment -name IO_STANDARD \"3.3-V LVTTL\" -to clk"));
         assert!(
             qsf.contains("set_instance_assignment -name IO_STANDARD \"3.3-V LVTTL\" -to led[0]")
@@ -224,7 +219,7 @@ mod tests {
             .io_standards
             .insert("clk".to_string(), "1.5 V".to_string());
 
-        let qsf = generate_qsf(&manifest, &[], Path::new("/proj")).unwrap();
+        let qsf = generate_qsf(&manifest, &[], Path::new("/proj"), None).unwrap();
         assert!(qsf.contains("set_instance_assignment -name IO_STANDARD \"1.5 V\" -to clk"));
         assert!(!qsf.contains("3.3-V LVTTL"));
     }
@@ -241,7 +236,7 @@ mod tests {
             ]),
         );
 
-        let qsf = generate_qsf(&manifest, &[], Path::new("/proj")).unwrap();
+        let qsf = generate_qsf(&manifest, &[], Path::new("/proj"), None).unwrap();
         assert!(qsf.contains("set_location_assignment PIN_V16 -to led[0]"));
         assert!(qsf.contains("set_location_assignment PIN_W16 -to led[1]"));
         assert!(qsf.contains("set_location_assignment PIN_V17 -to led[2]"));

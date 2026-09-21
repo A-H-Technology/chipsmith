@@ -14,9 +14,9 @@ pub struct Manifest {
     pub target: Target,
     pub hdl: Hdl,
     pub pins: BTreeMap<String, PinMapping>,
-    /// `[clocks]` — port name to frequency, e.g. `clk = "50 MHz"`. Without these
-    /// the design compiles unconstrained and timing analysis reports nothing useful.
-    pub clocks: BTreeMap<String, String>,
+    /// `[clocks]`, already resolved to periods. Empty means the design compiles
+    /// unconstrained and timing analysis reports nothing useful.
+    pub clocks: Vec<Clock>,
     /// `[io-standards]` — per-signal overrides of `target.io_standard`.
     pub io_standards: BTreeMap<String, String>,
 }
@@ -155,6 +155,32 @@ fn parse_frequency_hz(text: &str) -> Result<f64, String> {
     Ok(value * multiplier)
 }
 
+/// Resolve `[clocks]` into Clock Constraints, checking each port has a Pin
+/// Assignment. Runs once, during `parse` — a Manifest's clocks are already
+/// resolved, so nothing downstream can fail on them.
+fn resolve_clocks(
+    clocks: &BTreeMap<String, String>,
+    pins: &BTreeMap<String, PinMapping>,
+) -> Result<Vec<Clock>, String> {
+    clocks
+        .iter()
+        .map(|(port, frequency)| {
+            if !pins.contains_key(port) {
+                return Err(format!(
+                    "[clocks] '{port}' has no matching entry in [pins]; known pins: {}",
+                    pins.keys().cloned().collect::<Vec<_>>().join(", ")
+                ));
+            }
+            let hz =
+                parse_frequency_hz(frequency).map_err(|e| format!("[clocks] '{port}': {e}"))?;
+            Ok(Clock {
+                port: port.clone(),
+                period_ns: 1_000_000_000.0 / hz,
+            })
+        })
+        .collect()
+}
+
 impl Manifest {
     pub fn load(project_dir: &Path) -> Result<Self, ChipsmithError> {
         let path = project_dir.join("chipsmith.toml");
@@ -174,29 +200,25 @@ impl Manifest {
 
         let file: ManifestFile = facet_toml::from_str(content).map_err(|e| bad(e.to_string()))?;
 
-        let manifest = Manifest {
-            project: file.project,
-            toolchain: ToolchainSpec::try_from(file.toolchain).map_err(bad)?,
-            target: file.target,
-            hdl: file.hdl,
-            pins: file.pins,
-            clocks: file.clocks,
-            io_standards: file.io_standards,
-        };
-
-        // Surface a bad [clocks] or [io-standards] entry now rather than mid-compile
-        manifest.resolve_clocks().map_err(bad)?;
-        if let Some(unknown) = manifest
+        if let Some(unknown) = file
             .io_standards
             .keys()
-            .find(|signal| !manifest.pins.contains_key(*signal))
+            .find(|signal| !file.pins.contains_key(*signal))
         {
             return Err(bad(format!(
                 "[io-standards] '{unknown}' has no matching entry in [pins]"
             )));
         }
 
-        Ok(manifest)
+        Ok(Manifest {
+            project: file.project,
+            toolchain: ToolchainSpec::try_from(file.toolchain).map_err(bad)?,
+            target: file.target,
+            hdl: file.hdl,
+            clocks: resolve_clocks(&file.clocks, &file.pins).map_err(bad)?,
+            pins: file.pins,
+            io_standards: file.io_standards,
+        })
     }
 
     /// The I/O standard for a signal: its `[io-standards]` override, else the
@@ -206,28 +228,6 @@ impl Manifest {
             .get(signal)
             .or(self.target.io_standard.as_ref())
             .map(String::as_str)
-    }
-
-    /// Resolve `[clocks]` into SDC periods, checking each port has a pin assignment.
-    pub fn resolve_clocks(&self) -> Result<Vec<Clock>, String> {
-        self.clocks
-            .iter()
-            .map(|(port, frequency)| {
-                if !self.pins.contains_key(port) {
-                    return Err(format!(
-                        "[clocks] '{port}' has no matching entry in [pins]; \
-                         known pins: {}",
-                        self.pins.keys().cloned().collect::<Vec<_>>().join(", ")
-                    ));
-                }
-                let hz =
-                    parse_frequency_hz(frequency).map_err(|e| format!("[clocks] '{port}': {e}"))?;
-                Ok(Clock {
-                    port: port.clone(),
-                    period_ns: 1_000_000_000.0 / hz,
-                })
-            })
-            .collect()
     }
 
     pub fn resolve_sources(&self, project_dir: &Path) -> Result<Vec<PathBuf>, ChipsmithError> {
@@ -302,7 +302,7 @@ led = ["PIN_V16", "PIN_W16", "PIN_V17", "PIN_W17"]
     #[test]
     fn resolves_clock_frequency_to_period() {
         let m = with_clocks(r#"clk = "50 MHz""#).unwrap();
-        let clocks = m.resolve_clocks().unwrap();
+        let clocks = &m.clocks;
         assert_eq!(clocks.len(), 1);
         assert_eq!(clocks[0].port, "clk");
         assert!((clocks[0].period_ns - 20.0).abs() < 1e-9);
@@ -319,7 +319,7 @@ led = ["PIN_V16", "PIN_W16", "PIN_V17", "PIN_W17"]
             ("1000000 Hz", 1000.0),
         ] {
             let m = with_clocks(&format!("clk = \"{text}\"")).unwrap();
-            let clocks = m.resolve_clocks().unwrap();
+            let clocks = &m.clocks;
             assert!(
                 (clocks[0].period_ns - expected_ns).abs() < 1e-6,
                 "{text} gave {} ns, want {expected_ns}",
@@ -381,7 +381,7 @@ led = ["PIN_V16", "PIN_W16", "PIN_V17", "PIN_W17"]
     #[test]
     fn manifest_without_clocks_resolves_to_none() {
         let m = parse_manifest(VALID_TOML).unwrap();
-        assert!(m.resolve_clocks().unwrap().is_empty());
+        assert!(m.clocks.is_empty());
     }
 
     #[test]
