@@ -77,13 +77,28 @@ pub fn generate_qsf(
     writeln!(qsf).unwrap();
 
     for (signal, mapping) in &manifest.pins {
+        let io_standard = manifest.io_standard_for(signal);
         match mapping {
             PinMapping::Single(pin) => {
                 writeln!(qsf, "set_location_assignment {pin} -to {signal}").unwrap();
+                if let Some(standard) = io_standard {
+                    writeln!(
+                        qsf,
+                        "set_instance_assignment -name IO_STANDARD \"{standard}\" -to {signal}"
+                    )
+                    .unwrap();
+                }
             }
             PinMapping::Bus(pins) => {
                 for (i, pin) in pins.iter().enumerate() {
                     writeln!(qsf, "set_location_assignment {pin} -to {signal}[{i}]").unwrap();
+                    if let Some(standard) = io_standard {
+                        writeln!(
+                            qsf,
+                            "set_instance_assignment -name IO_STANDARD \"{standard}\" -to {signal}[{i}]"
+                        )
+                        .unwrap();
+                    }
                 }
             }
         }
@@ -111,6 +126,7 @@ mod tests {
             target: Target {
                 family: "Cyclone V".to_string(),
                 device: "5CSEBA6U23I7".to_string(),
+                io_standard: None,
             },
             hdl: Hdl {
                 standard: "VHDL_2008".to_string(),
@@ -118,6 +134,7 @@ mod tests {
             },
             pins: BTreeMap::new(),
             clocks: BTreeMap::new(),
+            io_standards: BTreeMap::new(),
         }
     }
 
@@ -164,6 +181,55 @@ mod tests {
 
         let qsf = generate_qsf(&manifest, &[], Path::new("/proj")).unwrap();
         assert!(qsf.contains("set_location_assignment PIN_Y2 -to clk"));
+    }
+
+    #[test]
+    fn qsf_omits_io_standard_when_unset() {
+        let mut manifest = test_manifest();
+        manifest
+            .pins
+            .insert("clk".to_string(), PinMapping::Single("PIN_Y2".to_string()));
+
+        let qsf = generate_qsf(&manifest, &[], Path::new("/proj")).unwrap();
+        assert!(!qsf.contains("IO_STANDARD"));
+    }
+
+    #[test]
+    fn qsf_applies_target_io_standard_to_every_pin_including_bus_members() {
+        let mut manifest = test_manifest();
+        manifest.target.io_standard = Some("3.3-V LVTTL".to_string());
+        manifest
+            .pins
+            .insert("clk".to_string(), PinMapping::Single("PIN_Y2".to_string()));
+        manifest.pins.insert(
+            "led".to_string(),
+            PinMapping::Bus(vec!["PIN_V16".to_string(), "PIN_W16".to_string()]),
+        );
+
+        let qsf = generate_qsf(&manifest, &[], Path::new("/proj")).unwrap();
+        assert!(qsf.contains("set_instance_assignment -name IO_STANDARD \"3.3-V LVTTL\" -to clk"));
+        assert!(
+            qsf.contains("set_instance_assignment -name IO_STANDARD \"3.3-V LVTTL\" -to led[0]")
+        );
+        assert!(
+            qsf.contains("set_instance_assignment -name IO_STANDARD \"3.3-V LVTTL\" -to led[1]")
+        );
+    }
+
+    #[test]
+    fn qsf_per_signal_io_standard_overrides_the_target_default() {
+        let mut manifest = test_manifest();
+        manifest.target.io_standard = Some("3.3-V LVTTL".to_string());
+        manifest
+            .pins
+            .insert("clk".to_string(), PinMapping::Single("PIN_Y2".to_string()));
+        manifest
+            .io_standards
+            .insert("clk".to_string(), "1.5 V".to_string());
+
+        let qsf = generate_qsf(&manifest, &[], Path::new("/proj")).unwrap();
+        assert!(qsf.contains("set_instance_assignment -name IO_STANDARD \"1.5 V\" -to clk"));
+        assert!(!qsf.contains("3.3-V LVTTL"));
     }
 
     #[test]

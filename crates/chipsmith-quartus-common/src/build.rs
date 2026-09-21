@@ -117,6 +117,7 @@ mod tests {
             target: Target {
                 family: "Cyclone V".to_string(),
                 device: "5CSEBA6U23I7".to_string(),
+                io_standard: None,
             },
             hdl: Hdl {
                 standard: "VHDL_2008".to_string(),
@@ -124,6 +125,7 @@ mod tests {
             },
             pins,
             clocks,
+            io_standards: BTreeMap::new(),
         }
     }
 

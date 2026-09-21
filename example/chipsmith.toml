@@ -8,6 +8,7 @@ quartus-prime = "23.1"
 [target]
 family = "Cyclone V"
 device = "5CSEBA6U23I7"
+io_standard = "3.3-V LVTTL"
 
 [hdl]
 standard = "VHDL_2008"

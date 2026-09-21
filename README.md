@@ -38,6 +38,7 @@ quartus-prime = "23.1"
 [target]
 family = "Cyclone V"
 device = "5CSEBA6U23I7"
+io_standard = "3.3-V LVTTL"    # optional, applied to every pin
 
 [hdl]
 standard = "VHDL_2008"         # optional, default
@@ -59,6 +60,20 @@ The `[toolchain]` key selects the backend. Supported backends:
 | `quartus-ii-13` | Altera Quartus II | 13.0sp1 |
 
 Pin mappings can be a single string for one pin or an array for a bus.
+
+### I/O standards
+
+`target.io_standard` sets the I/O standard for every assigned pin. Most boards run
+everything at one voltage, so that's usually all you need. Mixed-voltage banks get a
+per-signal override:
+
+```toml
+[io-standards]
+hps_clk = "1.5 V"
+```
+
+Omit both and chipsmith emits no `IO_STANDARD` assignments, leaving Quartus on its
+device defaults.
 
 ### Timing constraints
 

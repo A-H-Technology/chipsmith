@@ -17,6 +17,9 @@ pub struct Manifest {
     /// the design compiles unconstrained and timing analysis reports nothing useful.
     #[facet(default)]
     pub clocks: BTreeMap<String, String>,
+    /// `[io-standards]` — per-signal overrides of `target.io_standard`.
+    #[facet(default, rename = "io-standards")]
+    pub io_standards: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Facet)]
@@ -74,6 +77,10 @@ impl ToolchainSpec {
 pub struct Target {
     pub family: String,
     pub device: String,
+    /// I/O standard applied to every assigned pin, e.g. `"3.3-V LVTTL"`.
+    /// Individual signals can override it in `[io-standards]`.
+    #[facet(default)]
+    pub io_standard: Option<String>,
 }
 
 #[derive(Debug, Facet)]
@@ -145,11 +152,33 @@ impl Manifest {
                 path: path.clone(),
                 message: e,
             })?;
-        // Surface a bad [clocks] entry at load rather than mid-compile
+        // Surface a bad [clocks] or [io-standards] entry at load rather than mid-compile
         manifest
             .resolve_clocks()
-            .map_err(|e| ChipsmithError::ManifestParse { path, message: e })?;
+            .map_err(|e| ChipsmithError::ManifestParse {
+                path: path.clone(),
+                message: e,
+            })?;
+        if let Some(unknown) = manifest
+            .io_standards
+            .keys()
+            .find(|signal| !manifest.pins.contains_key(*signal))
+        {
+            return Err(ChipsmithError::ManifestParse {
+                path,
+                message: format!("[io-standards] '{unknown}' has no matching entry in [pins]"),
+            });
+        }
         Ok(manifest)
+    }
+
+    /// The I/O standard for a signal: its `[io-standards]` override, else the
+    /// project-wide `target.io_standard`, else none.
+    pub fn io_standard_for(&self, signal: &str) -> Option<&str> {
+        self.io_standards
+            .get(signal)
+            .or(self.target.io_standard.as_ref())
+            .map(String::as_str)
     }
 
     /// Resolve `[clocks]` into SDC periods, checking each port has a pin assignment.
@@ -290,6 +319,31 @@ led = ["PIN_V16", "PIN_W16", "PIN_V17", "PIN_W17"]
                 .resolve_clocks();
             assert!(result.is_err(), "'{bad}' should not parse");
         }
+    }
+
+    #[test]
+    fn io_standard_falls_back_from_signal_to_target_to_none() {
+        let m = parse_manifest(VALID_TOML).unwrap();
+        assert_eq!(m.io_standard_for("clk"), None);
+
+        let with_default = parse_manifest(&VALID_TOML.replace(
+            r#"device = "5CSEBA6U23I7""#,
+            "device = \"5CSEBA6U23I7\"\nio_standard = \"3.3-V LVTTL\"",
+        ))
+        .unwrap();
+        assert_eq!(with_default.io_standard_for("clk"), Some("3.3-V LVTTL"));
+        assert_eq!(with_default.io_standard_for("led"), Some("3.3-V LVTTL"));
+
+        let with_override = parse_manifest(&format!(
+            "{}\n[io-standards]\nclk = \"1.5 V\"\n",
+            VALID_TOML.replace(
+                r#"device = "5CSEBA6U23I7""#,
+                "device = \"5CSEBA6U23I7\"\nio_standard = \"3.3-V LVTTL\"",
+            )
+        ))
+        .unwrap();
+        assert_eq!(with_override.io_standard_for("clk"), Some("1.5 V"));
+        assert_eq!(with_override.io_standard_for("led"), Some("3.3-V LVTTL"));
     }
 
     #[test]

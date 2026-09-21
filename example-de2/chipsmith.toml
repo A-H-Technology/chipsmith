@@ -8,6 +8,7 @@ quartus-ii-13 = "13.0sp1"
 [target]
 family = "Cyclone II"
 device = "EP2C35F672C6"
+io_standard = "3.3-V LVTTL"
 
 [hdl]
 standard = "VHDL_2008"
