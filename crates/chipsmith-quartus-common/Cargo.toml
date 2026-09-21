@@ -11,5 +11,12 @@ description = "Shared Quartus-family logic for chipsmith: downloads, QSF generat
 chipsmith-toolchain = { path = "../chipsmith-toolchain", version = "0.1.0" }
 dirs = "6"
 futures-util = "0.3"
-reqwest = { version = "0.12", features = ["stream"] }
+# rustls rather than the default native-tls: an openssl-linked binary can't find
+# libssl.so.3 outside a nix shell, which defeats the point of a NixOS-first tool
+reqwest = { version = "0.12", default-features = false, features = [
+    "stream",
+    "rustls-tls",
+    "charset",
+    "http2",
+] }
 tokio = { version = "1", features = ["process", "fs", "io-util"] }
