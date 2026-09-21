@@ -7,15 +7,11 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
 use chipsmith_toolchain::error::ChipsmithError;
 
+use crate::process::{Capture, ProcessHost, ProcessSpec};
 use crate::product::SpawnStrategy;
-
-pub fn is_nixos() -> bool {
-    Path::new("/etc/NIXOS").exists()
-}
 
 /// The 64-bit store paths every Product needs.
 const BASE_ATTRS: &str = r#"
@@ -66,8 +62,8 @@ const THIRTY_TWO_BIT_ATTRS: &str = r#"
             bubblewrap = pkgs.bubblewrap.outPath;
 "#;
 
-/// Resolve every required nix store path in a single `nix eval` call.
-async fn resolve_nix_paths(strategy: SpawnStrategy) -> Result<NixPaths, ChipsmithError> {
+/// The `nix eval` invocation that resolves every store path this Product needs.
+fn nix_eval_spec(strategy: SpawnStrategy) -> ProcessSpec {
     let extra = if strategy.needs_32bit() {
         THIRTY_TWO_BIT_ATTRS
     } else {
@@ -76,22 +72,22 @@ async fn resolve_nix_paths(strategy: SpawnStrategy) -> Result<NixPaths, Chipsmit
     let expr =
         format!("let pkgs = import <nixpkgs> {{}};\n        in {{{BASE_ATTRS}{extra}        }}");
 
-    let output = tokio::process::Command::new("nix")
-        .args(["eval", "--impure", "--json", "--expr", &expr])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|source| ChipsmithError::Spawn {
-            command: "nix eval".to_string(),
-            source,
-        })?
-        .wait_with_output()
-        .await?;
+    ProcessSpec::new("nix")
+        .args(["eval", "--impure", "--json", "--expr"])
+        .arg(expr)
+        .capture(Capture::Piped)
+}
 
-    if !output.status.success() {
-        return Err(ChipsmithError::NixEval {
-            attr: "quartus dependencies".to_string(),
-            message: String::from_utf8_lossy(&output.stderr).to_string(),
+/// Resolve every required nix store path in a single `nix eval` call.
+async fn resolve_nix_paths(
+    host: &dyn ProcessHost,
+    strategy: SpawnStrategy,
+) -> Result<NixPaths, ChipsmithError> {
+    let outcome = host.run(nix_eval_spec(strategy)).await?;
+
+    if !outcome.success() {
+        return Err(ChipsmithError::NixEvalFailed {
+            message: outcome.stderr_tail.unwrap_or_default(),
         });
     }
 
@@ -99,8 +95,7 @@ async fn resolve_nix_paths(strategy: SpawnStrategy) -> Result<NixPaths, Chipsmit
     // and Rust's default hasher is seeded per process. With a HashMap, two store
     // paths shipping the same soname would resolve differently run to run.
     let map: BTreeMap<String, String> =
-        facet_json::from_slice(&output.stdout).map_err(|e| ChipsmithError::NixEval {
-            attr: "JSON parse".to_string(),
+        facet_json::from_slice(&outcome.stdout).map_err(|e| ChipsmithError::NixEvalOutput {
             message: e.to_string(),
         })?;
 
@@ -179,26 +174,19 @@ pub struct NixCompat {
 }
 
 impl NixCompat {
-    pub async fn init(strategy: SpawnStrategy) -> Result<Self, ChipsmithError> {
+    pub async fn init(
+        host: &dyn ProcessHost,
+        strategy: SpawnStrategy,
+    ) -> Result<Self, ChipsmithError> {
         eprintln!("Resolving NixOS library paths...");
-        let paths = resolve_nix_paths(strategy).await?;
+        let paths = resolve_nix_paths(host, strategy).await?;
 
-        let dynamic_linker = paths
-            .dynamic_linker()
-            .ok_or_else(|| ChipsmithError::NixEval {
-                attr: "glibc".to_string(),
-                message: "could not find dynamic linker".to_string(),
-            })?;
-
-        let patchelf_bin = paths.patchelf().ok_or_else(|| ChipsmithError::NixEval {
-            attr: "patchelf".to_string(),
-            message: "could not find patchelf".to_string(),
-        })?;
-
-        let bash_path = paths.bash().ok_or_else(|| ChipsmithError::NixEval {
-            attr: "bash".to_string(),
-            message: "could not find bash".to_string(),
-        })?;
+        let missing = |attr: &str| ChipsmithError::NixPackageMissing {
+            attr: attr.to_string(),
+        };
+        let dynamic_linker = paths.dynamic_linker().ok_or_else(|| missing("glibc"))?;
+        let patchelf_bin = paths.patchelf().ok_or_else(|| missing("patchelf"))?;
+        let bash_path = paths.bash().ok_or_else(|| missing("bash"))?;
 
         Ok(Self {
             ld_library_path: build_ld_library_path(&paths.lib_paths()),
@@ -249,38 +237,24 @@ impl NixCompat {
         ])
     }
 
-    /// A command that will launch `program` correctly on this host — sandboxed
-    /// if the Spawn Strategy calls for it, plain otherwise. Callers append their
-    /// own arguments; they land after `program` either way.
-    pub fn command_for(&self, program: &Path) -> tokio::process::Command {
-        match self.bwrap_argv(program) {
-            Some(argv) => {
-                let mut cmd = tokio::process::Command::new(&argv[0]);
-                cmd.args(&argv[1..]);
-                cmd
-            }
-            None => tokio::process::Command::new(program),
-        }
-    }
-
-    pub async fn patch_elf(&self, binary: &Path) -> Result<bool, ChipsmithError> {
+    pub async fn patch_elf(
+        &self,
+        host: &dyn ProcessHost,
+        binary: &Path,
+    ) -> Result<bool, ChipsmithError> {
         make_writable(binary)?;
 
-        let status = tokio::process::Command::new(&self.patchelf_bin)
-            .arg("--set-interpreter")
-            .arg(&self.dynamic_linker)
-            .arg(binary)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|source| ChipsmithError::Spawn {
-                command: "patchelf".to_string(),
-                source,
-            })?
-            .wait()
+        let outcome = host
+            .run(
+                ProcessSpec::new(&self.patchelf_bin)
+                    .arg("--set-interpreter")
+                    .arg(&self.dynamic_linker)
+                    .arg(binary)
+                    .capture(Capture::Null),
+            )
             .await?;
 
-        Ok(status.success())
+        Ok(outcome.success())
     }
 
     /// Fix `#!/bin/bash` shebangs to point to the nix bash.
@@ -304,7 +278,11 @@ impl NixCompat {
     /// Deliberately not recursive: the directories handed to `patch_install`
     /// are flat, and descending into `linux64` would rewrite interpreters on
     /// hundreds of shared objects that never get executed.
-    pub async fn patch_dir(&self, dir: &Path) -> Result<(u32, u32), ChipsmithError> {
+    pub async fn patch_dir(
+        &self,
+        host: &dyn ProcessHost,
+        dir: &Path,
+    ) -> Result<(u32, u32), ChipsmithError> {
         let mut elfs = 0u32;
         let mut scripts = 0u32;
 
@@ -317,7 +295,7 @@ impl NixCompat {
 
             if let Ok(bytes) = tokio::fs::read(&path).await {
                 if bytes.len() > 4 && &bytes[0..4] == b"\x7fELF" {
-                    if self.patch_elf(&path).await? {
+                    if self.patch_elf(host, &path).await? {
                         elfs += 1;
                     }
                 } else if self.patch_shebang(&path, &bytes)? {
@@ -330,7 +308,11 @@ impl NixCompat {
     }
 
     /// Patch all ELF and shell script files in the given directories.
-    pub async fn patch_install(&self, dirs_to_patch: &[PathBuf]) -> Result<(), ChipsmithError> {
+    pub async fn patch_install(
+        &self,
+        host: &dyn ProcessHost,
+        dirs_to_patch: &[PathBuf],
+    ) -> Result<(), ChipsmithError> {
         eprintln!("Patching installation for NixOS...");
 
         let mut total_elfs = 0u32;
@@ -338,7 +320,7 @@ impl NixCompat {
 
         for dir in dirs_to_patch {
             if dir.exists() {
-                let (elfs, scripts) = self.patch_dir(dir).await?;
+                let (elfs, scripts) = self.patch_dir(host, dir).await?;
                 total_elfs += elfs;
                 total_scripts += scripts;
             }

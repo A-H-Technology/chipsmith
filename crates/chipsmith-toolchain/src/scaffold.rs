@@ -100,21 +100,24 @@ pub fn init(project_dir: &Path, opts: InitOptions) -> Result<(), ChipsmithError>
     });
     let name = vhdl_identifier(&name);
 
-    std::fs::create_dir_all(project_dir)?;
-    std::fs::write(&manifest_path, manifest_template(&name, &opts))?;
+    std::fs::create_dir_all(project_dir).map_err(ChipsmithError::file("create", project_dir))?;
+    std::fs::write(&manifest_path, manifest_template(&name, &opts))
+        .map_err(ChipsmithError::file("write", &manifest_path))?;
 
     let src_dir = project_dir.join("src");
-    std::fs::create_dir_all(&src_dir)?;
+    std::fs::create_dir_all(&src_dir).map_err(ChipsmithError::file("create", &src_dir))?;
 
     let vhdl_path = src_dir.join(format!("{name}.vhd"));
     if !vhdl_path.exists() {
-        std::fs::write(&vhdl_path, entity_template(&name))?;
+        std::fs::write(&vhdl_path, entity_template(&name))
+            .map_err(ChipsmithError::file("write", &vhdl_path))?;
     }
 
     // Quartus dumps ~16MB of databases and reports into build/ on every compile
     let gitignore_path = project_dir.join(".gitignore");
     if !gitignore_path.exists() {
-        std::fs::write(&gitignore_path, "build/\n")?;
+        std::fs::write(&gitignore_path, "build/\n")
+            .map_err(ChipsmithError::file("write", &gitignore_path))?;
     }
 
     eprintln!("Created chipsmith.toml and src/{name}.vhd");

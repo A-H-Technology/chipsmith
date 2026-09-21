@@ -165,9 +165,11 @@ pub fn plan_build(
 
 /// Write a plan's files into the Build Directory.
 pub fn materialize(plan: &BuildPlan) -> Result<(), ChipsmithError> {
-    std::fs::create_dir_all(plan.build_dir())?;
+    std::fs::create_dir_all(plan.build_dir())
+        .map_err(ChipsmithError::file("create", plan.build_dir()))?;
     for file in &plan.files {
-        std::fs::write(&file.path, &file.contents)?;
+        std::fs::write(&file.path, &file.contents)
+            .map_err(ChipsmithError::file("write", &file.path))?;
     }
     Ok(())
 }

@@ -2,6 +2,7 @@ pub mod build;
 pub mod download;
 pub mod install;
 pub mod nixos;
+pub mod process;
 pub mod product;
 pub mod qsf;
 pub mod runner;

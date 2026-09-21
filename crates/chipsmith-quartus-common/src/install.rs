@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use chipsmith_toolchain::error::ChipsmithError;
 
 use crate::download;
+use crate::process::ProcessHost;
 use crate::product::{KnownVersion, QuartusProduct, QuartusVersion};
 use crate::runner;
 
@@ -21,6 +22,7 @@ pub fn cdn_url(ver: &QuartusVersion, filename: &str) -> String {
 }
 
 pub async fn ensure_installed(
+    host: &dyn ProcessHost,
     product: &QuartusProduct,
     version_key: &str,
 ) -> Result<PathBuf, ChipsmithError> {
@@ -43,16 +45,17 @@ pub async fn ensure_installed(
             version_key,
             dir.display()
         );
-        runner::install_quartus(product, &installer, &dir).await?;
+        runner::install_quartus(host, product, &installer, &dir).await?;
     }
 
-    install_device_support(version, &dir).await?;
+    install_device_support(host, version, &dir).await?;
 
     Ok(dir)
 }
 
 /// Install any missing device support packages for a given version.
 pub async fn install_device_support(
+    host: &dyn ProcessHost,
     version: &KnownVersion,
     install_dir: &Path,
 ) -> Result<(), ChipsmithError> {
@@ -68,7 +71,7 @@ pub async fn install_device_support(
         let url = cdn_url(&version.download, device.filename);
         match download::download_file(&url, device.filename).await {
             Ok(qdz) => {
-                if let Err(e) = download::unzip(&qdz, install_dir).await {
+                if let Err(e) = download::unzip(host, &qdz, install_dir).await {
                     eprintln!(
                         "Warning: failed to install {} device support: {}",
                         device.family, e
