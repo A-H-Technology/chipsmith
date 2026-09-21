@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use chipsmith_core::toolchain::BuildOutcome;
+use chipsmith_core::error::ChipsmithError;
+use chipsmith_core::scaffold::{self, InitOptions};
+use chipsmith_core::toolchain::{BuildOutcome, Toolchain};
+use chipsmith_core::{resolve_backend, DEFAULT_BACKEND};
 use facet::Facet;
 use figue::{self as args, FigueBuiltins};
 
@@ -28,12 +31,12 @@ enum Commands {
         name: Option<String>,
 
         /// Toolchain backend
-        #[facet(args::named, default = "quartus-prime".to_string())]
+        #[facet(args::named, default = DEFAULT_BACKEND.to_string())]
         backend: String,
 
-        /// Toolchain version
-        #[facet(args::named, default = chipsmith_core::DEFAULT_LATEST.to_string())]
-        version: String,
+        /// Toolchain version (default: the backend's latest)
+        #[facet(args::named)]
+        version: Option<String>,
 
         /// Target FPGA family
         #[facet(args::named, default = "Cyclone V".to_string())]
@@ -46,12 +49,12 @@ enum Commands {
 
     /// Download and install a toolchain
     Install {
-        /// Version to install (e.g. 23.1, 22.1, 24.1, 13.0sp1)
-        #[facet(args::positional, default = chipsmith_core::DEFAULT_LATEST.to_string())]
-        version: String,
+        /// Version to install (default: the backend's latest)
+        #[facet(args::positional)]
+        version: Option<String>,
 
         /// Toolchain backend (quartus-prime or quartus-ii-13)
-        #[facet(args::named, default = "quartus-prime".to_string())]
+        #[facet(args::named, default = DEFAULT_BACKEND.to_string())]
         backend: String,
 
         /// Path to a local installer (skips download)
@@ -76,12 +79,12 @@ enum Commands {
         #[facet(args::positional)]
         tool: String,
 
-        /// Version to use (default: latest)
-        #[facet(args::named, default = chipsmith_core::DEFAULT_LATEST.to_string())]
-        version: String,
+        /// Version to use (default: the backend's latest)
+        #[facet(args::named)]
+        version: Option<String>,
 
         /// Toolchain backend (quartus-prime or quartus-ii-13)
-        #[facet(args::named, default = "quartus-prime".to_string())]
+        #[facet(args::named, default = DEFAULT_BACKEND.to_string())]
         backend: String,
 
         /// Arguments passed to the tool
@@ -95,7 +98,7 @@ enum Commands {
         #[facet(args::named, default = PathBuf::from("."))]
         project_dir: PathBuf,
 
-        /// Path to .sof file (default: auto-detect from build output)
+        /// Path to .sof file (default: the last build's output)
         #[facet(args::named)]
         sof: Option<PathBuf>,
 
@@ -107,24 +110,36 @@ enum Commands {
     /// List connected JTAG cables and devices
     Cables {
         /// Toolchain backend (quartus-prime or quartus-ii-13)
-        #[facet(args::named, default = "quartus-prime".to_string())]
+        #[facet(args::named, default = DEFAULT_BACKEND.to_string())]
         backend: String,
 
-        /// Toolchain version
-        #[facet(args::named, default = chipsmith_core::DEFAULT_LATEST.to_string())]
-        version: String,
+        /// Toolchain version (default: the backend's latest)
+        #[facet(args::named)]
+        version: Option<String>,
     },
 
     /// Show the install path for a toolchain version
     Which {
-        /// Version (default: latest)
-        #[facet(args::positional, default = chipsmith_core::DEFAULT_LATEST.to_string())]
-        version: String,
+        /// Version (default: the backend's latest)
+        #[facet(args::positional)]
+        version: Option<String>,
 
         /// Toolchain backend (quartus-prime or quartus-ii-13)
-        #[facet(args::named, default = "quartus-prime".to_string())]
+        #[facet(args::named, default = DEFAULT_BACKEND.to_string())]
         backend: String,
     },
+}
+
+/// Resolve a Backend and the Version to use with it. The default Version is
+/// the Backend's own, which is why it cannot be an argument-parser default:
+/// nothing knows it until the Backend is picked.
+fn backend_and_version(
+    backend: &str,
+    version: Option<String>,
+) -> Result<(Box<dyn Toolchain>, String), ChipsmithError> {
+    let toolchain = resolve_backend(backend)?;
+    let version = version.unwrap_or_else(|| toolchain.default_version().to_string());
+    Ok((toolchain, version))
 }
 
 /// A design that misses timing still produces a loadable Bitstream, so this
@@ -163,26 +178,29 @@ async fn main() -> ExitCode {
             version,
             family,
             device,
-        } => chipsmith_core::init(
-            &project_dir,
-            chipsmith_core::InitOptions {
-                name,
-                backend,
-                version,
-                family,
-                device,
-            },
-        ),
+        } => backend_and_version(&backend, version).and_then(|(_, version)| {
+            scaffold::init(
+                &project_dir,
+                InitOptions {
+                    name,
+                    backend,
+                    version,
+                    family,
+                    device,
+                },
+            )
+        }),
 
         Commands::Install {
             version,
             backend,
             installer,
-        } => match installer {
-            Some(path) => chipsmith_core::install_from_local(&backend, &path, &version).await,
-            None => chipsmith_core::install(&backend, &version)
-                .await
-                .map(|_| ()),
+        } => match backend_and_version(&backend, version) {
+            Ok((toolchain, version)) => match installer {
+                Some(path) => toolchain.install_from_local(&path, &version).await,
+                None => toolchain.ensure_installed(&version).await.map(|_| ()),
+            },
+            Err(e) => Err(e),
         },
 
         Commands::Build {
@@ -204,7 +222,10 @@ async fn main() -> ExitCode {
             version,
             backend,
             args,
-        } => chipsmith_core::run_tool(&backend, &version, &tool, &args, None).await,
+        } => match backend_and_version(&backend, version) {
+            Ok((toolchain, version)) => toolchain.run_tool(&version, &tool, &args, None).await,
+            Err(e) => Err(e),
+        },
 
         Commands::Flash {
             project_dir,
@@ -212,17 +233,26 @@ async fn main() -> ExitCode {
             cable,
         } => chipsmith_core::flash(&project_dir, sof.as_deref(), cable.as_deref()).await,
 
-        Commands::Cables { backend, version } => chipsmith_core::cables(&backend, &version).await,
+        Commands::Cables { backend, version } => match backend_and_version(&backend, version) {
+            Ok((toolchain, version)) => toolchain.run_tool(&version, "jtagconfig", &[], None).await,
+            Err(e) => Err(e),
+        },
 
-        Commands::Which { version, backend } => match chipsmith_core::which(&backend, &version) {
-            Ok((dir, true)) => {
-                println!("{}", dir.display());
-                Ok(())
-            }
-            Ok((dir, false)) => {
-                eprintln!("Not installed (would install to {})", dir.display());
-                return ExitCode::FAILURE;
-            }
+        Commands::Which { version, backend } => match backend_and_version(&backend, version) {
+            Ok((toolchain, version)) => match toolchain.install_dir(&version) {
+                Ok(dir) => match toolchain.is_installed(&version) {
+                    Ok(true) => {
+                        println!("{}", dir.display());
+                        Ok(())
+                    }
+                    Ok(false) => {
+                        eprintln!("Not installed (would install to {})", dir.display());
+                        return ExitCode::FAILURE;
+                    }
+                    Err(e) => Err(e),
+                },
+                Err(e) => Err(e),
+            },
             Err(e) => Err(e),
         },
     };

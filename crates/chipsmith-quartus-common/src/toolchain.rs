@@ -29,6 +29,14 @@ impl Toolchain for QuartusToolchain {
         self.product.backend
     }
 
+    fn versions(&self) -> Vec<&str> {
+        self.product.versions.iter().map(|v| v.key).collect()
+    }
+
+    fn default_version(&self) -> &str {
+        self.product.latest
+    }
+
     fn install_dir(&self, version: &str) -> Result<PathBuf, ChipsmithError> {
         Ok(self.product.install_dir_for(self.product.lookup(version)?))
     }
@@ -86,5 +94,22 @@ impl Toolchain for QuartusToolchain {
             bitstream: plan.bitstream(),
             timing: timing::read_timing(&plan.timing_summary()),
         })
+    }
+
+    async fn flash(
+        &self,
+        version: &str,
+        bitstream: &Path,
+        cable: Option<&str>,
+    ) -> Result<(), ChipsmithError> {
+        if !bitstream.exists() {
+            return Err(ChipsmithError::OutputNotFound {
+                path: bitstream.to_path_buf(),
+            });
+        }
+
+        let dir = install::ensure_installed(self.product, version).await?;
+        let args = runner::flash_args(bitstream, cable);
+        runner::run_tool(self.product, &dir, "quartus_pgm", &args, None).await
     }
 }

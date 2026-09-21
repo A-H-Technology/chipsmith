@@ -97,6 +97,22 @@ pub async fn run_tool(
     Ok(())
 }
 
+/// The `quartus_pgm` arguments for loading a Bitstream over JTAG. Pure, so
+/// the operation grammar — `P;<file>` — gets a test instead of a live cable.
+pub fn flash_args(bitstream: &Path, cable: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "-m".to_string(),
+        "jtag".to_string(),
+        "-o".to_string(),
+        format!("P;{}", bitstream.display()),
+    ];
+    if let Some(cable) = cable {
+        args.push("-c".to_string());
+        args.push(cable.to_string());
+    }
+    args
+}
+
 /// The unattended-install arguments for a Product, ending with the target dir.
 fn installer_args(product: &QuartusProduct, install_dir: &Path) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec![
@@ -212,6 +228,21 @@ mod tests {
         assert_eq!(args[1], "unattended");
         let installdir = args.iter().position(|a| a == "--installdir").unwrap();
         assert_eq!(args[installdir + 1], "/home/u/q");
+    }
+
+    #[test]
+    fn flashing_programs_the_bitstream_over_jtag() {
+        let args = flash_args(Path::new("/proj/build/output_files/blinky.sof"), None);
+        assert_eq!(
+            args,
+            vec!["-m", "jtag", "-o", "P;/proj/build/output_files/blinky.sof"]
+        );
+    }
+
+    #[test]
+    fn a_named_cable_is_passed_through() {
+        let args = flash_args(Path::new("/b.sof"), Some("USB-Blaster"));
+        assert!(args.windows(2).any(|w| w == ["-c", "USB-Blaster"]));
     }
 
     /// Quartus II 13.0sp1 rejects the flag outright rather than ignoring it.

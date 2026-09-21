@@ -27,12 +27,24 @@ impl BuildOutcome {
 
 #[async_trait::async_trait]
 pub trait Toolchain: Send + Sync {
+    /// The Backend name that selects this Toolchain.
     fn name(&self) -> &str;
+
+    /// Every Version this Toolchain can install. The legal Version space is
+    /// part of this interface, so callers can offer it rather than discover it
+    /// from an `UnknownVersion` error.
+    fn versions(&self) -> Vec<&str>;
+
+    /// The Version to use when the caller doesn't name one. Backend-dependent,
+    /// which is why it has to be asked for rather than defaulted globally.
+    fn default_version(&self) -> &str;
 
     fn install_dir(&self, version: &str) -> Result<PathBuf, ChipsmithError>;
 
     fn is_installed(&self, version: &str) -> Result<bool, ChipsmithError>;
 
+    /// Install the Version if it isn't already, and return its Install Root.
+    /// May download several gigabytes and drive a vendor installer.
     async fn ensure_installed(&self, version: &str) -> Result<PathBuf, ChipsmithError>;
 
     async fn install_from_local(
@@ -41,6 +53,7 @@ pub trait Toolchain: Send + Sync {
         version: &str,
     ) -> Result<(), ChipsmithError>;
 
+    /// Run one of this Toolchain's tools. Installs the Version first if needed.
     async fn run_tool(
         &self,
         version: &str,
@@ -55,31 +68,11 @@ pub trait Toolchain: Send + Sync {
         manifest: &Manifest,
     ) -> Result<BuildOutcome, ChipsmithError>;
 
-    /// Flash a .sof file to the FPGA via JTAG using quartus_pgm.
+    /// Load a Bitstream onto the chip over a Cable.
     async fn flash(
         &self,
-        sof: &Path,
-        manifest: &Manifest,
+        version: &str,
+        bitstream: &Path,
         cable: Option<&str>,
-    ) -> Result<(), ChipsmithError> {
-        if !sof.exists() {
-            return Err(ChipsmithError::OutputNotFound {
-                path: sof.to_path_buf(),
-            });
-        }
-
-        let version = manifest.toolchain.version();
-        let mut args = vec![
-            "-m".to_string(),
-            "jtag".to_string(),
-            "-o".to_string(),
-            format!("P;{}", sof.display()),
-        ];
-        if let Some(cable) = cable {
-            args.push("-c".to_string());
-            args.push(cable.to_string());
-        }
-
-        self.run_tool(version, "quartus_pgm", &args, None).await
-    }
+    ) -> Result<(), ChipsmithError>;
 }
