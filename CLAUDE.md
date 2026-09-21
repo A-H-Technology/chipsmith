@@ -8,7 +8,7 @@ chipsmith is a Rust CLI tool that manages Intel FPGA toolchains (Quartus Prime, 
 
 ```bash
 cargo check                    # type check
-cargo test --workspace         # run all tests (21 tests across 4 crates)
+cargo test --workspace         # run all tests (39 tests across 4 crates)
 cargo fmt                      # format
 cargo fmt --check              # verify formatting
 ```
@@ -29,7 +29,7 @@ chipsmith-cli
 ```
 
 - **chipsmith-toolchain**: Foundational crate. Defines the `Toolchain` trait (async, object-safe via `async_trait`), `Manifest` struct (parsed from `chipsmith.toml` via `facet_toml`), `ChipsmithError` enum, and `PinMapping`.
-- **chipsmith-quartus-common**: Shared Quartus-family logic. Download with caching (`~/.cache/chipsmith/`), QSF/QPF file generation, build step orchestration (`prepare_build` returns a `BuildPlan`), version types (`KnownVersion`), and device support installation.
+- **chipsmith-quartus-common**: Shared Quartus-family logic. Download with caching (`~/.cache/chipsmith/`), QSF/QPF/SDC file generation, build step orchestration (`prepare_build` returns a `BuildPlan`), `quartus_sta` summary parsing, version types (`KnownVersion`), and device support installation.
 - **chipsmith-quartus-prime**: Quartus Prime backend. Version table (22.1, 23.1, 24.1), install to `~/intelFPGA_lite/<ver>/`, NixOS compat via `patchelf`.
 - **chipsmith-quartus-ii-13**: Quartus II 13.0sp1 backend. Version table (13.0sp1), install to `~/altera/13.0sp1/`, NixOS compat via `bubblewrap` (32-bit).
 - **chipsmith-core**: Public API. Routes backend name strings to `Box<dyn Toolchain>` via `resolve_backend()`. All CLI commands go through here.
@@ -50,6 +50,8 @@ chipsmith-cli
 | Error types | `crates/chipsmith-toolchain/src/error.rs` |
 | Manifest parsing | `crates/chipsmith-toolchain/src/manifest.rs` |
 | QSF generation | `crates/chipsmith-quartus-common/src/qsf.rs` |
+| SDC / timing constraints | `crates/chipsmith-quartus-common/src/sdc.rs` |
+| Timing report parsing | `crates/chipsmith-quartus-common/src/timing.rs` |
 | Download + caching | `crates/chipsmith-quartus-common/src/download.rs` |
 | Build plan | `crates/chipsmith-quartus-common/src/build.rs` |
 | Shared install types | `crates/chipsmith-quartus-common/src/install.rs` |

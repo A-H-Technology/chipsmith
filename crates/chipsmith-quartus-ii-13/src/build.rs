@@ -15,6 +15,8 @@ pub async fn build(project_dir: &Path, manifest: &Manifest) -> Result<PathBuf, C
         runner::run_tool(&install_dir, step.tool, &step.args, Some(&plan.build_dir)).await?;
     }
 
+    chipsmith_quartus_common::timing::report_timing(&plan.build_dir, &manifest.project.name);
+
     eprintln!("Build complete: {}", plan.output_sof.display());
     Ok(plan.output_sof)
 }

@@ -17,7 +17,8 @@ chipsmith flash
 
 ## Installation
 
-Requires Rust 1.75+.
+Requires a recent stable Rust — CI builds against `stable`, which is what the
+`facet` dependencies track.
 
 ```bash
 cargo install --path crates/chipsmith-cli
@@ -120,6 +121,10 @@ chipsmith install --installer ./QuartusLiteSetup.run   # from local file
 ### `chipsmith build`
 
 Run the full synthesis pipeline (map, fit, asm, timing analysis). Produces a `.sof` file in `build/output_files/`.
+
+Afterwards chipsmith reads the `quartus_sta` summary and reports the worst-case slack.
+A design that misses timing still produces a usable `.sof`, so this is a warning rather
+than a build failure — but it won't pass silently.
 
 ```bash
 chipsmith build
