@@ -133,6 +133,7 @@ dependencies = [
 name = "chipsmith-core"
 version = "0.1.0"
 dependencies = [
+ "chipsmith-quartus-common",
  "chipsmith-quartus-ii-13",
  "chipsmith-quartus-prime",
  "chipsmith-toolchain",
@@ -142,8 +143,10 @@ dependencies = [
 name = "chipsmith-quartus-common"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chipsmith-toolchain",
  "dirs",
+ "facet-json",
  "futures-util",
  "reqwest",
  "tokio",
@@ -153,26 +156,14 @@ dependencies = [
 name = "chipsmith-quartus-ii-13"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "chipsmith-quartus-common",
- "chipsmith-toolchain",
- "dirs",
- "facet",
- "facet-json",
- "tokio",
 ]
 
 [[package]]
 name = "chipsmith-quartus-prime"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "chipsmith-quartus-common",
- "chipsmith-toolchain",
- "dirs",
- "facet",
- "facet-json",
- "tokio",
 ]
 
 [[package]]

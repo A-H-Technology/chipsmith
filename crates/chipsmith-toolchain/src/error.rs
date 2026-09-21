@@ -18,8 +18,11 @@ pub enum ChipsmithError {
     #[error("installer not found: {path}")]
     InstallerNotFound { path: PathBuf },
 
-    #[error("unknown tool: {name}")]
-    UnknownTool { name: String },
+    #[error("unknown tool: {name} (available: {})", available.join(", "))]
+    UnknownTool {
+        name: String,
+        available: Vec<String>,
+    },
 
     #[error("chipsmith.toml not found: {path}")]
     ManifestNotFound { path: PathBuf },
@@ -36,8 +39,11 @@ pub enum ChipsmithError {
         available: Vec<String>,
     },
 
-    #[error("unknown toolchain backend: {name}")]
-    UnknownBackend { name: String },
+    #[error("unknown toolchain backend: {name} (available: {})", available.join(", "))]
+    UnknownBackend {
+        name: String,
+        available: Vec<String>,
+    },
 
     #[error("nix eval failed for `{attr}`: {message}")]
     NixEval { attr: String, message: String },

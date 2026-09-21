@@ -5,9 +5,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Shared Quartus-family logic for chipsmith: downloads, QSF generation, build plans"
+description = "The Quartus toolchain implementation for chipsmith: install, build, constraints, timing"
 
 [dependencies]
+async-trait = "0.1"
+facet-json = "0.46"
 chipsmith-toolchain = { path = "../chipsmith-toolchain", version = "0.1.0" }
 dirs = "6"
 futures-util = "0.3"

@@ -6,19 +6,25 @@ use error::ChipsmithError;
 use manifest::Manifest;
 use toolchain::Toolchain;
 
-use chipsmith_quartus_ii_13::QuartusII13Toolchain;
-use chipsmith_quartus_prime::QuartusPrimeToolchain;
+use chipsmith_quartus_common::{QuartusProduct, QuartusToolchain};
+
+/// Every Backend chipsmith knows. Adding one means adding a Product here.
+pub static PRODUCTS: &[&QuartusProduct] = &[
+    &chipsmith_quartus_prime::PRODUCT,
+    &chipsmith_quartus_ii_13::PRODUCT,
+];
 
 pub const DEFAULT_LATEST: &str = chipsmith_quartus_prime::LATEST;
 
 fn resolve_backend(name: &str) -> Result<Box<dyn Toolchain>, ChipsmithError> {
-    match name {
-        "quartus-prime" => Ok(Box::new(QuartusPrimeToolchain)),
-        "quartus-ii-13" => Ok(Box::new(QuartusII13Toolchain)),
-        _ => Err(ChipsmithError::UnknownBackend {
+    PRODUCTS
+        .iter()
+        .find(|product| product.backend == name)
+        .map(|product| Box::new(QuartusToolchain::new(product)) as Box<dyn Toolchain>)
+        .ok_or_else(|| ChipsmithError::UnknownBackend {
             name: name.to_string(),
-        }),
-    }
+            available: PRODUCTS.iter().map(|p| p.backend.to_string()).collect(),
+        })
 }
 
 /// Install a toolchain version. Downloads if needed.

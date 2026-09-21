@@ -1,29 +1,12 @@
-use std::path::Path;
+//! Acquiring a Version of a Product: download, install, add Device Support.
+
+use std::path::{Path, PathBuf};
 
 use chipsmith_toolchain::error::ChipsmithError;
 
 use crate::download;
-
-#[derive(Debug)]
-pub struct QuartusVersion {
-    pub version: &'static str,
-    pub revision: &'static str,
-    pub filename: &'static str,
-}
-
-#[derive(Debug)]
-pub struct DeviceSupport {
-    pub family: &'static str,
-    pub filename: &'static str,
-}
-
-#[derive(Debug)]
-pub struct KnownVersion {
-    pub key: &'static str,
-    pub download: QuartusVersion,
-    pub install_subdir: &'static str,
-    pub devices: &'static [DeviceSupport],
-}
+use crate::product::{KnownVersion, QuartusProduct, QuartusVersion};
+use crate::runner;
 
 // Intel spun Altera out and retired the downloads.intel.com/akdlm paths — they now
 // 301 into corpredirect.intel.com's 404 redirector. Altera serves the same directory
@@ -37,17 +20,35 @@ pub fn cdn_url(ver: &QuartusVersion, filename: &str) -> String {
     )
 }
 
-pub fn lookup<'a>(
-    versions: &'a [KnownVersion],
-    key: &str,
-) -> Result<&'a KnownVersion, ChipsmithError> {
-    versions
-        .iter()
-        .find(|v| v.key == key)
-        .ok_or_else(|| ChipsmithError::UnknownVersion {
-            version: key.to_string(),
-            available: versions.iter().map(|v| v.key.to_string()).collect(),
-        })
+pub async fn ensure_installed(
+    product: &QuartusProduct,
+    version_key: &str,
+) -> Result<PathBuf, ChipsmithError> {
+    let version = product.lookup(version_key)?;
+    let dir = product.install_dir_for(version);
+
+    if !product.is_installed(version) {
+        eprintln!(
+            "{} {} not found, downloading and installing...",
+            product.display_name, version_key
+        );
+
+        let url = cdn_url(&version.download, version.download.filename);
+        let installer = download::download_file(&url, version.download.filename).await?;
+        download::make_executable(&installer).await?;
+
+        eprintln!(
+            "Installing {} {} to {}",
+            product.display_name,
+            version_key,
+            dir.display()
+        );
+        runner::install_quartus(product, &installer, &dir).await?;
+    }
+
+    install_device_support(version, &dir).await?;
+
+    Ok(dir)
 }
 
 /// Install any missing device support packages for a given version.
@@ -96,49 +97,11 @@ pub async fn install_device_support(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    static TEST_VERSIONS: &[KnownVersion] = &[
-        KnownVersion {
-            key: "1.0",
-            download: QuartusVersion {
-                version: "1.0",
-                revision: "100",
-                filename: "test.run",
-            },
-            install_subdir: "1.0",
-            devices: &[],
-        },
-        KnownVersion {
-            key: "2.0",
-            download: QuartusVersion {
-                version: "2.0",
-                revision: "200",
-                filename: "test2.run",
-            },
-            install_subdir: "2.0",
-            devices: &[],
-        },
-    ];
-
-    #[test]
-    fn lookup_finds_known_version() {
-        let v = lookup(TEST_VERSIONS, "1.0").unwrap();
-        assert_eq!(v.key, "1.0");
-        assert_eq!(v.download.revision, "100");
-    }
-
-    #[test]
-    fn lookup_returns_error_for_unknown_version() {
-        let err = lookup(TEST_VERSIONS, "99.0").unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("99.0"));
-        assert!(msg.contains("1.0"));
-        assert!(msg.contains("2.0"));
-    }
+    use crate::product::TEST_PRODUCT;
 
     #[test]
     fn cdn_url_format() {
-        let ver = &TEST_VERSIONS[0].download;
+        let ver = &TEST_PRODUCT.versions[0].download;
         let url = cdn_url(ver, "device.qdz");
         assert_eq!(
             url,
