@@ -1,29 +1,8 @@
+//! Reading `quartus_sta`'s Timing Summary.
+
 use std::path::Path;
 
-/// One `Type:`/`Slack:` pair from a `.sta.summary` report.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TimingCorner {
-    pub kind: String,
-    pub slack_ns: f64,
-}
-
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct TimingSummary {
-    pub corners: Vec<TimingCorner>,
-}
-
-impl TimingSummary {
-    /// The tightest corner — the one that decides whether the design meets timing.
-    pub fn worst(&self) -> Option<&TimingCorner> {
-        self.corners
-            .iter()
-            .min_by(|a, b| a.slack_ns.total_cmp(&b.slack_ns))
-    }
-
-    pub fn met(&self) -> bool {
-        self.worst().is_none_or(|corner| corner.slack_ns >= 0.0)
-    }
-}
+use chipsmith_toolchain::timing::{TimingCorner, TimingSummary};
 
 /// Parse `quartus_sta`'s summary report. Corners with non-numeric slack
 /// (`N/A` on a fully unconstrained path) are skipped rather than guessed at.
@@ -49,31 +28,12 @@ pub fn parse_sta_summary(report: &str) -> TimingSummary {
     TimingSummary { corners }
 }
 
-/// Read and report the timing result of a finished build. A design that misses
-/// timing still produces a usable .sof, so this warns rather than fails — but it
-/// says so loudly, because "Build complete" on a design that missed setup by 2ns
-/// is exactly the trap this is here to close.
-pub fn report_timing(path: &Path) {
-    let Ok(report) = std::fs::read_to_string(path) else {
-        return;
-    };
-    let summary = parse_sta_summary(&report);
-    let Some(worst) = summary.worst() else {
-        return;
-    };
-
-    if summary.met() {
-        eprintln!(
-            "Timing met — worst slack {:.3} ns ({})",
-            worst.slack_ns, worst.kind
-        );
-    } else {
-        eprintln!(
-            "WARNING: timing NOT met — worst slack {:.3} ns ({})",
-            worst.slack_ns, worst.kind
-        );
-        eprintln!("         see {}", path.display());
-    }
+/// Read the Timing Summary a finished build left behind, or `None` if timing
+/// analysis produced no report. The caller decides what that silence means.
+pub fn read_timing(path: &Path) -> Option<TimingSummary> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|report| parse_sta_summary(&report))
 }
 
 #[cfg(test)]
@@ -133,5 +93,29 @@ TNS   : -50.496
         let summary = parse_sta_summary("Timing Analyzer Summary\n");
         assert!(summary.worst().is_none());
         assert!(summary.met());
+    }
+
+    /// A build whose timing step produced nothing must be distinguishable from
+    /// one that passed — the old code returned unit either way and printed
+    /// nothing, so a broken [clocks] feature looked exactly like a clean build.
+    #[test]
+    fn a_missing_report_is_none_rather_than_an_empty_summary() {
+        let missing = std::env::temp_dir().join("chipsmith-no-such-report.sta.summary");
+        let _ = std::fs::remove_file(&missing);
+        assert!(read_timing(&missing).is_none());
+    }
+
+    #[test]
+    fn reads_a_summary_that_is_there() {
+        let path = std::env::temp_dir().join(format!(
+            "chipsmith-timing-{}.sta.summary",
+            std::process::id()
+        ));
+        std::fs::write(&path, REPORT).unwrap();
+
+        let summary = read_timing(&path).expect("report exists");
+        assert_eq!(summary.worst().unwrap().slack_ns, -2.112);
+
+        std::fs::remove_file(&path).unwrap();
     }
 }

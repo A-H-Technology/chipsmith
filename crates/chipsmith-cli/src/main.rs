@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use chipsmith_core::toolchain::BuildOutcome;
 use facet::Facet;
 use figue::{self as args, FigueBuiltins};
 
@@ -63,6 +64,10 @@ enum Commands {
         /// Project directory containing chipsmith.toml (default: current dir)
         #[facet(args::named, default = PathBuf::from("."))]
         project_dir: PathBuf,
+
+        /// Exit non-zero if the design does not meet timing
+        #[facet(args::named, default = false)]
+        require_timing: bool,
     },
 
     /// Run a toolchain tool directly
@@ -122,6 +127,30 @@ enum Commands {
     },
 }
 
+/// A design that misses timing still produces a loadable Bitstream, so this
+/// warns by default — but it says so loudly, because "Build complete" on a
+/// design that missed setup by 2ns is exactly the trap this is here to close.
+/// `--require-timing` turns the warning into a failure.
+fn report_build(outcome: &BuildOutcome) {
+    eprintln!("Build complete: {}", outcome.bitstream.display());
+
+    match outcome.timing.as_ref().and_then(|t| t.worst()) {
+        Some(worst) if outcome.meets_timing() => {
+            eprintln!(
+                "Timing met — worst slack {:.3} ns ({})",
+                worst.slack_ns, worst.kind
+            );
+        }
+        Some(worst) => {
+            eprintln!(
+                "WARNING: timing NOT met — worst slack {:.3} ns ({})",
+                worst.slack_ns, worst.kind
+            );
+        }
+        None => eprintln!("WARNING: timing analysis produced no summary"),
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli: Cli = figue::from_std_args().unwrap();
@@ -156,7 +185,19 @@ async fn main() -> ExitCode {
                 .map(|_| ()),
         },
 
-        Commands::Build { project_dir } => chipsmith_core::build(&project_dir).await.map(|_| ()),
+        Commands::Build {
+            project_dir,
+            require_timing,
+        } => match chipsmith_core::build(&project_dir).await {
+            Ok(outcome) => {
+                report_build(&outcome);
+                if require_timing && !outcome.meets_timing() {
+                    return ExitCode::FAILURE;
+                }
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
 
         Commands::Run {
             tool,

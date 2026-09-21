@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use chipsmith_toolchain::error::ChipsmithError;
 use chipsmith_toolchain::manifest::Manifest;
-use chipsmith_toolchain::toolchain::Toolchain;
+use chipsmith_toolchain::toolchain::{BuildOutcome, Toolchain};
 
 use crate::product::QuartusProduct;
 use crate::{build, install, runner, timing};
@@ -65,7 +65,7 @@ impl Toolchain for QuartusToolchain {
         &self,
         project_dir: &Path,
         manifest: &Manifest,
-    ) -> Result<PathBuf, ChipsmithError> {
+    ) -> Result<BuildOutcome, ChipsmithError> {
         let install_dir =
             install::ensure_installed(self.product, manifest.toolchain.version()).await?;
         let plan = build::prepare_build(project_dir, manifest)?;
@@ -82,10 +82,9 @@ impl Toolchain for QuartusToolchain {
             .await?;
         }
 
-        timing::report_timing(&plan.timing_summary());
-
-        let bitstream = plan.bitstream();
-        eprintln!("Build complete: {}", bitstream.display());
-        Ok(bitstream)
+        Ok(BuildOutcome {
+            bitstream: plan.bitstream(),
+            timing: timing::read_timing(&plan.timing_summary()),
+        })
     }
 }

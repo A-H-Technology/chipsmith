@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use error::ChipsmithError;
 use manifest::Manifest;
-use toolchain::Toolchain;
+use toolchain::{BuildOutcome, Toolchain};
 
 use chipsmith_quartus_common::build::BuildLayout;
 use chipsmith_quartus_common::{QuartusProduct, QuartusToolchain};
@@ -45,7 +45,7 @@ pub async fn install_from_local(
 }
 
 /// Build the FPGA project described by the manifest.
-pub async fn build(project_dir: &Path) -> Result<PathBuf, ChipsmithError> {
+pub async fn build(project_dir: &Path) -> Result<BuildOutcome, ChipsmithError> {
     let manifest = Manifest::load(project_dir)?;
     let backend = resolve_backend(manifest.toolchain.backend())?;
     backend.build(project_dir, &manifest).await
