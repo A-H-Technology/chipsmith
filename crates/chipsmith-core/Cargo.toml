@@ -1,9 +1,13 @@
 [package]
 name = "chipsmith-core"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Public API and backend routing for chipsmith"
 
 [dependencies]
-chipsmith-toolchain = { path = "../chipsmith-toolchain" }
-chipsmith-quartus-prime = { path = "../chipsmith-quartus-prime" }
-chipsmith-quartus-ii-13 = { path = "../chipsmith-quartus-ii-13" }
+chipsmith-toolchain = { path = "../chipsmith-toolchain", version = "0.1.0" }
+chipsmith-quartus-prime = { path = "../chipsmith-quartus-prime", version = "0.1.0" }
+chipsmith-quartus-ii-13 = { path = "../chipsmith-quartus-ii-13", version = "0.1.0" }

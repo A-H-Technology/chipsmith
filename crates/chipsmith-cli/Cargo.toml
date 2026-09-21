@@ -1,7 +1,11 @@
 [package]
 name = "chipsmith-cli"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "A command-line FPGA toolchain manager and build system for Intel/Altera FPGAs"
 
 [[bin]]
 name = "chipsmith"
@@ -10,5 +14,5 @@ path = "src/main.rs"
 [dependencies]
 facet = "0.46"
 figue = "2"
-chipsmith-core = { path = "../chipsmith-core" }
+chipsmith-core = { path = "../chipsmith-core", version = "0.1.0" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

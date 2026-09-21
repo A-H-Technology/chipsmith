@@ -1,13 +1,17 @@
 [package]
 name = "chipsmith-quartus-prime"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Intel Quartus Prime Lite backend for chipsmith"
 
 [dependencies]
 async-trait = "0.1"
 dirs = "6"
-chipsmith-toolchain = { path = "../chipsmith-toolchain" }
-chipsmith-quartus-common = { path = "../chipsmith-quartus-common" }
+chipsmith-toolchain = { path = "../chipsmith-toolchain", version = "0.1.0" }
+chipsmith-quartus-common = { path = "../chipsmith-quartus-common", version = "0.1.0" }
 facet = "0.46"
 facet-json = "0.46"
 tokio = { version = "1", features = ["process", "fs", "io-util"] }

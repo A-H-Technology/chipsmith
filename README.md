@@ -150,4 +150,4 @@ example-de2/                 # Blinky on DE2 board (Quartus II 13.0sp1)
 
 ## License
 
-TODO
+MIT — see [LICENSE](LICENSE).
