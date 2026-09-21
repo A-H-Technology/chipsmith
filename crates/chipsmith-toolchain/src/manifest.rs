@@ -5,21 +5,36 @@ use facet::Facet;
 
 use crate::error::ChipsmithError;
 
-#[derive(Debug, Facet)]
+/// A Manifest that has been through `parse`. Every field is what it claims to
+/// be; nothing downstream needs to re-check the `[toolchain]` table.
+#[derive(Debug)]
 pub struct Manifest {
     pub project: Project,
     pub toolchain: ToolchainSpec,
     pub target: Target,
     pub hdl: Hdl,
-    #[facet(default)]
     pub pins: BTreeMap<String, PinMapping>,
     /// `[clocks]` — port name to frequency, e.g. `clk = "50 MHz"`. Without these
     /// the design compiles unconstrained and timing analysis reports nothing useful.
-    #[facet(default)]
     pub clocks: BTreeMap<String, String>,
     /// `[io-standards]` — per-signal overrides of `target.io_standard`.
-    #[facet(default, rename = "io-standards")]
     pub io_standards: BTreeMap<String, String>,
+}
+
+/// The `chipsmith.toml` as written on disk. Exists only to be turned into a
+/// `Manifest`: it is the shape the file has, not the shape the program wants.
+#[derive(Debug, Facet)]
+struct ManifestFile {
+    project: Project,
+    toolchain: ToolchainTable,
+    target: Target,
+    hdl: Hdl,
+    #[facet(default)]
+    pins: BTreeMap<String, PinMapping>,
+    #[facet(default)]
+    clocks: BTreeMap<String, String>,
+    #[facet(default, rename = "io-standards")]
+    io_standards: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Facet)]
@@ -28,48 +43,53 @@ pub struct Project {
     pub top: String,
 }
 
-/// Parsed from `[toolchain]` — exactly one key (the backend name) with a version string.
-/// e.g. `quartus = "23.1"` or `vivado = "2024.1"`
+/// `[toolchain]` as written — a Backend name mapped to a Version,
+/// e.g. `quartus-prime = "23.1"`. Only ever one entry; see `ToolchainSpec`.
 #[derive(Debug, Facet)]
 #[facet(transparent)]
-pub struct ToolchainSpec(BTreeMap<String, String>);
+struct ToolchainTable(BTreeMap<String, String>);
+
+/// The Backend and Version a Project builds with. Holding one is proof that
+/// `[toolchain]` named exactly one Backend — there is no other way to get one
+/// out of a file, and no way to build one that says otherwise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolchainSpec {
+    backend: String,
+    version: String,
+}
 
 impl ToolchainSpec {
-    /// Construct from a pre-validated single-entry map. Panics if map is empty.
-    /// Intended for tests and internal use after validation.
-    pub fn from_map(map: BTreeMap<String, String>) -> Self {
-        assert!(
-            map.len() == 1,
-            "[toolchain] must have exactly one entry, got {}",
-            map.len()
-        );
-        Self(map)
+    pub fn new(backend: impl Into<String>, version: impl Into<String>) -> Self {
+        Self {
+            backend: backend.into(),
+            version: version.into(),
+        }
     }
 
-    /// The backend name (e.g. "quartus-prime"). Safe to call after validation.
+    /// The Backend name, e.g. `quartus-prime`.
     pub fn backend(&self) -> &str {
-        self.0
-            .keys()
-            .next()
-            .expect("ToolchainSpec invariant: validated to have exactly one entry")
+        &self.backend
     }
 
-    /// The version string (e.g. "23.1"). Safe to call after validation.
+    /// The Version, e.g. `23.1`.
     pub fn version(&self) -> &str {
-        self.0
-            .values()
-            .next()
-            .expect("ToolchainSpec invariant: validated to have exactly one entry")
+        &self.version
     }
+}
 
-    fn validate(&self) -> Result<(), String> {
-        if self.0.len() != 1 {
-            return Err(
+impl TryFrom<ToolchainTable> for ToolchainSpec {
+    type Error = String;
+
+    /// The one place the "exactly one Backend" rule is enforced.
+    fn try_from(table: ToolchainTable) -> Result<Self, Self::Error> {
+        let mut entries = table.0.into_iter();
+        match (entries.next(), entries.next()) {
+            (Some((backend, version)), None) => Ok(Self { backend, version }),
+            _ => Err(
                 "[toolchain] must have exactly one entry (e.g. quartus-prime = \"23.1\")"
                     .to_string(),
-            );
+            ),
         }
-        Ok(())
     }
 }
 
@@ -140,35 +160,42 @@ impl Manifest {
         let path = project_dir.join("chipsmith.toml");
         let content = std::fs::read_to_string(&path)
             .map_err(|_| ChipsmithError::ManifestNotFound { path: path.clone() })?;
-        let manifest: Manifest =
-            facet_toml::from_str(&content).map_err(|e| ChipsmithError::ManifestParse {
-                path: path.clone(),
-                message: e.to_string(),
-            })?;
-        manifest
-            .toolchain
-            .validate()
-            .map_err(|e| ChipsmithError::ManifestParse {
-                path: path.clone(),
-                message: e,
-            })?;
-        // Surface a bad [clocks] or [io-standards] entry at load rather than mid-compile
-        manifest
-            .resolve_clocks()
-            .map_err(|e| ChipsmithError::ManifestParse {
-                path: path.clone(),
-                message: e,
-            })?;
+        Self::parse(&content, &path)
+    }
+
+    /// Turn the text of a `chipsmith.toml` into a Manifest, or say why it isn't
+    /// one. Every rule about a well-formed Manifest is enforced here and only
+    /// here — the filesystem sits outside so tests reach all of it.
+    pub fn parse(content: &str, path: &Path) -> Result<Self, ChipsmithError> {
+        let bad = |message: String| ChipsmithError::ManifestParse {
+            path: path.to_path_buf(),
+            message,
+        };
+
+        let file: ManifestFile = facet_toml::from_str(content).map_err(|e| bad(e.to_string()))?;
+
+        let manifest = Manifest {
+            project: file.project,
+            toolchain: ToolchainSpec::try_from(file.toolchain).map_err(bad)?,
+            target: file.target,
+            hdl: file.hdl,
+            pins: file.pins,
+            clocks: file.clocks,
+            io_standards: file.io_standards,
+        };
+
+        // Surface a bad [clocks] or [io-standards] entry now rather than mid-compile
+        manifest.resolve_clocks().map_err(bad)?;
         if let Some(unknown) = manifest
             .io_standards
             .keys()
             .find(|signal| !manifest.pins.contains_key(*signal))
         {
-            return Err(ChipsmithError::ManifestParse {
-                path,
-                message: format!("[io-standards] '{unknown}' has no matching entry in [pins]"),
-            });
+            return Err(bad(format!(
+                "[io-standards] '{unknown}' has no matching entry in [pins]"
+            )));
         }
+
         Ok(manifest)
     }
 
@@ -250,10 +277,10 @@ clk = "PIN_Y2"
 led = ["PIN_V16", "PIN_W16", "PIN_V17", "PIN_W17"]
 "#;
 
+    /// Exactly what `load` does, minus the file read — so these tests exercise
+    /// every validation rule a real `chipsmith.toml` goes through.
     fn parse_manifest(toml: &str) -> Result<Manifest, String> {
-        let manifest: Manifest = facet_toml::from_str(toml).map_err(|e| e.to_string())?;
-        manifest.toolchain.validate().map_err(|e| e.to_string())?;
-        Ok(manifest)
+        Manifest::parse(toml, Path::new("chipsmith.toml")).map_err(|e| e.to_string())
     }
 
     #[test]
@@ -303,10 +330,7 @@ led = ["PIN_V16", "PIN_W16", "PIN_V17", "PIN_W17"]
 
     #[test]
     fn rejects_clock_without_a_pin_assignment() {
-        let err = with_clocks(r#"clock_50 = "50 MHz""#)
-            .unwrap()
-            .resolve_clocks()
-            .unwrap_err();
+        let err = with_clocks(r#"clock_50 = "50 MHz""#).unwrap_err();
         assert!(err.contains("clock_50"), "{err}");
         assert!(err.contains("[pins]"), "{err}");
     }
@@ -314,11 +338,19 @@ led = ["PIN_V16", "PIN_W16", "PIN_V17", "PIN_W17"]
     #[test]
     fn rejects_unparseable_frequency() {
         for bad in ["fifty MHz", "50", "50 furlongs", "-50 MHz", "0 MHz"] {
-            let result = with_clocks(&format!("clk = \"{bad}\""))
-                .unwrap()
-                .resolve_clocks();
+            let result = with_clocks(&format!("clk = \"{bad}\""));
             assert!(result.is_err(), "'{bad}' should not parse");
         }
+    }
+
+    #[test]
+    fn rejects_an_io_standard_for_a_signal_with_no_pin() {
+        let err = parse_manifest(&format!(
+            "{VALID_TOML}\n[io-standards]\nuart_tx = \"3.3-V LVTTL\"\n"
+        ))
+        .unwrap_err();
+        assert!(err.contains("uart_tx"), "{err}");
+        assert!(err.contains("[pins]"), "{err}");
     }
 
     #[test]

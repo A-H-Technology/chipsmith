@@ -102,9 +102,6 @@ mod tests {
     }
 
     fn manifest_with_clocks(clocks: BTreeMap<String, String>) -> Manifest {
-        let mut toolchain = BTreeMap::new();
-        toolchain.insert("quartus-prime".to_string(), "23.1".to_string());
-
         let mut pins = BTreeMap::new();
         pins.insert("clk".to_string(), PinMapping::Single("PIN_Y2".to_string()));
 
@@ -113,7 +110,7 @@ mod tests {
                 name: "blinky".to_string(),
                 top: "blinky".to_string(),
             },
-            toolchain: ToolchainSpec::from_map(toolchain),
+            toolchain: ToolchainSpec::new("quartus-prime", "23.1"),
             target: Target {
                 family: "Cyclone V".to_string(),
                 device: "5CSEBA6U23I7".to_string(),

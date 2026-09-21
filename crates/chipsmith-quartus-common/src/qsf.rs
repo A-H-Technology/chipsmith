@@ -114,15 +114,12 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn test_manifest() -> Manifest {
-        let mut toolchain_map = BTreeMap::new();
-        toolchain_map.insert("quartus-prime".to_string(), "23.1".to_string());
-
         Manifest {
             project: Project {
                 name: "blinky".to_string(),
                 top: "blinky".to_string(),
             },
-            toolchain: ToolchainSpec::from_map(toolchain_map),
+            toolchain: ToolchainSpec::new("quartus-prime", "23.1"),
             target: Target {
                 family: "Cyclone V".to_string(),
                 device: "5CSEBA6U23I7".to_string(),
