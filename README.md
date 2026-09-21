@@ -102,21 +102,26 @@ Scaffold a new project with `chipsmith.toml` and a stub VHDL entity.
 ```bash
 chipsmith init
 chipsmith init --family "Cyclone IV E" --device EP4CE22F17C6
-chipsmith init --backend quartus-ii-13 --version 13.0sp1 --family "Cyclone II" --device EP2C35F672C6
+chipsmith init --backend quartus-ii-13 --family "Cyclone II" --device EP2C35F672C6
 ```
 
-Defaults to Cyclone V / quartus-prime 23.1 when no flags are given.
+Defaults to Cyclone V and the `quartus-prime` backend. Omitting `--version`
+picks the selected backend's latest, so `--backend quartus-ii-13` scaffolds
+`13.0sp1` without being told.
 
 ### `chipsmith install`
 
 Download and install a toolchain version. Happens automatically on first `build`, but can be done explicitly.
 
 ```bash
-chipsmith install              # latest quartus-prime (23.1)
+chipsmith install                          # latest quartus-prime (23.1)
 chipsmith install 24.1
-chipsmith install 13.0sp1 --backend quartus-ii-13
+chipsmith install --backend quartus-ii-13  # latest for that backend (13.0sp1)
 chipsmith install --installer ./QuartusLiteSetup.run   # from local file
 ```
+
+The version defaults to the chosen backend's latest, not to a single global
+default.
 
 ### `chipsmith build`
 
@@ -124,11 +129,13 @@ Run the full synthesis pipeline (map, fit, asm, timing analysis). Produces a `.s
 
 Afterwards chipsmith reads the `quartus_sta` summary and reports the worst-case slack.
 A design that misses timing still produces a usable `.sof`, so this is a warning rather
-than a build failure — but it won't pass silently.
+than a build failure — but it won't pass silently. Pass `--require-timing` to make it
+an error instead, which is what you want in CI.
 
 ```bash
 chipsmith build
 chipsmith build --project-dir path/to/project
+chipsmith build --require-timing           # exit non-zero if timing is missed
 ```
 
 ### `chipsmith flash`
@@ -156,7 +163,7 @@ Run any Quartus tool directly. Useful for operations not covered by the other co
 ```bash
 chipsmith run quartus_sh -- --tcl_eval "puts hello"
 chipsmith run quartus_pgm --version 24.1
-chipsmith run jtagconfig --backend quartus-ii-13 --version 13.0sp1
+chipsmith run jtagconfig --backend quartus-ii-13
 ```
 
 ### `chipsmith which`
@@ -178,15 +185,20 @@ No manual `nix-shell` or FHS wrappers needed.
 
 ```
 crates/
-  chipsmith-toolchain/       # Core trait, manifest parsing, error types
-  chipsmith-quartus-common/  # Shared Quartus logic (download, QSF gen, build)
-  chipsmith-quartus-prime/   # Quartus Prime backend (23.1, 22.1, 24.1)
-  chipsmith-quartus-ii-13/   # Quartus II 13.0sp1 backend
-  chipsmith-core/            # Public API, backend routing
+  chipsmith-toolchain/       # Toolchain trait, manifest parsing, scaffolding, errors
+  chipsmith-quartus-common/  # All Quartus behaviour: install, build, constraints, timing
+  chipsmith-quartus-prime/   # Quartus Prime product description (23.1, 22.1, 24.1)
+  chipsmith-quartus-ii-13/   # Quartus II product description (13.0sp1)
+  chipsmith-core/            # Backend registry, manifest-driven commands
   chipsmith-cli/             # CLI binary
 example/                     # Blinky on Cyclone V (Quartus Prime 23.1)
 example-de2/                 # Blinky on DE2 board (Quartus II 13.0sp1)
 ```
+
+The two backend crates are data, not code: each is one `QuartusProduct`
+constant naming its versions, install root, installer flags and spawn
+strategy. Everything they do lives once in `chipsmith-quartus-common`. See
+[CONTEXT.md](CONTEXT.md) for the vocabulary.
 
 ## License
 
