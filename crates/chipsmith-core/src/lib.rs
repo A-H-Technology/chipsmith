@@ -148,6 +148,12 @@ end architecture;
         std::fs::write(&vhdl_path, &vhdl)?;
     }
 
+    // Quartus dumps ~16MB of databases and reports into build/ on every compile
+    let gitignore_path = project_dir.join(".gitignore");
+    if !gitignore_path.exists() {
+        std::fs::write(&gitignore_path, "build/\n")?;
+    }
+
     eprintln!("Created chipsmith.toml and src/{name}.vhd");
     Ok(())
 }

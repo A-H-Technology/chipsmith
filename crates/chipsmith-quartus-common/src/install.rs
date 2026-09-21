@@ -25,7 +25,10 @@ pub struct KnownVersion {
     pub devices: &'static [DeviceSupport],
 }
 
-const QUARTUS_CDN: &str = "https://downloads.intel.com/akdlm/software/acdsinst";
+// Intel spun Altera out and retired the downloads.intel.com/akdlm paths — they now
+// 301 into corpredirect.intel.com's 404 redirector. Altera serves the same directory
+// layout from its own host. Revisit if Altera reorganises the CDN again.
+const QUARTUS_CDN: &str = "https://download.altera.com/akdlm/software/acdsinst";
 
 pub fn cdn_url(ver: &QuartusVersion, filename: &str) -> String {
     format!(
@@ -139,7 +142,7 @@ mod tests {
         let url = cdn_url(ver, "device.qdz");
         assert_eq!(
             url,
-            "https://downloads.intel.com/akdlm/software/acdsinst/1.0/100/ib_installers/device.qdz"
+            "https://download.altera.com/akdlm/software/acdsinst/1.0/100/ib_installers/device.qdz"
         );
     }
 }

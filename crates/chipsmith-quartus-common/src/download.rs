@@ -29,7 +29,15 @@ pub async fn download_file(url: &str, filename: &str) -> Result<PathBuf, Chipsmi
 
     eprintln!("Downloading {} ...", url);
 
-    let response = Client::new()
+    // Altera's CDN sits behind Akamai, which rejects requests with no User-Agent.
+    let client = Client::builder()
+        .user_agent(concat!("chipsmith/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| ChipsmithError::Download {
+            message: e.to_string(),
+        })?;
+
+    let response = client
         .get(url)
         .send()
         .await
