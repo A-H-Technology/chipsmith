@@ -114,6 +114,9 @@ device = "{device}"
 sources = ["src/*.vhd"]
 
 [pins]
+
+# Port frequencies, e.g. clk = "50 MHz". Without these the timing report is meaningless.
+[clocks]
 "#,
         backend = opts.backend,
         version = opts.version,

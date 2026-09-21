@@ -16,3 +16,6 @@ sources = ["src/*.vhd"]
 [pins]
 CLOCK_50 = "PIN_N2"
 LEDR = ["PIN_R17", "PIN_R18", "PIN_U18", "PIN_Y18"]
+
+[clocks]
+CLOCK_50 = "50 MHz"

@@ -16,3 +16,6 @@ sources = ["src/*.vhd"]
 [pins]
 clk = "PIN_V11"
 led = ["PIN_W15", "PIN_AA24", "PIN_V16", "PIN_V15"]
+
+[clocks]
+clk = "50 MHz"

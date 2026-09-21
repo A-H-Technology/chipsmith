@@ -66,6 +66,14 @@ pub fn generate_qsf(
         )
         .unwrap();
     }
+    if !manifest.clocks.is_empty() {
+        writeln!(
+            qsf,
+            "set_global_assignment -name SDC_FILE {}.sdc",
+            manifest.project.name
+        )
+        .unwrap();
+    }
     writeln!(qsf).unwrap();
 
     for (signal, mapping) in &manifest.pins {
@@ -109,6 +117,7 @@ mod tests {
                 sources: vec!["src/*.vhd".to_string()],
             },
             pins: BTreeMap::new(),
+            clocks: BTreeMap::new(),
         }
     }
 
@@ -131,6 +140,19 @@ mod tests {
         assert!(qsf.contains("TOP_LEVEL_ENTITY blinky"));
         assert!(qsf.contains("VHDL_INPUT_VERSION VHDL_2008"));
         assert!(qsf.contains("VHDL_FILE ../src/blinky.vhd"));
+    }
+
+    #[test]
+    fn qsf_references_sdc_only_when_clocks_are_declared() {
+        let mut manifest = test_manifest();
+        let without = generate_qsf(&manifest, &[], Path::new("/proj")).unwrap();
+        assert!(!without.contains("SDC_FILE"));
+
+        manifest
+            .clocks
+            .insert("clk".to_string(), "50 MHz".to_string());
+        let with = generate_qsf(&manifest, &[], Path::new("/proj")).unwrap();
+        assert!(with.contains("set_global_assignment -name SDC_FILE blinky.sdc"));
     }
 
     #[test]

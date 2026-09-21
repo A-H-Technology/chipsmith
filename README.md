@@ -46,6 +46,9 @@ sources = ["src/*.vhd"]
 [pins]
 clk = "PIN_V11"
 led = ["PIN_W15", "PIN_AA24", "PIN_V16", "PIN_V15"]
+
+[clocks]
+clk = "50 MHz"
 ```
 
 The `[toolchain]` key selects the backend. Supported backends:
@@ -56,6 +59,23 @@ The `[toolchain]` key selects the backend. Supported backends:
 | `quartus-ii-13` | Altera Quartus II | 13.0sp1 |
 
 Pin mappings can be a single string for one pin or an array for a bus.
+
+### Timing constraints
+
+`[clocks]` maps a top-level port to its frequency, written the way it appears on the
+board silkscreen — `Hz`, `kHz`, `MHz` and `GHz` are all accepted:
+
+```toml
+[clocks]
+clk = "50 MHz"
+```
+
+Chipsmith turns that into a `.sdc` file (`create_clock` plus `derive_clock_uncertainty`)
+and points the project at it, so `quartus_sta` reports real slack instead of analysing an
+unconstrained design. Every port named here must also appear in `[pins]`.
+
+Leave `[clocks]` out and the design still compiles — the timing report just won't mean
+anything.
 
 ## Commands
 
