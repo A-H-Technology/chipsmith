@@ -146,6 +146,54 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The examples in the repo are the first thing anyone runs, so hold them to
+    /// the real path: load the shipped manifest and generate a full build dir.
+    #[test]
+    fn shipped_examples_produce_a_constrained_project() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .to_path_buf();
+
+        for (example, clock_port, period) in [
+            ("example", "clk", "20.000"),
+            ("example-de2", "CLOCK_50", "20.000"),
+        ] {
+            let source = repo.join(example);
+            let dir = scratch_project(example);
+            std::fs::copy(source.join("chipsmith.toml"), dir.join("chipsmith.toml")).unwrap();
+
+            let manifest = Manifest::load(&dir).unwrap();
+            let plan = prepare_build(&dir, &manifest).unwrap();
+
+            let sdc = std::fs::read_to_string(
+                plan.build_dir
+                    .join(format!("{}.sdc", manifest.project.name)),
+            )
+            .unwrap();
+            assert!(
+                sdc.contains(&format!(
+                    "create_clock -name {clock_port} -period {period} [get_ports {clock_port}]"
+                )),
+                "{example} sdc:\n{sdc}"
+            );
+
+            let qsf = std::fs::read_to_string(
+                plan.build_dir
+                    .join(format!("{}.qsf", manifest.project.name)),
+            )
+            .unwrap();
+            assert!(qsf.contains("SDC_FILE"), "{example} qsf:\n{qsf}");
+            assert!(
+                qsf.contains("IO_STANDARD \"3.3-V LVTTL\""),
+                "{example} qsf:\n{qsf}"
+            );
+
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
     #[test]
     fn writes_no_sdc_when_clocks_are_absent() {
         let dir = scratch_project("no-clocks");

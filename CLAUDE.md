@@ -8,7 +8,7 @@ chipsmith is a Rust CLI tool that manages Intel FPGA toolchains (Quartus Prime, 
 
 ```bash
 cargo check                    # type check
-cargo test --workspace         # run all tests (39 tests across 4 crates)
+cargo test --workspace         # run all tests (40 tests across 4 crates)
 cargo fmt                      # format
 cargo fmt --check              # verify formatting
 ```
