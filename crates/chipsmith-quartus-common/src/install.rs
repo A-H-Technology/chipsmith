@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use chipsmith_toolchain::error::ChipsmithError;
 
 use crate::download;
-use crate::process::ProcessHost;
 use crate::product::{KnownVersion, QuartusProduct, QuartusVersion};
 use crate::runner;
+use chipsmith_toolchain::process::ProcessHost;
 
 // Intel spun Altera out and retired the downloads.intel.com/akdlm paths — they now
 // 301 into corpredirect.intel.com's 404 redirector. Altera serves the same directory

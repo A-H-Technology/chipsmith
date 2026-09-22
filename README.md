@@ -8,6 +8,9 @@ A command-line FPGA toolchain manager and build system. Handles downloading, ins
 # Create a new project
 chipsmith init --family "Cyclone V" --device 5CSEBA6U23I7
 
+# Run the testbenches (GHDL by default — no Quartus needed)
+chipsmith test
+
 # Build (downloads Quartus automatically on first run)
 chipsmith build
 
@@ -23,6 +26,9 @@ Requires a recent stable Rust — CI builds against `stable`, which is what the
 ```bash
 cargo install --path crates/chipsmith-cli
 ```
+
+On NixOS, `nix develop` gives you a shell with Rust, `just`, `ghdl` and the
+tools chipsmith shells out to when it patches a Quartus install.
 
 ## `chipsmith.toml`
 
@@ -42,7 +48,7 @@ device = "5CSEBA6U23I7"
 io_standard = "3.3-V LVTTL"    # optional, applied to every pin
 
 [hdl]
-standard = "VHDL_2008"         # optional, default
+standard = "VHDL_2008"         # optional, default; also VHDL_1993, VHDL_1987
 sources = ["src/*.vhd"]
 
 [pins]
@@ -51,6 +57,10 @@ led = ["PIN_W15", "PIN_AA24", "PIN_V16", "PIN_V15"]
 
 [clocks]
 clk = "50 MHz"
+
+[sim]                          # optional; without it there is nothing to test
+sources = ["tb/*.vhd"]
+testbenches = ["blinky_tb"]
 ```
 
 The `[toolchain]` key selects the backend. Supported backends:
@@ -138,6 +148,57 @@ chipsmith build --project-dir path/to/project
 chipsmith build --require-timing           # exit non-zero if timing is missed
 ```
 
+### `chipsmith test`
+
+Run the project's testbenches under a simulator and report a verdict for each.
+
+```bash
+chipsmith test
+chipsmith test --testbench blinky_tb    # just one
+chipsmith test --simulator ghdl         # override what chipsmith.toml says
+```
+
+Testbenches are declared in `[sim]`:
+
+```toml
+[sim]
+simulator = "quartus"          # optional, default "ghdl"
+sources = ["tb/*.vhd"]         # analysed only for simulation
+testbenches = ["blinky_tb"]    # top-level entities to elaborate and run
+```
+
+`sim.sources` are compiled on top of `hdl.sources` and never reach the `.qsf`, so
+a testbench can't accidentally end up in the synthesised design. Everything lands
+in `build/sim/`, which is as disposable as the rest of `build/`.
+
+A testbench fails when an assertion of severity `error` or worse fires. One
+failing testbench doesn't stop the others — they all run, and `chipsmith test`
+exits non-zero if any of them failed. Drive your testbench to a close with
+`std.env.finish`; a free-running clock with no `finish` never terminates.
+
+#### Simulators
+
+| `simulator` | Tool | Needs |
+|-------------|------|-------|
+| `ghdl` (default) | GHDL | `ghdl` on `PATH`. No toolchain, no licence. |
+| `quartus` | Whatever your Quartus bundles — Questa for Quartus Prime, ModelSim for Quartus II | An installed toolchain, and for Questa a licence |
+
+`quartus` is one name because which simulator you get is a fact about the
+version you build with, not a choice: Quartus Prime Lite 21.1 and later ship
+Questa-Intel FPGA Starter Edition, everything older ships ModelSim.
+
+**Questa needs a licence.** ModelSim Starter Edition never asked for one; Questa
+Starter Edition refuses to elaborate without a free node-locked licence from
+Altera's Self-Service Licensing Center, with `SALT_LICENSE_SERVER` pointing at
+the `.dat` file. chipsmith can't obtain that for you — it just says so when
+`vsim` fails. Use `--simulator ghdl` if you'd rather not.
+
+A testbench means the same thing on both: chipsmith writes a `modelsim.ini` into
+the work library setting `BreakOnAssertion = 2`, which is the severity GHDL's
+`--assert-level=error` breaks at. ModelSim's own default is `failure`, so
+without it a `severity error` assertion would pass under one simulator and fail
+under the other.
+
 ### `chipsmith flash`
 
 Program the FPGA via JTAG using `quartus_pgm`.
@@ -186,7 +247,8 @@ No manual `nix-shell` or FHS wrappers needed.
 ```
 crates/
   chipsmith-toolchain/       # Toolchain trait, manifest parsing, scaffolding, errors
-  chipsmith-quartus-common/  # All Quartus behaviour: install, build, constraints, timing
+  chipsmith-sim/             # Simulator trait, test verdicts, the GHDL simulator
+  chipsmith-quartus-common/  # All Quartus behaviour: install, build, constraints, timing, ModelSim/Questa
   chipsmith-quartus-prime/   # Quartus Prime product description (23.1, 22.1, 24.1)
   chipsmith-quartus-ii-13/   # Quartus II product description (13.0sp1)
   chipsmith-core/            # Backend registry, manifest-driven commands
@@ -194,6 +256,9 @@ crates/
 example/                     # Blinky on Cyclone V (Quartus Prime 23.1)
 example-de2/                 # Blinky on DE2 board (Quartus II 13.0sp1)
 ```
+
+Both examples carry a testbench and a `justfile`: `just testbench` runs it on the
+simulator the manifest names, `just testbench-ghdl` on GHDL.
 
 The two backend crates are data, not code: each is one `QuartusProduct`
 constant naming its versions, install root, installer flags and spawn

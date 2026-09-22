@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use chipsmith_toolchain::error::ChipsmithError;
 
-use crate::process::{Capture, ProcessHost, ProcessSpec};
 use crate::product::SpawnStrategy;
+use chipsmith_toolchain::process::{Capture, ProcessHost, ProcessSpec};
 
 /// The 64-bit store paths every Product needs.
 const BASE_ATTRS: &str = r#"

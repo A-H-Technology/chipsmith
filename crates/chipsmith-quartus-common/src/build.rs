@@ -185,7 +185,9 @@ pub fn prepare_build(project_dir: &Path, manifest: &Manifest) -> Result<BuildPla
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chipsmith_toolchain::manifest::{Clock, Hdl, PinMapping, Project, Target, ToolchainSpec};
+    use chipsmith_toolchain::manifest::{
+        Clock, Hdl, PinMapping, Project, Target, ToolchainSpec, VhdlStandard,
+    };
     use std::collections::BTreeMap;
 
     fn manifest_with_clocks(clocks: Vec<Clock>) -> Manifest {
@@ -204,12 +206,13 @@ mod tests {
                 io_standard: None,
             },
             hdl: Hdl {
-                standard: "VHDL_2008".to_string(),
+                standard: VhdlStandard::Vhdl2008,
                 sources: vec!["src/*.vhd".to_string()],
             },
             pins,
             clocks,
             io_standards: BTreeMap::new(),
+            sim: None,
         }
     }
 

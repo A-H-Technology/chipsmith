@@ -4,7 +4,7 @@
 //! set and a build flow. They differ in four facts, and those four facts are
 //! this module. A backend crate is a `QuartusProduct` constant and nothing else.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chipsmith_toolchain::error::ChipsmithError;
 
@@ -54,6 +54,37 @@ pub struct InstallerSpec {
     pub accepts_eula_flag: bool,
 }
 
+/// The simulator a Product's installer brings with it.
+///
+/// ModelSim and Questa are the same tool a decade apart and share the whole
+/// `vlib`/`vcom`/`vsim` command set, so the only things that vary are where it
+/// sits and what it is called.
+#[derive(Debug)]
+pub struct BundledSimulator {
+    /// Subdirectory of the Install Root, e.g. `questa_fse`.
+    pub subdir: &'static str,
+    /// What the vendor calls it, for reports and error messages.
+    pub display_name: &'static str,
+    /// Questa Starter Edition refuses to elaborate without a node-locked
+    /// licence file; ModelSim Starter Edition never asked for one. chipsmith
+    /// cannot obtain one, so all it can do is say so when `vsim` fails.
+    pub needs_license: bool,
+}
+
+impl BundledSimulator {
+    /// Where its executables live. `bin` holds wrapper scripts that exec the
+    /// real binaries out of a sibling directory.
+    pub fn bin_dir(&self, install_dir: &Path) -> PathBuf {
+        install_dir.join(self.subdir).join("bin")
+    }
+
+    /// The vendor's own `modelsim.ini`, which carries the `std` and `ieee`
+    /// library mappings that chipsmith's generated one chains to.
+    pub fn vendor_ini(&self, install_dir: &Path) -> PathBuf {
+        install_dir.join(self.subdir).join("modelsim.ini")
+    }
+}
+
 /// A line of Quartus releases. One per Backend.
 #[derive(Debug)]
 pub struct QuartusProduct {
@@ -67,6 +98,7 @@ pub struct QuartusProduct {
     pub latest: &'static str,
     pub installer: InstallerSpec,
     pub spawn: SpawnStrategy,
+    pub simulator: BundledSimulator,
 }
 
 impl QuartusProduct {
@@ -128,6 +160,11 @@ pub(crate) static TEST_PRODUCT: QuartusProduct = QuartusProduct {
         accepts_eula_flag: true,
     },
     spawn: SpawnStrategy::PatchElf,
+    simulator: BundledSimulator {
+        subdir: "modelsim_ase",
+        display_name: "Test Simulator",
+        needs_license: false,
+    },
 };
 
 #[cfg(test)]

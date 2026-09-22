@@ -15,14 +15,18 @@ are the names used throughout the code.
 
 ```bash
 cargo check                    # type check
-cargo test --workspace         # run all tests (82 tests across 5 crates)
+cargo test --workspace         # run all tests (108 tests across 6 crates)
 cargo fmt                      # format
 cargo fmt --check              # verify formatting
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Clippy is enforced in CI. On NixOS, run anything missing through
+Clippy is enforced in CI. On NixOS, `nix develop` provides Rust, `just`, `ghdl`
+and the tools chipsmith shells out to; run anything else missing through
 `nix shell nixpkgs#<pkg>` or `nix run nixpkgs#<pkg>`.
+
+The examples are runnable: `cd example && just testbench-ghdl` exercises the
+whole simulation path without a Quartus install.
 
 ## Architecture
 
@@ -32,33 +36,43 @@ Clippy is enforced in CI. On NixOS, run anything missing through
 chipsmith-cli
   -> chipsmith-core
        -> chipsmith-quartus-common          <- all Quartus behaviour
+            -> chipsmith-sim                <- ModelSim/Questa is a Quartus component
             -> chipsmith-toolchain
+       -> chipsmith-sim                     <- simulator-agnostic test running
        -> chipsmith-quartus-prime  \  product
        -> chipsmith-quartus-ii-13  /  descriptions
 ```
 
 - **chipsmith-toolchain**: Foundational crate, no Quartus knowledge. The
   `Toolchain` trait (async, object-safe via `async_trait`), `Manifest` parsing,
-  `TimingSummary`, project scaffolding, and `ChipsmithError`.
+  `TimingSummary`, project scaffolding, the `ProcessHost` seam, and
+  `ChipsmithError`.
+- **chipsmith-sim**: The `Simulator` trait, `SimPlan`, the shared `execute` that
+  turns exit codes into Test Verdicts, and the GHDL implementation. No vendor
+  knowledge.
 - **chipsmith-quartus-common**: Every Quartus behaviour, once. Install and
   download, QSF/QPF/SDC generation, build planning, `.sta.summary` parsing,
-  NixOS compatibility, the `ProcessHost` seam, and the single `QuartusToolchain`
-  implementation of the trait.
+  NixOS compatibility, the single `QuartusToolchain` implementation of the
+  trait, and `QuartusSimulator` — which lives here rather than in
+  `chipsmith-sim` because `vsim` is a vendor binary and needs the same NixOS
+  dressing as every other one.
 - **chipsmith-quartus-prime** / **chipsmith-quartus-ii-13**: Data, not code.
   Each is one `QuartusProduct` constant. Adding a backend means adding a
   constant, not a crate's worth of logic.
-- **chipsmith-core**: Backend registry (`resolve_backend`, `PRODUCTS`) plus the
-  two commands driven by a Manifest rather than by flags (`build`, `flash`).
+- **chipsmith-core**: Backend and Simulator registries (`resolve_backend`,
+  `PRODUCTS`) plus the three commands driven by a Manifest rather than by flags
+  (`build`, `test`, `flash`).
 - **chipsmith-cli**: Binary. Uses `figue`/`facet` for arg parsing, owns
   presentation and exit-code policy.
 
 ## Key patterns
 
-- **The variance lives in data.** `QuartusProduct` holds the four things that
+- **The variance lives in data.** `QuartusProduct` holds the five things that
   differ between Quartus Prime and Quartus II: version table, install root,
-  installer flags, `SpawnStrategy`. Everything else is shared. If you find
-  yourself adding a `match` on the backend name inside `quartus-common`, it
-  probably wants to be a field on `QuartusProduct` instead.
+  installer flags, `SpawnStrategy`, and the `BundledSimulator` it ships.
+  Everything else is shared. If you find yourself adding a `match` on the
+  backend name inside `quartus-common`, it probably wants to be a field on
+  `QuartusProduct` instead.
 - **Parse, don't validate.** `Manifest::parse` is the only place manifest rules
   are enforced. A `Manifest` that exists is valid: `ToolchainSpec` is a
   `{ backend, version }` pair that cannot hold anything else, and `clocks` are
@@ -85,7 +99,12 @@ chipsmith-cli
 | Timing types | `crates/chipsmith-toolchain/src/timing.rs` |
 | `chipsmith init` | `crates/chipsmith-toolchain/src/scaffold.rs` |
 | Product descriptors | `crates/chipsmith-quartus-common/src/product.rs` |
-| Process seam + test fake | `crates/chipsmith-quartus-common/src/process.rs` |
+| Process seam + test fake | `crates/chipsmith-toolchain/src/process.rs` |
+| Simulator trait, verdicts, `execute` | `crates/chipsmith-sim/src/lib.rs` |
+| GHDL simulator | `crates/chipsmith-sim/src/ghdl.rs` |
+| ModelSim/Questa simulator | `crates/chipsmith-quartus-common/src/simulator.rs` |
+| Simulator selection | `SimulatorChoice` in `crates/chipsmith-toolchain/src/manifest.rs` |
+| Example testbenches + `just` recipes | `example{,-de2}/tb/`, `example{,-de2}/justfile` |
 | Toolchain implementation | `crates/chipsmith-quartus-common/src/toolchain.rs` |
 | Build plan + layout | `crates/chipsmith-quartus-common/src/build.rs` |
 | QSF generation | `crates/chipsmith-quartus-common/src/qsf.rs` |

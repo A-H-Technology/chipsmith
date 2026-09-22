@@ -1,0 +1,18 @@
+[package]
+name = "chipsmith-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Running a chipsmith project's testbenches under a VHDL simulator"
+
+[dependencies]
+async-trait = "0.1"
+chipsmith-toolchain = { path = "../chipsmith-toolchain", version = "0.1.0" }
+
+[dev-dependencies]
+chipsmith-toolchain = { path = "../chipsmith-toolchain", version = "0.1.0", features = [
+    "test-host",
+] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

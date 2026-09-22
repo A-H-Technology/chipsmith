@@ -3,7 +3,8 @@
 //! `chipsmith-quartus-common`.
 
 use chipsmith_quartus_common::product::{
-    DeviceSupport, InstallerSpec, KnownVersion, QuartusProduct, QuartusVersion, SpawnStrategy,
+    BundledSimulator, DeviceSupport, InstallerSpec, KnownVersion, QuartusProduct, QuartusVersion,
+    SpawnStrategy,
 };
 
 pub static PRODUCT: QuartusProduct = QuartusProduct {
@@ -16,6 +17,13 @@ pub static PRODUCT: QuartusProduct = QuartusProduct {
         accepts_eula_flag: true,
     },
     spawn: SpawnStrategy::PatchElf,
+    // Lite 21.1 onwards swapped ModelSim for Questa, which unlike ModelSim
+    // refuses to elaborate without a licence.
+    simulator: BundledSimulator {
+        subdir: "questa_fse",
+        display_name: "Questa-Intel FPGA Starter Edition",
+        needs_license: true,
+    },
 };
 
 /// Kept as a separate const so the CLI and docs can name the default directly.

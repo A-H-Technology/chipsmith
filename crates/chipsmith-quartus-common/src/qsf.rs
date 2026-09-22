@@ -43,7 +43,7 @@ pub fn generate_qsf(
     writeln!(
         qsf,
         "set_global_assignment -name VHDL_INPUT_VERSION {}",
-        manifest.hdl.standard
+        manifest.hdl.standard.qsf_name()
     )
     .unwrap();
     writeln!(
@@ -108,7 +108,7 @@ pub fn generate_qsf(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chipsmith_toolchain::manifest::{Hdl, Project, Target, ToolchainSpec};
+    use chipsmith_toolchain::manifest::{Hdl, Project, Target, ToolchainSpec, VhdlStandard};
     use std::collections::BTreeMap;
 
     fn test_manifest() -> Manifest {
@@ -124,12 +124,13 @@ mod tests {
                 io_standard: None,
             },
             hdl: Hdl {
-                standard: "VHDL_2008".to_string(),
+                standard: VhdlStandard::Vhdl2008,
                 sources: vec!["src/*.vhd".to_string()],
             },
             pins: BTreeMap::new(),
             clocks: Vec::new(),
             io_standards: BTreeMap::new(),
+            sim: None,
         }
     }
 

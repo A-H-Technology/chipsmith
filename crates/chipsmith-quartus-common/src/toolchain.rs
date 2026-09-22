@@ -7,9 +7,9 @@ use chipsmith_toolchain::error::ChipsmithError;
 use chipsmith_toolchain::manifest::Manifest;
 use chipsmith_toolchain::toolchain::{BuildOutcome, Toolchain};
 
-use crate::process::{ProcessHost, RealHost};
 use crate::product::QuartusProduct;
 use crate::{build, install, runner, timing};
+use chipsmith_toolchain::process::{ProcessHost, RealHost};
 
 pub struct QuartusToolchain {
     product: &'static QuartusProduct,

@@ -2,8 +2,9 @@
 
 chipsmith turns a declarative description of an FPGA design into a programmed
 chip. It owns everything between a text file and a blinking LED: acquiring the
-vendor toolchain, generating the vendor's project files, driving the compile,
-and reporting whether the result actually meets timing.
+vendor toolchain, generating the vendor's project files, running the design's
+testbenches, driving the compile, and reporting whether the result actually
+meets timing.
 
 ## Language
 
@@ -87,6 +88,37 @@ _Avoid_: binary, image, firmware, sof (as a noun in prose)
 What a finished build yields: the Bitstream, plus the Timing Summary if one was
 produced. Distinct from success — a build can succeed and still miss timing.
 _Avoid_: build result, report
+
+### Simulating
+
+**Testbench**:
+A top-level HDL entity with no ports that instantiates the design, drives it,
+and asserts on what it sees. Declared in `[sim]`; never part of the synthesised
+design.
+_Avoid_: test, unit test, bench, stimulus file
+
+**Simulator**:
+A tool that elaborates a Testbench and runs it. chipsmith supports GHDL, which
+it looks up on `PATH`, and the one bundled with the Project's Quartus. Unlike a
+Toolchain, chipsmith never installs a Simulator on its own account.
+_Avoid_: sim, simulation tool, HDL runtime
+
+**Work Library**:
+The directory a Simulator analyses sources into. Disposable in the same way as
+the Build Directory, and every Simulator runs with it as the working directory
+so nothing lands in the Project.
+_Avoid_: work dir, library, sim output
+
+**Test Verdict**:
+What one Testbench did: passed, or failed with whatever the Simulator said. A
+Testbench that will not elaborate has a Verdict; sources that will not compile
+do not, because no Testbench got that far.
+_Avoid_: test result, status, outcome (that last one means something else here)
+
+**Test Report**:
+Every Test Verdict from one run, plus the name of the Simulator that produced
+them. A run passes only if every Verdict did.
+_Avoid_: test summary, results
 
 ### Constraints
 

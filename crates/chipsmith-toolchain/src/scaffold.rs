@@ -52,6 +52,12 @@ sources = ["src/*.vhd"]
 
 # Port frequencies, e.g. clk = "50 MHz". Without these the timing report is meaningless.
 [clocks]
+
+# Run these with `chipsmith test`. Defaults to GHDL; set simulator = 'quartus'
+# to use the one your toolchain bundles instead.
+[sim]
+sources = ["tb/*.vhd"]
+testbenches = ["{name}_tb"]
 "#,
         backend = opts.backend,
         version = opts.version,
@@ -74,6 +80,47 @@ end entity;
 
 architecture rtl of {name} is
 begin
+end architecture;
+"#,
+    )
+}
+
+/// A Testbench that runs, passes, and shows the shape of a real one: a clock,
+/// a design under test, an assertion, and a `finish` so the run terminates.
+fn testbench_template(name: &str) -> String {
+    format!(
+        r#"library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use std.env.finish;
+
+entity {name}_tb is
+end entity;
+
+architecture sim of {name}_tb is
+    constant period : time := 20 ns;
+
+    signal clk : std_logic := '0';
+begin
+    dut : entity work.{name}
+        port map (clk => clk);
+
+    clk <= not clk after period / 2;
+
+    check : process
+    begin
+        -- Replace this with what your design should actually do. An assertion
+        -- of severity error or worse is what fails the run.
+        wait until rising_edge(clk);
+        assert clk = '1'
+            report "clk should be high on its own rising edge"
+            severity error;
+
+        wait for period * 10;
+
+        -- Without this the free-running clock never lets the simulation end.
+        finish;
+    end process;
 end architecture;
 "#,
     )
@@ -113,6 +160,17 @@ pub fn init(project_dir: &Path, opts: InitOptions) -> Result<(), ChipsmithError>
             .map_err(ChipsmithError::file("write", &vhdl_path))?;
     }
 
+    // The scaffolded Manifest declares a Testbench, so one has to exist or
+    // `chipsmith test` fails on a brand new project.
+    let tb_dir = project_dir.join("tb");
+    std::fs::create_dir_all(&tb_dir).map_err(ChipsmithError::file("create", &tb_dir))?;
+
+    let tb_path = tb_dir.join(format!("{name}_tb.vhd"));
+    if !tb_path.exists() {
+        std::fs::write(&tb_path, testbench_template(&name))
+            .map_err(ChipsmithError::file("write", &tb_path))?;
+    }
+
     // Quartus dumps ~16MB of databases and reports into build/ on every compile
     let gitignore_path = project_dir.join(".gitignore");
     if !gitignore_path.exists() {
@@ -120,7 +178,7 @@ pub fn init(project_dir: &Path, opts: InitOptions) -> Result<(), ChipsmithError>
             .map_err(ChipsmithError::file("write", &gitignore_path))?;
     }
 
-    eprintln!("Created chipsmith.toml and src/{name}.vhd");
+    eprintln!("Created chipsmith.toml, src/{name}.vhd and tb/{name}_tb.vhd");
     Ok(())
 }
 
@@ -152,6 +210,13 @@ mod tests {
         assert_eq!(manifest.toolchain.version(), "23.1");
         assert_eq!(manifest.target.family, "Cyclone V");
         assert!(manifest.clocks.is_empty());
+
+        // the scaffolded [sim] must name the testbench the scaffold writes
+        let sim = manifest
+            .sim
+            .expect("scaffolded manifest declares a testbench");
+        assert_eq!(sim.testbenches, vec!["blinky_tb"]);
+        assert!(testbench_template("blinky").contains("entity blinky_tb is"));
     }
 
     #[test]

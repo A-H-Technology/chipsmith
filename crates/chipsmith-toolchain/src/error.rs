@@ -40,6 +40,27 @@ pub enum ChipsmithError {
     #[error("no source files matched pattern: {pattern}")]
     NoSourceFiles { pattern: String },
 
+    /// Carries its own hint because the two Simulators are missing for
+    /// completely different reasons: GHDL was never installed, whereas the
+    /// Quartus one is a component of a Toolchain that is already there.
+    #[error("simulator `{program}` not found — {hint}")]
+    SimulatorNotFound { program: String, hint: String },
+
+    #[error("{path} declares no testbenches; add a [sim] section to run any")]
+    NoTestbenches { path: PathBuf },
+
+    #[error("unknown testbench: {name} (declared in [sim]: {})", available.join(", "))]
+    UnknownTestbench {
+        name: String,
+        available: Vec<String>,
+    },
+
+    #[error("unknown simulator: {name} (available: {})", available.join(", "))]
+    UnknownSimulator {
+        name: String,
+        available: Vec<String>,
+    },
+
     #[error("unknown version: {version} (available: {})", available.join(", "))]
     UnknownVersion {
         version: String,

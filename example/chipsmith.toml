@@ -20,3 +20,10 @@ led = ["PIN_W15", "PIN_AA24", "PIN_V16", "PIN_V15"]
 
 [clocks]
 clk = "50 MHz"
+
+[sim]
+# The simulator Quartus brings with it: Questa for Quartus Prime, ModelSim for
+# Quartus II. Swap for "ghdl" (or pass --simulator ghdl) to test without one.
+simulator = "quartus"
+sources = ["tb/*.vhd"]
+testbenches = ["blinky_tb"]

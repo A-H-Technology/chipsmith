@@ -9,7 +9,7 @@ use tokio::io::AsyncWriteExt;
 
 use chipsmith_toolchain::error::ChipsmithError;
 
-use crate::process::{Capture, ProcessHost, ProcessSpec};
+use chipsmith_toolchain::process::{Capture, ProcessHost, ProcessSpec};
 
 pub fn cache_dir() -> PathBuf {
     dirs::cache_dir()

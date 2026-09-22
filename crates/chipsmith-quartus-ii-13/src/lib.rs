@@ -2,7 +2,8 @@
 //! Cyclone and MAX families. All behaviour lives in `chipsmith-quartus-common`.
 
 use chipsmith_quartus_common::product::{
-    DeviceSupport, InstallerSpec, KnownVersion, QuartusProduct, QuartusVersion, SpawnStrategy,
+    BundledSimulator, DeviceSupport, InstallerSpec, KnownVersion, QuartusProduct, QuartusVersion,
+    SpawnStrategy,
 };
 
 pub static PRODUCT: QuartusProduct = QuartusProduct {
@@ -17,6 +18,13 @@ pub static PRODUCT: QuartusProduct = QuartusProduct {
         accepts_eula_flag: false,
     },
     spawn: SpawnStrategy::Bubblewrap32,
+    // 32-bit like the rest of 13.0sp1, and the last Starter Edition that
+    // needed no licence at all.
+    simulator: BundledSimulator {
+        subdir: "modelsim_ase",
+        display_name: "ModelSim-Altera Starter Edition",
+        needs_license: false,
+    },
 };
 
 /// Kept as a separate const so the CLI and docs can name the default directly.

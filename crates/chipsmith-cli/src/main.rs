@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use chipsmith_core::error::ChipsmithError;
+use chipsmith_core::manifest::SimulatorChoice;
 use chipsmith_core::scaffold::{self, InitOptions};
+use chipsmith_core::sim::{TestReport, TestVerdict};
 use chipsmith_core::toolchain::{BuildOutcome, Toolchain};
 use chipsmith_core::{resolve_backend, DEFAULT_BACKEND};
 use facet::Facet;
@@ -71,6 +73,21 @@ enum Commands {
         /// Exit non-zero if the design does not meet timing
         #[facet(args::named, default = false)]
         require_timing: bool,
+    },
+
+    /// Run the project's testbenches under a simulator
+    Test {
+        /// Project directory containing chipsmith.toml (default: current dir)
+        #[facet(args::named, default = PathBuf::from("."))]
+        project_dir: PathBuf,
+
+        /// Run only this testbench (default: every one in [sim])
+        #[facet(args::named)]
+        testbench: Option<String>,
+
+        /// Simulator to use, overriding [sim] (ghdl or quartus)
+        #[facet(args::named)]
+        simulator: Option<String>,
     },
 
     /// Run a toolchain tool directly
@@ -142,6 +159,21 @@ fn backend_and_version(
     Ok((toolchain, version))
 }
 
+/// `--simulator` as a name, checked against the ones that exist. The Manifest
+/// parser already does this for `[sim]`; this is the same rule for the flag.
+fn parse_simulator(name: &str) -> Result<SimulatorChoice, ChipsmithError> {
+    SimulatorChoice::ALL
+        .into_iter()
+        .find(|choice| choice.name().eq_ignore_ascii_case(name))
+        .ok_or_else(|| ChipsmithError::UnknownSimulator {
+            name: name.to_string(),
+            available: SimulatorChoice::ALL
+                .iter()
+                .map(|c| c.name().to_string())
+                .collect(),
+        })
+}
+
 /// A design that misses timing still produces a loadable Bitstream, so this
 /// warns by default — but it says so loudly, because "Build complete" on a
 /// design that missed setup by 2ns is exactly the trap this is here to close.
@@ -163,6 +195,34 @@ fn report_build(outcome: &BuildOutcome) {
             );
         }
         None => eprintln!("WARNING: timing analysis produced no summary"),
+    }
+}
+
+/// One line per Testbench, then whatever the failures had to say. A failing
+/// Testbench is a failing command — unlike missed timing there is no usable
+/// artefact to weigh against it.
+fn report_test(report: &TestReport) {
+    eprintln!();
+    for result in &report.results {
+        let mark = if result.passed() { "ok" } else { "FAILED" };
+        eprintln!("  {mark}: {}", result.testbench);
+    }
+
+    let failed = report.failures().count();
+    eprintln!(
+        "\n{} testbench(es) on {}: {} passed, {failed} failed",
+        report.results.len(),
+        report.simulator,
+        report.results.len() - failed,
+    );
+
+    for result in report.failures() {
+        if let TestVerdict::Failed {
+            detail: Some(detail),
+        } = &result.verdict
+        {
+            eprintln!("\n--- {} ---\n{detail}", result.testbench);
+        }
     }
 }
 
@@ -213,6 +273,26 @@ async fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
                 Ok(())
+            }
+            Err(e) => Err(e),
+        },
+
+        Commands::Test {
+            project_dir,
+            testbench,
+            simulator,
+        } => match simulator.as_deref().map(parse_simulator).transpose() {
+            Ok(simulator) => {
+                match chipsmith_core::test(&project_dir, testbench.as_deref(), simulator).await {
+                    Ok(report) => {
+                        report_test(&report);
+                        if !report.passed() {
+                            return ExitCode::FAILURE;
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
             }
             Err(e) => Err(e),
         },

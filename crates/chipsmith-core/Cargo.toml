@@ -12,3 +12,4 @@ chipsmith-toolchain = { path = "../chipsmith-toolchain", version = "0.1.0" }
 chipsmith-quartus-common = { path = "../chipsmith-quartus-common", version = "0.1.0" }
 chipsmith-quartus-prime = { path = "../chipsmith-quartus-prime", version = "0.1.0" }
 chipsmith-quartus-ii-13 = { path = "../chipsmith-quartus-ii-13", version = "0.1.0" }
+chipsmith-sim = { path = "../chipsmith-sim", version = "0.1.0" }

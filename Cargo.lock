@@ -136,6 +136,7 @@ dependencies = [
  "chipsmith-quartus-common",
  "chipsmith-quartus-ii-13",
  "chipsmith-quartus-prime",
+ "chipsmith-sim",
  "chipsmith-toolchain",
 ]
 
@@ -144,6 +145,7 @@ name = "chipsmith-quartus-common"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chipsmith-sim",
  "chipsmith-toolchain",
  "dirs",
  "facet-json",
@@ -167,6 +169,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "chipsmith-sim"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chipsmith-toolchain",
+ "tokio",
+]
+
+[[package]]
 name = "chipsmith-toolchain"
 version = "0.1.0"
 dependencies = [
@@ -175,6 +186,7 @@ dependencies = [
  "facet-toml",
  "glob",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

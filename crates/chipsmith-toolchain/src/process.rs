@@ -11,7 +11,7 @@ use std::process::Stdio;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use chipsmith_toolchain::error::ChipsmithError;
+use crate::error::ChipsmithError;
 
 /// What to do with a child's output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +127,11 @@ pub trait ProcessHost: Send + Sync {
 
     /// Whether a path exists. Here for the same reason as `is_nixos`.
     fn path_exists(&self, path: &Path) -> bool;
+
+    /// Resolve an executable on `PATH`. A host question like the other two, so
+    /// a tool chipsmith expects to find rather than install can be reported
+    /// missing by name instead of as a bare spawn failure.
+    fn which(&self, program: &str) -> Option<PathBuf>;
 }
 
 /// How many lines of stderr to keep for an error message.
@@ -201,10 +206,20 @@ impl ProcessHost for RealHost {
     fn path_exists(&self, path: &Path) -> bool {
         path.exists()
     }
+
+    fn which(&self, program: &str) -> Option<PathBuf> {
+        let named = Path::new(program);
+        if named.components().count() > 1 {
+            return named.is_file().then(|| named.to_path_buf());
+        }
+        std::env::split_paths(&std::env::var_os("PATH")?)
+            .map(|dir| dir.join(program))
+            .find(|path| path.is_file())
+    }
 }
 
-#[cfg(test)]
-pub(crate) mod fake {
+#[cfg(any(test, feature = "test-host"))]
+pub mod fake {
     use super::*;
     use std::sync::Mutex;
 
@@ -213,6 +228,9 @@ pub(crate) mod fake {
         pub nixos: bool,
         /// Paths the fake host should claim exist. `None` means everything does.
         pub existing: Option<Vec<PathBuf>>,
+        /// Executables the fake host should claim are on `PATH`. `None` means
+        /// every one asked for is.
+        pub on_path: Option<Vec<String>>,
         replies: Mutex<Vec<ProcessOutcome>>,
         pub runs: Mutex<Vec<ProcessSpec>>,
     }
@@ -223,6 +241,7 @@ pub(crate) mod fake {
             Self {
                 nixos: false,
                 existing: None,
+                on_path: None,
                 replies: Mutex::new(Vec::new()),
                 runs: Mutex::new(Vec::new()),
             }
@@ -235,6 +254,11 @@ pub(crate) mod fake {
 
         pub fn only_these_exist(mut self, paths: Vec<PathBuf>) -> Self {
             self.existing = Some(paths);
+            self
+        }
+
+        pub fn only_these_on_path(mut self, programs: Vec<String>) -> Self {
+            self.on_path = Some(programs);
             self
         }
 
@@ -271,6 +295,12 @@ pub(crate) mod fake {
         }
     }
 
+    impl Default for RecordingHost {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     #[async_trait::async_trait]
     impl ProcessHost for RecordingHost {
         async fn run(&self, spec: ProcessSpec) -> Result<ProcessOutcome, ChipsmithError> {
@@ -295,6 +325,14 @@ pub(crate) mod fake {
                 Some(paths) => paths.iter().any(|p| p == path),
                 None => true,
             }
+        }
+
+        fn which(&self, program: &str) -> Option<PathBuf> {
+            let found = match &self.on_path {
+                Some(programs) => programs.iter().any(|p| p == program),
+                None => true,
+            };
+            found.then(|| PathBuf::from("/usr/bin").join(program))
         }
     }
 }
@@ -366,6 +404,18 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&outcome.stdout).trim(),
             r#"{"a":"b"}"#
+        );
+    }
+
+    #[test]
+    fn the_real_host_finds_an_executable_on_path_and_admits_when_it_cannot() {
+        let sh = RealHost.which("sh").expect("sh is on PATH everywhere");
+        assert!(sh.is_absolute() && sh.ends_with("sh"), "{}", sh.display());
+        assert_eq!(RealHost.which("definitely-not-a-program"), None);
+        assert_eq!(
+            RealHost.which("/definitely/not/a/program"),
+            None,
+            "a path that is not on PATH is still checked as a path"
         );
     }
 

@@ -19,6 +19,10 @@ pub struct Manifest {
     pub clocks: Vec<Clock>,
     /// `[io-standards]` — per-signal overrides of `target.io_standard`.
     pub io_standards: BTreeMap<String, String>,
+    /// `[sim]`. `None` means the Project declares no Testbenches, which is the
+    /// only reason `chipsmith test` has nothing to do — a `Some` always names
+    /// at least one.
+    pub sim: Option<Sim>,
 }
 
 /// The `chipsmith.toml` as written on disk. Exists only to be turned into a
@@ -28,13 +32,15 @@ struct ManifestFile {
     project: Project,
     toolchain: ToolchainTable,
     target: Target,
-    hdl: Hdl,
+    hdl: HdlTable,
     #[facet(default)]
     pins: BTreeMap<String, PinMapping>,
     #[facet(default)]
     clocks: BTreeMap<String, String>,
     #[facet(default, rename = "io-standards")]
     io_standards: BTreeMap<String, String>,
+    #[facet(default)]
+    sim: Option<SimTable>,
 }
 
 #[derive(Debug, Facet)]
@@ -103,11 +109,149 @@ pub struct Target {
     pub io_standard: Option<String>,
 }
 
+/// `[hdl]` as written. `standard` is free text here and an enum by the time it
+/// reaches a `Manifest`.
 #[derive(Debug, Facet)]
+struct HdlTable {
+    #[facet(default)]
+    standard: Option<String>,
+    sources: Vec<String>,
+}
+
+#[derive(Debug)]
 pub struct Hdl {
-    #[facet(default = "VHDL_2008".to_string())]
-    pub standard: String,
+    pub standard: VhdlStandard,
     pub sources: Vec<String>,
+}
+
+/// A revision of the VHDL language. Only the three that both Quartus and the
+/// simulator understand exist, so nothing downstream can be handed a standard
+/// one of them will reject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VhdlStandard {
+    Vhdl1987,
+    Vhdl1993,
+    #[default]
+    Vhdl2008,
+}
+
+impl VhdlStandard {
+    pub const ALL: [Self; 3] = [Self::Vhdl1987, Self::Vhdl1993, Self::Vhdl2008];
+
+    /// The name the Settings File uses, which is also the name a Manifest
+    /// writes.
+    pub fn qsf_name(self) -> &'static str {
+        match self {
+            Self::Vhdl1987 => "VHDL_1987",
+            Self::Vhdl1993 => "VHDL_1993",
+            Self::Vhdl2008 => "VHDL_2008",
+        }
+    }
+
+    /// The two-digit year GHDL's `--std` takes.
+    pub fn ghdl_std(self) -> &'static str {
+        match self {
+            Self::Vhdl1987 => "87",
+            Self::Vhdl1993 => "93",
+            Self::Vhdl2008 => "08",
+        }
+    }
+
+    fn parse(text: &str) -> Result<Self, String> {
+        Self::ALL
+            .into_iter()
+            .find(|standard| standard.qsf_name().eq_ignore_ascii_case(text.trim()))
+            .ok_or_else(|| {
+                format!(
+                    "unknown VHDL standard '{}' (use {})",
+                    text.trim(),
+                    Self::ALL.map(VhdlStandard::qsf_name).join(", ")
+                )
+            })
+    }
+}
+
+/// `[sim]` as written on disk.
+#[derive(Debug, Facet)]
+struct SimTable {
+    #[facet(default)]
+    simulator: Option<String>,
+    #[facet(default)]
+    sources: Vec<String>,
+    testbenches: Vec<String>,
+}
+
+/// Which Simulator runs a Project's Testbenches. A closed set, so selecting
+/// one cannot fail later: by the time anything holds a Manifest, the choice
+/// has already been checked against the Simulators that exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SimulatorChoice {
+    /// GHDL, from `PATH`. Needs no Toolchain and no licence, which is why it
+    /// is the default.
+    #[default]
+    Ghdl,
+    /// Whichever simulator the Project's Quartus bundles — ModelSim for
+    /// Quartus II, Questa for Quartus Prime. One name, because which one you
+    /// get is a fact about the Toolchain rather than a choice.
+    Quartus,
+}
+
+impl SimulatorChoice {
+    pub const ALL: [Self; 2] = [Self::Ghdl, Self::Quartus];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Ghdl => "ghdl",
+            Self::Quartus => "quartus",
+        }
+    }
+
+    fn parse(text: &str) -> Result<Self, String> {
+        Self::ALL
+            .into_iter()
+            .find(|choice| choice.name().eq_ignore_ascii_case(text.trim()))
+            .ok_or_else(|| {
+                format!(
+                    "[sim] unknown simulator '{}' (use {})",
+                    text.trim(),
+                    Self::ALL.map(SimulatorChoice::name).join(" or ")
+                )
+            })
+    }
+}
+
+/// What a Project needs in order to be simulated. Holding one is proof that
+/// `[sim]` named at least one Testbench — there is nothing to run otherwise.
+#[derive(Debug)]
+pub struct Sim {
+    pub simulator: SimulatorChoice,
+    /// Sources analysed only for simulation: the Testbenches and whatever else
+    /// they need. Never reaches the Settings File, so a Testbench cannot
+    /// accidentally become part of the synthesised design.
+    pub sources: Vec<String>,
+    /// The Testbench entities to elaborate and run. Never empty.
+    pub testbenches: Vec<String>,
+}
+
+impl TryFrom<SimTable> for Sim {
+    type Error = String;
+
+    fn try_from(table: SimTable) -> Result<Self, Self::Error> {
+        if table.testbenches.is_empty() {
+            return Err(
+                "[sim] must name at least one testbench (e.g. testbenches = [\"blinky_tb\"])"
+                    .to_string(),
+            );
+        }
+        Ok(Self {
+            simulator: match &table.simulator {
+                Some(text) => SimulatorChoice::parse(text)?,
+                None => SimulatorChoice::default(),
+            },
+            sources: table.sources,
+            testbenches: table.testbenches,
+        })
+    }
 }
 
 #[derive(Debug, Facet)]
@@ -214,10 +358,19 @@ impl Manifest {
             project: file.project,
             toolchain: ToolchainSpec::try_from(file.toolchain).map_err(bad)?,
             target: file.target,
-            hdl: file.hdl,
+            hdl: Hdl {
+                standard: match &file.hdl.standard {
+                    Some(text) => {
+                        VhdlStandard::parse(text).map_err(|e| bad(format!("[hdl] {e}")))?
+                    }
+                    None => VhdlStandard::default(),
+                },
+                sources: file.hdl.sources,
+            },
             clocks: resolve_clocks(&file.clocks, &file.pins).map_err(bad)?,
             pins: file.pins,
             io_standards: file.io_standards,
+            sim: file.sim.map(Sim::try_from).transpose().map_err(bad)?,
         })
     }
 
@@ -231,26 +384,47 @@ impl Manifest {
     }
 
     pub fn resolve_sources(&self, project_dir: &Path) -> Result<Vec<PathBuf>, ChipsmithError> {
-        let mut files = Vec::new();
-        for pattern in &self.hdl.sources {
-            let full_pattern = project_dir.join(pattern);
-            let matches: Vec<_> = glob::glob(full_pattern.to_str().unwrap_or(pattern))
-                .map_err(|e| ChipsmithError::ManifestParse {
-                    path: project_dir.join("chipsmith.toml"),
-                    message: format!("invalid glob pattern '{}': {}", pattern, e),
-                })?
-                .filter_map(|r| r.ok())
-                .collect();
+        resolve_patterns(&self.hdl.sources, project_dir)
+    }
 
-            if matches.is_empty() {
-                return Err(ChipsmithError::NoSourceFiles {
-                    pattern: pattern.clone(),
-                });
-            }
-            files.extend(matches);
-        }
+    /// Every source a simulation needs to elaborate a Testbench: the design's
+    /// own sources first, then the Testbenches on top. Analysis order matters
+    /// to GHDL, and a Testbench is by definition the thing that depends on the
+    /// design rather than the other way round.
+    pub fn resolve_sim_sources(
+        &self,
+        sim: &Sim,
+        project_dir: &Path,
+    ) -> Result<Vec<PathBuf>, ChipsmithError> {
+        let mut files = self.resolve_sources(project_dir)?;
+        files.extend(resolve_patterns(&sim.sources, project_dir)?);
         Ok(files)
     }
+}
+
+fn resolve_patterns(
+    patterns: &[String],
+    project_dir: &Path,
+) -> Result<Vec<PathBuf>, ChipsmithError> {
+    let mut files = Vec::new();
+    for pattern in patterns {
+        let full_pattern = project_dir.join(pattern);
+        let matches: Vec<_> = glob::glob(full_pattern.to_str().unwrap_or(pattern))
+            .map_err(|e| ChipsmithError::ManifestParse {
+                path: project_dir.join("chipsmith.toml"),
+                message: format!("invalid glob pattern '{}': {}", pattern, e),
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if matches.is_empty() {
+            return Err(ChipsmithError::NoSourceFiles {
+                pattern: pattern.clone(),
+            });
+        }
+        files.extend(matches);
+    }
+    Ok(files)
 }
 
 #[cfg(test)]
@@ -387,7 +561,81 @@ led = ["PIN_V16", "PIN_W16", "PIN_V17", "PIN_W17"]
     #[test]
     fn default_hdl_standard_is_vhdl_2008() {
         let m = parse_manifest(VALID_TOML).unwrap();
-        assert_eq!(m.hdl.standard, "VHDL_2008");
+        assert_eq!(m.hdl.standard, VhdlStandard::Vhdl2008);
+    }
+
+    /// The Settings File and the simulator want different spellings of the
+    /// same fact, so the Manifest holds the fact rather than either spelling.
+    #[test]
+    fn a_vhdl_standard_is_named_for_quartus_and_for_the_simulator() {
+        for (written, standard, qsf, ghdl) in [
+            ("VHDL_1987", VhdlStandard::Vhdl1987, "VHDL_1987", "87"),
+            ("vhdl_1993", VhdlStandard::Vhdl1993, "VHDL_1993", "93"),
+            ("VHDL_2008", VhdlStandard::Vhdl2008, "VHDL_2008", "08"),
+        ] {
+            let m = parse_manifest(
+                &VALID_TOML.replace("[hdl]", &format!("[hdl]\nstandard = \"{written}\"")),
+            )
+            .unwrap();
+            assert_eq!(m.hdl.standard, standard);
+            assert_eq!(m.hdl.standard.qsf_name(), qsf);
+            assert_eq!(m.hdl.standard.ghdl_std(), ghdl);
+        }
+    }
+
+    #[test]
+    fn rejects_a_vhdl_standard_neither_tool_understands() {
+        let err = parse_manifest(&VALID_TOML.replace("[hdl]", "[hdl]\nstandard = \"VHDL_2019\""))
+            .unwrap_err();
+        assert!(err.contains("VHDL_2019"), "{err}");
+        assert!(err.contains("VHDL_2008"), "{err}");
+    }
+
+    #[test]
+    fn a_manifest_without_a_sim_section_declares_no_testbenches() {
+        assert!(parse_manifest(VALID_TOML).unwrap().sim.is_none());
+    }
+
+    #[test]
+    fn sim_defaults_to_ghdl_and_no_extra_sources() {
+        let m = parse_manifest(&format!(
+            "{VALID_TOML}\n[sim]\ntestbenches = [\"blinky_tb\"]\n"
+        ))
+        .unwrap();
+        let sim = m.sim.unwrap();
+        assert_eq!(sim.simulator, SimulatorChoice::Ghdl);
+        assert_eq!(sim.testbenches, vec!["blinky_tb"]);
+        assert!(sim.sources.is_empty());
+    }
+
+    #[test]
+    fn sim_names_the_simulator_and_its_own_sources() {
+        let m = parse_manifest(&format!(
+            "{VALID_TOML}\n[sim]\nsimulator = \"quartus\"\nsources = [\"tb/*.vhd\"]\ntestbenches = [\"a_tb\", \"b_tb\"]\n"
+        ))
+        .unwrap();
+        let sim = m.sim.unwrap();
+        assert_eq!(sim.simulator, SimulatorChoice::Quartus);
+        assert_eq!(sim.sources, vec!["tb/*.vhd"]);
+        assert_eq!(sim.testbenches, vec!["a_tb", "b_tb"]);
+    }
+
+    /// A `[sim]` with nothing to run is a typo, not a configuration.
+    #[test]
+    fn rejects_a_sim_section_that_names_no_testbench() {
+        let err = parse_manifest(&format!("{VALID_TOML}\n[sim]\ntestbenches = []\n")).unwrap_err();
+        assert!(err.contains("at least one testbench"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_simulator_that_does_not_exist() {
+        let err = parse_manifest(&format!(
+            "{VALID_TOML}\n[sim]\nsimulator = \"vivado\"\ntestbenches = [\"a_tb\"]\n"
+        ))
+        .unwrap_err();
+        assert!(err.contains("vivado"), "{err}");
+        assert!(err.contains("ghdl"), "{err}");
+        assert!(err.contains("quartus"), "{err}");
     }
 
     #[test]

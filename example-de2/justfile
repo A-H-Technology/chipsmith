@@ -1,0 +1,23 @@
+chipsmith := "cargo run --quiet --manifest-path ../Cargo.toml -p chipsmith-cli --"
+
+_default:
+    @just --list
+
+# Run the testbenches on the simulator chipsmith.toml names
+testbench:
+    {{chipsmith}} test --project-dir .
+
+# Same testbenches on GHDL, which needs no Quartus and no licence
+testbench-ghdl:
+    {{chipsmith}} test --project-dir . --simulator ghdl
+
+# Synthesise, fit, assemble and report timing
+build:
+    {{chipsmith}} build --project-dir .
+
+# Load the last build onto the board over JTAG
+flash:
+    {{chipsmith}} flash --project-dir .
+
+clean:
+    rm -rf build

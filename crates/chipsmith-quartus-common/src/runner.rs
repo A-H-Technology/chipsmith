@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use chipsmith_toolchain::error::ChipsmithError;
 
 use crate::nixos::NixCompat;
-use crate::process::{Capture, ProcessHost, ProcessSpec};
 use crate::product::QuartusProduct;
+use chipsmith_toolchain::process::{Capture, ProcessHost, ProcessSpec};
 
 pub const KNOWN_TOOLS: &[&str] = &[
     "quartus_sh",
@@ -37,7 +37,7 @@ pub fn tool_path(install_dir: &Path, tool: &str) -> Result<PathBuf, ChipsmithErr
 }
 
 /// Resolve the Nix Compat layer, if this host needs one.
-async fn host_compat(
+pub(crate) async fn host_compat(
     host: &dyn ProcessHost,
     product: &QuartusProduct,
 ) -> Result<Option<NixCompat>, ChipsmithError> {
@@ -50,7 +50,7 @@ async fn host_compat(
 
 /// Dress a spec for this host: sandboxed if the Spawn Strategy calls for it,
 /// and with the resolved library path either way.
-fn for_host(spec: ProcessSpec, compat: Option<&NixCompat>) -> ProcessSpec {
+pub(crate) fn for_host(spec: ProcessSpec, compat: Option<&NixCompat>) -> ProcessSpec {
     let Some(compat) = compat else {
         return spec;
     };
@@ -181,6 +181,14 @@ pub async fn install_quartus(
                     install_dir.join("quartus").join("bin"),
                     install_dir.join("quartus").join("linux64"),
                     install_dir.join("quartus").join("adm"),
+                    // the bundled simulator is a vendor binary like any other
+                    product.simulator.bin_dir(install_dir),
+                    install_dir
+                        .join(product.simulator.subdir)
+                        .join("linuxaloem"),
+                    install_dir
+                        .join(product.simulator.subdir)
+                        .join("linux_x86_64"),
                 ],
             )
             .await?;
@@ -192,8 +200,8 @@ pub async fn install_quartus(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::fake::RecordingHost;
-    use crate::product::{InstallerSpec, SpawnStrategy};
+    use crate::product::{BundledSimulator, InstallerSpec, SpawnStrategy};
+    use chipsmith_toolchain::process::fake::RecordingHost;
 
     fn product(accepts_eula_flag: bool, spawn: SpawnStrategy) -> QuartusProduct {
         QuartusProduct {
@@ -204,6 +212,11 @@ mod tests {
             latest: "1.0",
             installer: InstallerSpec { accepts_eula_flag },
             spawn,
+            simulator: BundledSimulator {
+                subdir: "modelsim_ase",
+                display_name: "Test Simulator",
+                needs_license: false,
+            },
         }
     }
 

@@ -13,3 +13,12 @@ facet = "0.46"
 facet-toml = "0.46"
 glob = "0.3"
 thiserror = "2"
+tokio = { version = "1", features = ["process", "io-util"] }
+
+[features]
+# The recording `ProcessHost` fake, so crates layered on top can reach their
+# NixOS / non-NixOS branches too. Off by default: it is test scaffolding.
+test-host = []
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
