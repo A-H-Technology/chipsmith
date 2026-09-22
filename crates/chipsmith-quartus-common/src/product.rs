@@ -59,15 +59,27 @@ pub struct InstallerSpec {
 /// ModelSim and Questa are the same tool a decade apart and share the whole
 /// `vlib`/`vcom`/`vsim` command set, so the only things that vary are where it
 /// sits and what it is called.
+///
+/// Sitting on the Product is very slightly too high: Quartus Prime Lite
+/// switched from bundling ModelSim to bundling Questa partway through the
+/// line, so which simulator you get is really a fact about the Version. It
+/// only matters once a Version predating the switch is in the table — move
+/// this to `KnownVersion` then, and an older Prime becomes the licence-free
+/// way to run the vendor simulator.
 #[derive(Debug)]
 pub struct BundledSimulator {
-    /// Subdirectory of the Install Root, e.g. `questa_fse`.
+    /// Subdirectory of the Install Root. `modelsim_ase` is the free Starter
+    /// Edition; `modelsim_ae` would be the full one, which does check a
+    /// licence out.
     pub subdir: &'static str,
     /// What the vendor calls it, for reports and error messages.
     pub display_name: &'static str,
-    /// Questa Starter Edition refuses to elaborate without a node-locked
-    /// licence file; ModelSim Starter Edition never asked for one. chipsmith
-    /// cannot obtain one, so all it can do is say so when `vsim` fails.
+    /// Questa Starter Edition needs a zero-cost node-locked licence; ModelSim
+    /// Starter Edition needs none. Intel's own licensing documentation says so
+    /// outright: <https://www.intel.com/content/www/us/en/docs/programmable/683472/22-4/and-software-license.html>
+    ///
+    /// chipsmith cannot obtain a licence, so all it can do is say so when
+    /// `vsim` fails.
     pub needs_license: bool,
 }
 

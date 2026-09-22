@@ -25,8 +25,8 @@ Clippy is enforced in CI. On NixOS, `nix develop` provides Rust, `just`, `ghdl`
 and the tools chipsmith shells out to; run anything else missing through
 `nix shell nixpkgs#<pkg>` or `nix run nixpkgs#<pkg>`.
 
-The examples are runnable: `cd example && just testbench-ghdl` exercises the
-whole simulation path without a Quartus install.
+The examples are runnable: `cd example && just testbench` exercises the whole
+simulation path on GHDL, without a Quartus install.
 
 ## Architecture
 

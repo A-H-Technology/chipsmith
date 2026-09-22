@@ -3,13 +3,13 @@ chipsmith := "cargo run --quiet --manifest-path ../Cargo.toml -p chipsmith-cli -
 _default:
     @just --list
 
-# Run the testbenches on the simulator chipsmith.toml names
+# Run the testbenches. GHDL, per chipsmith.toml — no toolchain, no licence.
 testbench:
     {{chipsmith}} test --project-dir .
 
-# Same testbenches on GHDL, which needs no Quartus and no licence
-testbench-ghdl:
-    {{chipsmith}} test --project-dir . --simulator ghdl
+# Same testbenches on the simulator Quartus bundles (needs an install, and a licence for Questa)
+testbench-quartus:
+    {{chipsmith}} test --project-dir . --simulator quartus
 
 # Synthesise, fit, assemble and report timing
 build:

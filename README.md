@@ -183,15 +183,20 @@ exits non-zero if any of them failed. Drive your testbench to a close with
 | `ghdl` (default) | GHDL | `ghdl` on `PATH`. No toolchain, no licence. |
 | `quartus` | Whatever your Quartus bundles — Questa for Quartus Prime, ModelSim for Quartus II | An installed toolchain, and for Questa a licence |
 
-`quartus` is one name because which simulator you get is a fact about the
-version you build with, not a choice: Quartus Prime Lite 21.1 and later ship
-Questa-Intel FPGA Starter Edition, everything older ships ModelSim.
+GHDL is the default because it is the one that just works: a package manager
+away, no toolchain, no licence.
 
-**Questa needs a licence.** ModelSim Starter Edition never asked for one; Questa
-Starter Edition refuses to elaborate without a free node-locked licence from
-Altera's Self-Service Licensing Center, with `SALT_LICENSE_SERVER` pointing at
-the `.dat` file. chipsmith can't obtain that for you — it just says so when
-`vsim` fails. Use `--simulator ghdl` if you'd rather not.
+`quartus` is one name because which simulator you get is a fact about the
+version you build with rather than a choice — recent Quartus Prime Lite ships
+Questa-Intel FPGA Starter Edition, older releases and Quartus II ship ModelSim.
+
+**Questa needs a licence, ModelSim does not.** Per Intel's own
+[licensing documentation](https://www.intel.com/content/www/us/en/docs/programmable/683472/22-4/and-software-license.html),
+Questa-Intel FPGA Starter Edition requires a zero-cost licence while
+ModelSim-Intel FPGA Starter Edition requires none. The Questa licence is free
+but node-locked and expires yearly: generate it at Altera's Self-Service
+Licensing Center and point `SALT_LICENSE_SERVER` at the `.dat` file. chipsmith
+cannot obtain it for you; it says so when `vsim` fails.
 
 A testbench means the same thing on both: chipsmith writes a `modelsim.ini` into
 the work library setting `BreakOnAssertion = 2`, which is the severity GHDL's
@@ -257,8 +262,8 @@ example/                     # Blinky on Cyclone V (Quartus Prime 23.1)
 example-de2/                 # Blinky on DE2 board (Quartus II 13.0sp1)
 ```
 
-Both examples carry a testbench and a `justfile`: `just testbench` runs it on the
-simulator the manifest names, `just testbench-ghdl` on GHDL.
+Both examples carry a testbench and a `justfile`: `just testbench` runs it on
+GHDL, `just testbench-quartus` on the simulator the toolchain bundles.
 
 The two backend crates are data, not code: each is one `QuartusProduct`
 constant naming its versions, install root, installer flags and spawn
