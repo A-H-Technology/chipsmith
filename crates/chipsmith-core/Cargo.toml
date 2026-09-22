@@ -8,8 +8,8 @@ authors.workspace = true
 description = "Public API and backend routing for chipsmith"
 
 [dependencies]
-chipsmith-toolchain = { path = "../chipsmith-toolchain", version = "0.1.0" }
-chipsmith-quartus-common = { path = "../chipsmith-quartus-common", version = "0.1.0" }
-chipsmith-quartus-prime = { path = "../chipsmith-quartus-prime", version = "0.1.0" }
-chipsmith-quartus-ii-13 = { path = "../chipsmith-quartus-ii-13", version = "0.1.0" }
-chipsmith-sim = { path = "../chipsmith-sim", version = "0.1.0" }
+chipsmith-toolchain = { path = "../chipsmith-toolchain", version = "0.2.0" }
+chipsmith-quartus-common = { path = "../chipsmith-quartus-common", version = "0.2.0" }
+chipsmith-quartus-prime = { path = "../chipsmith-quartus-prime", version = "0.2.0" }
+chipsmith-quartus-ii-13 = { path = "../chipsmith-quartus-ii-13", version = "0.2.0" }
+chipsmith-sim = { path = "../chipsmith-sim", version = "0.2.0" }

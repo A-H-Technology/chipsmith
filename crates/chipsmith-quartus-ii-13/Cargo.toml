@@ -8,4 +8,4 @@ authors.workspace = true
 description = "Altera Quartus II 13.0sp1 product description for chipsmith"
 
 [dependencies]
-chipsmith-quartus-common = { path = "../chipsmith-quartus-common", version = "0.1.0" }
+chipsmith-quartus-common = { path = "../chipsmith-quartus-common", version = "0.2.0" }
