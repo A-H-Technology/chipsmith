@@ -14,5 +14,5 @@ path = "src/main.rs"
 [dependencies]
 facet = "0.46"
 figue = "2"
-chipsmith-core = { path = "../chipsmith-core", version = "0.1.0" }
+chipsmith-core = { path = "../chipsmith-core", version = "0.2.0" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
