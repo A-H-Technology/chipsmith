@@ -64,7 +64,7 @@ pub(crate) fn for_host(spec: ProcessSpec, compat: Option<&NixCompat>) -> Process
     let Some(compat) = compat else {
         return spec;
     };
-    let spec = match compat.bwrap_argv(&spec.program) {
+    let spec = match compat.bwrap_wrapper() {
         Some(argv) => spec.wrapped_in(argv),
         None => spec,
     };
@@ -167,7 +167,7 @@ pub async fn install_quartus(
     // The installer is a vendor binary like any other, except that when the
     // sandbox isn't available we have to rewrite it in place before it can run.
     if let Some(compat) = &compat {
-        if compat.bwrap_argv(installer).is_some() {
+        if compat.bwrap_wrapper().is_some() {
             eprintln!("Using bubblewrap for 32-bit installer...");
         } else {
             eprintln!("Patching installer for NixOS...");
@@ -348,8 +348,8 @@ mod tests {
         assert!(tool_run.starts_with("/nix/bwrap/bin/bwrap"), "{tool_run}");
         assert!(tool_run.contains("--tmpfs /lib"), "{tool_run}");
         assert!(
-            tool_run.ends_with("/opt/q/quartus/bin/quartus_map blinky"),
-            "{tool_run}"
+            tool_run.ends_with("--proc /proc /opt/q/quartus/bin/quartus_map blinky"),
+            "the program goes exactly once, straight after the sandbox spec: {tool_run}"
         );
     }
 

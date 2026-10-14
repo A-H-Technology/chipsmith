@@ -107,6 +107,32 @@ fn build_ld_library_path(lib_paths: &[PathBuf]) -> String {
         .join(":")
 }
 
+/// One entry directly under `/`, for rebuilding the root inside bubblewrap.
+struct RootEntry {
+    name: OsString,
+    /// Where it points, if it is a symlink.
+    link: Option<PathBuf>,
+}
+
+/// The host's top-level entries, minus the ones the sandbox supplies itself:
+/// its own /lib, /dev, /proc, and a writable /tmp.
+fn host_root() -> Vec<RootEntry> {
+    let Ok(entries) = std::fs::read_dir("/") else {
+        return Vec::new();
+    };
+    let mut root: Vec<RootEntry> = entries
+        .flatten()
+        .filter(|e| !matches!(e.file_name().to_str(), Some("lib" | "dev" | "proc" | "tmp")))
+        .map(|e| RootEntry {
+            link: std::fs::read_link(e.path()).ok(),
+            name: e.file_name(),
+        })
+        .collect();
+    // read_dir order is arbitrary; a stable argv is easier to read in an error
+    root.sort_by(|a, b| a.name.cmp(&b.name));
+    root
+}
+
 /// The interpreter of a bash shebang that chipsmith patches, as bytes.
 fn bash_shebang(content: &[u8]) -> Option<&[u8]> {
     let rest = content.strip_prefix(b"#!")?;
@@ -180,28 +206,40 @@ impl NixCompat {
         })
     }
 
-    /// The argv for running `program` under bubblewrap with a 32-bit loader
-    /// mounted at `/lib/ld-linux.so.2`, or `None` if this Product doesn't need
-    /// the sandbox or the pieces aren't available.
-    ///
-    /// Returns argv rather than a `Command` so the sandbox spec can be asserted
-    /// on — `Command` gives no way to read its arguments back.
-    pub fn bwrap_argv(&self, program: &Path) -> Option<Vec<OsString>> {
+    /// The bubblewrap argv to put in front of a vendor binary so it finds a
+    /// 32-bit loader at `/lib/ld-linux.so.2`, or `None` if this Product doesn't
+    /// need the sandbox or the pieces aren't available. Ends where the program
+    /// goes: `ProcessSpec::wrapped_in` appends it.
+    pub fn bwrap_wrapper(&self) -> Option<Vec<OsString>> {
         if !self.strategy.needs_32bit() {
             return None;
         }
         let bwrap = self.bwrap_bin.as_ref()?;
         let ld32 = self.dynamic_linker_32.as_ref()?;
         let home = dirs::home_dir().unwrap_or_default();
+        let scratch = std::env::temp_dir();
 
-        Some(vec![
-            bwrap.into(),
-            "--ro-bind".into(),
-            "/".into(),
-            "/".into(),
-            "--bind".into(),
+        let mut argv: Vec<OsString> = vec![bwrap.into()];
+        // The host's root rebuilt entry by entry on bubblewrap's own tmpfs,
+        // rather than `--ro-bind / /`: a NixOS root has no /lib, and a
+        // read-only root gives nowhere to create one.
+        for entry in host_root() {
+            let target = Path::new("/").join(&entry.name);
+            match entry.link {
+                Some(points_to) => argv.extend(["--symlink".into(), points_to.into()]),
+                None => argv.extend(["--ro-bind".into(), target.clone().into()]),
+            }
+            argv.push(target.into());
+        }
+        argv.extend([
+            // `-try`, because a nix build sandbox has no /tmp; its scratch
+            // space is $TMPDIR, which is also where it points $HOME.
+            "--bind-try".into(),
             "/tmp".into(),
             "/tmp".into(),
+            "--bind-try".into(),
+            scratch.clone().into(),
+            scratch.into(),
             "--bind".into(),
             home.clone().into(),
             home.into(),
@@ -214,8 +252,8 @@ impl NixCompat {
             "/dev".into(),
             "--proc".into(),
             "/proc".into(),
-            program.into(),
-        ])
+        ]);
+        Some(argv)
     }
 
     pub async fn patch_elf(
@@ -398,30 +436,33 @@ mod tests {
     #[test]
     fn a_64_bit_product_never_sandboxes() {
         let compat = compat(SpawnStrategy::PatchElf, true);
-        assert!(compat.bwrap_argv(Path::new("/q/quartus_sh")).is_none());
+        assert!(compat.bwrap_wrapper().is_none());
     }
 
     #[test]
     fn sandbox_mounts_the_32_bit_loader_where_the_binary_looks_for_it() {
         let compat = compat(SpawnStrategy::Bubblewrap32, true);
-        let argv = compat.bwrap_argv(Path::new("/q/quartus_sh")).unwrap();
+        let argv = compat.bwrap_wrapper().unwrap();
         let argv: Vec<String> = argv
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
 
         assert_eq!(argv[0], "/nix/bwrap");
-        assert_eq!(argv.last().unwrap(), "/q/quartus_sh");
-        let symlink = argv.iter().position(|a| a == "--symlink").unwrap();
-        assert_eq!(argv[symlink + 1], "/nix/ld-linux.so.2");
-        assert_eq!(argv[symlink + 2], "/lib/ld-linux.so.2");
+        assert!(argv
+            .windows(3)
+            .any(|w| w == ["--symlink", "/nix/ld-linux.so.2", "/lib/ld-linux.so.2"]));
         // /lib has to be a tmpfs or the symlink can't be created over the host's
         assert!(argv.windows(2).any(|w| w == ["--tmpfs", "/lib"]));
+        // and the root must not be one read-only bind, or there is nowhere to
+        // create /lib on a host that has none
+        assert!(!argv.windows(3).any(|w| w == ["--ro-bind", "/", "/"]));
+        assert!(argv.windows(3).any(|w| w == ["--ro-bind", "/etc", "/etc"]));
     }
 
     #[test]
     fn falls_back_to_a_plain_spawn_when_bubblewrap_is_missing() {
         let compat = compat(SpawnStrategy::Bubblewrap32, false);
-        assert!(compat.bwrap_argv(Path::new("/q/quartus_sh")).is_none());
+        assert!(compat.bwrap_wrapper().is_none());
     }
 }
