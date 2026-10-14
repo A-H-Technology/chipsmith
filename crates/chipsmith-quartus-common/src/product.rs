@@ -97,6 +97,32 @@ impl BundledSimulator {
     }
 }
 
+/// Where Versions are installed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallBase {
+    /// The vendor's layout under a home directory, which is where Quartus
+    /// would put itself: `~/intelFPGA_lite/23.1std`.
+    Home(PathBuf),
+    /// chipsmith's own layout under a directory named by
+    /// `CHIPSMITH_INSTALL_ROOT`, keyed by Backend and Version exactly as a
+    /// Manifest spells them: `<dir>/quartus-prime/23.1`. Exists so that a
+    /// build sandbox, which has no meaningful `$HOME`, can be handed a
+    /// Toolchain at a path computed from the Manifest alone.
+    Shared(PathBuf),
+}
+
+impl InstallBase {
+    pub const ENV: &'static str = "CHIPSMITH_INSTALL_ROOT";
+
+    /// `CHIPSMITH_INSTALL_ROOT` if set, the home directory otherwise.
+    pub fn from_env() -> Self {
+        match std::env::var_os(Self::ENV).filter(|v| !v.is_empty()) {
+            Some(dir) => Self::Shared(PathBuf::from(dir)),
+            None => Self::Home(dirs::home_dir().expect("could not determine home directory")),
+        }
+    }
+}
+
 /// A line of Quartus releases. One per Backend.
 #[derive(Debug)]
 pub struct QuartusProduct {
@@ -104,7 +130,8 @@ pub struct QuartusProduct {
     pub backend: &'static str,
     /// How the Product names itself in progress output, e.g. `Quartus Prime`.
     pub display_name: &'static str,
-    /// Install Root under `$HOME`, e.g. `intelFPGA_lite`.
+    /// Install Root under `$HOME`, e.g. `intelFPGA_lite`. Only used for
+    /// `InstallBase::Home`; a shared base is laid out by Backend name.
     pub install_root: &'static str,
     pub versions: &'static [KnownVersion],
     pub latest: &'static str,
@@ -124,15 +151,15 @@ impl QuartusProduct {
             })
     }
 
-    pub fn install_dir_for(&self, version: &KnownVersion) -> PathBuf {
-        dirs::home_dir()
-            .expect("could not determine home directory")
-            .join(self.install_root)
-            .join(version.install_subdir)
+    pub fn install_dir_for(&self, base: &InstallBase, version: &KnownVersion) -> PathBuf {
+        match base {
+            InstallBase::Home(home) => home.join(self.install_root).join(version.install_subdir),
+            InstallBase::Shared(root) => root.join(self.backend).join(version.key),
+        }
     }
 
-    pub fn is_installed(&self, version: &KnownVersion) -> bool {
-        self.install_dir_for(version)
+    pub fn is_installed(&self, base: &InstallBase, version: &KnownVersion) -> bool {
+        self.install_dir_for(base, version)
             .join("quartus")
             .join("bin")
             .join("quartus_sh")
@@ -163,7 +190,7 @@ pub(crate) static TEST_PRODUCT: QuartusProduct = QuartusProduct {
                 revision: "200",
                 filename: "test2.run",
             },
-            install_subdir: "2.0",
+            install_subdir: "2.0std",
             devices: &[],
         },
     ],
@@ -206,8 +233,18 @@ mod tests {
 
     #[test]
     fn install_dir_combines_install_root_and_subdir() {
-        let dir = TEST_PRODUCT.install_dir_for(TEST_PRODUCT.lookup("1.0").unwrap());
-        assert!(dir.ends_with("testFPGA/1.0"), "{}", dir.display());
+        let home = InstallBase::Home(PathBuf::from("/home/u"));
+        let dir = TEST_PRODUCT.install_dir_for(&home, TEST_PRODUCT.lookup("1.0").unwrap());
+        assert_eq!(dir, Path::new("/home/u/testFPGA/1.0"));
+    }
+
+    /// The layout the NixOS module mounts into the build sandbox, so it has to
+    /// be computable from a Manifest's `[toolchain]` line and nothing else.
+    #[test]
+    fn a_shared_base_is_keyed_by_backend_and_version_as_the_manifest_names_them() {
+        let shared = InstallBase::Shared(PathBuf::from("/chipsmith"));
+        let dir = TEST_PRODUCT.install_dir_for(&shared, TEST_PRODUCT.lookup("2.0").unwrap());
+        assert_eq!(dir, Path::new("/chipsmith/test-product/2.0"));
     }
 
     #[test]

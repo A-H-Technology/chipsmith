@@ -41,11 +41,21 @@ pub(crate) async fn host_compat(
     host: &dyn ProcessHost,
     product: &QuartusProduct,
 ) -> Result<Option<NixCompat>, ChipsmithError> {
-    if host.is_nixos() {
-        Ok(Some(NixCompat::init(host, product.spawn).await?))
-    } else {
-        Ok(None)
-    }
+    NixCompat::for_host(host, product.spawn).await
+}
+
+/// The directories of an install that hold vendor binaries and scripts.
+pub(crate) fn patch_dirs(product: &QuartusProduct, install_dir: &Path) -> Vec<PathBuf> {
+    let simulator = install_dir.join(product.simulator.subdir);
+    vec![
+        install_dir.join("quartus").join("bin"),
+        install_dir.join("quartus").join("linux64"),
+        install_dir.join("quartus").join("adm"),
+        // the bundled simulator is a vendor binary like any other
+        product.simulator.bin_dir(install_dir),
+        simulator.join("linuxaloem"),
+        simulator.join("linux_x86_64"),
+    ]
 }
 
 /// Dress a spec for this host: sandboxed if the Spawn Strategy calls for it,
@@ -175,22 +185,7 @@ pub async fn install_quartus(
 
     if let Some(compat) = &compat {
         compat
-            .patch_install(
-                host,
-                &[
-                    install_dir.join("quartus").join("bin"),
-                    install_dir.join("quartus").join("linux64"),
-                    install_dir.join("quartus").join("adm"),
-                    // the bundled simulator is a vendor binary like any other
-                    product.simulator.bin_dir(install_dir),
-                    install_dir
-                        .join(product.simulator.subdir)
-                        .join("linuxaloem"),
-                    install_dir
-                        .join(product.simulator.subdir)
-                        .join("linux_x86_64"),
-                ],
-            )
+            .patch_install(host, install_dir, &patch_dirs(product, install_dir))
             .await?;
     }
 
@@ -449,20 +444,23 @@ mod tests {
             .on_nixos()
             .will_reply(RecordingHost::succeeding_with(NIX_EVAL_JSON));
 
-        // patch_elf chmods the installer for real, so it has to be a real file
-        let installer =
-            std::env::temp_dir().join(format!("chipsmith-installer-{}.run", std::process::id()));
+        // patch_elf chmods the installer and patching stamps the install, both
+        // for real, so they have to be real paths
+        let scratch =
+            std::env::temp_dir().join(format!("chipsmith-installer-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let installer = scratch.join("setup.run");
         std::fs::write(&installer, "#!/bin/sh\n").unwrap();
 
         install_quartus(
             &host,
             &product(true, SpawnStrategy::PatchElf),
             &installer,
-            Path::new("/home/u/q"),
+            &scratch,
         )
         .await
         .unwrap();
-        std::fs::remove_file(&installer).unwrap();
+        std::fs::remove_dir_all(&scratch).unwrap();
 
         let commands = host.commands();
         assert!(commands[0].starts_with("nix eval"));

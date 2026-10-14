@@ -84,6 +84,16 @@ pub enum ChipsmithError {
     )]
     NixPackageMissing { attr: String },
 
+    #[error(
+        "{path} was patched for NixOS against different store paths than this chipsmith \
+         uses; run `chipsmith install --backend {backend} {version}` to patch it again"
+    )]
+    StaleNixPatch {
+        path: PathBuf,
+        backend: String,
+        version: String,
+    },
+
     #[error("output file not found: {path} (have you run `chipsmith build`?)")]
     OutputNotFound { path: PathBuf },
 

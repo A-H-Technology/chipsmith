@@ -11,66 +11,20 @@ use std::path::{Path, PathBuf};
 use chipsmith_toolchain::error::ChipsmithError;
 
 use crate::product::SpawnStrategy;
-use chipsmith_toolchain::process::{Capture, ProcessHost, ProcessSpec};
+use chipsmith_toolchain::process::{Capture, NixCompatSource, ProcessHost, ProcessSpec};
 
-/// The 64-bit store paths every Product needs.
-const BASE_ATTRS: &str = r#"
-            glibc = pkgs.glibc.outPath;
-            gcc-lib = pkgs.gcc-unwrapped.lib.outPath;
-            zlib = pkgs.zlib.outPath;
-            patchelf = pkgs.patchelf.outPath;
-            bash = pkgs.bash.outPath;
-            ncurses = pkgs.ncurses.outPath;
-            freetype = pkgs.freetype.outPath;
-            fontconfig = pkgs.fontconfig.lib.outPath;
-            libxrender = pkgs.xorg.libXrender.outPath;
-            libxext = pkgs.xorg.libXext.outPath;
-            libx11 = pkgs.xorg.libX11.outPath;
-            libxi = pkgs.xorg.libXi.outPath;
-            libxtst = pkgs.xorg.libXtst.outPath;
-            libxft = pkgs.xorg.libXft.outPath;
-            dbus = pkgs.dbus.lib.outPath;
-            glib = pkgs.glib.out.outPath;
-            libpng = pkgs.libpng.outPath;
-            expat = pkgs.expat.outPath;
-            libxml2 = pkgs.libxml2.outPath;
-            libxcb = pkgs.xorg.libxcb.outPath;
-            libxau = pkgs.xorg.libXau.outPath;
-            libxdmcp = pkgs.xorg.libXdmcp.outPath;
-            libxcrypt-legacy = pkgs.libxcrypt-legacy.outPath;
-            libsm = pkgs.xorg.libSM.outPath;
-            libice = pkgs.xorg.libICE.outPath;
-            krb5 = pkgs.krb5.lib.outPath;
-            bzip2 = pkgs.bzip2.out.outPath;
-            systemd = pkgs.systemd.outPath;
-            libxfixes = pkgs.xorg.libXfixes.outPath;
-            libxdamage = pkgs.xorg.libXdamage.outPath;
-            libxcomposite = pkgs.xorg.libXcomposite.outPath;
-            libxrandr = pkgs.xorg.libXrandr.outPath;
-            libxcursor = pkgs.xorg.libXcursor.outPath;
-            libxinerama = pkgs.xorg.libXinerama.outPath;
-            libuuid = pkgs.util-linux.lib.outPath;
-"#;
+/// The store paths vendor binaries need, as a nix function of `pkgs`. The
+/// flake bakes the same file into a nix-built chipsmith, so the two ways of
+/// getting the paths cannot drift.
+const COMPAT_NIX: &str = include_str!("../compat.nix");
 
-/// Only `SpawnStrategy::Bubblewrap32` asks for these. Naming `pkgsi686Linux`
-/// forces nix to instantiate the whole i686 package set, which is seconds of
-/// evaluation a 64-bit-only Product should not pay.
-const THIRTY_TWO_BIT_ATTRS: &str = r#"
-            glibc32 = pkgs.pkgsi686Linux.glibc.outPath;
-            gcc-lib32 = pkgs.pkgsi686Linux.gcc-unwrapped.lib.outPath;
-            zlib32 = pkgs.pkgsi686Linux.zlib.outPath;
-            bubblewrap = pkgs.bubblewrap.outPath;
-"#;
-
-/// The `nix eval` invocation that resolves every store path this Product needs.
+/// The `nix eval` invocation that resolves every store path this Product needs
+/// from the host's `<nixpkgs>`.
 fn nix_eval_spec(strategy: SpawnStrategy) -> ProcessSpec {
-    let extra = if strategy.needs_32bit() {
-        THIRTY_TWO_BIT_ATTRS
-    } else {
-        ""
-    };
-    let expr =
-        format!("let pkgs = import <nixpkgs> {{}};\n        in {{{BASE_ATTRS}{extra}        }}");
+    let expr = format!(
+        "({COMPAT_NIX}) {{ pkgs = import <nixpkgs> {{}}; i686 = {}; }}",
+        strategy.needs_32bit()
+    );
 
     ProcessSpec::new("nix")
         .args(["eval", "--impure", "--json", "--expr"])
@@ -78,8 +32,19 @@ fn nix_eval_spec(strategy: SpawnStrategy) -> ProcessSpec {
         .capture(Capture::Piped)
 }
 
+fn parse_paths(json: &[u8]) -> Result<NixPaths, ChipsmithError> {
+    // BTreeMap, not HashMap: `lib_paths` iterates this to build LD_LIBRARY_PATH,
+    // and Rust's default hasher is seeded per process. With a HashMap, two store
+    // paths shipping the same soname would resolve differently run to run.
+    let map: BTreeMap<String, String> =
+        facet_json::from_slice(json).map_err(|e| ChipsmithError::NixEvalOutput {
+            message: e.to_string(),
+        })?;
+    Ok(NixPaths { paths: map })
+}
+
 /// Resolve every required nix store path in a single `nix eval` call.
-async fn resolve_nix_paths(
+async fn eval_nix_paths(
     host: &dyn ProcessHost,
     strategy: SpawnStrategy,
 ) -> Result<NixPaths, ChipsmithError> {
@@ -91,15 +56,7 @@ async fn resolve_nix_paths(
         });
     }
 
-    // BTreeMap, not HashMap: `lib_paths` iterates this to build LD_LIBRARY_PATH,
-    // and Rust's default hasher is seeded per process. With a HashMap, two store
-    // paths shipping the same soname would resolve differently run to run.
-    let map: BTreeMap<String, String> =
-        facet_json::from_slice(&outcome.stdout).map_err(|e| ChipsmithError::NixEvalOutput {
-            message: e.to_string(),
-        })?;
-
-    Ok(NixPaths { paths: map })
+    parse_paths(&outcome.stdout)
 }
 
 struct NixPaths {
@@ -150,6 +107,19 @@ fn build_ld_library_path(lib_paths: &[PathBuf]) -> String {
         .join(":")
 }
 
+/// The interpreter of a bash shebang that chipsmith patches, as bytes.
+fn bash_shebang(content: &[u8]) -> Option<&[u8]> {
+    let rest = content.strip_prefix(b"#!")?;
+    let end = rest
+        .iter()
+        .position(|b| b.is_ascii_whitespace())
+        .unwrap_or(rest.len());
+    let interpreter = &rest[..end];
+    let ours = interpreter == b"/bin/bash"
+        || (interpreter.starts_with(b"/nix/store/") && interpreter.ends_with(b"/bin/bash"));
+    ours.then_some(interpreter)
+}
+
 fn make_writable(path: &Path) -> Result<(), ChipsmithError> {
     use std::os::unix::fs::PermissionsExt;
     let meta = std::fs::metadata(path)?;
@@ -174,13 +144,24 @@ pub struct NixCompat {
 }
 
 impl NixCompat {
-    pub async fn init(
+    /// The compat layer this host needs, or `None` if vendor binaries run on
+    /// it as shipped.
+    pub async fn for_host(
         host: &dyn ProcessHost,
         strategy: SpawnStrategy,
-    ) -> Result<Self, ChipsmithError> {
-        eprintln!("Resolving NixOS library paths...");
-        let paths = resolve_nix_paths(host, strategy).await?;
+    ) -> Result<Option<Self>, ChipsmithError> {
+        let paths = match host.nix_compat() {
+            NixCompatSource::NotNeeded => return Ok(None),
+            NixCompatSource::Pinned(json) => parse_paths(json.as_bytes())?,
+            NixCompatSource::Channel => {
+                eprintln!("Resolving NixOS library paths...");
+                eval_nix_paths(host, strategy).await?
+            }
+        };
+        Self::from_paths(&paths, strategy).map(Some)
+    }
 
+    fn from_paths(paths: &NixPaths, strategy: SpawnStrategy) -> Result<Self, ChipsmithError> {
         let missing = |attr: &str| ChipsmithError::NixPackageMissing {
             attr: attr.to_string(),
         };
@@ -257,18 +238,19 @@ impl NixCompat {
         Ok(outcome.success())
     }
 
-    /// Fix `#!/bin/bash` shebangs to point to the nix bash.
+    /// Point `#!/bin/bash` shebangs at the nix bash — and ones an earlier
+    /// patch already pointed at some other nix bash, so re-patching an install
+    /// against a newer nixpkgs leaves no script behind on the old one.
     fn patch_shebang(&self, path: &Path, content: &[u8]) -> Result<bool, ChipsmithError> {
-        let shebang = b"#!/bin/bash";
-        if content.len() < shebang.len() || &content[..shebang.len()] != shebang {
+        let Some(interpreter) = bash_shebang(content) else {
             return Ok(false);
-        }
+        };
 
         make_writable(path)?;
 
         let replacement = format!("#!{}", self.bash_path.display());
         let mut new_content = replacement.into_bytes();
-        new_content.extend_from_slice(&content[shebang.len()..]);
+        new_content.extend_from_slice(&content[2 + interpreter.len()..]);
         std::fs::write(path, &new_content)?;
 
         Ok(true)
@@ -307,10 +289,12 @@ impl NixCompat {
         Ok((elfs, scripts))
     }
 
-    /// Patch all ELF and shell script files in the given directories.
+    /// Patch every ELF and shell script in `dirs_to_patch`, then record in
+    /// `install_dir` what they were patched against.
     pub async fn patch_install(
         &self,
         host: &dyn ProcessHost,
+        install_dir: &Path,
         dirs_to_patch: &[PathBuf],
     ) -> Result<(), ChipsmithError> {
         eprintln!("Patching installation for NixOS...");
@@ -326,13 +310,39 @@ impl NixCompat {
             }
         }
 
+        let stamp = install_dir.join(PATCH_STAMP);
+        std::fs::write(&stamp, self.patch_stamp())
+            .map_err(ChipsmithError::file("write", &stamp))?;
+
         eprintln!(
             "Patched {} ELF binaries, {} shell scripts",
             total_elfs, total_scripts
         );
         Ok(())
     }
+
+    /// What a patched binary names by absolute store path. If any of it
+    /// changes, the install has to be patched again: an interpreter from one
+    /// glibc loading the libc from another dies before `main`, and inside a
+    /// build sandbox a path outside chipsmith's closure does not exist at all.
+    fn patch_stamp(&self) -> String {
+        format!(
+            "interpreter={}\nshell={}\n",
+            self.dynamic_linker.display(),
+            self.bash_path.display()
+        )
+    }
+
+    /// Whether `install_dir` was last patched against exactly these paths.
+    /// An install patched before chipsmith kept a record is not.
+    pub fn patched(&self, install_dir: &Path) -> bool {
+        std::fs::read_to_string(install_dir.join(PATCH_STAMP))
+            .is_ok_and(|stamp| stamp == self.patch_stamp())
+    }
 }
+
+/// Where `patch_install` records what it patched against.
+const PATCH_STAMP: &str = ".chipsmith-nix-patch";
 
 #[cfg(test)]
 mod tests {
@@ -358,11 +368,19 @@ mod tests {
         assert_eq!(joined, "/a/lib:/b/lib");
     }
 
+    fn eval_expr(strategy: SpawnStrategy) -> String {
+        nix_eval_spec(strategy)
+            .args
+            .last()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+
     #[test]
-    fn only_the_32_bit_expression_names_the_i686_package_set() {
-        assert!(!BASE_ATTRS.contains("pkgsi686Linux"));
-        assert!(THIRTY_TWO_BIT_ATTRS.contains("pkgsi686Linux"));
-        assert!(THIRTY_TWO_BIT_ATTRS.contains("bubblewrap"));
+    fn only_a_32_bit_product_asks_nix_for_the_i686_package_set() {
+        assert!(eval_expr(SpawnStrategy::PatchElf).ends_with("i686 = false; }"));
+        assert!(eval_expr(SpawnStrategy::Bubblewrap32).ends_with("i686 = true; }"));
     }
 
     fn compat(strategy: SpawnStrategy, with_32bit: bool) -> NixCompat {

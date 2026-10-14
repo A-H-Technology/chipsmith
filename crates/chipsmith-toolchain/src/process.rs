@@ -117,15 +117,35 @@ impl ProcessOutcome {
     }
 }
 
+/// Where the store paths come from that let FHS-assuming vendor binaries run
+/// on a nix host. One decision rather than an "is this NixOS" flag plus a
+/// "was I built by nix" flag, because the second overrides the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NixCompatSource {
+    /// An FHS host. Vendor binaries run as shipped.
+    NotNeeded,
+    /// NixOS, and chipsmith was built outside nix: evaluate the host's
+    /// `<nixpkgs>` at run time.
+    Channel,
+    /// chipsmith was built by nix and carries the store paths it was built
+    /// against, as a JSON object. They are in chipsmith's own closure, so they
+    /// exist in a build sandbox — which has neither `/etc/NIXOS` nor
+    /// `<nixpkgs>` — and outlive any garbage collection that keeps chipsmith.
+    Pinned(&'static str),
+}
+
+/// Set by the flake's package build; see `compat.nix`.
+const PINNED_NIX_COMPAT: Option<&str> = option_env!("CHIPSMITH_NIX_COMPAT");
+
 #[async_trait::async_trait]
 pub trait ProcessHost: Send + Sync {
     async fn run(&self, spec: ProcessSpec) -> Result<ProcessOutcome, ChipsmithError>;
 
-    /// Whether this host needs the Nix Compat layer. A method rather than a
-    /// free function reading `/etc/NIXOS`, so both answers are testable.
-    fn is_nixos(&self) -> bool;
+    /// Whether and how this host needs the Nix Compat layer. A method rather
+    /// than a free function reading `/etc/NIXOS`, so every answer is testable.
+    fn nix_compat(&self) -> NixCompatSource;
 
-    /// Whether a path exists. Here for the same reason as `is_nixos`.
+    /// Whether a path exists. Here for the same reason as `nix_compat`.
     fn path_exists(&self, path: &Path) -> bool;
 
     /// Resolve an executable on `PATH`. A host question like the other two, so
@@ -199,8 +219,12 @@ impl ProcessHost for RealHost {
         })
     }
 
-    fn is_nixos(&self) -> bool {
-        Path::new("/etc/NIXOS").exists()
+    fn nix_compat(&self) -> NixCompatSource {
+        match PINNED_NIX_COMPAT {
+            Some(json) => NixCompatSource::Pinned(json),
+            None if Path::new("/etc/NIXOS").exists() => NixCompatSource::Channel,
+            None => NixCompatSource::NotNeeded,
+        }
     }
 
     fn path_exists(&self, path: &Path) -> bool {
@@ -225,7 +249,7 @@ pub mod fake {
 
     /// Records every spec it is asked to run and replies with canned outcomes.
     pub struct RecordingHost {
-        pub nixos: bool,
+        pub nix_compat: NixCompatSource,
         /// Paths the fake host should claim exist. `None` means everything does.
         pub existing: Option<Vec<PathBuf>>,
         /// Executables the fake host should claim are on `PATH`. `None` means
@@ -239,7 +263,7 @@ pub mod fake {
         /// A host where every process succeeds silently.
         pub fn new() -> Self {
             Self {
-                nixos: false,
+                nix_compat: NixCompatSource::NotNeeded,
                 existing: None,
                 on_path: None,
                 replies: Mutex::new(Vec::new()),
@@ -248,7 +272,13 @@ pub mod fake {
         }
 
         pub fn on_nixos(mut self) -> Self {
-            self.nixos = true;
+            self.nix_compat = NixCompatSource::Channel;
+            self
+        }
+
+        /// A host running a nix-built chipsmith, which carries `json`.
+        pub fn with_pinned_compat(mut self, json: &'static str) -> Self {
+            self.nix_compat = NixCompatSource::Pinned(json);
             self
         }
 
@@ -316,8 +346,8 @@ pub mod fake {
             })
         }
 
-        fn is_nixos(&self) -> bool {
-            self.nixos
+        fn nix_compat(&self) -> NixCompatSource {
+            self.nix_compat
         }
 
         fn path_exists(&self, path: &Path) -> bool {

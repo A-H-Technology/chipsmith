@@ -7,25 +7,47 @@ use chipsmith_toolchain::error::ChipsmithError;
 use chipsmith_toolchain::manifest::Manifest;
 use chipsmith_toolchain::toolchain::{BuildOutcome, Toolchain};
 
-use crate::product::QuartusProduct;
+use crate::install::StalePatch;
+use crate::product::{InstallBase, QuartusProduct};
 use crate::{build, install, runner, timing};
 use chipsmith_toolchain::process::{ProcessHost, RealHost};
 
 pub struct QuartusToolchain {
     product: &'static QuartusProduct,
+    base: InstallBase,
     host: Arc<dyn ProcessHost>,
 }
 
 impl QuartusToolchain {
     pub fn new(product: &'static QuartusProduct) -> Self {
-        Self::with_host(product, Arc::new(RealHost))
+        Self::with_host(product, InstallBase::from_env(), Arc::new(RealHost))
     }
 
     /// Same Toolchain against a different host. The seam exists because two
     /// things sit at it: the real OS, and the recording fake the tests use to
     /// reach the NixOS and non-NixOS paths that cannot both run on one machine.
-    pub fn with_host(product: &'static QuartusProduct, host: Arc<dyn ProcessHost>) -> Self {
-        Self { product, host }
+    pub fn with_host(
+        product: &'static QuartusProduct,
+        base: InstallBase,
+        host: Arc<dyn ProcessHost>,
+    ) -> Self {
+        Self {
+            product,
+            base,
+            host,
+        }
+    }
+
+    /// The install a build or tool run uses. Never rewrites it.
+    async fn installed(&self, version: &str) -> Result<PathBuf, ChipsmithError> {
+        install::ensure_installed(
+            &*self.host,
+            self.product,
+            &self.base,
+            version,
+            StalePatch::Refuse,
+        )
+        .await
     }
 
     pub const fn product(&self) -> &'static QuartusProduct {
@@ -48,15 +70,26 @@ impl Toolchain for QuartusToolchain {
     }
 
     fn install_dir(&self, version: &str) -> Result<PathBuf, ChipsmithError> {
-        Ok(self.product.install_dir_for(self.product.lookup(version)?))
+        Ok(self
+            .product
+            .install_dir_for(&self.base, self.product.lookup(version)?))
     }
 
     fn is_installed(&self, version: &str) -> Result<bool, ChipsmithError> {
-        Ok(self.product.is_installed(self.product.lookup(version)?))
+        Ok(self
+            .product
+            .is_installed(&self.base, self.product.lookup(version)?))
     }
 
     async fn ensure_installed(&self, version: &str) -> Result<PathBuf, ChipsmithError> {
-        install::ensure_installed(&*self.host, self.product, version).await
+        install::ensure_installed(
+            &*self.host,
+            self.product,
+            &self.base,
+            version,
+            StalePatch::Repatch,
+        )
+        .await
     }
 
     async fn install_from_local(
@@ -64,7 +97,9 @@ impl Toolchain for QuartusToolchain {
         installer: &Path,
         version: &str,
     ) -> Result<(), ChipsmithError> {
-        let dir = self.product.install_dir_for(self.product.lookup(version)?);
+        let dir = self
+            .product
+            .install_dir_for(&self.base, self.product.lookup(version)?);
         runner::install_quartus(&*self.host, self.product, installer, &dir).await
     }
 
@@ -75,7 +110,7 @@ impl Toolchain for QuartusToolchain {
         args: &[String],
         working_dir: Option<&Path>,
     ) -> Result<(), ChipsmithError> {
-        let dir = install::ensure_installed(&*self.host, self.product, version).await?;
+        let dir = self.installed(version).await?;
         runner::run_tool(&*self.host, self.product, &dir, tool, args, working_dir).await
     }
 
@@ -84,9 +119,7 @@ impl Toolchain for QuartusToolchain {
         project_dir: &Path,
         manifest: &Manifest,
     ) -> Result<BuildOutcome, ChipsmithError> {
-        let install_dir =
-            install::ensure_installed(&*self.host, self.product, manifest.toolchain.version())
-                .await?;
+        let install_dir = self.installed(manifest.toolchain.version()).await?;
         let plan = build::prepare_build(project_dir, manifest)?;
 
         for step in &plan.steps {
@@ -120,7 +153,7 @@ impl Toolchain for QuartusToolchain {
             });
         }
 
-        let dir = install::ensure_installed(&*self.host, self.product, version).await?;
+        let dir = self.installed(version).await?;
         let args = runner::flash_args(bitstream, cable);
         runner::run_tool(&*self.host, self.product, &dir, "quartus_pgm", &args, None).await
     }

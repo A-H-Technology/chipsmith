@@ -19,7 +19,7 @@ use chipsmith_toolchain::error::ChipsmithError;
 use chipsmith_toolchain::manifest::VhdlStandard;
 use chipsmith_toolchain::process::{ProcessHost, ProcessSpec, RealHost};
 
-use crate::product::{BundledSimulator, QuartusProduct};
+use crate::product::{BundledSimulator, InstallBase, QuartusProduct};
 use crate::{install, runner};
 
 /// The library every Testbench is compiled into and elaborated from.
@@ -143,22 +143,30 @@ const LICENSE_HINT: &str = "\nnote: this simulator needs a free node-locked lice
 pub struct QuartusSimulator {
     product: &'static QuartusProduct,
     version: String,
+    base: InstallBase,
     host: Arc<dyn ProcessHost>,
 }
 
 impl QuartusSimulator {
     pub fn new(product: &'static QuartusProduct, version: impl Into<String>) -> Self {
-        Self::with_host(product, version, Arc::new(RealHost))
+        Self::with_host(
+            product,
+            version,
+            InstallBase::from_env(),
+            Arc::new(RealHost),
+        )
     }
 
     pub fn with_host(
         product: &'static QuartusProduct,
         version: impl Into<String>,
+        base: InstallBase,
         host: Arc<dyn ProcessHost>,
     ) -> Self {
         Self {
             product,
             version: version.into(),
+            base,
             host,
         }
     }
@@ -181,8 +189,14 @@ impl Simulator for QuartusSimulator {
     async fn test(&self, plan: &SimPlan) -> Result<TestReport, ChipsmithError> {
         // The Toolchain is the thing that carries the simulator, so asking for
         // it installs Quartus if it isn't there — the same as `build` does.
-        let install_dir =
-            install::ensure_installed(&*self.host, self.product, &self.version).await?;
+        let install_dir = install::ensure_installed(
+            &*self.host,
+            self.product,
+            &self.base,
+            &self.version,
+            install::StalePatch::Refuse,
+        )
+        .await?;
 
         let simulator = self.simulator();
         let bin_dir = simulator.bin_dir(&install_dir);

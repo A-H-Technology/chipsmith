@@ -53,6 +53,7 @@ const VERSIONS: &[KnownVersion] = &[KnownVersion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chipsmith_quartus_common::product::InstallBase;
 
     #[test]
     fn lookup_finds_known_version() {
@@ -71,7 +72,10 @@ mod tests {
 
     #[test]
     fn install_dir_contains_version() {
-        let dir = PRODUCT.install_dir_for(PRODUCT.lookup("13.0sp1").unwrap());
+        let dir = PRODUCT.install_dir_for(
+            &InstallBase::Home("/home/u".into()),
+            PRODUCT.lookup("13.0sp1").unwrap(),
+        );
         assert!(dir.ends_with("altera/13.0sp1"));
     }
 

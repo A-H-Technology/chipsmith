@@ -54,7 +54,9 @@ _Avoid_: release, tag
 
 **Install Root**:
 The directory a Product installs its Versions under, e.g. `~/intelFPGA_lite`.
-Each Version occupies a subdirectory of its Product's Install Root.
+Each Version occupies a subdirectory of its Product's Install Root. With
+`CHIPSMITH_INSTALL_ROOT` set, every Product shares that directory instead, laid
+out by the Manifest's own names: `<root>/<backend>/<version>`.
 _Avoid_: prefix, home, install path
 
 **Device Support**:
@@ -170,8 +172,15 @@ _Avoid_: passes, is clean, is green
 
 **Nix Compat**:
 The resolved set of nix store paths and tools needed to run a vendor's
-FHS-assuming binaries on NixOS. Acquired once, used for every spawn.
+FHS-assuming binaries on NixOS. Pinned into a nix-built chipsmith at build
+time; evaluated from `<nixpkgs>` at run time otherwise.
 _Avoid_: nix shim, FHS wrapper, nix env
+
+**Patch Stamp**:
+The record an install keeps of the store paths its binaries were patched to
+name. An install whose Patch Stamp does not match the running Nix Compat is
+refused by a build and re-patched by `chipsmith install`.
+_Avoid_: patch marker, patch version
 
 **Spawn Strategy**:
 How a Product's binaries must be launched on NixOS: patch the ELF interpreter
