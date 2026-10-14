@@ -73,6 +73,10 @@ enum Commands {
         /// Exit non-zero if the design does not meet timing
         #[facet(args::named, default = false)]
         require_timing: bool,
+
+        /// Also copy the bitstream and timing report into this directory
+        #[facet(args::named)]
+        out_dir: Option<PathBuf>,
     },
 
     /// Run the project's testbenches under a simulator
@@ -266,13 +270,17 @@ async fn main() -> ExitCode {
         Commands::Build {
             project_dir,
             require_timing,
+            out_dir,
         } => match chipsmith_core::build(&project_dir).await {
             Ok(outcome) => {
                 report_build(&outcome);
                 if require_timing && !outcome.meets_timing() {
                     return ExitCode::FAILURE;
                 }
-                Ok(())
+                match out_dir {
+                    Some(dir) => outcome.copy_to(&dir),
+                    None => Ok(()),
+                }
             }
             Err(e) => Err(e),
         },

@@ -11,6 +11,9 @@ use crate::timing::TimingSummary;
 #[derive(Debug)]
 pub struct BuildOutcome {
     pub bitstream: PathBuf,
+    /// The timing analyser's own summary file, which `timing` was read from.
+    /// May not exist, for the same reasons `timing` may be `None`.
+    pub timing_report: PathBuf,
     /// `None` when timing analysis left no summary behind — which after a
     /// build that ran the timing step means something went wrong, not that
     /// everything was fine.
@@ -22,6 +25,21 @@ impl BuildOutcome {
     /// with no Timing Summary is not.
     pub fn meets_timing(&self) -> bool {
         self.timing.as_ref().is_some_and(TimingSummary::met)
+    }
+
+    /// Copy the Bitstream, and the timing report if there is one, into `dir`
+    /// under their own names. For a caller that wants the artifacts without
+    /// knowing where a Toolchain keeps them — a nix derivation's `$out`.
+    pub fn copy_to(&self, dir: &Path) -> Result<(), ChipsmithError> {
+        std::fs::create_dir_all(dir).map_err(ChipsmithError::file("create", dir))?;
+        let artifacts = std::iter::once(&self.bitstream)
+            .chain(Some(&self.timing_report).filter(|report| report.exists()));
+        for artifact in artifacts {
+            let name = artifact.file_name().expect("artifacts are files");
+            std::fs::copy(artifact, dir.join(name))
+                .map_err(ChipsmithError::file("copy", artifact))?;
+        }
+        Ok(())
     }
 }
 
@@ -75,4 +93,35 @@ pub trait Toolchain: Send + Sync {
         bitstream: &Path,
         cable: Option<&str>,
     ) -> Result<(), ChipsmithError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A build whose timing analysis left nothing behind still hands over its
+    /// Bitstream, rather than failing the copy on the missing report.
+    #[test]
+    fn copying_out_takes_the_bitstream_and_whatever_timing_report_exists() {
+        let scratch = std::env::temp_dir().join(format!("chipsmith-copy-{}", std::process::id()));
+        let built = scratch.join("build/output_files");
+        std::fs::create_dir_all(&built).unwrap();
+        std::fs::write(built.join("blinky.sof"), "sof").unwrap();
+
+        let outcome = BuildOutcome {
+            bitstream: built.join("blinky.sof"),
+            timing_report: built.join("blinky.sta.summary"),
+            timing: None,
+        };
+        let out = scratch.join("out");
+        outcome.copy_to(&out).unwrap();
+
+        let mut copied: Vec<_> = std::fs::read_dir(&out)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        copied.sort();
+        std::fs::remove_dir_all(&scratch).unwrap();
+        assert_eq!(copied, ["blinky.sof"]);
+    }
 }

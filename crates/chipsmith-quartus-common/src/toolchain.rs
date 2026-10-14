@@ -138,6 +138,7 @@ impl Toolchain for QuartusToolchain {
         Ok(BuildOutcome {
             bitstream: plan.bitstream(),
             timing: timing::read_timing(&plan.timing_summary()),
+            timing_report: plan.timing_summary(),
         })
     }
 
