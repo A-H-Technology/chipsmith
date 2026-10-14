@@ -114,15 +114,15 @@ struct RootEntry {
     link: Option<PathBuf>,
 }
 
-/// The host's top-level entries, minus the ones the sandbox supplies itself:
-/// its own /lib, /dev, /proc, and a writable /tmp.
+/// The host's top-level entries, minus the two the sandbox supplies itself:
+/// its own /lib, and a /proc for its own pid namespace.
 fn host_root() -> Vec<RootEntry> {
     let Ok(entries) = std::fs::read_dir("/") else {
         return Vec::new();
     };
     let mut root: Vec<RootEntry> = entries
         .flatten()
-        .filter(|e| !matches!(e.file_name().to_str(), Some("lib" | "dev" | "proc" | "tmp")))
+        .filter(|e| !matches!(e.file_name().to_str(), Some("lib" | "proc")))
         .map(|e| RootEntry {
             link: std::fs::read_link(e.path()).ok(),
             name: e.file_name(),
@@ -216,40 +216,32 @@ impl NixCompat {
         }
         let bwrap = self.bwrap_bin.as_ref()?;
         let ld32 = self.dynamic_linker_32.as_ref()?;
-        let home = dirs::home_dir().unwrap_or_default();
-        let scratch = std::env::temp_dir();
-
         let mut argv: Vec<OsString> = vec![bwrap.into()];
         // The host's root rebuilt entry by entry on bubblewrap's own tmpfs,
-        // rather than `--ro-bind / /`: a NixOS root has no /lib, and a
-        // read-only root gives nowhere to create one.
+        // rather than `--bind / /`: a NixOS root has no /lib to mount over,
+        // and binding the root itself leaves nowhere to create one.
+        //
+        // Read-write, and /dev with its devices: the sandbox exists only to
+        // put a loader at /lib, not to confine anything. The binary has the
+        // user's own access — to an Install Root anywhere on disk, to a build
+        // directory outside $HOME, to a JTAG cable.
         for entry in host_root() {
             let target = Path::new("/").join(&entry.name);
             match entry.link {
                 Some(points_to) => argv.extend(["--symlink".into(), points_to.into()]),
-                None => argv.extend(["--ro-bind".into(), target.clone().into()]),
+                None if entry.name == "dev" => {
+                    argv.extend(["--dev-bind".into(), target.clone().into()])
+                }
+                None => argv.extend(["--bind".into(), target.clone().into()]),
             }
             argv.push(target.into());
         }
         argv.extend([
-            // `-try`, because a nix build sandbox has no /tmp; its scratch
-            // space is $TMPDIR, which is also where it points $HOME.
-            "--bind-try".into(),
-            "/tmp".into(),
-            "/tmp".into(),
-            "--bind-try".into(),
-            scratch.clone().into(),
-            scratch.into(),
-            "--bind".into(),
-            home.clone().into(),
-            home.into(),
             "--tmpfs".into(),
             "/lib".into(),
             "--symlink".into(),
             ld32.into(),
             "/lib/ld-linux.so.2".into(),
-            "--dev".into(),
-            "/dev".into(),
             "--proc".into(),
             "/proc".into(),
         ]);
@@ -454,10 +446,13 @@ mod tests {
             .any(|w| w == ["--symlink", "/nix/ld-linux.so.2", "/lib/ld-linux.so.2"]));
         // /lib has to be a tmpfs or the symlink can't be created over the host's
         assert!(argv.windows(2).any(|w| w == ["--tmpfs", "/lib"]));
-        // and the root must not be one read-only bind, or there is nowhere to
-        // create /lib on a host that has none
-        assert!(!argv.windows(3).any(|w| w == ["--ro-bind", "/", "/"]));
-        assert!(argv.windows(3).any(|w| w == ["--ro-bind", "/etc", "/etc"]));
+        // and the root must not be bound whole, or there is nowhere to create
+        // /lib on a host that has none
+        assert!(!argv.windows(3).any(|w| w[1] == "/" && w[2] == "/"));
+        // while everything else stays writable: an Install Root or a build
+        // directory can live anywhere
+        assert!(argv.windows(3).any(|w| w == ["--bind", "/etc", "/etc"]));
+        assert!(argv.windows(3).any(|w| w == ["--dev-bind", "/dev", "/dev"]));
     }
 
     #[test]
