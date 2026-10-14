@@ -15,7 +15,7 @@ are the names used throughout the code.
 
 ```bash
 cargo check                    # type check
-cargo test --workspace         # run all tests (108 tests across 6 crates)
+cargo test --workspace         # run all tests (113 of them)
 cargo fmt                      # format
 cargo fmt --check              # verify formatting
 cargo clippy --workspace --all-targets -- -D warnings
@@ -27,6 +27,12 @@ and the tools chipsmith shells out to; run anything else missing through
 
 The examples are runnable: `cd example && just testbench` exercises the whole
 simulation path on GHDL, without a Quartus install.
+
+`nix build .#checks.x86_64-linux.e2e-quartus-ii-13` is the end-to-end proof of
+the nix integration: a NixOS VM installs Quartus II 13.0sp1, declares it via
+the module and builds `example-de2` as a derivation. It needs KVM, ~10 GB of
+store and well over half an hour; run it when touching `nix/`, `nixos.rs`,
+`runner.rs` or the install path.
 
 ## Architecture
 
@@ -83,7 +89,7 @@ chipsmith-cli
   re-derive `build/output_files/<name>.sof` anywhere else.
 - **Verdicts travel out.** `build` returns `BuildOutcome { bitstream, timing }`.
   The library reports; the CLI decides what to print and what to exit with.
-- **Every subprocess goes through `ProcessHost`.** Including `is_nixos()` and
+- **Every subprocess goes through `ProcessHost`.** Including `nix_compat()` and
   `path_exists()`. `RealHost` in production, `RecordingHost` in tests — that is
   what makes the NixOS and non-NixOS paths both reachable, since no single
   machine can run both.
@@ -117,6 +123,9 @@ chipsmith-cli
 | Version tables | `crates/chipsmith-quartus-{prime,ii-13}/src/lib.rs` |
 | Backend registry | `crates/chipsmith-core/src/lib.rs` |
 | CLI commands | `crates/chipsmith-cli/src/main.rs` |
+| Nix Compat store paths (one list, two readers) | `crates/chipsmith-quartus-common/compat.nix` |
+| Flake package, NixOS module, `lib.buildProject` | `nix/package.nix`, `nix/module.nix`, `nix/build-project.nix` |
+| VM end-to-end test | `nix/tests/default.nix` |
 
 ## Conventions
 

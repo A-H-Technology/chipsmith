@@ -90,10 +90,17 @@ impl NixPaths {
         self.get("bubblewrap").map(|p| p.join("bin").join("bwrap"))
     }
 
+    /// Every `lib` directory except glibc's. A patched binary's interpreter
+    /// already loads libc from its own directory, and LD_LIBRARY_PATH also
+    /// reaches every host binary a vendor script runs — `/bin/sh` first. Put a
+    /// glibc there and a host whose system glibc differs from this one runs
+    /// its own ld.so against this libc, which dies with "stack smashing
+    /// detected" before `main`.
     fn lib_paths(&self) -> Vec<PathBuf> {
         self.paths
-            .values()
-            .map(|p| PathBuf::from(p).join("lib"))
+            .iter()
+            .filter(|(attr, _)| !matches!(attr.as_str(), "glibc" | "glibc32"))
+            .map(|(_, p)| PathBuf::from(p).join("lib"))
             .filter(|p| p.exists())
             .collect()
     }
@@ -378,18 +385,27 @@ const PATCH_STAMP: &str = ".chipsmith-nix-patch";
 mod tests {
     use super::*;
 
+    /// Ordered by attribute name so it is the same every run, and without
+    /// either glibc, which reaches the host's own `/bin/sh` and breaks it.
     #[test]
-    fn ld_library_path_order_follows_attribute_name() {
+    fn the_library_path_is_stable_and_leaves_glibc_to_the_interpreter() {
+        let store = std::env::temp_dir().join(format!("chipsmith-libs-{}", std::process::id()));
         let paths = NixPaths {
-            paths: BTreeMap::from([
-                ("zlib".to_string(), "/nix/store/z".to_string()),
-                ("glibc".to_string(), "/nix/store/g".to_string()),
-                ("bash".to_string(), "/nix/store/b".to_string()),
-            ]),
+            paths: ["zlib", "glibc", "glibc32", "bash", "gcc-lib32"]
+                .into_iter()
+                .map(|attr| {
+                    std::fs::create_dir_all(store.join(attr).join("lib")).unwrap();
+                    (attr.to_string(), store.join(attr).display().to_string())
+                })
+                .collect(),
         };
-        // `lib_paths` filters on existence, so assert the ordering directly.
-        let ordered: Vec<_> = paths.paths.keys().cloned().collect();
-        assert_eq!(ordered, vec!["bash", "glibc", "zlib"]);
+        let libs: Vec<_> = paths
+            .lib_paths()
+            .iter()
+            .map(|p| p.strip_prefix(&store).unwrap().display().to_string())
+            .collect();
+        std::fs::remove_dir_all(&store).unwrap();
+        assert_eq!(libs, ["bash/lib", "gcc-lib32/lib", "zlib/lib"]);
     }
 
     #[test]

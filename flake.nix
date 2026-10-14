@@ -6,10 +6,21 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { nixpkgs, flake-utils, ... }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let pkgs = nixpkgs.legacyPackages.${system};
-      in {
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+      ...
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
+      let
+        pkgs = nixpkgs.legacyPackages.${system};
+      in
+      {
+        packages.default = pkgs.callPackage ./nix/package.nix { };
+
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             cargo
@@ -29,5 +40,16 @@
             unzip
           ];
         };
-      });
+      }
+    )
+    // {
+      nixosModules.default = import ./nix/module.nix { inherit self; };
+
+      lib = import ./nix/lib.nix { inherit self; };
+
+      checks.x86_64-linux = import ./nix/tests {
+        inherit self;
+        pkgs = nixpkgs.legacyPackages.x86_64-linux;
+      };
+    };
 }

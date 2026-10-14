@@ -247,6 +247,64 @@ Chipsmith has first-class NixOS support. It automatically patches ELF binaries a
 
 No manual `nix-shell` or FHS wrappers needed.
 
+An install remembers which nix store paths it was patched against. If the
+chipsmith you run uses different ones — a nixpkgs bump, or switching between a
+`cargo install`ed and a nix-built chipsmith — `build` refuses the install and
+says so, and `chipsmith install` for that version patches it again.
+
+`CHIPSMITH_INSTALL_ROOT=/some/dir` moves every install to
+`/some/dir/<backend>/<version>`, e.g. `/some/dir/quartus-ii-13/13.0sp1`.
+
+## Building with nix
+
+The flake builds a Project as a derivation whose `$out` is the bitstream and the
+timing report. Quartus stays out of the store: you install it with chipsmith as
+usual, and the NixOS module tells nix which machines have it.
+
+On the machine that has the toolchain:
+
+```nix
+{
+  imports = [ chipsmith.nixosModules.default ];
+  programs.chipsmith = {
+    enable = true;
+    toolchains = [
+      { backend = "quartus-ii-13"; version = "13.0sp1"; path = "/home/alice/altera/13.0sp1"; }
+    ];
+  };
+}
+```
+
+then, as the user who owns that path, `chipsmith install --backend quartus-ii-13`
+with the chipsmith the module put on `PATH`, so the install is patched against
+the same store paths the build sandbox will have. The path must be readable by
+the nix build users.
+
+Each entry adds the system feature `<backend>-<version>` and mounts the install
+at `/chipsmith/<backend>/<version>` inside the build sandbox. A Project then
+builds with:
+
+```nix
+chipsmith.lib.buildProject {
+  inherit pkgs;
+  src = ./my-design;      # the directory holding chipsmith.toml
+  requireTiming = true;   # optional: fail the derivation if timing is missed
+}
+```
+
+The derivation requires the feature its Manifest's `[toolchain]` names, so nix
+only runs it on a machine that declared that toolchain. To build from another
+machine, list the feature in that builder's `nix.buildMachines.*.supportedFeatures`.
+
+Outputs are not bit-reproducible — Quartus stamps dates into them — so
+`nix build --rebuild` reports a difference. ModelSim/Questa are not run.
+
+`nix build .#checks.x86_64-linux.e2e-quartus-ii-13` proves the whole path in a
+VM: installs Quartus II 13.0sp1 as a user, declares it through the module, and
+realises `buildProject ./example-de2` in the VM's own build sandbox. It fetches
+the 7.2 GB Quartus II DVD image from archive.org, pinned to the SHA-1 Altera
+publishes for it.
+
 ## Project structure
 
 ```
