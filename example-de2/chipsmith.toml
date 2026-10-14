@@ -16,7 +16,8 @@ sources = ["src/*.vhd"]
 
 [pins]
 CLOCK_50 = "PIN_N2"
-LEDR = ["PIN_R17", "PIN_R18", "PIN_U18", "PIN_Y18"]
+# DE2 user manual, table 4.3
+LEDR = ["PIN_AE23", "PIN_AF23", "PIN_AB21", "PIN_AC22"]
 
 [clocks]
 CLOCK_50 = "50 MHz"
