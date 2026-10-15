@@ -134,21 +134,62 @@ let
       ''
         bsdtar -xOf ${quartusII13Dvd} components/${name} > $out
       '';
+
+  # Quartus Prime Lite has no anonymous mirror: Altera's download center wants
+  # a login. So this one is not a flake check. Download the two files from
+  # https://www.altera.com/downloads/fpga-development-tools/quartus-prime-lite-edition-design-software-version-23-1-1-linux,
+  # `nix-store --add-fixed sha1` each, then build
+  # .#legacyPackages.x86_64-linux.e2e-quartus-prime. The SHA-1s are Altera's.
+  # requireFile's contract, without requireFile's unfree marking: present in
+  # the store under this hash, or fail saying how to put it there.
+  quartusPrimeLite231 =
+    name: hash:
+    pkgs.runCommand name
+      {
+        outputHash = hash;
+        outputHashMode = "flat";
+      }
+      ''
+        echo "${name} is not in the store. Download it from" >&2
+        echo "  https://www.altera.com/downloads/fpga-development-tools/quartus-prime-lite-edition-design-software-version-23-1-1-linux" >&2
+        echo "then: nix-store --add-fixed sha1 ${name}" >&2
+        exit 1
+      '';
 in
 {
-  package = chipsmith;
+  checks = {
+    package = chipsmith;
 
-  e2e-quartus-ii-13 = e2e {
-    backend = "quartus-ii-13";
-    version = "13.0sp1";
-    project = ../../example-de2;
-    downloads = {
-      "QuartusSetupWeb-13.0.1.232.run" =
-        fromQuartusII13Dvd "QuartusSetupWeb-13.0.1.232.run" "sha1-FBiylxqkRobF0Rtsjvge7hNzeeg=";
-      "cyclone_web-13.0.1.232.qdz" =
-        fromQuartusII13Dvd "cyclone_web-13.0.1.232.qdz" "sha1-iCsZqP/uHt0TNpP/Qio/bFphVYk=";
-      "max_web-13.0.1.232.qdz" =
-        fromQuartusII13Dvd "max_web-13.0.1.232.qdz" "sha1-97MaoiNv99+i797ipMI/r+kfJ2Q=";
+    e2e-quartus-ii-13 = e2e {
+      backend = "quartus-ii-13";
+      version = "13.0sp1";
+      project = ../../example-de2;
+      downloads = {
+        "QuartusSetupWeb-13.0.1.232.run" =
+          fromQuartusII13Dvd "QuartusSetupWeb-13.0.1.232.run" "sha1-FBiylxqkRobF0Rtsjvge7hNzeeg=";
+        "cyclone_web-13.0.1.232.qdz" =
+          fromQuartusII13Dvd "cyclone_web-13.0.1.232.qdz" "sha1-iCsZqP/uHt0TNpP/Qio/bFphVYk=";
+        "max_web-13.0.1.232.qdz" =
+          fromQuartusII13Dvd "max_web-13.0.1.232.qdz" "sha1-97MaoiNv99+i797ipMI/r+kfJ2Q=";
+      };
     };
+  };
+
+  # Not yet run: written alongside the Quartus II one, never observed passing.
+  manual.e2e-quartus-prime = e2e {
+    backend = "quartus-prime";
+    version = "23.1";
+    project = ../../example;
+    # The other Device Support packages 23.1 lists go undownloaded, which
+    # chipsmith reports as a warning; example/ only needs Cyclone V.
+    downloads = {
+      "QuartusLiteSetup-23.1std.1.993-linux.run" =
+        quartusPrimeLite231 "QuartusLiteSetup-23.1std.1.993-linux.run" "sha1-u8oJhsecpLNng4/KMbBh7Ye/5Q4=";
+      "cyclonev-23.1std.1.993.qdz" =
+        quartusPrimeLite231 "cyclonev-23.1std.1.993.qdz" "sha1-TYSVFurHUMleqlhI0iVz1g5cyiY=";
+    };
+    # Cyclone V fitting, and an install Altera sizes at 8.3 GB plus 1.4 GB
+    memorySize = 12 * 1024;
+    diskSize = 50 * 1024;
   };
 }

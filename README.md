@@ -305,6 +305,12 @@ realises `buildProject ./example-de2` in the VM's own build sandbox. It fetches
 the 7.2 GB Quartus II DVD image from archive.org, pinned to the SHA-1 Altera
 publishes for it.
 
+The same test for Quartus Prime 23.1 and `example/` is
+`.#legacyPackages.x86_64-linux.e2e-quartus-prime`. Altera only serves Prime
+Lite to logged-in users, so download `QuartusLiteSetup-23.1std.1.993-linux.run`
+and `cyclonev-23.1std.1.993.qdz` yourself and `nix-store --add-fixed sha1` each
+first. It has not been run yet.
+
 ## Project structure
 
 ```

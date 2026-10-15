@@ -13,6 +13,12 @@
       flake-utils,
       ...
     }:
+    let
+      tests = import ./nix/tests {
+        inherit self;
+        pkgs = nixpkgs.legacyPackages.x86_64-linux;
+      };
+    in
     flake-utils.lib.eachDefaultSystem (
       system:
       let
@@ -47,9 +53,8 @@
 
       lib = import ./nix/lib.nix { inherit self; };
 
-      checks.x86_64-linux = import ./nix/tests {
-        inherit self;
-        pkgs = nixpkgs.legacyPackages.x86_64-linux;
-      };
+      checks.x86_64-linux = tests.checks;
+      # e2e tests whose inputs nobody can fetch anonymously; see nix/tests
+      legacyPackages.x86_64-linux = tests.manual;
     };
 }
