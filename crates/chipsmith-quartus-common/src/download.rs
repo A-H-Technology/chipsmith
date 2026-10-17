@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use futures_util::StreamExt;
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT_ENCODING, ACCEPT_LANGUAGE};
 use reqwest::Client;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
@@ -45,9 +46,16 @@ pub async fn download_file(url: &str, filename: &str) -> Result<PathBuf, Chipsmi
 
     eprintln!("Downloading {} ...", url);
 
-    // Altera's CDN sits behind Akamai, which rejects requests with no User-Agent.
+    // Altera's CDN sits behind Akamai, which 403s anything that doesn't carry
+    // the headers every browser sends: User-Agent, Accept, Accept-Encoding and
+    // Accept-Language. reqwest only sends `Accept: */*` on its own. `identity`
+    // because the bytes go straight to disk as the installer.
     let client = Client::builder()
         .user_agent(concat!("chipsmith/", env!("CARGO_PKG_VERSION")))
+        .default_headers(HeaderMap::from_iter([
+            (ACCEPT_ENCODING, HeaderValue::from_static("identity")),
+            (ACCEPT_LANGUAGE, HeaderValue::from_static("en")),
+        ]))
         .build()
         .map_err(download_error(url))?;
 
