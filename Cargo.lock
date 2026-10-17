@@ -121,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "chipsmith-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chipsmith-core",
  "facet",
@@ -131,7 +131,7 @@ dependencies = [
 
 [[package]]
 name = "chipsmith-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chipsmith-quartus-common",
  "chipsmith-quartus-ii-13",
@@ -142,7 +142,7 @@ dependencies = [
 
 [[package]]
 name = "chipsmith-quartus-common"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chipsmith-sim",
@@ -156,21 +156,21 @@ dependencies = [
 
 [[package]]
 name = "chipsmith-quartus-ii-13"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chipsmith-quartus-common",
 ]
 
 [[package]]
 name = "chipsmith-quartus-prime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chipsmith-quartus-common",
 ]
 
 [[package]]
 name = "chipsmith-sim"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chipsmith-toolchain",
@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "chipsmith-toolchain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "facet",

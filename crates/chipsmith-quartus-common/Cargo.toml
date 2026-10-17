@@ -10,8 +10,8 @@ description = "The Quartus toolchain implementation for chipsmith: install, buil
 [dependencies]
 async-trait = "0.1"
 facet-json = "0.46"
-chipsmith-sim = { path = "../chipsmith-sim", version = "0.1.0" }
-chipsmith-toolchain = { path = "../chipsmith-toolchain", version = "0.1.0" }
+chipsmith-sim = { path = "../chipsmith-sim", version = "0.2.0" }
+chipsmith-toolchain = { path = "../chipsmith-toolchain", version = "0.2.0" }
 dirs = "6"
 futures-util = "0.3"
 # rustls rather than the default native-tls: an openssl-linked binary can't find
@@ -25,7 +25,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 tokio = { version = "1", features = ["process", "fs", "io-util"] }
 
 [dev-dependencies]
-chipsmith-toolchain = { path = "../chipsmith-toolchain", version = "0.1.0", features = [
+chipsmith-toolchain = { path = "../chipsmith-toolchain", version = "0.2.0", features = [
     "test-host",
 ] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
