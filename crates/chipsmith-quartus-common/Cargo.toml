@@ -12,7 +12,7 @@ async-trait = "0.1"
 facet-json = "0.46"
 chipsmith-sim = { path = "../chipsmith-sim", version = "0.1.0" }
 chipsmith-toolchain = { path = "../chipsmith-toolchain", version = "0.1.0" }
-dirs = "6"
+dirs = "7"
 futures-util = "0.3"
 # rustls rather than the default native-tls: an openssl-linked binary can't find
 # libssl.so.3 outside a nix shell, which defeats the point of a NixOS-first tool
