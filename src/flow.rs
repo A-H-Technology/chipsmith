@@ -364,11 +364,12 @@ fn place_route(
     let started = Instant::now();
     let r = crate::route::route_file(&graph, placed, routed)?;
     eprintln!(
-        "    routed {} nets, {} pips, {} iterations in {:.1} s",
+        "    routed {} nets, {} pips, {} iterations in {:.1} s; critical path {:.2} ns (estimate)",
         r.nets,
         r.pips,
         r.iterations,
-        started.elapsed().as_secs_f64()
+        started.elapsed().as_secs_f64(),
+        r.critical / 1000.0
     );
     Ok(())
 }

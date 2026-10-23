@@ -4,3 +4,4 @@ pub mod jtag;
 pub mod manifest;
 pub mod place;
 pub mod route;
+pub mod timing;

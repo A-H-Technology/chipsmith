@@ -20,8 +20,9 @@ Both examples produce RBFs that are byte-identical to the
 [cyclone2-re](https://github.com/cramt/cyclone2-re) blinky, which Quartus
 reproduces bit for bit from the same placement and routing.
 
-The Cyclone II limits come from cyclone2-re: no timing model, no M4K RAM,
-multipliers or PLLs, no bidirectional or registered I/O.
+The Cyclone II limits come from cyclone2-re: no M4K RAM, multipliers or
+PLLs, no bidirectional or registered I/O. The timing model covers LE and
+register delays exactly and routing by per-element-type averages.
 
 ## Flow
 
@@ -91,6 +92,30 @@ share chipsmith's own netlist IR, not Verilog.
      per temperature, 139 s) ends at lower wirelength (3,903 vs 4,261) but
      less slack (8.84 ns): wirelength is not timing, so the next gain is a
      timing model, not more annealing.
+   - Timing model (`src/timing.rs`) and timing-driven routing. Cell delays
+     are Quartus' DMF values (cyclone2-re docs/timing-model.md), routing
+     delays quartus_sta's median per element type; register-to-register
+     paths only, like Quartus with just a clock constraint. After each
+     PathFinder iteration the router runs STA and costs each connection
+     `(1 - crit) * congestion + crit * delay`. `bench/quartus-timing.sh`
+     has Quartus time a chipsmith routing.
+
+     picorv32, same placement, Quartus' data delay on the critical path:
+
+     | routing | chipsmith estimate | Quartus |
+     |---|---|---|
+     | congestion only | 9.12 ns (before the carry fixes below) | 10.71 ns |
+     | timing-driven, carry chains missing from the model | 7.62 ns | 10.68 ns |
+     | timing-driven, carry chains in, carry delay by LE position | 9.45 ns | 9.98 ns |
+     | + A* distance from each wire's bounding box | 9.45 ns | 9.82 ns |
+
+     Per connection, Quartus' routing delay is 1.07x the model's (median
+     over 564 connections). The critical path is now a 27-LE carry chain
+     (2.5 ns), 5 LUTs (1.8 ns) and 5 routed connections (4.7 ns, about
+     0.95 ns each), so the next gain is timing-driven placement. Routing
+     picorv32 takes 16.7 s, up from 6.6 s: critical nets are rerouted every
+     iteration, and the box distance needs a stronger A* weight (1.5) to
+     search as narrowly as the old single-tile one.
    - Packer: next.
 4. **Own synthesis**: techmap and LUT mapping on the IR. yosys's JSON
    netlist is the boundary until then.

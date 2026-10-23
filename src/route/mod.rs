@@ -16,6 +16,8 @@ use serde_json::Value;
 
 use chipdb::{ChipDb, Edge, NodeId};
 
+use crate::timing::{self, Arc, Ps};
+
 /// One net to route: where it starts and every node it must reach.
 #[derive(Debug, Clone)]
 struct NetReq {
@@ -25,6 +27,13 @@ struct NetReq {
     /// The source as a tile wire, for the first `ROUTING` entry.
     source_wire: (u32, u32),
     sinks: Vec<NodeId>,
+    /// The driving cell port's timing node.
+    driver: u32,
+    /// Each sink's cell port, as a timing node.
+    sink_ports: Vec<u32>,
+    /// Cell ports on the source's own wire, reached without routing: a
+    /// carry chain's COUT is the next LE's CIN.
+    direct_ports: Vec<u32>,
 }
 
 /// A routed net: its source and, for every other node, the pip that drives it.
@@ -32,13 +41,17 @@ struct NetReq {
 struct Tree {
     nodes: Vec<NodeId>,
     pips: Vec<Edge>,
+    /// Routing delay from the source to each sink, in `NetReq::sinks` order.
+    sink_delay: Vec<Ps>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Stats {
     pub nets: usize,
     pub pips: usize,
     pub iterations: usize,
+    /// Estimated minimum clock period (critical register-to-register path).
+    pub critical: Ps,
 }
 
 /// Route `placed`, write `routed`.
@@ -48,7 +61,15 @@ pub fn route_file(db: &ChipDb, placed: &Path, routed: &Path) -> Result<Stats> {
     let mut json: Value = serde_json::from_str(&text)?;
     let design = Design::read(db, &json)?;
     let mut router = Router::new(db, &design);
-    let (trees, iterations) = router.route(&design.nets)?;
+    let (trees, iterations, analysis) = router.route(&design.nets)?;
+    if let Some(out) = std::env::var_os("CHIPSMITH_DUMP_CONNECTIONS") {
+        dump_connections(db, &router, &design, &trees, Path::new(&out))?;
+    }
+    if std::env::var_os("CHIPSMITH_CRITICAL_PATH").is_some() {
+        for &(n, t) in &analysis.path {
+            eprintln!("      {t:8.0} ps  {}", design.timing.name(n));
+        }
+    }
 
     let netnames = json["modules"]["top"]["netnames"]
         .as_object_mut()
@@ -72,7 +93,50 @@ pub fn route_file(db: &ChipDb, placed: &Path, routed: &Path) -> Result<Stats> {
         nets: design.nets.len(),
         pips,
         iterations,
+        critical: analysis.critical,
     })
+}
+
+/// For calibrating the delay model against quartus_sta: one line per
+/// connection, `driver-port sink-port model-ps fanout wire-type...`.
+fn dump_connections(
+    db: &ChipDb,
+    router: &Router,
+    design: &Design,
+    trees: &[Tree],
+    out: &Path,
+) -> Result<()> {
+    let mut lines = String::new();
+    for (net, tree) in design.nets.iter().zip(trees) {
+        let in_tree: HashSet<NodeId> = tree.nodes.iter().copied().collect();
+        let mut parent: HashMap<NodeId, NodeId> = HashMap::new();
+        for &u in &tree.nodes {
+            for e in db.downhill(u) {
+                if in_tree.contains(&e.dst) && tree.pips.contains(e) {
+                    parent.insert(e.dst, u);
+                }
+            }
+        }
+        for (i, &sink) in net.sinks.iter().enumerate() {
+            let mut types = Vec::new();
+            let mut n = sink;
+            while n != net.source {
+                types.push(db.wire_types[db.node_type[n as usize] as usize].as_str());
+                n = parent[&n];
+            }
+            types.reverse();
+            lines += &format!(
+                "{} {} {} {} {}\n",
+                design.timing.name(net.driver),
+                design.timing.name(net.sink_ports[i]),
+                tree.sink_delay[i],
+                net.sinks.len(),
+                types.join(" ")
+            );
+        }
+    }
+    let _ = router;
+    std::fs::write(out, lines).with_context(|| format!("writing {}", out.display()))
 }
 
 /// nextpnr's `ROUTING`: `wire;pip;strength;` per wire, the source wire with
@@ -93,9 +157,10 @@ fn routing_attribute(db: &ChipDb, net: &NetReq, tree: &Tree) -> String {
 /// A net's endpoints in the graph, as cells name them.
 #[derive(Default)]
 struct Ends {
-    /// The driving tile wire and its node.
-    source: Option<((u32, u32), NodeId)>,
-    sinks: Vec<NodeId>,
+    /// The driving tile wire, its node and its timing node.
+    source: Option<((u32, u32), NodeId, u32)>,
+    /// (node, timing node)
+    sinks: Vec<(NodeId, u32)>,
 }
 
 /// What the router needs from the placed design.
@@ -103,6 +168,7 @@ struct Design {
     nets: Vec<NetReq>,
     /// LEs whose LUT inputs can't be permuted: (tile, LE index).
     fixed_inputs: HashSet<(u32, u8)>,
+    timing: timing::Graph,
 }
 
 fn tile_xy(name: &str) -> Option<(u32, u32)> {
@@ -119,6 +185,7 @@ impl Design {
         // net id -> number of cell inputs on it, for "is COUT used".
         let mut loads: HashMap<u64, usize> = HashMap::new();
         let mut carry_luts: Vec<(u32, u8, Option<u64>, bool)> = Vec::new();
+        let mut timing = timing::Graph::default();
 
         for (name, cell) in top["cells"].as_object().context("no cells")? {
             let bel = cell["attributes"]["NEXTPNR_BEL"]
@@ -137,6 +204,17 @@ impl Design {
                 .pins;
             let dirs = &cell["port_directions"];
             let conns = cell["connections"].as_object().context("connections")?;
+            let connected: Vec<&str> = conns
+                .iter()
+                .filter(|(_, b)| b.as_array().is_some_and(|a| !a.is_empty()))
+                .map(|(p, _)| p.as_str())
+                .collect();
+            let le: u8 = bel_name
+                .strip_prefix("LE")
+                .and_then(|b| b.split_once('.'))
+                .and_then(|(k, _)| k.parse().ok())
+                .unwrap_or(0);
+            timing.add_cell(name, cell["type"].as_str().unwrap_or(""), &connected, le);
             for (port, bits) in conns {
                 let Some(net) = bits
                     .as_array()
@@ -154,15 +232,16 @@ impl Design {
                     continue;
                 };
                 let node = db.node(tile, wire);
+                let tnode = timing.node(name, port);
                 let e = ends.entry(net).or_default();
                 if output {
                     ensure!(
                         e.source.is_none(),
                         "net {net} has two drivers (one is {name}.{port})"
                     );
-                    e.source = Some(((tile, wire), node));
+                    e.source = Some(((tile, wire), node, tnode));
                 } else {
-                    e.sinks.push(node);
+                    e.sinks.push((node, tnode));
                 }
             }
             if cell["type"] == "LCELL_COMB" {
@@ -204,27 +283,39 @@ impl Design {
                 .get(&id)
                 .cloned()
                 .unwrap_or_else(|| format!("net {id}"));
-            let Some((source_wire, source)) = source else {
+            let Some((source_wire, source, driver)) = source else {
                 ensure!(
                     sinks.is_empty(),
                     "net {name} has loads but no driver in the fabric"
                 );
                 continue;
             };
-            sinks.retain(|&s| s != source);
+            let direct_ports: Vec<u32> = sinks
+                .iter()
+                .filter(|&&(s, _)| s == source)
+                .map(|&(_, t)| t)
+                .collect();
+            sinks.retain(|&(s, _)| s != source);
             sinks.sort();
             sinks.dedup();
-            if sinks.is_empty() {
+            if sinks.is_empty() && direct_ports.is_empty() {
                 continue;
             }
             nets.push(NetReq {
                 name,
                 source,
                 source_wire,
-                sinks,
+                driver,
+                sink_ports: sinks.iter().map(|&(_, t)| t).collect(),
+                direct_ports,
+                sinks: sinks.into_iter().map(|(n, _)| n).collect(),
             });
         }
-        Ok(Design { nets, fixed_inputs })
+        Ok(Design {
+            nets,
+            fixed_inputs,
+            timing,
+        })
     }
 }
 
@@ -252,7 +343,18 @@ const MAX_ITERATIONS: usize = 60;
 /// Weight of the distance estimate. Above what a single hop can cover, so
 /// searches head for the sink instead of flooding the chip; the price is
 /// that a route may be a little longer than the shortest.
-const ASTAR: f32 = 0.6;
+const ASTAR: f32 = 1.5;
+/// Delays are costed in units of an R4 wire.
+const DELAY_UNIT: Ps = 235.0;
+/// Delay per tile of distance, for the A* estimate: an R4 spans 4 LABs.
+const HOP_DELAY_ESTIMATE: Ps = 60.0;
+/// Criticality is sharpened (VPR's `criticality_exp`) and capped below 1
+/// so even the most critical connection still sees congestion.
+const CRIT_EXP: f32 = 4.0;
+const MAX_CRITICALITY: f32 = 0.95;
+/// Nets with a connection this critical are rerouted every iteration, not
+/// only when congested, so they can follow the timing as it changes.
+const REROUTE_CRITICALITY: f32 = 0.8;
 
 struct Router<'a> {
     db: &'a ChipDb,
@@ -260,6 +362,8 @@ struct Router<'a> {
     occ: Vec<u16>,
     hist: Vec<f32>,
     present_factor: f32,
+    /// Routing delay of each node.
+    delay: Vec<Ps>,
     // Search scratch, valid where `stamp == generation`.
     cost: Vec<f32>,
     via: Vec<Option<(NodeId, Edge)>>,
@@ -267,9 +371,12 @@ struct Router<'a> {
     generation: u32,
     in_tree: Vec<u32>,
     tree_generation: u32,
+    /// Delay from the source, for nodes of the tree being built.
+    delay_to: Vec<Ps>,
     /// Per tile type, per pip: the LE whose LUT input it permutes.
     permutes: Vec<Option<Vec<i8>>>,
     fixed_inputs: &'a HashSet<(u32, u8)>,
+    timing: &'a timing::Graph,
 }
 
 fn permuting_pips(tt: &chipdb::TileType) -> Option<Vec<i8>> {
@@ -301,14 +408,24 @@ impl<'a> Router<'a> {
             occ: vec![0; n],
             hist: vec![0.0; n],
             present_factor: 0.5,
+            delay: {
+                let by_type: Vec<Ps> = db
+                    .wire_types
+                    .iter()
+                    .map(|t| timing::wire_delay(t))
+                    .collect();
+                db.node_type.iter().map(|&t| by_type[t as usize]).collect()
+            },
             cost: vec![0.0; n],
             via: vec![None; n],
             stamp: vec![0; n],
             generation: 0,
             in_tree: vec![0; n],
             tree_generation: 0,
+            delay_to: vec![0.0; n],
             permutes: db.tile_types.iter().map(permuting_pips).collect(),
             fixed_inputs: &design.fixed_inputs,
+            timing: &design.timing,
         }
     }
 
@@ -326,31 +443,71 @@ impl<'a> Router<'a> {
     }
 
     fn distance(&self, a: NodeId, b: NodeId) -> f32 {
-        let (ax, ay) = self.db.node_xy[a as usize];
-        let (bx, by) = self.db.node_xy[b as usize];
+        let (dx, dy) = self.db.node_box[a as usize].gap(self.db.node_box[b as usize]);
         // Tile x counts routing and logic columns separately: halve it.
-        (ax.abs_diff(bx) as f32) / 2.0 + ay.abs_diff(by) as f32
+        dx as f32 / 2.0 + dy as f32
     }
 
-    fn route(&mut self, nets: &[NetReq]) -> Result<(Vec<Tree>, usize)> {
+    /// Net arcs of the current routing, for timing analysis: every routed
+    /// sink in net and sink order, then the unrouted direct ones.
+    fn net_arcs(nets: &[NetReq], trees: &[Tree]) -> Vec<Arc> {
+        let direct = nets.iter().flat_map(|net| {
+            net.direct_ports.iter().map(|&to| Arc {
+                from: net.driver,
+                to,
+                delay: 0.0,
+            })
+        });
+        nets.iter()
+            .zip(trees)
+            .flat_map(|(net, tree)| {
+                net.sink_ports
+                    .iter()
+                    .zip(&tree.sink_delay)
+                    .map(|(&to, &delay)| Arc {
+                        from: net.driver,
+                        to,
+                        delay,
+                    })
+            })
+            .chain(direct)
+            .collect()
+    }
+
+    fn route(&mut self, nets: &[NetReq]) -> Result<(Vec<Tree>, usize, timing::Analysis)> {
         let mut trees: Vec<Tree> = vec![Tree::default(); nets.len()];
+        // Per net, per sink: how critical its connection is. Nothing is
+        // known before the first routing.
+        let mut crit: Vec<Vec<f32>> = nets.iter().map(|n| vec![0.0; n.sinks.len()]).collect();
         for iteration in 1..=MAX_ITERATIONS {
             for (i, net) in nets.iter().enumerate() {
                 let congested = trees[i].nodes.iter().any(|&n| self.occ[n as usize] > 1);
-                if iteration > 1 && !congested {
+                let critical = crit[i].iter().any(|&c| c > REROUTE_CRITICALITY);
+                if iteration > 1 && !congested && !critical {
                     continue;
                 }
                 for &n in &trees[i].nodes {
                     self.occ[n as usize] -= 1;
                 }
-                trees[i] = self.route_net(net)?;
+                trees[i] = self.route_net(net, &crit[i])?;
                 for &n in &trees[i].nodes {
                     self.occ[n as usize] += 1;
                 }
             }
+
+            let arcs = Self::net_arcs(nets, &trees);
+            let analysis = self.timing.analyse(&arcs);
+            let mut k = 0;
+            for c in crit.iter_mut() {
+                for c in c.iter_mut() {
+                    *c = (analysis.criticality(&arcs[k]).powf(CRIT_EXP)).min(MAX_CRITICALITY);
+                    k += 1;
+                }
+            }
+
             let overused: Vec<usize> = (0..self.occ.len()).filter(|&n| self.occ[n] > 1).collect();
             if overused.is_empty() {
-                return Ok((trees, iteration));
+                return Ok((trees, iteration, analysis));
             }
             for n in overused {
                 self.hist[n] += (self.occ[n] - 1) as f32;
@@ -360,50 +517,72 @@ impl<'a> Router<'a> {
         bail!("routing did not converge in {MAX_ITERATIONS} iterations")
     }
 
-    fn route_net(&mut self, net: &NetReq) -> Result<Tree> {
+    fn route_net(&mut self, net: &NetReq, crit: &[f32]) -> Result<Tree> {
         self.tree_generation += 1;
         let mut tree = Tree {
             nodes: vec![net.source],
             pips: Vec::new(),
+            sink_delay: Vec::new(),
         };
         self.in_tree[net.source as usize] = self.tree_generation;
+        self.delay_to[net.source as usize] = self.delay[net.source as usize];
 
-        let mut sinks = net.sinks.clone();
-        sinks.sort_by(|&a, &b| {
-            self.distance(net.source, a)
-                .total_cmp(&self.distance(net.source, b))
+        // Most critical first, so they get the direct wires; then nearest.
+        let mut order: Vec<usize> = (0..net.sinks.len()).collect();
+        order.sort_by(|&a, &b| {
+            crit[b].total_cmp(&crit[a]).then(
+                self.distance(net.source, net.sinks[a])
+                    .total_cmp(&self.distance(net.source, net.sinks[b])),
+            )
         });
-        for sink in sinks {
+        for i in order {
+            let sink = net.sinks[i];
             if self.in_tree[sink as usize] == self.tree_generation {
                 continue;
             }
-            self.search(&tree.nodes, sink)
+            self.search(&tree.nodes, sink, crit[i])
                 .with_context(|| format!("net {}: no route to a sink", net.name))?;
-            // Walk back from the sink to the tree, adding nodes and pips.
+            // Walk back from the sink to the tree, then add the branch.
+            let mut branch = Vec::new();
             let mut n = sink;
             while self.in_tree[n as usize] != self.tree_generation {
-                self.in_tree[n as usize] = self.tree_generation;
-                tree.nodes.push(n);
                 let (from, edge) = self.via[n as usize].expect("searched nodes have a predecessor");
-                tree.pips.push(edge);
+                branch.push((n, edge));
                 n = from;
             }
+            let mut d = self.delay_to[n as usize];
+            for &(n, edge) in branch.iter().rev() {
+                d += self.delay[n as usize];
+                self.delay_to[n as usize] = d;
+                self.in_tree[n as usize] = self.tree_generation;
+                tree.nodes.push(n);
+                tree.pips.push(edge);
+            }
         }
+        tree.sink_delay = net
+            .sinks
+            .iter()
+            .map(|&s| self.delay_to[s as usize])
+            .collect();
         Ok(tree)
     }
 
-    /// A* from every node of `tree` to `sink`; fills `via`.
-    fn search(&mut self, tree: &[NodeId], sink: NodeId) -> Result<()> {
+    /// A* from every node of `tree` to `sink`; fills `via`. Each node costs
+    /// `(1 - crit)` times its congestion cost plus `crit` times its delay
+    /// (in units of an R4 wire, so both terms are about 1 per hop).
+    fn search(&mut self, tree: &[NodeId], sink: NodeId, crit: f32) -> Result<()> {
         self.generation += 1;
         let gen = self.generation;
         let mut heap = BinaryHeap::new();
+        let per_hop = 1.0 - crit + crit * HOP_DELAY_ESTIMATE / DELAY_UNIT;
         for &n in tree {
+            let g = crit * self.delay_to[n as usize] / DELAY_UNIT;
             self.stamp[n as usize] = gen;
-            self.cost[n as usize] = 0.0;
+            self.cost[n as usize] = g;
             self.via[n as usize] = None;
             heap.push(Queued {
-                f: ASTAR * self.distance(n, sink),
-                g: 0.0,
+                f: g + ASTAR * per_hop * self.distance(n, sink),
+                g,
                 node: n,
             });
         }
@@ -419,7 +598,8 @@ impl<'a> Router<'a> {
                     continue;
                 }
                 let m = e.dst as usize;
-                let g2 = g + self.node_cost(e.dst);
+                let g2 =
+                    g + (1.0 - crit) * self.node_cost(e.dst) + crit * self.delay[m] / DELAY_UNIT;
                 if self.stamp[m] == gen && self.cost[m] <= g2 {
                     continue;
                 }
@@ -427,7 +607,7 @@ impl<'a> Router<'a> {
                 self.cost[m] = g2;
                 self.via[m] = Some((node, *e));
                 heap.push(Queued {
-                    f: g2 + ASTAR * self.distance(e.dst, sink),
+                    f: g2 + ASTAR * per_hop * self.distance(e.dst, sink),
                     g: g2,
                     node: e.dst,
                 });
@@ -470,18 +650,31 @@ mod tests {
                     source: node("S0"),
                     source_wire: (0, 0),
                     sinks: vec![node("T0")],
+                    driver: 0,
+                    sink_ports: vec![1],
+                    direct_ports: vec![],
                 },
                 NetReq {
                     name: "b".into(),
                     source: node("S1"),
                     source_wire: (0, 1),
                     sinks: vec![node("T1")],
+                    driver: 2,
+                    sink_ports: vec![3],
+                    direct_ports: vec![],
                 },
             ],
             fixed_inputs: HashSet::new(),
+            timing: {
+                let mut g = timing::Graph::default();
+                for (c, p) in [("a", "O"), ("a", "I"), ("b", "O"), ("b", "I")] {
+                    g.node(c, p);
+                }
+                g
+            },
         };
         let mut router = Router::new(&db, &design);
-        let (trees, _) = router.route(&design.nets).unwrap();
+        let (trees, _, _) = router.route(&design.nets).unwrap();
         assert!(trees[0].nodes.contains(&node("N")));
         assert!(trees[1].nodes.contains(&node("M")));
         assert!(router.occ.iter().all(|&o| o <= 1));

@@ -22,12 +22,14 @@ pub const GRAPH_VAR: &str = "CHIPSMITH_CYCLONE2_GRAPH";
 pub const DB_VAR: &str = "CHIPSMITH_CYCLONE2_DB";
 
 /// Bump when `ChipDb`'s layout changes.
-const CACHE_MAGIC: &[u8] = b"chipsmith-routing-graph-4\n";
+const CACHE_MAGIC: &[u8] = b"chipsmith-routing-graph-6\n";
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TileType {
     pub name: String,
     pub wires: Names,
+    /// Element type of each wire, an index into `ChipDb::wire_types`.
+    pub wire_types: Vec<u8>,
     /// (src wire, dst wire)
     pub pips: Vec<(u32, u32)>,
     pub bels: HashMap<String, Bel>,
@@ -102,6 +104,8 @@ pub struct ChipDb {
     pub width: u32,
     pub height: u32,
     pub tile_types: Vec<TileType>,
+    /// Element type names (`R4`, `C16`, `LOCAL_INTERCONNECT`, ...).
+    pub wire_types: Vec<String>,
     /// Tile type of tile `y * width + x`.
     tiles: Vec<u32>,
     // The big arrays below are stored raw by `write_cache`, not by serde:
@@ -111,13 +115,62 @@ pub struct ChipDb {
     wire_base: Vec<u32>,
     #[serde(skip)]
     node_of: Vec<NodeId>,
-    /// A representative tile of each node, for distance estimates.
+    /// The tiles each node spans, for distance estimates: a long wire is
+    /// near everything along its length, not only its first tile.
     #[serde(skip)]
-    pub node_xy: Vec<(u16, u16)>,
+    pub node_box: Vec<Box>,
+    /// Element type of each node, an index into `wire_types`.
+    #[serde(skip)]
+    pub node_type: Vec<u8>,
     #[serde(skip)]
     edge_start: Vec<u32>,
     #[serde(skip)]
     edges: Vec<Edge>,
+}
+
+/// A bounding box of tiles, inclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Box {
+    pub x0: u8,
+    pub y0: u8,
+    pub x1: u8,
+    pub y1: u8,
+}
+
+impl Box {
+    fn tile(x: u8, y: u8) -> Self {
+        Box {
+            x0: x,
+            y0: y,
+            x1: x,
+            y1: y,
+        }
+    }
+
+    fn add(&mut self, x: u8, y: u8) {
+        self.x0 = self.x0.min(x);
+        self.y0 = self.y0.min(y);
+        self.x1 = self.x1.max(x);
+        self.y1 = self.y1.max(y);
+    }
+
+    /// Tiles between the two boxes, per axis (0 where they overlap).
+    pub fn gap(self, o: Box) -> (u8, u8) {
+        let gap = |a0: u8, a1: u8, b0: u8, b1: u8| b0.saturating_sub(a1).max(a0.saturating_sub(b1));
+        (
+            gap(self.x0, self.x1, o.x0, o.x1),
+            gap(self.y0, self.y1, o.y0, o.y1),
+        )
+    }
+
+    fn word(self) -> u32 {
+        u32::from_le_bytes([self.x0, self.y0, self.x1, self.y1])
+    }
+
+    fn from_word(w: u32) -> Self {
+        let [x0, y0, x1, y1] = w.to_le_bytes();
+        Box { x0, y0, x1, y1 }
+    }
 }
 
 /// Little-endian `u32` arrays, each preceded by its length as a `u64`.
@@ -162,6 +215,7 @@ impl ChipDb {
         let mut pad_lines: Vec<(String, String, String)> = Vec::new();
         // Wire name -> index, per tile type; only needed while parsing.
         let mut wire_index: Vec<HashMap<String, u32>> = Vec::new();
+        let mut wire_types: Vec<String> = Vec::new();
 
         for line in reader.lines() {
             let line = line?;
@@ -187,8 +241,18 @@ impl ChipDb {
                     let t = current.context("wire outside a tile type")?;
                     let tt = &mut tile_types[t];
                     let name = f.next().context("wire name")?;
+                    let ty = f.next().context("wire type")?;
+                    let ty = match wire_types.iter().position(|w| w == ty) {
+                        Some(i) => i,
+                        None => {
+                            wire_types.push(ty.to_string());
+                            wire_types.len() - 1
+                        }
+                    };
+                    ensure!(ty < 256, "more than 256 wire types");
                     wire_index[t].insert(name.to_string(), tt.wires.len() as u32);
                     tt.wires.push(name);
+                    tt.wire_types.push(ty as u8);
                 }
                 "p" => {
                     let t = current.context("pip outside a tile type")?;
@@ -246,6 +310,11 @@ impl ChipDb {
             }
         }
         ensure!(width > 0 && height > 0, "no chip line");
+        // Node boxes hold tile coordinates in a byte each.
+        ensure!(
+            width <= 256 && height <= 256,
+            "chip too large for the cache format"
+        );
 
         let mut tiles = vec![u32::MAX; (width * height) as usize];
         for (x, y, ty) in tile_type_of {
@@ -265,14 +334,17 @@ impl ChipDb {
 
         // Nodes first, then every remaining tile wire is a node of its own.
         let mut node_of = vec![u32::MAX; flat_wires as usize];
-        let mut node_xy: Vec<(u16, u16)> = Vec::new();
-        let flat = |x: u32, y: u32, name: &str| -> Result<u32> {
+        let mut node_box: Vec<Box> = Vec::new();
+        let mut node_type: Vec<u8> = Vec::new();
+        // (flat wire, its type)
+        let flat = |x: u32, y: u32, name: &str| -> Result<(u32, u8)> {
             ensure!(x < width && y < height, "node wire outside the chip");
             let tile = (y * width + x) as usize;
-            let w = *wire_index[tiles[tile] as usize]
+            let tt = tiles[tile] as usize;
+            let w = *wire_index[tt]
                 .get(name)
                 .with_context(|| format!("node wire X{x}Y{y}/{name} undeclared"))?;
-            Ok(wire_base[tile] + w)
+            Ok((wire_base[tile] + w, tile_types[tt].wire_types[w as usize]))
         };
         for line in &node_lines {
             let f: Vec<&str> = line.split_ascii_whitespace().skip(1).collect();
@@ -280,28 +352,44 @@ impl ChipDb {
                 f.len().is_multiple_of(3) && !f.is_empty(),
                 "malformed node line"
             );
-            let id = node_xy.len() as NodeId;
-            for w in f.chunks(3) {
-                let (x, y) = (w[0].parse()?, w[1].parse()?);
-                let fw = flat(x, y, w[2])? as usize;
-                ensure!(node_of[fw] == u32::MAX, "X{x}Y{y}/{} is in two nodes", w[2]);
-                node_of[fw] = id;
+            let id = node_box.len() as NodeId;
+            let mut ty = 0;
+            let mut bbox: Option<Box> = None;
+            for (i, w) in f.chunks(3).enumerate() {
+                let (x, y): (u32, u32) = (w[0].parse()?, w[1].parse()?);
+                match &mut bbox {
+                    Some(b) => b.add(x as u8, y as u8),
+                    None => bbox = Some(Box::tile(x as u8, y as u8)),
+                }
+                let (fw, t) = flat(x, y, w[2])?;
+                ensure!(
+                    node_of[fw as usize] == u32::MAX,
+                    "X{x}Y{y}/{} is in two nodes",
+                    w[2]
+                );
+                node_of[fw as usize] = id;
+                // A node is one physical wire; its first tile wire names the type.
+                if i == 0 {
+                    ty = t;
+                }
             }
-            node_xy.push((f[0].parse()?, f[1].parse()?));
+            node_box.push(bbox.expect("node lines have at least one wire"));
+            node_type.push(ty);
         }
         for (tile, &t) in tiles.iter().enumerate() {
-            let (x, y) = ((tile as u32 % width) as u16, (tile as u32 / width) as u16);
+            let (x, y) = ((tile as u32 % width) as u8, (tile as u32 / width) as u8);
             for w in 0..tile_types[t as usize].wires.len() {
                 let fw = wire_base[tile] as usize + w;
                 if node_of[fw] == u32::MAX {
-                    node_of[fw] = node_xy.len() as NodeId;
-                    node_xy.push((x, y));
+                    node_of[fw] = node_box.len() as NodeId;
+                    node_box.push(Box::tile(x, y));
+                    node_type.push(tile_types[t as usize].wire_types[w]);
                 }
             }
         }
 
         // Edges, grouped by source node (CSR).
-        let nodes = node_xy.len();
+        let nodes = node_box.len();
         let mut out_degree = vec![0u32; nodes + 1];
         for (tile, &t) in tiles.iter().enumerate() {
             for &(s, _) in &tile_types[t as usize].pips {
@@ -355,10 +443,12 @@ impl ChipDb {
             width,
             height,
             tile_types,
+            wire_types,
             tiles,
             wire_base,
             node_of,
-            node_xy,
+            node_box,
+            node_type,
             edge_start,
             edges,
         })
@@ -374,12 +464,8 @@ impl ChipDb {
         bytes.extend(header);
         put_words(&mut bytes, self.wire_base.iter().copied());
         put_words(&mut bytes, self.node_of.iter().copied());
-        put_words(
-            &mut bytes,
-            self.node_xy
-                .iter()
-                .map(|&(x, y)| x as u32 | (y as u32) << 16),
-        );
+        put_words(&mut bytes, self.node_box.iter().map(|b| b.word()));
+        put_words(&mut bytes, self.node_type.iter().map(|&t| t as u32));
         put_words(&mut bytes, self.edge_start.iter().copied());
         put_words(
             &mut bytes,
@@ -403,7 +489,7 @@ impl ChipDb {
         let mut c = Cursor(body);
         let header_len = c.len()?;
         let header = c.take(header_len)?;
-        let mut arrays: [&[u8]; 5] = [&[]; 5];
+        let mut arrays: [&[u8]; 6] = [&[]; 6];
         for a in &mut arrays {
             let n = c.len()?;
             *a = c.take(n * 4)?;
@@ -421,28 +507,32 @@ impl ChipDb {
                 .map(|w| f(w.map(u32::from_le_bytes)))
                 .collect()
         }
-        let [wire_base, node_of, node_xy, edge_start, edges] = arrays;
-        let (db, wire_base, node_of, node_xy, edge_start, edges) = std::thread::scope(|s| {
-            let wire_base = s.spawn(|| decode(wire_base, |[w]| w));
-            let node_of = s.spawn(|| decode(node_of, |[w]| w));
-            let node_xy = s.spawn(|| decode(node_xy, |[w]| (w as u16, (w >> 16) as u16)));
-            let edge_start = s.spawn(|| decode(edge_start, |[w]| w));
-            let edges = s.spawn(|| decode(edges, |[dst, tile, pip]| Edge { dst, tile, pip }));
-            let db = postcard::from_bytes::<ChipDb>(header);
-            let join = "decoding thread panicked";
-            (
-                db,
-                wire_base.join().expect(join),
-                node_of.join().expect(join),
-                node_xy.join().expect(join),
-                edge_start.join().expect(join),
-                edges.join().expect(join),
-            )
-        });
+        let [wire_base, node_of, node_box, node_type, edge_start, edges] = arrays;
+        let (db, wire_base, node_of, node_box, node_type, edge_start, edges) =
+            std::thread::scope(|s| {
+                let wire_base = s.spawn(|| decode(wire_base, |[w]| w));
+                let node_of = s.spawn(|| decode(node_of, |[w]| w));
+                let node_type = s.spawn(|| decode(node_type, |[w]| w as u8));
+                let node_box = s.spawn(|| decode(node_box, |[w]| Box::from_word(w)));
+                let edge_start = s.spawn(|| decode(edge_start, |[w]| w));
+                let edges = s.spawn(|| decode(edges, |[dst, tile, pip]| Edge { dst, tile, pip }));
+                let db = postcard::from_bytes::<ChipDb>(header);
+                let join = "decoding thread panicked";
+                (
+                    db,
+                    wire_base.join().expect(join),
+                    node_of.join().expect(join),
+                    node_box.join().expect(join),
+                    node_type.join().expect(join),
+                    edge_start.join().expect(join),
+                    edges.join().expect(join),
+                )
+            });
         let mut db = db?;
         db.wire_base = wire_base;
         db.node_of = node_of;
-        db.node_xy = node_xy;
+        db.node_box = node_box;
+        db.node_type = node_type;
         db.edge_start = edge_start;
         db.edges = edges;
         Ok(db)
@@ -474,7 +564,7 @@ impl ChipDb {
     }
 
     pub fn nodes(&self) -> usize {
-        self.node_xy.len()
+        self.node_box.len()
     }
 
     pub fn edge_count(&self) -> usize {
