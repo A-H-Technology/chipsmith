@@ -79,6 +79,11 @@ impl UsbBlaster {
             |request: u8, value: u16| handle.write_control(0x40, request, value, 1, &[], TIMEOUT);
         ftdi(0, 0).context("resetting the FTDI")?;
         ftdi(9, 2).context("setting the FTDI latency timer")?;
+        // Bytes left in the FIFOs by an interrupted session, or by a board
+        // power-cycled mid-transfer, would otherwise arrive as our TDO
+        // ("returned 276 TDO bytes, expected 63").
+        ftdi(0, 1).context("purging the FTDI receive buffer")?;
+        ftdi(0, 2).context("purging the FTDI transmit buffer")?;
 
         let mut blaster = UsbBlaster {
             handle,

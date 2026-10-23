@@ -36,6 +36,9 @@ enum Cmd {
     /// Compare two packed netlists (ours against nextpnr's `--pack-only`).
     #[command(hide = true)]
     PackDiff { ours: PathBuf, theirs: PathBuf },
+    /// Map a yosys netlist's simple gates to 4-input LUTs (in place of abc).
+    #[command(hide = true)]
+    Lutmap { netlist: PathBuf, mapped: PathBuf },
 }
 
 fn main() -> Result<()> {
@@ -53,6 +56,14 @@ fn main() -> Result<()> {
             anyhow::ensure!(d.equal, "packed netlists differ");
             return Ok(());
         }
+        Cmd::Lutmap { netlist, mapped } => {
+            let mut json: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(netlist)?)?;
+            let s = chipsmith::synth::lutmap::map(&mut json)?;
+            std::fs::write(mapped, serde_json::to_string(&json)?)?;
+            eprintln!("{s:?}");
+            return Ok(());
+        }
         _ => {}
     }
     let project_dir = std::path::absolute(&cli.project_dir)?;
@@ -64,7 +75,7 @@ fn main() -> Result<()> {
             flow::plan_build(&manifest, &layout, &flow::synth_dir()?).run()?;
             println!("{}", layout.bitstream().display());
         }
-        Cmd::RoutingGraph { .. } | Cmd::Pack { .. } | Cmd::PackDiff { .. } => {
+        Cmd::RoutingGraph { .. } | Cmd::Pack { .. } | Cmd::PackDiff { .. } | Cmd::Lutmap { .. } => {
             unreachable!("handled before the manifest")
         }
         Cmd::Flash { bitstream } => {

@@ -5,4 +5,5 @@ pub mod manifest;
 pub mod pack;
 pub mod place;
 pub mod route;
+pub mod synth;
 pub mod timing;
