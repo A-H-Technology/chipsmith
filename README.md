@@ -7,8 +7,9 @@ nix run github:A-H-Technology/chipsmith/open -- -C examples/blinky-vhdl build
 nix run github:A-H-Technology/chipsmith/open -- -C examples/blinky-vhdl flash
 ```
 
-The first run builds nextpnr's chip database (about 15 minutes). A build of
-blinky takes about 9 s.
+The first run builds cram and flattens its chip database into the router's
+graph. After that a build of blinky-vhdl takes about 6 s; chipsmith runs no
+nextpnr.
 
 ## Status
 
@@ -33,7 +34,7 @@ register delays exactly and routing by per-element-type averages.
 |---|---|---|
 | VHDL → Verilog | GHDL `--synth --out=verilog` | stays a translator in front of the flow |
 | synthesis | yosys + `cyclone2.ys` (cyclone2-re) | to replace |
-| packing | nextpnr-himbaechel `--pack-only`, cyclone2 uarch (cyclone2-re) | to replace next |
+| packing | chipsmith: cyclone2-re's nextpnr packer, ported (`src/pack`) | ours |
 | placement | chipsmith: simulated annealing over LAB slots, nextpnr's LAB rules (`src/place`) | ours |
 | routing | chipsmith: PathFinder over the chip database (`src/route`) | ours |
 | bitstream | `cram pack` (cyclone2-re) | ours already |
@@ -128,7 +129,35 @@ share chipsmith's own netlist IR, not Verilog.
      8.79 ns (11.23 ns of slack at 50 MHz; was 2.25 ns with nextpnr).
      Weight/exponent sweep, one seed each: 8/4 8.79 ns, 32/8 8.81 ns,
      16/4 8.94 ns, 8/2 9.35 ns.
-   - Packer: next.
+   - Packer (done). `src/pack` is the `pack()` of cyclone2-re's nextpnr
+     uarch in Rust: pin buffers named after their port bits, constants
+     folded into LUT masks and pins, stuck-at-GND registers and input-less
+     LUTs removed, one-input LUTs folded into their loads (inversions into
+     masks, `DATA_INVERT`, `ENA_INV`/`SCLR_INV`; pushed back into the driver
+     or made an inverted copy of it in front of a register), registers
+     paired with their LUT or put on the sync-load path, carry chains in
+     Quartus' polarity, a clock control per clock (the placer picks which).
+     Some rules depend on visiting order (folding one buffer can make
+     another LUT a buffer; the first register to claim a LUT gets it), so
+     the netlist iterates the way nextpnr's containers do and imports yosys'
+     JSON the way its frontend does; net ids come out in nextpnr's order,
+     which is the order the router routes in.
+     `bench/pack-equiv.sh` packs a netlist with both and compares
+     (`chipsmith pack-diff`: cells by name, type, parameters, every
+     connection by net name, net id order):
+
+     | design | cells | nextpnr `--pack-only` vs chipsmith | full-flow RBF vs nextpnr-packed flow | Quartus (`bench/quartus-timing.sh`) |
+     |---|---|---|---|---|
+     | blinky | 58 | identical, same net order | identical | byte-identical; slack 16.65 ns, data delay 3.39 ns |
+     | lfsr | 173 | identical, same net order | identical | byte-identical; slack 13.39 ns, data delay 6.68 ns |
+     | uart_tx | 152 | identical, same net order | identical | byte-identical; slack 14.46 ns, data delay 5.56 ns |
+     | picorv32 | 1,459 | identical, same net order | identical | byte-identical; slack 11.23 ns, data delay 8.79 ns |
+     | examples/blinky-verilog, blinky-vhdl | 58 | identical, same net order | identical | (same design as blinky) |
+
+     Packing picorv32 takes 0.4 s. A design exercising the rarer rules
+     (register inits of 1, active-low enables and clears, constant and
+     inverted outputs) packs identically too. Parameters nextpnr writes as
+     `0` (a flag toggled back) chipsmith leaves out; they read the same.
 4. **Own synthesis**: techmap and LUT mapping on the IR. yosys's JSON
    netlist is the boundary until then.
 5. **Own Verilog frontend**: the synthesizable subset that GHDL and HDL

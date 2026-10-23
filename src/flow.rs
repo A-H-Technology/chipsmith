@@ -1,7 +1,7 @@
 //! HDL to bitstream to chip. Some stages are still external tools: GHDL
-//! (VHDL to Verilog), yosys (synthesis), nextpnr (packing) and cram
-//! (bitstream, JTAG stream). Placement (`place`), routing (`route`) and
-//! loading over the cable (`jtag`) are chipsmith's own. Each stage is one
+//! (VHDL to Verilog), yosys (synthesis) and cram (bitstream, JTAG stream).
+//! Packing (`pack`), placement (`place`), routing (`route`) and loading
+//! over the cable (`jtag`) are chipsmith's own. Each stage is one
 //! `Step` in a `Plan`, so replacing a tool with chipsmith's own code means
 //! replacing one step.
 //!
@@ -53,9 +53,6 @@ impl Layout {
     fn netlist(&self) -> PathBuf {
         self.dir.join("netlist.json")
     }
-    fn pins(&self) -> PathBuf {
-        self.dir.join("pins.qsf")
-    }
     fn packed(&self) -> PathBuf {
         self.dir.join("packed.json")
     }
@@ -74,7 +71,9 @@ impl Layout {
 pub enum Step {
     /// An external program.
     Tool(Tool),
-    /// Route a placed design (nextpnr JSON) into a routed one, in process.
+    /// Pack a yosys netlist into LEs, pins and clock controls (nextpnr's
+    /// JSON), in process.
+    Pack { netlist: PathBuf, packed: PathBuf },
     /// Place a packed design (nextpnr JSON) and route it, in process.
     /// `pins` maps top-level port bits (`LEDR[0]`) to pins (`PIN_AE23`).
     PlaceRoute {
@@ -91,6 +90,7 @@ impl Step {
     pub fn label(&self) -> &'static str {
         match self {
             Step::Tool(tool) => tool.label,
+            Step::Pack { .. } => "pack",
             Step::PlaceRoute { .. } => "place and route",
             Step::PlaySvf(_) => "JTAG: program over USB-Blaster",
         }
@@ -180,23 +180,10 @@ pub fn plan_build(manifest: &Manifest, layout: &Layout, synth_dir: &Path) -> Pla
         .arg(layout.synth_script())
         .into(),
     );
-    steps.push(
-        Tool {
-            log: Some(layout.log("nextpnr")),
-            ..Tool::new("nextpnr: pack", "nextpnr-himbaechel")
-        }
-        .args(["--device", manifest.device.part(), "--json"])
-        .arg(layout.netlist())
-        .arg("--pack-only")
-        .arg("--write")
-        .arg(layout.packed())
-        .arg("-o")
-        .arg(prefixed("qsf=", &layout.pins()))
-        .arg("--log")
-        .arg(layout.log("nextpnr"))
-        .arg("-q")
-        .into(),
-    );
+    steps.push(Step::Pack {
+        netlist: layout.netlist(),
+        packed: layout.packed(),
+    });
     steps.push(Step::PlaceRoute {
         packed: layout.packed(),
         placed: layout.placed(),
@@ -218,13 +205,10 @@ pub fn plan_build(manifest: &Manifest, layout: &Layout, synth_dir: &Path) -> Pla
 
     Plan {
         dir: Some(layout.dir.clone()),
-        files: vec![
-            (
-                layout.synth_script(),
-                synth_script(&verilog, &manifest.top, &layout.netlist()),
-            ),
-            (layout.pins(), pins_qsf(manifest)),
-        ],
+        files: vec![(
+            layout.synth_script(),
+            synth_script(&verilog, &manifest.top, &layout.netlist()),
+        )],
         steps,
     }
 }
@@ -287,28 +271,8 @@ fn synth_script(verilog: &[PathBuf], top: &str, netlist: &Path) -> String {
     script
 }
 
-fn pins_qsf(manifest: &Manifest) -> String {
-    manifest
-        .pins
-        .iter()
-        .map(|a| {
-            format!(
-                "set_location_assignment {} -to {}\n",
-                a.pin.as_str(),
-                a.port
-            )
-        })
-        .collect()
-}
-
 fn quoted(path: &Path) -> String {
     format!("\"{}\"", path.display())
-}
-
-fn prefixed(prefix: &str, path: &Path) -> OsString {
-    let mut s = OsString::from(prefix);
-    s.push(path);
-    s
 }
 
 impl Plan {
@@ -324,6 +288,7 @@ impl Plan {
             eprintln!("  {}", step.label());
             match step {
                 Step::Tool(tool) => run_tool(tool)?,
+                Step::Pack { netlist, packed } => pack(netlist, packed)?,
                 Step::PlaceRoute {
                     packed,
                     placed,
@@ -335,6 +300,25 @@ impl Plan {
         }
         Ok(())
     }
+}
+
+fn pack(netlist: &Path, packed: &Path) -> Result<()> {
+    let started = Instant::now();
+    let s = crate::pack::pack_file(netlist, packed)?;
+    eprintln!(
+        "    {} LUTs, {} registers ({} on the sync load path), {} carry chains, {} clocks in {:.1} s; \
+         removed {} stuck registers, {} constant and {} one-input LUTs",
+        s.luts,
+        s.ffs,
+        s.sdata,
+        s.chains,
+        s.clocks,
+        started.elapsed().as_secs_f64(),
+        s.stuck_ffs,
+        s.const_luts,
+        s.removed_luts
+    );
+    Ok(())
 }
 
 fn place_route(
@@ -427,7 +411,6 @@ pub fn synth_dir() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::{PinAssignment, PortBit};
 
     fn manifest(sources: Sources) -> Manifest {
         let dir = std::env::temp_dir().join(format!("chipsmith-flow-{}", std::process::id()));
@@ -473,7 +456,7 @@ mod tests {
             labels(&plan),
             [
                 "yosys: synthesis",
-                "nextpnr: pack",
+                "pack",
                 "place and route",
                 "cram: bitstream"
             ]
@@ -483,8 +466,14 @@ mod tests {
             script,
             "read_verilog \"/p/src/blinky.v\"\nrename blinky top\nscript synth/cyclone2.ys\nwrite_json \"/p/build/netlist.json\"\n"
         );
-        // nextpnr only packs; chipsmith places and routes.
-        assert!(tool(&plan.steps[1]).args.iter().any(|a| a == "--pack-only"));
+        // No nextpnr: chipsmith packs what yosys wrote.
+        assert_eq!(
+            plan.steps[1],
+            Step::Pack {
+                netlist: "/p/build/netlist.json".into(),
+                packed: "/p/build/packed.json".into()
+            }
+        );
         assert_eq!(
             tool(&plan.steps[3]).args.last().unwrap(),
             "/p/build/blinky.rbf"
@@ -510,20 +499,24 @@ mod tests {
     }
 
     #[test]
-    fn pins_become_location_assignments_per_port_bit() {
+    fn pins_reach_the_placer_per_port_bit() {
         let m = manifest(Sources::Verilog(vec![]));
+        let layout = Layout {
+            dir: "/p/build".into(),
+            name: m.name.clone(),
+        };
+        let plan = plan_build(&m, &layout, Path::new("/synth"));
+        let Step::PlaceRoute { pins, .. } = &plan.steps[2] else {
+            panic!("{:?} is not place and route", plan.steps[2]);
+        };
+        let pins: Vec<(&str, &str)> = pins.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
         assert_eq!(
-            m.pins[1],
-            PinAssignment {
-                port: PortBit::Bit("LEDR".into(), 0),
-                pin: m.pins[1].pin.clone()
-            }
-        );
-        assert_eq!(
-            pins_qsf(&m),
-            "set_location_assignment PIN_N2 -to CLOCK_50\n\
-             set_location_assignment PIN_AE23 -to LEDR[0]\n\
-             set_location_assignment PIN_AF23 -to LEDR[1]\n"
+            pins,
+            [
+                ("CLOCK_50", "PIN_N2"),
+                ("LEDR[0]", "PIN_AE23"),
+                ("LEDR[1]", "PIN_AF23")
+            ]
         );
     }
 }

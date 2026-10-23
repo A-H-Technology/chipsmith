@@ -2,10 +2,10 @@
   description = "chipsmith: an open FPGA toolchain, HDL in, programmed chip out";
 
   inputs = {
-    # The Cyclone II device database, techmap, packer and nextpnr uarch.
+    # The Cyclone II device database (cram's db/), techmap and cram.
     cyclone2-re.url = "github:cramt/cyclone2-re";
-    # One nixpkgs for both, so nextpnr-cyclone2 (a ~15 min chip database
-    # build) is the same derivation cyclone2-re's devshell already built.
+    # One nixpkgs for both, so cram and its tools are the same derivations
+    # cyclone2-re's devshell already built.
     nixpkgs.follows = "cyclone2-re/nixpkgs";
     flake-utils.follows = "cyclone2-re/flake-utils";
   };
@@ -25,12 +25,10 @@
         flowTools = [
           pkgs.ghdl
           pkgs.yosys
-          open.nextpnr-cyclone2
           open.cram
         ];
         chipsmith = pkgs.callPackage ./nix/package.nix {
           inherit (open)
-            nextpnr-cyclone2
             cram
             cyclone2-synth
             ;
