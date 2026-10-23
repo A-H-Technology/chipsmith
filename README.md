@@ -3,8 +3,8 @@
 An open FPGA toolchain: HDL in, programmed chip out, no vendor software.
 
 ```
-nix run github:cramt/chipsmith/open -- -C examples/blinky-vhdl build
-nix run github:cramt/chipsmith/open -- -C examples/blinky-vhdl flash
+nix run github:A-H-Technology/chipsmith/open -- -C examples/blinky-vhdl build
+nix run github:A-H-Technology/chipsmith/open -- -C examples/blinky-vhdl flash
 ```
 
 The first run builds nextpnr's chip database (about 15 minutes).

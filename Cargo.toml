@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "An open FPGA toolchain: HDL in, bitstream out, chip programmed"
-repository = "https://github.com/cramt/chipsmith"
+repository = "https://github.com/A-H-Technology/chipsmith"
 
 [dependencies]
 anyhow = "1"
