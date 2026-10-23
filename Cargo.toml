@@ -1,0 +1,15 @@
+[package]
+name = "chipsmith"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "An open FPGA toolchain: HDL in, bitstream out, chip programmed"
+repository = "https://github.com/cramt/chipsmith"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+glob = "0.3"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "0.9"
