@@ -39,7 +39,7 @@ register delays exactly and routing by per-element-type averages.
 | routing | chipsmith: PathFinder over the chip database (`src/route`) | ours |
 | bitstream | `cram pack` (cyclone2-re) | ours already |
 | JTAG stream | `cram svf` | ours already |
-| cable | chipsmith: USB-Blaster driver + SVF player (`src/jtag`) | ours |
+| cable | chipsmith: USB-Blaster and FT2232 (MPSSE) drivers, SVF player, 7-series JTAG loader (`src/jtag`) | ours |
 
 Every stage is one `Step` in a `Plan` (`src/flow.rs`), so replacing a tool
 means replacing one step. The nix package pins every tool. The devshell
@@ -162,6 +162,13 @@ share chipsmith's own netlist IR, not Verilog.
    netlist is the boundary until then.
 5. **Own Verilog frontend**: the synthesizable subset that GHDL and HDL
    generators emit.
+
+6. **Persistent flashing**: `chipsmith flash --persist` writes the board's
+   configuration flash so the design survives a power cycle. `flash` as it
+   is loads configuration RAM over JTAG (fast, gone at power-off). DE2: the
+   EPCS16, written through a JTAG-to-SPI bridge design loaded first. Zybo:
+   a boot image (FSBL + bitstream) in QSPI flash, the same way, or on the
+   SD card.
 
 Next devices:
 

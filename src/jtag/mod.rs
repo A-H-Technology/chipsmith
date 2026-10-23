@@ -2,8 +2,10 @@
 //! player on top. A bitstream writer emits SVF (`cram svf`), so loading a
 //! device is "play this SVF", whatever the vendor.
 
+pub mod ftdi;
 pub mod svf;
 pub mod usb_blaster;
+pub mod xc7;
 
 use anyhow::Result;
 
