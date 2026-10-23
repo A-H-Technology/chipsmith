@@ -22,7 +22,7 @@ pub const GRAPH_VAR: &str = "CHIPSMITH_CYCLONE2_GRAPH";
 pub const DB_VAR: &str = "CHIPSMITH_CYCLONE2_DB";
 
 /// Bump when `ChipDb`'s layout changes.
-const CACHE_MAGIC: &[u8] = b"chipsmith-routing-graph-1\n";
+const CACHE_MAGIC: &[u8] = b"chipsmith-routing-graph-2\n";
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TileType {
@@ -33,8 +33,25 @@ pub struct TileType {
     wire_index: HashMap<String, u32>,
     /// (src wire, dst wire)
     pub pips: Vec<(u32, u32)>,
-    /// bel name -> pin name -> wire
-    pub bels: HashMap<String, HashMap<String, u32>>,
+    pub bels: HashMap<String, Bel>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Bel {
+    /// `LCELL_COMB`, `LCELL_FF`, `IOE`, `CLKCTRL`.
+    pub ty: String,
+    pub z: u32,
+    /// pin name -> wire
+    pub pins: HashMap<String, u32>,
+}
+
+/// A package pin and the I/O bel behind it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Pad {
+    /// Ball name without `PIN_`, e.g. `N2`.
+    pub pin: String,
+    pub tile: u32,
+    pub bel: String,
 }
 
 impl TileType {
@@ -53,6 +70,7 @@ pub struct Edge {
 
 #[derive(Serialize, Deserialize)]
 pub struct ChipDb {
+    pub pads: Vec<Pad>,
     pub width: u32,
     pub height: u32,
     pub tile_types: Vec<TileType>,
@@ -83,6 +101,7 @@ impl ChipDb {
         let mut current_bel: Option<String> = None;
         let mut tile_type_of: Vec<(u32, u32, String)> = Vec::new();
         let mut node_lines: Vec<String> = Vec::new();
+        let mut pad_lines: Vec<(String, String, String)> = Vec::new();
 
         for line in reader.lines() {
             let line = line?;
@@ -120,7 +139,16 @@ impl ChipDb {
                 "b" => {
                     let tt = &mut tile_types[current.context("bel outside a tile type")?];
                     let name = f.next().context("bel name")?.to_string();
-                    tt.bels.insert(name.clone(), HashMap::new());
+                    let ty = f.next().context("bel type")?.to_string();
+                    let z = f.next().context("bel z")?.parse()?;
+                    tt.bels.insert(
+                        name.clone(),
+                        Bel {
+                            ty,
+                            z,
+                            pins: HashMap::new(),
+                        },
+                    );
                     current_bel = Some(name);
                 }
                 "bp" => {
@@ -130,7 +158,11 @@ impl ChipDb {
                         .wire(wire)
                         .with_context(|| format!("bel pin {pin} on undeclared wire {wire}"))?;
                     let bel = current_bel.as_ref().context("bel pin outside a bel")?;
-                    tt.bels.get_mut(bel).unwrap().insert(pin.to_string(), w);
+                    tt.bels
+                        .get_mut(bel)
+                        .unwrap()
+                        .pins
+                        .insert(pin.to_string(), w);
                 }
                 "t" => {
                     let x = f.next().context("tile x")?.parse()?;
@@ -138,7 +170,13 @@ impl ChipDb {
                     tile_type_of.push((x, y, f.next().context("tile type")?.to_string()));
                 }
                 "node" => node_lines.push(line),
-                "pkg" | "pad" => {}
+                "pad" => {
+                    let pin = f.next().context("pad pin")?.to_string();
+                    let tile = f.next().context("pad tile")?.to_string();
+                    let bel = f.next().context("pad bel")?.to_string();
+                    pad_lines.push((pin, tile, bel));
+                }
+                "pkg" => {}
                 other => bail!("unknown chipdb line kind {other:?}"),
             }
         }
@@ -232,7 +270,23 @@ impl ChipDb {
             }
         }
 
+        let mut pads = Vec::new();
+        for (pin, tile, bel) in pad_lines {
+            let (x, y) = tile
+                .strip_prefix('X')
+                .and_then(|t| t.split_once('Y'))
+                .and_then(|(x, y)| Some((x.parse::<u32>().ok()?, y.parse::<u32>().ok()?)))
+                .with_context(|| format!("pad {pin}: tile {tile}"))?;
+            ensure!(x < width && y < height, "pad {pin} off chip");
+            pads.push(Pad {
+                pin,
+                tile: y * width + x,
+                bel,
+            });
+        }
+
         Ok(ChipDb {
+            pads,
             width,
             height,
             tile_types,
@@ -274,20 +328,29 @@ impl ChipDb {
         Ok(db)
     }
 
-    /// The EP2C35's graph: the prebuilt one named by `GRAPH_VAR` (the nix
-    /// package builds it), or else parsed from the chip database under
-    /// `DB_VAR`, which takes several seconds longer.
+    /// The EP2C35's graph: the prebuilt one at `GRAPH_VAR` (the nix package
+    /// ships one), or else parsed from the chip database under `DB_VAR`, which
+    /// takes several seconds longer. A missing or stale cache at `GRAPH_VAR`
+    /// is rewritten from the parse when the path is writable (the devshell
+    /// points it into `target/`).
     pub fn load_for_device() -> Result<Self> {
-        if let Some(graph) = std::env::var_os(GRAPH_VAR) {
-            match Self::read_cache(Path::new(&graph)) {
+        let cache = std::env::var_os(GRAPH_VAR).map(std::path::PathBuf::from);
+        if let Some(cache) = cache.as_deref().filter(|c| c.exists()) {
+            match Self::read_cache(cache) {
                 Ok(db) => return Ok(db),
-                Err(e) => eprintln!("    warning: {e:#}; parsing the chip database instead"),
+                Err(e) => eprintln!("    {e:#}; parsing the chip database instead"),
             }
         }
         let db = std::env::var_os(DB_VAR).with_context(|| {
-            format!("neither {GRAPH_VAR} nor {DB_VAR} is set; run chipsmith from its nix package or `nix develop`")
+            format!("{DB_VAR} is not set; run chipsmith from its nix package or `nix develop`")
         })?;
-        Self::load(&Path::new(&db).join("EP2C35F672C6/chipdb.txt.xz"))
+        let graph = Self::load(&Path::new(&db).join("EP2C35F672C6/chipdb.txt.xz"))?;
+        if let Some(cache) = cache {
+            if graph.write_cache(&cache).is_ok() {
+                eprintln!("    cached the routing graph in {}", cache.display());
+            }
+        }
+        Ok(graph)
     }
 
     pub fn nodes(&self) -> usize {
@@ -384,6 +447,7 @@ node 0 0 B 1 0 A
             [b1]
         );
         assert_eq!(db.pip_name(1, 0), "X1Y0/B/A");
-        assert_eq!(db.tile_type(0).bels["BEL"]["O"], 1);
+        assert_eq!(db.tile_type(0).bels["BEL"].pins["O"], 1);
+        assert_eq!(db.tile_type(0).bels["BEL"].ty, "TYPE");
     }
 }

@@ -51,10 +51,12 @@
           ]
           ++ flowTools;
           CHIPSMITH_CYCLONE2_SYNTH = open.cyclone2-synth;
-          # Built by the packaged chipsmith; one built by `cargo run` with a
-          # changed graph format refuses it and parses the chip database.
-          CHIPSMITH_CYCLONE2_GRAPH = chipsmith.routingGraph;
           CHIPSMITH_CYCLONE2_DB = "${open.cram}/db";
+          # Written on first use (and whenever the format changes), so the
+          # shell doesn't depend on building chipsmith itself.
+          shellHook = ''
+            export CHIPSMITH_CYCLONE2_GRAPH=$PWD/target/routing-graph.bin
+          '';
         };
       }
     );

@@ -1,0 +1,933 @@
+//! chipsmith's placer: simulated annealing over LAB slots.
+//!
+//! Input is a packed design in nextpnr's JSON (`nextpnr-himbaechel
+//! --pack-only --write`): LUTs, registers, pin buffers and clock controls,
+//! with carry polarity and register packing already settled. Output is the
+//! same JSON with a `NEXTPNR_BEL` on every cell, which the router and cram
+//! read.
+//!
+//! What moves is an LE (a LUT and the register its output feeds, or either
+//! alone) or a whole carry chain, which starts at LE 0 of a LAB and runs
+//! LE k -> k+1, LE 15 -> LE 0 of the LAB below. A LAB holds 16 LEs and has
+//! to satisfy the rules `lab_ok` checks; pins sit where the pin assignments
+//! say, clock controls are the nearest free one the clock pin reaches.
+
+use std::collections::VecDeque;
+
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::path::Path;
+
+use anyhow::{bail, ensure, Context, Result};
+use serde_json::Value;
+
+use crate::route::chipdb::{ChipDb, NodeId};
+
+const LES_PER_LAB: usize = 16;
+/// Signals from outside a LAB arrive on its 38 local lines, each LE input
+/// reaching about half of them. nextpnr's cyclone2 uarch measured 34 as the
+/// most that keeps a full LAB routable on picorv32.
+const MAX_LAB_INPUTS: usize = 34;
+const LUT_INPUTS: [Port; 4] = [Port::DataA, Port::DataB, Port::DataC, Port::DataD];
+
+/// Every cell port the packed netlist uses: a closed set, so cells keep
+/// their nets in an array indexed by it rather than a map keyed by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Port {
+    DataA,
+    DataB,
+    DataC,
+    DataD,
+    Cin,
+    Cout,
+    Combout,
+    Datain,
+    Sdata,
+    Clk,
+    Ena,
+    Aclr,
+    Sclr,
+    Regout,
+    Inclk,
+    Outclk,
+    Dataout,
+}
+
+impl Port {
+    const ALL: [Port; 17] = [
+        Port::DataA,
+        Port::DataB,
+        Port::DataC,
+        Port::DataD,
+        Port::Cin,
+        Port::Cout,
+        Port::Combout,
+        Port::Datain,
+        Port::Sdata,
+        Port::Clk,
+        Port::Ena,
+        Port::Aclr,
+        Port::Sclr,
+        Port::Regout,
+        Port::Inclk,
+        Port::Outclk,
+        Port::Dataout,
+    ];
+
+    fn parse(name: &str) -> Option<Port> {
+        Some(match name {
+            "DATAA" => Port::DataA,
+            "DATAB" => Port::DataB,
+            "DATAC" => Port::DataC,
+            "DATAD" => Port::DataD,
+            "CIN" => Port::Cin,
+            "COUT" => Port::Cout,
+            "COMBOUT" => Port::Combout,
+            "DATAIN" => Port::Datain,
+            "SDATA" => Port::Sdata,
+            "CLK" => Port::Clk,
+            "ENA" => Port::Ena,
+            "ACLR" => Port::Aclr,
+            "SCLR" => Port::Sclr,
+            "REGOUT" => Port::Regout,
+            "INCLK" => Port::Inclk,
+            "OUTCLK" => Port::Outclk,
+            "DATAOUT" => Port::Dataout,
+            _ => return None,
+        })
+    }
+}
+
+/// A net, renumbered densely so per-net data lives in `Vec`s.
+type NetId = u32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Lut,
+    Ff,
+    Ibuf,
+    Obuf,
+    ClkCtrl,
+}
+
+#[derive(Debug)]
+struct Cell {
+    name: String,
+    kind: Kind,
+    ports: [Option<NetId>; Port::ALL.len()],
+    ena_inv: bool,
+    sclr_inv: bool,
+    /// Pin buffers: the top-level port they serve (`LEDR[0]`).
+    port: Option<String>,
+}
+
+impl Cell {
+    fn net(&self, port: Port) -> Option<NetId> {
+        self.ports[port as usize]
+    }
+
+    fn connections(&self) -> impl Iterator<Item = (Port, NetId)> + '_ {
+        Port::ALL
+            .into_iter()
+            .filter_map(|p| Some((p, self.net(p)?)))
+    }
+}
+
+/// One LE's worth of logic.
+#[derive(Debug, Clone, Copy)]
+struct Le {
+    lut: Option<usize>,
+    ff: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stats {
+    pub les: usize,
+    pub chains: usize,
+    pub initial_cost: u64,
+    pub cost: u64,
+    pub moves: u64,
+}
+
+/// A position: tile coordinates, used for wirelength.
+type Xy = (i32, i32);
+
+struct Design {
+    cells: Vec<Cell>,
+    les: Vec<Le>,
+    le_of: Vec<Option<usize>>,
+    chains: Vec<Vec<usize>>,
+    chain_of: Vec<Option<usize>>,
+    /// Nets that count for wirelength: their cells. Clock nets (driven by
+    /// a clock control) don't; they ride the global network.
+    nets: Vec<Vec<usize>>,
+    nets_of_le: Vec<Vec<usize>>,
+    /// Driving cell of each net, for "is this LAB input local".
+    driver: Vec<Option<usize>>,
+}
+
+fn read_design(json: &Value) -> Result<Design> {
+    let mut cells = Vec::new();
+    let mut net_ids: HashMap<u64, NetId> = HashMap::default();
+    for (name, c) in json["modules"]["top"]["cells"]
+        .as_object()
+        .context("no cells")?
+    {
+        let kind = match c["type"].as_str().unwrap_or("") {
+            "LCELL_COMB" => Kind::Lut,
+            "LCELL_FF" => Kind::Ff,
+            "CY2_IBUF" => Kind::Ibuf,
+            "CY2_OBUF" => Kind::Obuf,
+            "CLKCTRL" => Kind::ClkCtrl,
+            other => bail!("{name}: cell type {other} has nowhere to go"),
+        };
+        let mut ports = [None; Port::ALL.len()];
+        for (port, bits) in c["connections"].as_object().context("connections")? {
+            if let Some(net) = bits
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(Value::as_u64)
+            {
+                let p =
+                    Port::parse(port).with_context(|| format!("{name}: unknown port {port}"))?;
+                let next = net_ids.len() as NetId;
+                ports[p as usize] = Some(*net_ids.entry(net).or_insert(next));
+            }
+        }
+        let flag = |p: &str| {
+            c["parameters"][p]
+                .as_str()
+                .is_some_and(|v| v.chars().any(|ch| ch == '1'))
+        };
+        cells.push(Cell {
+            name: name.clone(),
+            kind,
+            ports,
+            ena_inv: flag("ENA_INV"),
+            sclr_inv: flag("SCLR_INV"),
+            port: c["attributes"]["PORT"].as_str().map(str::to_string),
+        });
+    }
+
+    let net_count = net_ids.len();
+    let mut driver: Vec<Option<usize>> = vec![None; net_count];
+    let mut users: Vec<Vec<(usize, Port)>> = vec![Vec::new(); net_count];
+    for (i, c) in cells.iter().enumerate() {
+        for (port, net) in c.connections() {
+            let output = matches!(
+                (c.kind, port),
+                (Kind::Lut, Port::Combout | Port::Cout)
+                    | (Kind::Ff, Port::Regout)
+                    | (Kind::Ibuf, Port::Combout)
+                    | (Kind::ClkCtrl, Port::Outclk)
+            );
+            if output {
+                ensure!(
+                    driver[net as usize].replace(i).is_none(),
+                    "{}: drives a net that already has a driver",
+                    c.name
+                );
+            } else {
+                users[net as usize].push((i, port));
+            }
+        }
+    }
+
+    // LEs: a register whose data comes from a LUT shares that LUT's LE.
+    let mut le_of = vec![None; cells.len()];
+    let mut les = Vec::new();
+    for (i, c) in cells.iter().enumerate().filter(|(_, c)| c.kind == Kind::Ff) {
+        let lut = match c.net(Port::Datain) {
+            Some(net) => {
+                let d =
+                    driver[net as usize].with_context(|| format!("{}: DATAIN undriven", c.name))?;
+                ensure!(
+                    cells[d].kind == Kind::Lut && cells[d].net(Port::Combout) == Some(net),
+                    "{}: DATAIN must come from a LUT",
+                    c.name
+                );
+                ensure!(
+                    le_of[d].is_none(),
+                    "{} feeds two registers' DATAIN",
+                    cells[d].name
+                );
+                Some(d)
+            }
+            None => None,
+        };
+        le_of[i] = Some(les.len());
+        if let Some(d) = lut {
+            le_of[d] = Some(les.len());
+        }
+        les.push(Le { lut, ff: Some(i) });
+    }
+    for (i, c) in cells.iter().enumerate() {
+        if c.kind == Kind::Lut && le_of[i].is_none() {
+            le_of[i] = Some(les.len());
+            les.push(Le {
+                lut: Some(i),
+                ff: None,
+            });
+        }
+    }
+
+    // Carry chains, from their heads (COUT used, CIN not driven).
+    let mut chains = Vec::new();
+    let mut chain_of = vec![None; les.len()];
+    let cout_user = |cell: usize| -> Result<Option<usize>> {
+        let Some(net) = cells[cell].net(Port::Cout) else {
+            return Ok(None);
+        };
+        match users[net as usize].as_slice() {
+            [] => Ok(None),
+            [(next, Port::Cin)] => Ok(Some(*next)),
+            _ => bail!(
+                "carry out of {} must feed exactly one carry in",
+                cells[cell].name
+            ),
+        }
+    };
+    for (i, c) in cells.iter().enumerate() {
+        let head = c.kind == Kind::Lut
+            && c.net(Port::Cin)
+                .is_none_or(|n| driver[n as usize].is_none());
+        if !head || cout_user(i)?.is_none() {
+            continue;
+        }
+        let mut chain = vec![le_of[i].unwrap()];
+        let mut at = i;
+        while let Some(next) = cout_user(at)? {
+            chain.push(le_of[next].unwrap());
+            at = next;
+        }
+        for &le in &chain {
+            chain_of[le] = Some(chains.len());
+        }
+        chains.push(chain);
+    }
+
+    let clock_nets: HashSet<NetId> = cells
+        .iter()
+        .filter(|c| c.kind == Kind::ClkCtrl)
+        .filter_map(|c| c.net(Port::Outclk))
+        .collect();
+    let mut by_net: Vec<Vec<usize>> = vec![Vec::new(); net_count];
+    for (i, c) in cells.iter().enumerate() {
+        for (port, net) in c.connections() {
+            // Carry wires are fixed by the chain itself.
+            if !clock_nets.contains(&net) && port != Port::Cin && port != Port::Cout {
+                by_net[net as usize].push(i);
+            }
+        }
+    }
+    let mut nets: Vec<Vec<usize>> = by_net
+        .into_iter()
+        .map(|mut v| {
+            v.sort();
+            v.dedup();
+            v
+        })
+        .filter(|v| v.len() > 1)
+        .collect();
+    nets.sort();
+    let mut nets_of_le = vec![Vec::new(); les.len()];
+    for (n, members) in nets.iter().enumerate() {
+        for &c in members {
+            if let Some(le) = le_of[c] {
+                if nets_of_le[le].last() != Some(&n) {
+                    nets_of_le[le].push(n);
+                }
+            }
+        }
+    }
+
+    Ok(Design {
+        cells,
+        les,
+        le_of,
+        chains,
+        chain_of,
+        nets,
+        nets_of_le,
+        driver,
+    })
+}
+
+/// The LABs of the chip.
+struct Grid {
+    /// LAB index -> its tile.
+    tiles: Vec<u32>,
+    xy: Vec<Xy>,
+    at: HashMap<Xy, usize>,
+}
+
+impl Grid {
+    fn new(db: &ChipDb) -> Self {
+        let (mut tiles, mut xy, mut at) = (Vec::new(), Vec::new(), HashMap::default());
+        for tile in 0..db.width * db.height {
+            if db.tile_type(tile).bels.contains_key("LE0.LUT") {
+                let (x, y) = db.tile_xy(tile);
+                at.insert((x as i32, y as i32), tiles.len());
+                xy.push((x as i32, y as i32));
+                tiles.push(tile);
+            }
+        }
+        Grid { tiles, xy, at }
+    }
+
+    /// The LABs a chain of `len` LEs starting at `lab` occupies.
+    fn chain_labs(&self, lab: usize, len: usize) -> Option<Vec<usize>> {
+        let (x, y) = self.xy[lab];
+        (0..len.div_ceil(LES_PER_LAB) as i32)
+            .map(|i| self.at.get(&(x, y - i)).copied())
+            .collect()
+    }
+}
+
+/// Fixed cells: pins and clock controls, with their bel names.
+fn fixed_cells(
+    db: &ChipDb,
+    design: &Design,
+    pins: &std::collections::BTreeMap<String, String>,
+) -> Result<HashMap<usize, (u32, String)>> {
+    let mut out = HashMap::default();
+    let pads: HashMap<&str, (u32, &str)> = db
+        .pads
+        .iter()
+        .map(|p| (p.pin.as_str(), (p.tile, p.bel.as_str())))
+        .collect();
+    for (i, c) in design.cells.iter().enumerate() {
+        if !matches!(c.kind, Kind::Ibuf | Kind::Obuf) {
+            continue;
+        }
+        let port = c
+            .port
+            .as_ref()
+            .with_context(|| format!("{}: pin buffer without a top-level port", c.name))?;
+        let pin = pins
+            .get(port)
+            .with_context(|| format!("no pin assignment for port {port}"))?;
+        let ball = pin.strip_prefix("PIN_").unwrap_or(pin);
+        let &(tile, bel) = pads
+            .get(ball)
+            .with_context(|| format!("port {port}: {pin} is not a user I/O pin"))?;
+        ensure!(
+            !out.values()
+                .any(|(t, b): &(u32, String)| *t == tile && b == bel),
+            "port {port}: {pin} is already used"
+        );
+        out.insert(i, (tile, bel.to_string()));
+    }
+
+    // INCLK node of every clock control.
+    let mut inclk: HashMap<NodeId, (u32, String)> = HashMap::default();
+    for tile in 0..db.width * db.height {
+        for (name, bel) in &db.tile_type(tile).bels {
+            if bel.ty == "CLKCTRL" {
+                if let Some(&w) = bel.pins.get("INCLK") {
+                    inclk.insert(db.node(tile, w), (tile, name.clone()));
+                }
+            }
+        }
+    }
+    for (i, c) in design
+        .cells
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.kind == Kind::ClkCtrl)
+    {
+        let net = c
+            .net(Port::Inclk)
+            .with_context(|| format!("{}: INCLK unconnected", c.name))?;
+        let pin = design.driver[net as usize].context("clock control input undriven")?;
+        ensure!(
+            design.cells[pin].kind == Kind::Ibuf,
+            "{}: clocks must come straight from a pin",
+            c.name
+        );
+        let (tile, bel) = &out[&pin];
+        let w = db.tile_type(*tile).bels[bel].pins["COMBOUT"];
+        // Nearest free clock control the pin reaches, as nextpnr's packer picks it.
+        let start = db.node(*tile, w);
+        let mut seen = HashSet::from_iter([start]);
+        let mut queue = VecDeque::from([(start, 0)]);
+        let mut found = None;
+        while let Some((n, depth)) = queue.pop_front() {
+            if let Some(cc) = inclk.get(&n) {
+                if !out.values().any(|v| v == cc) {
+                    found = Some(cc.clone());
+                    break;
+                }
+            }
+            if depth > 8 {
+                continue;
+            }
+            for e in db.downhill(n) {
+                if seen.insert(e.dst) {
+                    queue.push_back((e.dst, depth + 1));
+                }
+            }
+        }
+        out.insert(
+            i,
+            found.with_context(|| {
+                format!(
+                    "no free clock control reachable from {}",
+                    design.cells[pin].name
+                )
+            })?,
+        );
+    }
+    Ok(out)
+}
+
+/// The placement being annealed.
+struct State<'a> {
+    design: &'a Design,
+    grid: &'a Grid,
+    /// LE in each slot of each LAB.
+    slots: Vec<[Option<usize>; LES_PER_LAB]>,
+    /// (LAB, LE index) of each LE.
+    pos: Vec<(usize, usize)>,
+    /// Fixed cells' positions.
+    /// Position of each fixed cell (pins, clock controls).
+    fixed_xy: Vec<Option<Xy>>,
+    net_cost: Vec<u32>,
+}
+
+impl<'a> State<'a> {
+    fn cell_xy(&self, cell: usize) -> Xy {
+        match self.design.le_of[cell] {
+            Some(le) => self.grid.xy[self.pos[le].0],
+            None => self.fixed_xy[cell].expect("every cell is an LE or fixed"),
+        }
+    }
+
+    /// Half-perimeter wirelength; x counts routing and logic columns
+    /// separately, so it is halved.
+    fn hpwl(&self, net: usize) -> u32 {
+        let mut it = self.design.nets[net].iter().map(|&c| self.cell_xy(c));
+        let (x0, y0) = it.next().unwrap();
+        let (mut lx, mut hx, mut ly, mut hy) = (x0, x0, y0, y0);
+        for (x, y) in it {
+            lx = lx.min(x);
+            hx = hx.max(x);
+            ly = ly.min(y);
+            hy = hy.max(y);
+        }
+        ((hx - lx) / 2 + (hy - ly)) as u32
+    }
+
+    fn total(&self) -> u64 {
+        self.net_cost.iter().map(|&c| c as u64).sum()
+    }
+
+    /// nextpnr's `isBelLocationValid` for one LAB. Hot: runs on every
+    /// move, so it allocates nothing.
+    fn lab_ok(&self, lab: usize) -> bool {
+        let d = self.design;
+        let cells = &d.cells;
+        type Ctl = (Option<NetId>, bool);
+        // A third distinct domain already fails, so three slots suffice.
+        let mut domains: [(Option<NetId>, Ctl); 3] = [(None, (None, false)); 3];
+        let mut n_domains = 0;
+        let (mut ena, mut aclr, mut sclr): (Option<Ctl>, Option<NetId>, Option<Ctl>) =
+            (None, None, None);
+        let mut sync_kind = 0;
+        let mut inputs = [0 as NetId; MAX_LAB_INPUTS + 1];
+        let mut n_inputs = 0;
+        let here = |net: NetId| {
+            d.driver[net as usize]
+                .and_then(|c| d.le_of[c])
+                .is_some_and(|le| self.pos[le].0 == lab)
+        };
+        // False once the LAB has too many outside inputs.
+        let mut add = |net: Option<NetId>| -> bool {
+            let Some(n) = net else { return true };
+            if here(n) || inputs[..n_inputs].contains(&n) {
+                return true;
+            }
+            if n_inputs == MAX_LAB_INPUTS {
+                return false;
+            }
+            inputs[n_inputs] = n;
+            n_inputs += 1;
+            true
+        };
+        let one = |slot: &mut Option<Ctl>, v: Ctl| match (v.0, *slot) {
+            (None, _) => true,
+            (Some(_), None) => {
+                *slot = Some(v);
+                true
+            }
+            (Some(_), Some(s)) => s == v,
+        };
+        for le in self.slots[lab].iter().flatten() {
+            let Le { lut, ff } = d.les[*le];
+            if let Some(l) = lut {
+                for p in LUT_INPUTS {
+                    if !add(cells[l].net(p)) {
+                        return false;
+                    }
+                }
+            }
+            let Some(f) = ff else { continue };
+            let c = &cells[f];
+            for p in [Port::Sdata, Port::Ena, Port::Sclr, Port::Aclr] {
+                if !add(c.net(p)) {
+                    return false;
+                }
+            }
+            let kind =
+                c.net(Port::Sdata).is_some() as u8 | (c.net(Port::Sclr).is_some() as u8) << 1;
+            if kind != 0 && sync_kind != 0 && kind != sync_kind {
+                return false;
+            }
+            sync_kind |= kind;
+            let e: Ctl = (c.net(Port::Ena), c.ena_inv);
+            let domain = (c.net(Port::Clk), e);
+            if !domains[..n_domains].contains(&domain) {
+                if n_domains == 2 {
+                    return false;
+                }
+                domains[n_domains] = domain;
+                n_domains += 1;
+            }
+            if !one(&mut ena, e) || !one(&mut sclr, (c.net(Port::Sclr), c.sclr_inv)) {
+                return false;
+            }
+            if let Some(a) = c.net(Port::Aclr) {
+                if aclr.is_some_and(|x| x != a) {
+                    return false;
+                }
+                aclr = Some(a);
+            }
+        }
+        true
+    }
+
+    fn put(&mut self, le: usize, lab: usize, k: usize) {
+        self.slots[lab][k] = Some(le);
+        self.pos[le] = (lab, k);
+    }
+}
+
+/// xorshift64*: deterministic, so the same design places the same way.
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+    fn unit(&mut self) -> f64 {
+        (self.next() >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+/// A move, kept so it can be undone: every LE that moved and where it was.
+struct Undo(Vec<(usize, usize, usize)>);
+
+impl<'a> State<'a> {
+    fn initial(design: &'a Design, grid: &'a Grid, fixed_xy: Vec<Option<Xy>>) -> Result<Self> {
+        let mut s = State {
+            design,
+            grid,
+            slots: vec![[None; LES_PER_LAB]; grid.tiles.len()],
+            pos: vec![(usize::MAX, 0); design.les.len()],
+            fixed_xy,
+            net_cost: vec![0; design.nets.len()],
+        };
+        // Centre outwards.
+        let (cx, cy) = grid
+            .xy
+            .iter()
+            .fold((0i64, 0i64), |(a, b), &(x, y)| (a + x as i64, b + y as i64));
+        let centre = (
+            (cx / grid.xy.len() as i64) as i32,
+            (cy / grid.xy.len() as i64) as i32,
+        );
+        let mut order: Vec<usize> = (0..grid.tiles.len()).collect();
+        order.sort_by_key(|&l| {
+            let (x, y) = grid.xy[l];
+            (x - centre.0).abs() / 2 + (y - centre.1).abs()
+        });
+
+        for chain in &design.chains {
+            let spot = order.iter().find_map(|&lab| {
+                let labs = grid.chain_labs(lab, chain.len())?;
+                let free = chain
+                    .iter()
+                    .enumerate()
+                    .all(|(i, _)| s.slots[labs[i / LES_PER_LAB]][i % LES_PER_LAB].is_none());
+                free.then_some(labs)
+            });
+            let labs = spot.context("no room for a carry chain")?;
+            for (i, &le) in chain.iter().enumerate() {
+                s.put(le, labs[i / LES_PER_LAB], i % LES_PER_LAB);
+            }
+            for &lab in &labs {
+                ensure!(
+                    s.lab_ok(lab),
+                    "a carry chain's registers don't fit one LAB's controls"
+                );
+            }
+        }
+
+        let mut next = 0;
+        for le in 0..design.les.len() {
+            if design.chain_of[le].is_some() {
+                continue;
+            }
+            let mut placed = false;
+            for &lab in &order[next..] {
+                let Some(k) = s.slots[lab].iter().position(Option::is_none) else {
+                    continue;
+                };
+                s.put(le, lab, k);
+                if s.lab_ok(lab) {
+                    placed = true;
+                    break;
+                }
+                s.slots[lab][k] = None;
+            }
+            ensure!(placed, "the design doesn't fit");
+            // Skip LABs that are full for good.
+            while next < order.len() && s.slots[order[next]].iter().all(Option::is_some) {
+                next += 1;
+            }
+        }
+        for n in 0..design.nets.len() {
+            s.net_cost[n] = s.hpwl(n);
+        }
+        Ok(s)
+    }
+
+    /// Try moving `le` (with its chain, if any) to `lab`/`k`. Returns the
+    /// undo record, or None if the move is impossible or illegal.
+    fn try_move(&mut self, le: usize, lab: usize, k: usize) -> Option<Undo> {
+        let d = self.design;
+        if let Some(c) = d.chain_of[le] {
+            let chain = &d.chains[c];
+            let labs = self.grid.chain_labs(lab, chain.len())?;
+            let target = |i: usize| (labs[i / LES_PER_LAB], i % LES_PER_LAB);
+            // Only into slots that are free or the chain's own.
+            for i in 0..chain.len() {
+                let (l, kk) = target(i);
+                if self.slots[l][kk].is_some_and(|o| d.chain_of[o] != Some(c)) {
+                    return None;
+                }
+            }
+            let undo = Undo(
+                chain
+                    .iter()
+                    .map(|&x| (x, self.pos[x].0, self.pos[x].1))
+                    .collect(),
+            );
+            for &x in chain {
+                let (l, kk) = self.pos[x];
+                self.slots[l][kk] = None;
+            }
+            for (i, &x) in chain.iter().enumerate() {
+                let (l, kk) = target(i);
+                self.put(x, l, kk);
+            }
+            let mut touched: Vec<usize> = undo.0.iter().map(|&(_, l, _)| l).chain(labs).collect();
+            touched.sort();
+            touched.dedup();
+            if touched.iter().all(|&l| self.lab_ok(l)) {
+                return Some(undo);
+            }
+            self.undo(&undo);
+            return None;
+        }
+        let other = self.slots[lab][k];
+        if other.is_some_and(|o| d.chain_of[o].is_some()) || other == Some(le) {
+            return None;
+        }
+        let (from, fk) = self.pos[le];
+        let mut undo = vec![(le, from, fk)];
+        self.slots[from][fk] = None;
+        if let Some(o) = other {
+            undo.push((o, lab, k));
+            self.put(o, from, fk);
+        }
+        self.put(le, lab, k);
+        let undo = Undo(undo);
+        if self.lab_ok(lab) && (from == lab || self.lab_ok(from)) {
+            return Some(undo);
+        }
+        self.undo(&undo);
+        None
+    }
+
+    fn undo(&mut self, undo: &Undo) {
+        for &(le, _, _) in &undo.0 {
+            let (l, k) = self.pos[le];
+            if self.slots[l][k] == Some(le) {
+                self.slots[l][k] = None;
+            }
+        }
+        for &(le, l, k) in &undo.0 {
+            self.put(le, l, k);
+        }
+    }
+
+    fn nets_of(&self, undo: &Undo) -> Vec<usize> {
+        let mut nets: Vec<usize> = undo
+            .0
+            .iter()
+            .flat_map(|&(le, _, _)| self.design.nets_of_le[le].iter().copied())
+            .collect();
+        nets.sort();
+        nets.dedup();
+        nets
+    }
+}
+
+fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
+    let d = s.design;
+    let movable: Vec<usize> = (0..d.les.len())
+        .filter(|&le| d.chain_of[le].is_none_or(|c| d.chains[c][0] == le))
+        .collect();
+    if movable.is_empty() {
+        return 0;
+    }
+    let max_r = s
+        .grid
+        .xy
+        .iter()
+        .map(|&(x, y)| (x / 2).max(y))
+        .max()
+        .unwrap_or(1) as f64;
+    let mut r = max_r;
+    let moves_per_t = (2.0 * (movable.len() as f64).powf(4.0 / 3.0)).max(200.0) as usize;
+    let mut total_moves = 0u64;
+
+    let attempt = |s: &mut State, rng: &mut Rng, r: f64, t: f64| -> Option<i64> {
+        let le = movable[rng.below(movable.len())];
+        let (x, y) = s.grid.xy[s.pos[le].0];
+        let ri = r.max(1.0) as i32;
+        let tx = x + 2 * (rng.below(2 * ri as usize + 1) as i32 - ri);
+        let ty = y + rng.below(2 * ri as usize + 1) as i32 - ri;
+        let &lab = s.grid.at.get(&(tx, ty))?;
+        let k = if d.chain_of[le].is_some() {
+            0
+        } else {
+            rng.below(LES_PER_LAB)
+        };
+        let undo = s.try_move(le, lab, k)?;
+        let nets = s.nets_of(&undo);
+        let before: i64 = nets.iter().map(|&n| s.net_cost[n] as i64).sum();
+        let after_costs: Vec<u32> = nets.iter().map(|&n| s.hpwl(n)).collect();
+        let delta = after_costs.iter().map(|&c| c as i64).sum::<i64>() - before;
+        if delta <= 0 || (t > 0.0 && rng.unit() < (-(delta as f64) / t).exp()) {
+            for (&n, &c) in nets.iter().zip(&after_costs) {
+                s.net_cost[n] = c;
+            }
+            Some(delta)
+        } else {
+            s.undo(&undo);
+            None
+        }
+    };
+
+    // Starting temperature: 20 standard deviations of random moves' deltas.
+    let mut deltas = Vec::new();
+    for _ in 0..movable.len().max(50) {
+        if let Some(dc) = attempt(s, rng, r, f64::INFINITY) {
+            deltas.push(dc as f64);
+        }
+    }
+    let mean = deltas.iter().sum::<f64>() / deltas.len().max(1) as f64;
+    let var = deltas.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / deltas.len().max(1) as f64;
+    let mut t = 20.0 * var.sqrt();
+
+    loop {
+        let mut accepted = 0;
+        for _ in 0..moves_per_t {
+            total_moves += 1;
+            if attempt(s, rng, r, t).is_some() {
+                accepted += 1;
+            }
+        }
+        let rate = accepted as f64 / moves_per_t as f64;
+        t *= match rate {
+            r if r > 0.96 => 0.5,
+            r if r > 0.8 => 0.9,
+            r if r > 0.15 => 0.95,
+            _ => 0.8,
+        };
+        r = (r * (1.0 - 0.44 + rate)).clamp(1.0, max_r);
+        let cost = s.total() as f64;
+        if t < 0.005 * cost / d.nets.len().max(1) as f64 {
+            break;
+        }
+    }
+    // A final greedy pass at zero temperature.
+    for _ in 0..moves_per_t {
+        total_moves += 1;
+        attempt(s, rng, 1.0, 0.0);
+    }
+    total_moves
+}
+
+/// Place `packed`, write `placed`. `pins` maps top-level ports (`LEDR[0]`)
+/// to pins (`PIN_AE23`).
+pub fn place_file(
+    db: &ChipDb,
+    packed: &Path,
+    pins: &std::collections::BTreeMap<String, String>,
+    placed: &Path,
+) -> Result<Stats> {
+    let text =
+        std::fs::read_to_string(packed).with_context(|| format!("reading {}", packed.display()))?;
+    let mut json: Value = serde_json::from_str(&text)?;
+    let design = read_design(&json)?;
+    let fixed = fixed_cells(db, &design, pins)?;
+
+    let grid = Grid::new(db);
+    let mut fixed_xy = vec![None; design.cells.len()];
+    for (&c, &(tile, _)) in &fixed {
+        let (x, y) = db.tile_xy(tile);
+        fixed_xy[c] = Some((x as i32, y as i32));
+    }
+    let mut state = State::initial(&design, &grid, fixed_xy)?;
+    let initial_cost = state.total();
+    let moves = anneal(&mut state, &mut Rng(0x9e37_79b9_7f4a_7c15));
+
+    let cells = json["modules"]["top"]["cells"]
+        .as_object_mut()
+        .context("no cells")?;
+    for (i, c) in design.cells.iter().enumerate() {
+        let (tile, bel) = match design.le_of[i] {
+            Some(le) => {
+                let (lab, k) = state.pos[le];
+                let half = if c.kind == Kind::Lut { "LUT" } else { "FF" };
+                (grid.tiles[lab], format!("LE{k}.{half}"))
+            }
+            None => fixed[&i].clone(),
+        };
+        let (x, y) = db.tile_xy(tile);
+        let attrs = cells
+            .get_mut(&c.name)
+            .context("cell vanished")?
+            .as_object_mut()
+            .context("cell is not an object")?
+            .entry("attributes")
+            .or_insert_with(|| Value::Object(Default::default()));
+        attrs["NEXTPNR_BEL"] = Value::String(format!("X{x}Y{y}/{bel}"));
+    }
+    std::fs::write(placed, serde_json::to_string(&json)?)
+        .with_context(|| format!("writing {}", placed.display()))?;
+    Ok(Stats {
+        les: design.les.len(),
+        chains: design.chains.len(),
+        initial_cost,
+        cost: state.total(),
+        moves,
+    })
+}

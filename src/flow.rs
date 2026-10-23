@@ -1,12 +1,14 @@
 //! HDL to bitstream to chip. Some stages are still external tools: GHDL
-//! (VHDL to Verilog), yosys (synthesis), nextpnr (packing and placement) and
-//! cram (bitstream, JTAG stream). Routing (`route`) and loading over the
-//! cable (`jtag`) are chipsmith's own. Each stage is one `Step` in a `Plan`, so replacing a tool with
-//! chipsmith's own code means replacing one step.
+//! (VHDL to Verilog), yosys (synthesis), nextpnr (packing) and cram
+//! (bitstream, JTAG stream). Placement (`place`), routing (`route`) and
+//! loading over the cable (`jtag`) are chipsmith's own. Each stage is one
+//! `Step` in a `Plan`, so replacing a tool with chipsmith's own code means
+//! replacing one step.
 //!
 //! Planning is pure: `plan_build` and `plan_flash` return every file to
 //! write and every command to run, and `Plan::run` does it.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -54,6 +56,9 @@ impl Layout {
     fn pins(&self) -> PathBuf {
         self.dir.join("pins.qsf")
     }
+    fn packed(&self) -> PathBuf {
+        self.dir.join("packed.json")
+    }
     fn placed(&self) -> PathBuf {
         self.dir.join("placed.json")
     }
@@ -70,7 +75,14 @@ pub enum Step {
     /// An external program.
     Tool(Tool),
     /// Route a placed design (nextpnr JSON) into a routed one, in process.
-    Route { placed: PathBuf, routed: PathBuf },
+    /// Place a packed design (nextpnr JSON) and route it, in process.
+    /// `pins` maps top-level port bits (`LEDR[0]`) to pins (`PIN_AE23`).
+    PlaceRoute {
+        packed: PathBuf,
+        placed: PathBuf,
+        routed: PathBuf,
+        pins: BTreeMap<String, String>,
+    },
     /// Play an SVF over the USB-Blaster, in process.
     PlaySvf(PathBuf),
 }
@@ -79,7 +91,7 @@ impl Step {
     pub fn label(&self) -> &'static str {
         match self {
             Step::Tool(tool) => tool.label,
-            Step::Route { .. } => "route",
+            Step::PlaceRoute { .. } => "place and route",
             Step::PlaySvf(_) => "JTAG: program over USB-Blaster",
         }
     }
@@ -171,13 +183,13 @@ pub fn plan_build(manifest: &Manifest, layout: &Layout, synth_dir: &Path) -> Pla
     steps.push(
         Tool {
             log: Some(layout.log("nextpnr")),
-            ..Tool::new("nextpnr: pack and place", "nextpnr-himbaechel")
+            ..Tool::new("nextpnr: pack", "nextpnr-himbaechel")
         }
         .args(["--device", manifest.device.part(), "--json"])
         .arg(layout.netlist())
-        .arg("--no-route")
+        .arg("--pack-only")
         .arg("--write")
-        .arg(layout.placed())
+        .arg(layout.packed())
         .arg("-o")
         .arg(prefixed("qsf=", &layout.pins()))
         .arg("--log")
@@ -185,9 +197,15 @@ pub fn plan_build(manifest: &Manifest, layout: &Layout, synth_dir: &Path) -> Pla
         .arg("-q")
         .into(),
     );
-    steps.push(Step::Route {
+    steps.push(Step::PlaceRoute {
+        packed: layout.packed(),
         placed: layout.placed(),
         routed: layout.routed(),
+        pins: manifest
+            .pins
+            .iter()
+            .map(|a| (a.port.to_string(), a.pin.as_str().to_string()))
+            .collect(),
     });
     steps.push(
         Tool::new("cram: bitstream", "cram")
@@ -306,7 +324,12 @@ impl Plan {
             eprintln!("  {}", step.label());
             match step {
                 Step::Tool(tool) => run_tool(tool)?,
-                Step::Route { placed, routed } => route(placed, routed)?,
+                Step::PlaceRoute {
+                    packed,
+                    placed,
+                    routed,
+                    pins,
+                } => place_route(packed, placed, routed, pins)?,
                 Step::PlaySvf(svf) => play_svf(svf)?,
             }
         }
@@ -314,18 +337,38 @@ impl Plan {
     }
 }
 
-fn route(placed: &Path, routed: &Path) -> Result<()> {
+fn place_route(
+    packed: &Path,
+    placed: &Path,
+    routed: &Path,
+    pins: &BTreeMap<String, String>,
+) -> Result<()> {
     let started = Instant::now();
     let graph = crate::route::chipdb::ChipDb::load_for_device()?;
-    let loaded = started.elapsed();
-    let stats = crate::route::route_file(&graph, placed, routed)?;
     eprintln!(
-        "    {} nets, {} pips, {} iterations in {:.1} s (graph {:.1} s)",
-        stats.nets,
-        stats.pips,
-        stats.iterations,
-        started.elapsed().as_secs_f64(),
-        loaded.as_secs_f64()
+        "    routing graph in {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
+
+    let started = Instant::now();
+    let p = crate::place::place_file(&graph, packed, pins, placed)?;
+    eprintln!(
+        "    placed {} LEs ({} carry chains), wirelength {} -> {} in {:.1} s",
+        p.les,
+        p.chains,
+        p.initial_cost,
+        p.cost,
+        started.elapsed().as_secs_f64()
+    );
+
+    let started = Instant::now();
+    let r = crate::route::route_file(&graph, placed, routed)?;
+    eprintln!(
+        "    routed {} nets, {} pips, {} iterations in {:.1} s",
+        r.nets,
+        r.pips,
+        r.iterations,
+        started.elapsed().as_secs_f64()
     );
     Ok(())
 }
@@ -428,8 +471,8 @@ mod tests {
             labels(&plan),
             [
                 "yosys: synthesis",
-                "nextpnr: pack and place",
-                "route",
+                "nextpnr: pack",
+                "place and route",
                 "cram: bitstream"
             ]
         );
@@ -438,8 +481,8 @@ mod tests {
             script,
             "read_verilog \"/p/src/blinky.v\"\nrename blinky top\nscript synth/cyclone2.ys\nwrite_json \"/p/build/netlist.json\"\n"
         );
-        // nextpnr only places; chipsmith routes.
-        assert!(tool(&plan.steps[1]).args.iter().any(|a| a == "--no-route"));
+        // nextpnr only packs; chipsmith places and routes.
+        assert!(tool(&plan.steps[1]).args.iter().any(|a| a == "--pack-only"));
         assert_eq!(
             tool(&plan.steps[3]).args.last().unwrap(),
             "/p/build/blinky.rbf"

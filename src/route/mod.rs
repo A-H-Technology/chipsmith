@@ -129,11 +129,12 @@ impl Design {
             let tile = db
                 .tile_index(x, y)
                 .with_context(|| format!("{name}: tile {tile_name} off chip"))?;
-            let pins = db
+            let pins = &db
                 .tile_type(tile)
                 .bels
                 .get(bel_name)
-                .with_context(|| format!("{name}: no bel {bel}"))?;
+                .with_context(|| format!("{name}: no bel {bel}"))?
+                .pins;
             let dirs = &cell["port_directions"];
             let conns = cell["connections"].as_object().context("connections")?;
             for (port, bits) in conns {

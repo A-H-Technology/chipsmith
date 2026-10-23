@@ -29,7 +29,8 @@ multipliers or PLLs, no bidirectional or registered I/O.
 |---|---|---|
 | VHDL → Verilog | GHDL `--synth --out=verilog` | stays a translator in front of the flow |
 | synthesis | yosys + `cyclone2.ys` (cyclone2-re) | to replace |
-| packing and placement | nextpnr-himbaechel, cyclone2 uarch (cyclone2-re) | to replace next |
+| packing | nextpnr-himbaechel `--pack-only`, cyclone2 uarch (cyclone2-re) | to replace next |
+| placement | chipsmith: simulated annealing over LAB slots, nextpnr's LAB rules (`src/place`) | ours |
 | routing | chipsmith: PathFinder over the chip database (`src/route`) | ours |
 | bitstream | `cram pack` (cyclone2-re) | ours already |
 | JTAG stream | `cram svf` | ours already |
@@ -64,7 +65,22 @@ share chipsmith's own netlist IR, not Verilog.
 
      The routing graph (861,427 nodes, 8,325,848 pips) is flattened from
      cyclone2-re's chip database by a nix derivation; loading it takes 2.4 s.
-   - Placer, then packer: next.
+   - Placer (done). nextpnr only packs; chipsmith places and routes. Quartus
+     keeps 100% of the routes and assembles byte-identical RBFs for lfsr,
+     uart_tx and picorv32:
+
+     | design | placer + router | place time | setup slack @ 50 MHz (Quartus STA) |
+     |---|---|---|---|
+     | picorv32 | nextpnr (HeAP + SA, router2) | 50.8 s | 2.25 ns |
+     | picorv32 | chipsmith | 12.2 s | 8.84 ns (at 8 moves per temperature; 2 is the default) |
+     | lfsr | chipsmith | 1.5 s | 12.22 ns |
+     | uart_tx | chipsmith | 0.7 s | 13.16 ns |
+
+     Placer speed on picorv32, same result each time: 31.8 s with std
+     `HashMap`, 19.8 s with FxHash, 12.2 s with an enum of ports and dense
+     net ids (no hashing per move). Recomputing high-fanout nets' bounding
+     boxes is the largest cost left (26%).
+   - Packer: next.
 4. **Own synthesis**: techmap and LUT mapping on the IR. yosys's JSON
    netlist is the boundary until then.
 5. **Own Verilog frontend**: the synthesizable subset that GHDL and HDL
