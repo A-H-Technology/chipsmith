@@ -1,6 +1,6 @@
 //! chipsmith's placer: simulated annealing over LAB slots.
 //!
-//! Input is a packed design in nextpnr's JSON (`nextpnr-himbaechel
+//! Input is a packed design in nextpnr's JSON (`pack`, or `nextpnr-himbaechel
 //! --pack-only --write`): LUTs, registers, pin buffers and clock controls,
 //! with carry polarity and register packing already settled. Output is the
 //! same JSON with a `NEXTPNR_BEL` on every cell, which the router and cram

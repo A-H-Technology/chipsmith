@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 
 use chipsmith::flow::{self, Layout, Loadable};
 use chipsmith::manifest::Manifest;
+use chipsmith::pack;
 use chipsmith::route::chipdb::ChipDb;
 
 #[derive(Parser)]
@@ -29,12 +30,30 @@ enum Cmd {
     /// Prebuild the routing graph from a chip database (the nix package does).
     #[command(hide = true)]
     RoutingGraph { chipdb: PathBuf, out: PathBuf },
+    /// Pack a yosys netlist into what the placer reads (`build` does this).
+    #[command(hide = true)]
+    Pack { netlist: PathBuf, packed: PathBuf },
+    /// Compare two packed netlists (ours against nextpnr's `--pack-only`).
+    #[command(hide = true)]
+    PackDiff { ours: PathBuf, theirs: PathBuf },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    if let Cmd::RoutingGraph { chipdb, out } = &cli.command {
-        return ChipDb::load(chipdb)?.write_cache(out);
+    match &cli.command {
+        Cmd::RoutingGraph { chipdb, out } => return ChipDb::load(chipdb)?.write_cache(out),
+        Cmd::Pack { netlist, packed } => {
+            let s = pack::pack_file(netlist, packed)?;
+            eprintln!("{s:?}");
+            return Ok(());
+        }
+        Cmd::PackDiff { ours, theirs } => {
+            let d = pack::diff_files(ours, theirs)?;
+            println!("{}", d.report);
+            anyhow::ensure!(d.equal, "packed netlists differ");
+            return Ok(());
+        }
+        _ => {}
     }
     let project_dir = std::path::absolute(&cli.project_dir)?;
     let manifest = Manifest::load(&project_dir)?;
@@ -45,7 +64,9 @@ fn main() -> Result<()> {
             flow::plan_build(&manifest, &layout, &flow::synth_dir()?).run()?;
             println!("{}", layout.bitstream().display());
         }
-        Cmd::RoutingGraph { .. } => unreachable!("handled before the manifest"),
+        Cmd::RoutingGraph { .. } | Cmd::Pack { .. } | Cmd::PackDiff { .. } => {
+            unreachable!("handled before the manifest")
+        }
         Cmd::Flash { bitstream } => {
             let loadable = Loadable::from_path(bitstream.unwrap_or_else(|| layout.bitstream()))?;
             flow::plan_flash(&loadable).run()?;

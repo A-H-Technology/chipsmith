@@ -7,7 +7,6 @@
   libusb1,
   ghdl,
   yosys,
-  nextpnr-cyclone2,
   cram,
   cyclone2-synth,
 }:
@@ -54,7 +53,6 @@ runCommand "chipsmith-${unwrapped.version}"
         lib.makeBinPath [
           ghdl
           yosys
-          nextpnr-cyclone2
           cram
         ]
       } \
