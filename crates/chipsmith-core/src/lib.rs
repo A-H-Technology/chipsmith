@@ -23,6 +23,7 @@ use chipsmith_sim::{ghdl::Ghdl, SimPlan, Simulator, TestReport};
 pub static PRODUCTS: &[&QuartusProduct] = &[
     &chipsmith_quartus_prime::PRODUCT,
     &chipsmith_quartus_ii_13::PRODUCT,
+    &chipsmith_quartus_pro::PRODUCT,
 ];
 
 /// The Backend used when a command doesn't name one.

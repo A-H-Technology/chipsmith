@@ -55,7 +55,7 @@ enum Commands {
         #[facet(args::positional)]
         version: Option<String>,
 
-        /// Toolchain backend (quartus-prime or quartus-ii-13)
+        /// Toolchain backend (quartus-prime, quartus-ii-13 or quartus-pro)
         #[facet(args::named, default = DEFAULT_BACKEND.to_string())]
         backend: String,
 
@@ -104,7 +104,7 @@ enum Commands {
         #[facet(args::named)]
         version: Option<String>,
 
-        /// Toolchain backend (quartus-prime or quartus-ii-13)
+        /// Toolchain backend (quartus-prime, quartus-ii-13 or quartus-pro)
         #[facet(args::named, default = DEFAULT_BACKEND.to_string())]
         backend: String,
 
@@ -130,7 +130,7 @@ enum Commands {
 
     /// List connected JTAG cables and devices
     Cables {
-        /// Toolchain backend (quartus-prime or quartus-ii-13)
+        /// Toolchain backend (quartus-prime, quartus-ii-13 or quartus-pro)
         #[facet(args::named, default = DEFAULT_BACKEND.to_string())]
         backend: String,
 
@@ -145,7 +145,7 @@ enum Commands {
         #[facet(args::positional)]
         version: Option<String>,
 
-        /// Toolchain backend (quartus-prime or quartus-ii-13)
+        /// Toolchain backend (quartus-prime, quartus-ii-13 or quartus-pro)
         #[facet(args::named, default = DEFAULT_BACKEND.to_string())]
         backend: String,
     },

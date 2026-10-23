@@ -69,6 +69,20 @@ The `[toolchain]` key selects the backend. Supported backends:
 |-----|-----------|-------------------|
 | `quartus-prime` | Intel Quartus Prime Lite | 22.1, 23.1, 24.1 |
 | `quartus-ii-13` | Altera Quartus II | 13.0sp1 |
+| `quartus-pro` | Altera Quartus Prime Pro (Agilex 5 device support) | 26.1.1 |
+
+`quartus-pro` 26.1.1 is the newest Pro release and supports the DE25-Nano's
+`A5EB013BB23BE4SCS` with final timing. Agilex 5 E-series costs nothing, but
+the Fitter still refuses to run without Altera's no-cost node-locked licence
+(`quartus_agilex5e`); synthesis runs without one. The base install is the
+`.run` plus its `-part2-*.qdz` (9.9 GB together), Agilex 5 adds
+`agilex5-*.qdz` and `agilex_common-*.qdz` (7.3 GB), and the result is 32 GB.
+
+Altera's CDN answers chipsmith's own downloader with a 403 (Akamai
+fingerprints the TLS client, so a browser User-Agent is not enough). Until
+that is solved, put the files in chipsmith's cache yourself, e.g.
+`nix shell nixpkgs#curl-impersonate -c curl_chrome146 -O <url>` into
+`$XDG_CACHE_HOME/chipsmith/`, and `chipsmith install` uses them.
 
 Pin mappings can be a single string for one pin or an array for a bus.
 
@@ -127,6 +141,7 @@ Download and install a toolchain version. Happens automatically on first `build`
 chipsmith install                          # latest quartus-prime (23.1)
 chipsmith install 24.1
 chipsmith install --backend quartus-ii-13  # latest for that backend (13.0sp1)
+chipsmith install --backend quartus-pro    # Quartus Prime Pro 26.1.1 + Agilex 5
 chipsmith install --installer ./QuartusLiteSetup.run   # from local file
 ```
 
@@ -319,6 +334,7 @@ crates/
   chipsmith-sim/             # Simulator trait, test verdicts, the GHDL simulator
   chipsmith-quartus-common/  # All Quartus behaviour: install, build, constraints, timing, ModelSim/Questa
   chipsmith-quartus-prime/   # Quartus Prime product description (23.1, 22.1, 24.1)
+  chipsmith-quartus-pro/     # Quartus Prime Pro product description (26.1.1)
   chipsmith-quartus-ii-13/   # Quartus II product description (13.0sp1)
   chipsmith-core/            # Backend registry, manifest-driven commands
   chipsmith-cli/             # CLI binary
@@ -329,7 +345,7 @@ example-de2/                 # Blinky on DE2 board (Quartus II 13.0sp1)
 Both examples carry a testbench and a `justfile`: `just testbench` runs it on
 GHDL, `just testbench-quartus` on the simulator the toolchain bundles.
 
-The two backend crates are data, not code: each is one `QuartusProduct`
+The backend crates are data, not code: each is one `QuartusProduct`
 constant naming its versions, install root, installer flags and spawn
 strategy. Everything they do lives once in `chipsmith-quartus-common`. See
 [CONTEXT.md](CONTEXT.md) for the vocabulary.

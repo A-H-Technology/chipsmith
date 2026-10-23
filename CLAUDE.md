@@ -15,7 +15,7 @@ are the names used throughout the code.
 
 ```bash
 cargo check                    # type check
-cargo test --workspace         # run all tests (113 of them)
+cargo test --workspace         # run all tests (119 of them)
 cargo fmt                      # format
 cargo fmt --check              # verify formatting
 cargo clippy --workspace --all-targets -- -D warnings
@@ -45,8 +45,9 @@ chipsmith-cli
             -> chipsmith-sim                <- ModelSim/Questa is a Quartus component
             -> chipsmith-toolchain
        -> chipsmith-sim                     <- simulator-agnostic test running
-       -> chipsmith-quartus-prime  \  product
-       -> chipsmith-quartus-ii-13  /  descriptions
+       -> chipsmith-quartus-prime  \
+       -> chipsmith-quartus-pro     > product descriptions
+       -> chipsmith-quartus-ii-13  /
 ```
 
 - **chipsmith-toolchain**: Foundational crate, no Quartus knowledge. The
@@ -62,7 +63,7 @@ chipsmith-cli
   trait, and `QuartusSimulator` — which lives here rather than in
   `chipsmith-sim` because `vsim` is a vendor binary and needs the same NixOS
   dressing as every other one.
-- **chipsmith-quartus-prime** / **chipsmith-quartus-ii-13**: Data, not code.
+- **chipsmith-quartus-prime** / **-pro** / **-ii-13**: Data, not code.
   Each is one `QuartusProduct` constant. Adding a backend means adding a
   constant, not a crate's worth of logic.
 - **chipsmith-core**: Backend and Simulator registries (`resolve_backend`,
@@ -73,9 +74,11 @@ chipsmith-cli
 
 ## Key patterns
 
-- **The variance lives in data.** `QuartusProduct` holds the five things that
-  differ between Quartus Prime and Quartus II: version table, install root,
-  installer flags, `SpawnStrategy`, and the `BundledSimulator` it ships.
+- **The variance lives in data.** `QuartusProduct` holds the things that
+  differ between Quartus Prime Lite, Prime Pro and Quartus II: version table
+  (including archives the installer reads beside itself), install root,
+  installer flags, `SpawnStrategy`, synthesis tool, and the
+  `BundledSimulator` it ships.
   Everything else is shared. If you find yourself adding a `match` on the
   backend name inside `quartus-common`, it probably wants to be a field on
   `QuartusProduct` instead.
@@ -120,7 +123,7 @@ chipsmith-cli
 | Install orchestration | `crates/chipsmith-quartus-common/src/install.rs` |
 | Tool + installer spawning | `crates/chipsmith-quartus-common/src/runner.rs` |
 | NixOS patching | `crates/chipsmith-quartus-common/src/nixos.rs` |
-| Version tables | `crates/chipsmith-quartus-{prime,ii-13}/src/lib.rs` |
+| Version tables | `crates/chipsmith-quartus-{prime,pro,ii-13}/src/lib.rs` |
 | Backend registry | `crates/chipsmith-core/src/lib.rs` |
 | CLI commands | `crates/chipsmith-cli/src/main.rs` |
 | Nix Compat store paths (one list, two readers) | `crates/chipsmith-quartus-common/compat.nix` |

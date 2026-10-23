@@ -1,0 +1,11 @@
+[package]
+name = "chipsmith-quartus-pro"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Altera Quartus Prime Pro product description for chipsmith"
+
+[dependencies]
+chipsmith-quartus-common = { path = "../chipsmith-quartus-common", version = "0.1.0" }

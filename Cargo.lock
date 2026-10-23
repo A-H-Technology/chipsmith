@@ -136,6 +136,7 @@ dependencies = [
  "chipsmith-quartus-common",
  "chipsmith-quartus-ii-13",
  "chipsmith-quartus-prime",
+ "chipsmith-quartus-pro",
  "chipsmith-sim",
  "chipsmith-toolchain",
 ]
@@ -163,6 +164,13 @@ dependencies = [
 
 [[package]]
 name = "chipsmith-quartus-prime"
+version = "0.1.0"
+dependencies = [
+ "chipsmith-quartus-common",
+]
+
+[[package]]
+name = "chipsmith-quartus-pro"
 version = "0.1.0"
 dependencies = [
  "chipsmith-quartus-common",

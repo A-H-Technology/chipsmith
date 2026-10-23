@@ -43,7 +43,7 @@ _Avoid_: driver, provider, plugin
 
 **Product**:
 A line of Quartus releases that share an install layout, an installer
-invocation, and a Spawn Strategy — currently Quartus Prime and Quartus II. Two
+invocation, and a Spawn Strategy — currently Quartus Prime Lite, Quartus Prime Pro and Quartus II. Two
 Backends over one Product line differ only in their Product description.
 _Avoid_: flavour, variant, edition
 
