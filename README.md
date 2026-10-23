@@ -21,9 +21,12 @@ nextpnr.
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
 LEDs, about 1,100 LEs; it builds in about 70 s.
 
-Both blinky examples produce RBFs that are byte-identical to the
-[cyclone2-re](https://github.com/cramt/cyclone2-re) blinky, which Quartus
-reproduces bit for bit from the same placement and routing.
+Quartus assembles chipsmith's placement and routing into the same RBF bit
+for bit (`bench/quartus-timing.sh`): checked 2026-10-23 on blinky-vhdl
+(16.65 ns of slack at 50 MHz) and on picorv32. Since chipsmith places
+designs itself, the RBFs no longer match the
+[cyclone2-re](https://github.com/cramt/cyclone2-re) examples built with
+nextpnr's placement.
 
 The Cyclone II limits come from cyclone2-re: no M4K RAM, multipliers or
 PLLs, no bidirectional or registered I/O. The timing model covers LE and
