@@ -15,6 +15,7 @@
 //! and friends become `$lut` cells; every other cell stays as it is.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use anyhow::{bail, ensure, Context, Result};
 use serde_json::{json, Map, Value};
@@ -741,6 +742,34 @@ fn lut_cell(inputs: &[Value], tt: u16, y: u64) -> Value {
     })
 }
 
+/// Map the gates of module `top` in the yosys JSON at `gates`, and write
+/// module `top` alone to `luts`: yosys' JSON also holds the cell library as
+/// parameterless blackbox stubs, which would shadow the real cells
+/// (`read_verilog -lib`) when yosys reads the result back.
+pub fn map_file(gates: &Path, luts: &Path) -> Result<Stats> {
+    let text =
+        std::fs::read_to_string(gates).with_context(|| format!("reading {}", gates.display()))?;
+    let mut json: Value =
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", gates.display()))?;
+    let stats = map(&mut json)?;
+    keep_only_top(&mut json)?;
+    std::fs::write(luts, serde_json::to_string(&json)?)
+        .with_context(|| format!("writing {}", luts.display()))?;
+    Ok(stats)
+}
+
+fn keep_only_top(json: &mut Value) -> Result<()> {
+    let modules = json["modules"]
+        .as_object_mut()
+        .context("netlist has no modules")?;
+    let top = modules
+        .remove("top")
+        .context("netlist has no module `top`")?;
+    modules.clear();
+    modules.insert("top".into(), top);
+    Ok(())
+}
+
 /// Map the gates of module `top` in `json` to `$lut` cells, in place.
 pub fn map(json: &mut Value) -> Result<Stats> {
     let net = Network::read(&json["modules"]["top"])?;
@@ -992,6 +1021,16 @@ mod tests {
             );
             assert_eq!(simulate(&j, &ins, 14), !(a & b), "z, inputs {m:05b}");
         }
+    }
+
+    #[test]
+    fn only_top_is_written_back() {
+        let mut j = json!({ "modules": {
+            "LCELL_COMB": { "attributes": { "blackbox": "1" } },
+            "top": { "cells": {} },
+        }});
+        keep_only_top(&mut j).unwrap();
+        assert_eq!(j, json!({ "modules": { "top": { "cells": {} } } }));
     }
 
     #[test]

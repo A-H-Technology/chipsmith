@@ -10,3 +10,7 @@ device = "EP2C35F672C6"
 [pins]
 CLOCK_50 = "PIN_N2"
 LEDR = ["PIN_AE23", "PIN_AF23", "PIN_AB21", "PIN_AC22"]
+
+# The DE2's 50 MHz oscillator; slack is reported against it.
+[clocks]
+CLOCK_50 = "50 MHz"

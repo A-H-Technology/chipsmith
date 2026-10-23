@@ -57,10 +57,7 @@ fn main() -> Result<()> {
             return Ok(());
         }
         Cmd::Lutmap { netlist, mapped } => {
-            let mut json: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(netlist)?)?;
-            let s = chipsmith::synth::lutmap::map(&mut json)?;
-            std::fs::write(mapped, serde_json::to_string(&json)?)?;
+            let s = chipsmith::synth::lutmap::map_file(netlist, mapped)?;
             eprintln!("{s:?}");
             return Ok(());
         }

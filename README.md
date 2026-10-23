@@ -15,15 +15,16 @@ nextpnr.
 
 | device | board | build | on hardware |
 |---|---|---|---|
-| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes: LUT/carry/register logic, global clocks from pins, 3.3-V LVTTL pins | yes (2026-10-23: blinky-vhdl built and flashed by chipsmith) |
+| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes: LUT/carry/register logic, global clocks from pins, 3.3-V LVTTL pins | yes (2026-10-24: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs) |
 | xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes, all external tools (below): what yosys `synth_xilinx` and openXC7's nextpnr handle, LVCMOS33 pins | yes (2026-10-23: zybo-jtag-counter built by the nix package, flashed by chipsmith, read back over JTAG at 125.00 MHz) |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
-LEDs, about 1,100 LEs; it builds in about 70 s.
+LEDs, about 1,200 LEs; a build takes about 85 s of CPU time.
 
 Quartus assembles chipsmith's placement and routing into the same RBF bit
-for bit (`bench/quartus-timing.sh`): checked 2026-10-23 on blinky-vhdl
-(16.65 ns of slack at 50 MHz) and on picorv32. Since chipsmith places
+for bit (`bench/quartus-timing.sh`): checked 2026-10-24 on blinky-verilog
+and blinky-vhdl (16.65 ns of slack at 50 MHz) and on picorv32 (11.08 ns),
+all three built through chipsmith's LUT mapper. Since chipsmith places
 designs itself, the RBFs no longer match the
 [cyclone2-re](https://github.com/cramt/cyclone2-re) examples built with
 nextpnr's placement.
@@ -60,13 +61,17 @@ Zybo limits, all of them inherited from the tools:
   `package_pins.csv`). PS pins (MIO, DDR) are rejected in the manifest.
 - The PS isn't configured. Nothing needs the ARM cores, DDR or the
   PS clocks, and a design instantiating PS7 is untested.
-- No clock constraints reach nextpnr, so it checks timing against its
-  default 12 MHz. Its estimate still tracks Vivado's. zybo-blinky through
-  the Vivado 2026.1 oracle (xc7-re `tools/oracle.sh`, same Verilog, 8 ns
-  clock): 27 registers, 1 LUT, 7 CARRY4, WNS 5.438 ns, so a 2.562 ns
-  critical path (390.3 MHz) through the 7-CARRY4 chain. nextpnr reports
-  391.5 MHz, 0.3% apart. nextpnr reports 56 LUT BELs, against Vivado's 1
-  LUT. That is most likely route-through LUTs, not checked.
+- Both Zybo examples declare their 125 MHz clock in `[clocks]`, which
+  reaches nextpnr as an XDC `create_clock`. nextpnr's estimate tracks
+  Vivado's. zybo-blinky through the Vivado 2026.1 oracle (xc7-re
+  `tools/oracle.sh`, same Verilog, 8 ns clock): 27 registers, 1 LUT,
+  7 CARRY4, WNS 5.438 ns, so a 2.562 ns critical path (390.3 MHz) through
+  the 7-CARRY4 chain. chipsmith's build prints nextpnr's 391.5 MHz, slack
+  5.446 ns at 125 MHz, 0.3% apart. zybo-jtag-counter: 317.2 MHz,
+  slack 4.847 ns (no Vivado number yet). Its BSCANE2's `tck` has no pin,
+  so `[clocks]` can't name it, and nextpnr times it at its default
+  12 MHz. nextpnr reports 56 LUT BELs, against Vivado's 1 LUT. That is
+  most likely route-through LUTs, not checked.
 - The flow is deterministic: two builds give the same FASM. The `.bit`
   header still carries xc7frames2bit's build date and time.
 - The Zybo Z7 has its clock on K17. It needs only another pin map; the
@@ -82,7 +87,8 @@ Cyclone II (EP2C35F672C6):
 | stage | today | |
 |---|---|---|
 | VHDL → Verilog | GHDL `--synth --out=verilog` | stays a translator in front of the flow |
-| synthesis | yosys + `cyclone2.ys` (cyclone2-re) | to replace |
+| synthesis | yosys runs cyclone2-re's `cyclone2.ys` in two halves around the LUT mapping | to replace |
+| LUT mapping | chipsmith: AIG plus priority cuts, in place of `abc -lut 4` (`src/synth/lutmap.rs`) | ours |
 | packing | chipsmith: cyclone2-re's nextpnr packer, ported (`src/pack`) | ours |
 | placement | chipsmith: simulated annealing over LAB slots, nextpnr's LAB rules (`src/place`) | ours |
 | routing | chipsmith: PathFinder over the chip database (`src/route`) | ours |
@@ -222,6 +228,29 @@ share chipsmith's own netlist IR, not Verilog.
      `0` (a flag toggled back) chipsmith leaves out; they read the same.
 4. **Own synthesis**: techmap and LUT mapping on the IR. yosys's JSON
    netlist is the boundary until then.
+   - LUT mapping (done, in the default Cyclone II flow). yosys runs
+     `cyclone2.ys` up to `abc -lut 4` and writes `build/gates.json`.
+     chipsmith maps that, and a second yosys runs the rest of the script
+     from `opt -fast` on. chipsmith cuts the script at plan time, and the
+     build fails if `abc -lut 4` isn't there exactly once. Measured
+     2026-10-24, the same design through both flows; slack is from
+     `bench/quartus-timing.sh` (byte-identical assembly in every row):
+
+     | design | LUT mapper | mapped LUTs | packed LUTs (LEs) | Quartus slack @ 50 MHz |
+     |---|---|---|---|---|
+     | picorv32 | yosys `abc -lut 4` | 770 | 992 (1,105) | 11.23 ns |
+     | picorv32 | chipsmith | 842 | 1,062 (1,175) | 11.08 ns |
+     | blinky-verilog, blinky-vhdl | either | 0 (all carry) | 26 (26) | 16.65 ns, same RBF |
+
+     `bench/lutmap-vs-abc.sh build/` maps one `gates.json` both ways
+     (LUTs after `opt -fast`). On picorv32, abc's mapper alone
+     (`strash; if -K 4`) gives 847 LUTs and chipsmith's 842, so the
+     mapping itself is on par. The 9% gap comes from abc's logic
+     optimisation around its mapper: choice nodes (`dch -f`, 810 LUTs)
+     and don't-care resynthesis (`mfs2`, `lutpack`, 788). A choice-aware
+     mapper is the next gain. More cuts per node (16, 32), more recovery
+     passes, or relaxing depth by a level didn't help (844 to 847). An earlier comparison (842 vs 847) had
+     counted abc's 75 one-input buffer LUTs, which `opt -fast` removes.
 5. **Own Verilog frontend**: the synthesizable subset that GHDL and HDL
    generators emit.
 
@@ -263,8 +292,23 @@ package ball (`L16`) on the Zynq. A pin of the wrong form, or one the
 package doesn't have as user I/O, is an error when the manifest loads.
 The Zynq builds `build/<name>.bit` instead of `.rbf`.
 
-Unknown keys are errors: until there is a timing model, a `[clocks]` table
-would be silently ignored, so it is rejected.
+A `[clocks]` table gives the frequency of a clock entering at a pin:
+
+```toml
+[clocks]
+CLOCK_50 = "50 MHz"        # a port bit with a pin in [pins]
+```
+
+On the Zynq each clock becomes an XDC `create_clock` for nextpnr; the
+build prints nextpnr's Fmax and slack per clock and fails if one misses
+its constraint. Cyclone II takes at most one clock, because chipsmith's
+timing model times one clock domain. The build prints the estimated
+slack after routing and doesn't fail on it: the estimate is not sign-off (picorv32: 11.90 ns estimated, 11.08 ns in Quartus). The
+placer and router stay timing-driven against the critical path itself,
+whatever the clock. Without `[clocks]`, nextpnr times against its default
+12 MHz and Cyclone II reports no slack.
+
+Unknown keys are errors, so a misspelt table can't be silently ignored.
 
 ## Development
 

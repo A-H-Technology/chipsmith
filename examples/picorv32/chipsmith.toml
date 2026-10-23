@@ -19,3 +19,7 @@ LEDG = [
     "PIN_AE22", "PIN_AF22", "PIN_W19", "PIN_V18", "PIN_U18", "PIN_U17",
     "PIN_AA20", "PIN_Y18", "PIN_Y12",
 ]
+
+# The DE2's 50 MHz oscillator; slack is reported against it.
+[clocks]
+CLOCK_50 = "50 MHz"

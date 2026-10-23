@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -21,21 +22,74 @@ pub struct Manifest {
     pub target: Target,
 }
 
-/// The device and its pin assignments, one entry per port bit in the order
-/// the file lists them. Each device writes its pins its own way, so the pin
-/// type is per device: a Zynq ball on a Cyclone II can't be represented.
+/// The device, its pin assignments (one entry per port bit in the order
+/// the file lists them) and its clock constraints. Each device writes its
+/// pins its own way, so the pin type is per device: a Zynq ball on a
+/// Cyclone II can't be represented.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
-    Ep2c35f672c6(Vec<PinAssignment<QuartusPin>>),
-    Xc7z010clg400_1(Vec<PinAssignment<Clg400Pin>>),
+    Ep2c35f672c6 {
+        pins: Vec<PinAssignment<QuartusPin>>,
+        /// chipsmith's Cyclone II timing model times one clock domain, so
+        /// there is at most one clock to constrain.
+        clock: Option<Clock>,
+    },
+    Xc7z010clg400_1 {
+        pins: Vec<PinAssignment<Clg400Pin>>,
+        clocks: Vec<Clock>,
+    },
 }
 
 impl Target {
     pub fn device(&self) -> Device {
         match self {
-            Target::Ep2c35f672c6(_) => Device::Ep2c35f672c6,
-            Target::Xc7z010clg400_1(_) => Device::Xc7z010clg400_1,
+            Target::Ep2c35f672c6 { .. } => Device::Ep2c35f672c6,
+            Target::Xc7z010clg400_1 { .. } => Device::Xc7z010clg400_1,
         }
+    }
+}
+
+/// A clock entering at a pin, and the frequency it runs at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Clock {
+    /// A port bit with a pin assignment.
+    pub port: PortBit,
+    pub frequency: Frequency,
+}
+
+/// A clock frequency, written `"125 MHz"` (up to six decimals: whole Hz).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Frequency(NonZeroU64);
+
+impl Frequency {
+    fn parse(s: &str) -> Option<Self> {
+        let number = s.strip_suffix("MHz")?.trim_end();
+        let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+        let digits = |d: &str| d.bytes().all(|b| b.is_ascii_digit());
+        if whole.is_empty() || !digits(whole) || !digits(fraction) || fraction.len() > 6 {
+            return None;
+        }
+        let hz = whole.parse::<u64>().ok()?.checked_mul(1_000_000)?
+            + format!("{fraction:0<6}").parse::<u64>().ok()?;
+        NonZeroU64::new(hz).map(Frequency)
+    }
+
+    pub fn hz(self) -> u64 {
+        self.0.get()
+    }
+
+    pub fn mhz(self) -> f64 {
+        self.hz() as f64 / 1e6
+    }
+
+    pub fn period_ns(self) -> f64 {
+        1e9 / self.hz() as f64
+    }
+}
+
+impl fmt::Display for Frequency {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} MHz", self.mhz())
     }
 }
 
@@ -130,6 +184,12 @@ pub enum ManifestError {
         device: Device,
         expected: &'static str,
     },
+    #[error("[clocks] {port}: {value:?} is not a frequency like \"50 MHz\"")]
+    BadFrequency { port: String, value: String },
+    #[error("[clocks] {0}: a clock enters at a pin, and [pins] assigns none to {0}")]
+    ClockWithoutPin(String),
+    #[error("[clocks] has {0} clocks; the {1} timing model times one clock domain")]
+    TooManyClocks(usize, Device),
     #[error("pin {pin} is assigned to both {first} and {second}")]
     PinTwice {
         pin: String,
@@ -146,6 +206,9 @@ struct ManifestFile {
     target: TargetTable,
     #[serde(default)]
     pins: BTreeMap<String, PinsEntry>,
+    /// Port bit (as in error messages: `clk`, `bus[0]`) to frequency.
+    #[serde(default)]
+    clocks: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -192,15 +255,27 @@ impl Manifest {
         let device: Device = file.target.device.parse()?;
         let target = match device {
             Device::Ep2c35f672c6 => {
-                Target::Ep2c35f672c6(flatten_pins(file.pins, QuartusPin::parse)?)
+                let pins = flatten_pins(file.pins, QuartusPin::parse)?;
+                let mut clocks = parse_clocks(&file.clocks, &pins)?;
+                if clocks.len() > 1 {
+                    return Err(ManifestError::TooManyClocks(clocks.len(), device));
+                }
+                Target::Ep2c35f672c6 {
+                    pins,
+                    clock: clocks.pop(),
+                }
             }
-            Device::Xc7z010clg400_1 => Target::Xc7z010clg400_1(flatten_pins(file.pins, |s| {
-                Clg400Pin::parse(s).ok_or_else(|| ManifestError::BadPin {
-                    pin: s.to_string(),
-                    device,
-                    expected: "pins are the package's programmable-logic balls, like L16 (PS/MIO pins are not)",
-                })
-            })?),
+            Device::Xc7z010clg400_1 => {
+                let pins = flatten_pins(file.pins, |s| {
+                    Clg400Pin::parse(s).ok_or_else(|| ManifestError::BadPin {
+                        pin: s.to_string(),
+                        device,
+                        expected: "pins are the package's programmable-logic balls, like L16 (PS/MIO pins are not)",
+                    })
+                })?;
+                let clocks = parse_clocks(&file.clocks, &pins)?;
+                Target::Xc7z010clg400_1 { pins, clocks }
+            }
         };
         Ok(Manifest {
             name: file.project.name,
@@ -245,6 +320,30 @@ fn expand_sources(project_dir: &Path, patterns: &[String]) -> Result<Sources, Ma
             vhdl: vhdl.swap_remove(0),
         }),
     }
+}
+
+fn parse_clocks<P>(
+    table: &BTreeMap<String, String>,
+    pins: &[PinAssignment<P>],
+) -> Result<Vec<Clock>, ManifestError> {
+    table
+        .iter()
+        .map(|(port, value)| {
+            let port = pins
+                .iter()
+                .map(|a| &a.port)
+                .find(|p| p.to_string() == *port)
+                .ok_or_else(|| ManifestError::ClockWithoutPin(port.clone()))?;
+            let frequency = Frequency::parse(value).ok_or_else(|| ManifestError::BadFrequency {
+                port: port.to_string(),
+                value: value.clone(),
+            })?;
+            Ok(Clock {
+                port: port.clone(),
+                frequency,
+            })
+        })
+        .collect()
 }
 
 fn flatten_pins<P: PartialEq + fmt::Display>(
@@ -308,7 +407,7 @@ mod tests {
     fn a_bus_entry_assigns_list_index_i_to_port_bit_i() {
         let dir = scratch("bus", &["src/blinky.v"]);
         let m = Manifest::parse(DE2, &dir).unwrap();
-        let Target::Ep2c35f672c6(pins) = &m.target else {
+        let Target::Ep2c35f672c6 { pins, .. } = &m.target else {
             panic!("{:?} is not the DE2's part", m.target);
         };
         let pins: Vec<_> = pins
@@ -340,7 +439,7 @@ mod tests {
     fn a_device_takes_its_own_pin_names_only() {
         let dir = scratch("zybo", &["src/blinky.v"]);
         let m = Manifest::parse(ZYBO, &dir).unwrap();
-        let Target::Xc7z010clg400_1(pins) = &m.target else {
+        let Target::Xc7z010clg400_1 { pins, .. } = &m.target else {
             panic!("{:?} is not the Zybo's part", m.target);
         };
         let pins: Vec<_> = pins
@@ -402,11 +501,80 @@ mod tests {
             Manifest::parse(&other_part, &dir),
             Err(ManifestError::Device(_))
         ));
-        // A key chipsmith would silently ignore (no timing model yet) is an error.
-        let clocks = format!("{DE2}\n[clocks]\nCLOCK_50 = \"50 MHz\"\n");
+        // A key chipsmith would silently ignore is an error.
+        let typo = format!("{DE2}\n[clock]\nCLOCK_50 = \"50 MHz\"\n");
         assert!(matches!(
-            Manifest::parse(&clocks, &dir),
+            Manifest::parse(&typo, &dir),
             Err(ManifestError::Syntax { .. })
+        ));
+    }
+
+    #[test]
+    fn frequencies_are_whole_hz_in_mhz() {
+        let f = |s| Frequency::parse(s).map(Frequency::hz);
+        assert_eq!(f("125 MHz"), Some(125_000_000));
+        assert_eq!(f("12.5MHz"), Some(12_500_000));
+        assert_eq!(f("0.000001 MHz"), Some(1));
+        for bad in [
+            "0 MHz",
+            "125",
+            "125 mhz",
+            "-5 MHz",
+            "1.0000001 MHz",
+            ". MHz",
+            "1e3 MHz",
+        ] {
+            assert_eq!(f(bad), None, "{bad}");
+        }
+        assert_eq!(Frequency::parse("125 MHz").unwrap().period_ns(), 8.0);
+    }
+
+    #[test]
+    fn a_clock_names_a_pin_and_cyclone_ii_takes_one() {
+        let dir = scratch("clocks", &["src/a.v"]);
+        let m =
+            Manifest::parse(&format!("{DE2}\n[clocks]\nCLOCK_50 = \"50 MHz\"\n"), &dir).unwrap();
+        let Target::Ep2c35f672c6 { clock, .. } = &m.target else {
+            unreachable!()
+        };
+        assert_eq!(
+            clock
+                .as_ref()
+                .map(|c| (c.port.to_string(), c.frequency.hz())),
+            Some(("CLOCK_50".into(), 50_000_000))
+        );
+
+        let two = format!("{DE2}\n[clocks]\nCLOCK_50 = \"50 MHz\"\n\"LEDR[0]\" = \"1 MHz\"\n");
+        assert!(matches!(
+            Manifest::parse(&two, &dir),
+            Err(ManifestError::TooManyClocks(2, Device::Ep2c35f672c6))
+        ));
+        let m = Manifest::parse(
+            &format!("{ZYBO}\n[clocks]\nclk = \"125 MHz\"\n\"led[1]\" = \"10 MHz\"\n"),
+            &dir,
+        )
+        .unwrap();
+        let Target::Xc7z010clg400_1 { clocks, .. } = &m.target else {
+            unreachable!()
+        };
+        assert_eq!(clocks.len(), 2);
+
+        for (text, port) in [
+            (
+                format!("{DE2}\n[clocks]\nCLOCK_27 = \"27 MHz\"\n"),
+                "CLOCK_27",
+            ),
+            // The bus, not one of its bits, has no pin.
+            (format!("{DE2}\n[clocks]\nLEDR = \"1 MHz\"\n"), "LEDR"),
+        ] {
+            match Manifest::parse(&text, &dir) {
+                Err(ManifestError::ClockWithoutPin(p)) => assert_eq!(p, port),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(matches!(
+            Manifest::parse(&format!("{DE2}\n[clocks]\nCLOCK_50 = \"fast\"\n"), &dir),
+            Err(ManifestError::BadFrequency { .. })
         ));
     }
 }
