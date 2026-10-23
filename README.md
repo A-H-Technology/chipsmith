@@ -16,7 +16,10 @@ blinky takes about 9 s.
 |---|---|---|---|
 | EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes: LUT/carry/register logic, global clocks from pins, 3.3-V LVTTL pins | yes (2026-10-23: blinky-vhdl built and flashed by chipsmith) |
 
-Both examples produce RBFs that are byte-identical to the
+`examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
+LEDs, about 1,100 LEs; it builds in about 70 s.
+
+Both blinky examples produce RBFs that are byte-identical to the
 [cyclone2-re](https://github.com/cramt/cyclone2-re) blinky, which Quartus
 reproduces bit for bit from the same placement and routing.
 
