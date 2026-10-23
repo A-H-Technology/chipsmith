@@ -120,7 +120,7 @@ impl Toolchain for QuartusToolchain {
         manifest: &Manifest,
     ) -> Result<BuildOutcome, ChipsmithError> {
         let install_dir = self.installed(manifest.toolchain.version()).await?;
-        let plan = build::prepare_build(project_dir, manifest)?;
+        let plan = build::prepare_build(project_dir, manifest, self.product.synthesis_tool)?;
 
         for step in &plan.steps {
             eprintln!("==> {} ({})", step.label, step.tool);

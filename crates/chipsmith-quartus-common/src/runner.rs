@@ -17,11 +17,13 @@ use chipsmith_toolchain::process::{Capture, ProcessHost, ProcessSpec};
 pub const KNOWN_TOOLS: &[&str] = &[
     "quartus_sh",
     "quartus_map",
+    "quartus_syn",
     "quartus_fit",
     "quartus_asm",
     "quartus_sta",
     "quartus_pgm",
     "quartus_cpf",
+    "quartus_pfg",
     "quartus",
     "jtagconfig",
 ];
@@ -207,6 +209,7 @@ mod tests {
             latest: "1.0",
             installer: InstallerSpec { accepts_eula_flag },
             spawn,
+            synthesis_tool: "quartus_map",
             simulator: BundledSimulator {
                 subdir: "modelsim_ase",
                 display_name: "Test Simulator",

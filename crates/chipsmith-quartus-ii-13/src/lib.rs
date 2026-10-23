@@ -18,6 +18,7 @@ pub static PRODUCT: QuartusProduct = QuartusProduct {
         accepts_eula_flag: false,
     },
     spawn: SpawnStrategy::Bubblewrap32,
+    synthesis_tool: "quartus_map",
     // 32-bit like the rest of 13.0sp1, and the last Starter Edition that
     // needed no licence at all.
     simulator: BundledSimulator {
@@ -36,6 +37,7 @@ const VERSIONS: &[KnownVersion] = &[KnownVersion {
         version: "13.0sp1",
         revision: "232",
         filename: "QuartusSetupWeb-13.0.1.232.run",
+        companions: &[],
     },
     install_subdir: "13.0sp1",
     devices: &[

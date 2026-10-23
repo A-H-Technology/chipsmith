@@ -17,6 +17,7 @@ pub static PRODUCT: QuartusProduct = QuartusProduct {
         accepts_eula_flag: true,
     },
     spawn: SpawnStrategy::PatchElf,
+    synthesis_tool: "quartus_map",
     // Lite 21.1 onwards swapped ModelSim for Questa, which unlike ModelSim
     // refuses to elaborate without a licence.
     simulator: BundledSimulator {
@@ -36,6 +37,7 @@ const VERSIONS: &[KnownVersion] = &[
             version: "23.1std.1",
             revision: "993",
             filename: "QuartusLiteSetup-23.1std.1.993-linux.run",
+            companions: &[],
         },
         install_subdir: "23.1std",
         devices: &[
@@ -67,6 +69,7 @@ const VERSIONS: &[KnownVersion] = &[
             version: "22.1std.2",
             revision: "922",
             filename: "QuartusLiteSetup-22.1std.2.922-linux.run",
+            companions: &[],
         },
         install_subdir: "22.1std",
         devices: &[DeviceSupport {
@@ -80,6 +83,7 @@ const VERSIONS: &[KnownVersion] = &[
             version: "24.1std",
             revision: "1077",
             filename: "QuartusLiteSetup-24.1std.0.1077-linux.run",
+            companions: &[],
         },
         install_subdir: "24.1std",
         devices: &[DeviceSupport {

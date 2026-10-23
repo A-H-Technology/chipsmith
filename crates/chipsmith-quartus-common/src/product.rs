@@ -1,8 +1,8 @@
 //! What distinguishes one Quartus Product from another.
 //!
-//! Quartus Prime and Quartus II share an install layout, an installer, a tool
-//! set and a build flow. They differ in four facts, and those four facts are
-//! this module. A backend crate is a `QuartusProduct` constant and nothing else.
+//! Quartus Prime Lite, Quartus Prime Pro and Quartus II share an install
+//! layout, an installer, a tool set and a build flow. They differ in a handful
+//! of facts, and those facts are this module. A backend crate is a `QuartusProduct` constant and nothing else.
 
 use std::path::{Path, PathBuf};
 
@@ -13,6 +13,10 @@ pub struct QuartusVersion {
     pub version: &'static str,
     pub revision: &'static str,
     pub filename: &'static str,
+    /// Archives the installer reads from its own directory rather than
+    /// carrying inside itself. Quartus Prime Pro splits its base install into
+    /// the `.run` and a `-part2-*.qdz`, and the installer fails without both.
+    pub companions: &'static [&'static str],
 }
 
 #[derive(Debug)]
@@ -137,6 +141,9 @@ pub struct QuartusProduct {
     pub latest: &'static str,
     pub installer: InstallerSpec,
     pub spawn: SpawnStrategy,
+    /// `quartus_map` for Lite and Quartus II. Pro replaced it with
+    /// `quartus_syn` and rejects the old name.
+    pub synthesis_tool: &'static str,
     pub simulator: BundledSimulator,
 }
 
@@ -179,6 +186,7 @@ pub(crate) static TEST_PRODUCT: QuartusProduct = QuartusProduct {
                 version: "1.0",
                 revision: "100",
                 filename: "test.run",
+                companions: &[],
             },
             install_subdir: "1.0",
             devices: &[],
@@ -189,6 +197,7 @@ pub(crate) static TEST_PRODUCT: QuartusProduct = QuartusProduct {
                 version: "2.0",
                 revision: "200",
                 filename: "test2.run",
+                companions: &["test2-part2.qdz"],
             },
             install_subdir: "2.0std",
             devices: &[],
@@ -199,6 +208,7 @@ pub(crate) static TEST_PRODUCT: QuartusProduct = QuartusProduct {
         accepts_eula_flag: true,
     },
     spawn: SpawnStrategy::PatchElf,
+    synthesis_tool: "quartus_map",
     simulator: BundledSimulator {
         subdir: "modelsim_ase",
         display_name: "Test Simulator",

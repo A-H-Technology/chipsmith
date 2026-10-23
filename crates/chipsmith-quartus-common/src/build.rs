@@ -107,6 +107,7 @@ pub fn plan_build(
     project_dir: &Path,
     manifest: &Manifest,
     sources: &[PathBuf],
+    synthesis_tool: &'static str,
 ) -> Result<BuildPlan, ChipsmithError> {
     let layout = BuildLayout::new(project_dir, manifest);
 
@@ -136,7 +137,7 @@ pub fn plan_build(
     let steps = vec![
         BuildStep {
             label: "Synthesis",
-            tool: "quartus_map",
+            tool: synthesis_tool,
             args: vec![name.clone(), "--read_settings_files=on".to_string()],
         },
         BuildStep {
@@ -175,9 +176,13 @@ pub fn materialize(plan: &BuildPlan) -> Result<(), ChipsmithError> {
 }
 
 /// Resolve sources, plan the build, and lay the Build Directory out.
-pub fn prepare_build(project_dir: &Path, manifest: &Manifest) -> Result<BuildPlan, ChipsmithError> {
+pub fn prepare_build(
+    project_dir: &Path,
+    manifest: &Manifest,
+    synthesis_tool: &'static str,
+) -> Result<BuildPlan, ChipsmithError> {
     let sources = manifest.resolve_sources(project_dir)?;
-    let plan = plan_build(project_dir, manifest, &sources)?;
+    let plan = plan_build(project_dir, manifest, &sources, synthesis_tool)?;
     materialize(&plan)?;
     Ok(plan)
 }
@@ -218,7 +223,13 @@ mod tests {
 
     fn plan_for(clocks: Vec<Clock>) -> BuildPlan {
         let sources = vec![PathBuf::from("/proj/src/blinky.vhd")];
-        plan_build(Path::new("/proj"), &manifest_with_clocks(clocks), &sources).unwrap()
+        plan_build(
+            Path::new("/proj"),
+            &manifest_with_clocks(clocks),
+            &sources,
+            "quartus_map",
+        )
+        .unwrap()
     }
 
     fn clock(port: &str, period_ns: f64) -> Clock {
@@ -289,6 +300,20 @@ mod tests {
         );
     }
 
+    /// Quartus Prime Pro refuses `quartus_map` outright ("no longer
+    /// supported. Please use quartus_syn"), so synthesis is the Product's call.
+    #[test]
+    fn synthesis_runs_whichever_tool_the_product_names() {
+        let plan = plan_build(
+            Path::new("/proj"),
+            &manifest_with_clocks(vec![]),
+            &[PathBuf::from("/proj/src/blinky.vhd")],
+            "quartus_syn",
+        )
+        .unwrap();
+        assert_eq!(plan.steps[0].tool, "quartus_syn");
+    }
+
     /// The examples in the repo are the first thing anyone runs, so hold them
     /// to the real path: load the shipped Manifest and plan a full build.
     #[test]
@@ -308,7 +333,7 @@ mod tests {
             let sources = manifest.resolve_sources(&dir).unwrap();
             assert!(!sources.is_empty(), "{example} has no sources");
 
-            let plan = plan_build(&dir, &manifest, &sources).unwrap();
+            let plan = plan_build(&dir, &manifest, &sources, "quartus_map").unwrap();
             let name = &manifest.project.name;
 
             let sdc = file(&plan, &format!("{name}.sdc")).expect("example should be constrained");
@@ -342,7 +367,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         let manifest = manifest_with_clocks(vec![clock("clk", 20.0)]);
-        let plan = plan_build(&dir, &manifest, &[PathBuf::from("src/blinky.vhd")]).unwrap();
+        let plan = plan_build(
+            &dir,
+            &manifest,
+            &[PathBuf::from("src/blinky.vhd")],
+            "quartus_map",
+        )
+        .unwrap();
         materialize(&plan).unwrap();
 
         for planned in &plan.files {

@@ -50,6 +50,11 @@ pub async fn ensure_installed(
             product.display_name, version_key
         );
 
+        // Companions land in the same cache directory as the installer, which
+        // is where it looks for them.
+        for companion in version.download.companions {
+            download::download_file(&cdn_url(&version.download, companion), companion).await?;
+        }
         let url = cdn_url(&version.download, version.download.filename);
         let installer = download::download_file(&url, version.download.filename).await?;
         download::make_executable(&installer).await?;
