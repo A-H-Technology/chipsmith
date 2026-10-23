@@ -1,0 +1,13 @@
+[project]
+name = "blinky"
+top = "blinky"
+sources = ["src/*.v"]
+
+[target]
+device = "xc7z010clg400-1"
+
+# Original Zybo (now "Zybo (legacy)"), Digilent Zybo-Master.xdc. The Zybo Z7's
+# clock is on K17 instead.
+[pins]
+clk = "L16"
+led = ["M14", "M15", "G14", "D18"]

@@ -1,12 +1,21 @@
-//! HDL to bitstream to chip. Some stages are still external tools: GHDL
-//! (VHDL to Verilog), yosys (synthesis) and cram (bitstream, JTAG stream).
-//! Packing (`pack`), placement (`place`), routing (`route`) and loading
-//! over the cable (`jtag`) are chipsmith's own. Each stage is one
-//! `Step` in a `Plan`, so replacing a tool with chipsmith's own code means
-//! replacing one step.
+//! HDL to bitstream to chip. The device decides the flow.
 //!
-//! Planning is pure: `plan_build` and `plan_flash` return every file to
-//! write and every command to run, and `Plan::run` does it.
+//! Cyclone II: some stages are still external tools: GHDL (VHDL to
+//! Verilog), yosys (synthesis) and cram (bitstream, JTAG stream). Packing
+//! (`pack`), placement (`place`), routing (`route`) and loading over the
+//! cable (`jtag`) are chipsmith's own.
+//!
+//! 7-series (Zynq-7010): every stage is still an external tool: yosys
+//! `synth_xilinx`, openXC7's nextpnr (himbaechel xilinx), prjxray's
+//! `fasm2frames` and `xc7frames2bit`. Loading over the Zybo's FT2232 cable
+//! is chipsmith's own (`jtag::ftdi`, `jtag::xc7`).
+//!
+//! Each stage is one `Step` in a `Plan`, so replacing a tool with
+//! chipsmith's own code means replacing one step.
+//!
+//! Planning is pure: `plan_cyclone2`, `plan_xc7` and `plan_flash` return
+//! every file to write and every command to run, and `Plan::run` does it.
+//! `plan_build` only adds reading the tools' locations from the environment.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -17,20 +26,29 @@ use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 
-use crate::jtag::svf;
+use crate::jtag::ftdi::Ftdi;
 use crate::jtag::usb_blaster::UsbBlaster;
+use crate::jtag::{svf, xc7};
 
-use crate::manifest::{Manifest, Sources};
+use crate::device::{Clg400Pin, Device, Xc7Part, XC7Z010CLG400_1};
+use crate::manifest::{Manifest, PinAssignment, QuartusPin, Sources, Target};
 
 /// Where the cyclone2-re yosys techmap lives: a directory holding `synth/`.
 /// Set by the nix wrapper and the devshell.
 pub const SYNTH_DIR_VAR: &str = "CHIPSMITH_CYCLONE2_SYNTH";
+/// A directory of nextpnr-himbaechel xilinx chip databases,
+/// `chipdb-<die>.bin`. Set by the nix wrapper and the devshell.
+pub const XC7_CHIPDB_VAR: &str = "CHIPSMITH_XC7_CHIPDB";
+/// A prjxray-db checkout (holding `zynq7/`, ...), the one the chip
+/// databases were built from. Set by the nix wrapper and the devshell.
+pub const PRJXRAY_DB_VAR: &str = "CHIPSMITH_PRJXRAY_DB";
 
 /// Every artifact path of a build, in one place.
 #[derive(Debug, Clone)]
 pub struct Layout {
     pub dir: PathBuf,
     name: String,
+    device: Device,
 }
 
 impl Layout {
@@ -38,11 +56,18 @@ impl Layout {
         Layout {
             dir: project_dir.join("build"),
             name: manifest.name.clone(),
+            device: manifest.target.device(),
         }
     }
 
+    /// What the device is configured with: a raw bitstream for Cyclone II,
+    /// a `.bit` (header plus configuration packets) for 7-series.
     pub fn bitstream(&self) -> PathBuf {
-        self.dir.join(format!("{}.rbf", self.name))
+        let extension = match self.device {
+            Device::Ep2c35f672c6 => "rbf",
+            Device::Xc7z010clg400_1 => "bit",
+        };
+        self.dir.join(format!("{}.{extension}", self.name))
     }
     fn translated(&self) -> PathBuf {
         self.dir.join("vhdl.v")
@@ -61,6 +86,15 @@ impl Layout {
     }
     fn routed(&self) -> PathBuf {
         self.dir.join("routed.json")
+    }
+    fn xdc(&self) -> PathBuf {
+        self.dir.join("pins.xdc")
+    }
+    fn fasm(&self) -> PathBuf {
+        self.dir.join(format!("{}.fasm", self.name))
+    }
+    fn frames(&self) -> PathBuf {
+        self.dir.join(format!("{}.frames", self.name))
     }
     fn log(&self, tool: &str) -> PathBuf {
         self.dir.join(format!("{tool}.log"))
@@ -84,6 +118,43 @@ pub enum Step {
     },
     /// Play an SVF over the USB-Blaster, in process.
     PlaySvf(PathBuf),
+    /// Load a 7-series `.bit` over a Digilent FT2232 cable, in process.
+    LoadBit(PathBuf),
+}
+
+/// The 7-series tools' data, resolved for one part.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Xc7Data {
+    /// nextpnr's chip database for the part's die.
+    pub chipdb: PathBuf,
+    /// prjxray-db's directory for the part's family, e.g. `.../zynq7`.
+    pub db: PathBuf,
+}
+
+impl Xc7Data {
+    pub fn from_env(part: Xc7Part) -> Result<Self> {
+        let var = |name: &str| {
+            std::env::var_os(name).map(PathBuf::from).with_context(|| {
+                format!("{name} is not set; run chipsmith from its nix package or `nix develop`")
+            })
+        };
+        let data = Xc7Data {
+            chipdb: var(XC7_CHIPDB_VAR)?.join(format!("chipdb-{}.bin", part.die)),
+            db: var(PRJXRAY_DB_VAR)?.join(part.family),
+        };
+        if !data.chipdb.is_file() {
+            bail!(
+                "no chip database for {} at {}",
+                part.die,
+                data.chipdb.display()
+            );
+        }
+        let part_yaml = data.db.join(part.part).join("part.yaml");
+        if !part_yaml.is_file() {
+            bail!("prjxray-db has no {}", part_yaml.display());
+        }
+        Ok(data)
+    }
 }
 
 impl Step {
@@ -93,6 +164,7 @@ impl Step {
             Step::Pack { .. } => "pack",
             Step::PlaceRoute { .. } => "place and route",
             Step::PlaySvf(_) => "JTAG: program over USB-Blaster",
+            Step::LoadBit(_) => "JTAG: program over Digilent FT2232",
         }
     }
 }
@@ -145,10 +217,22 @@ pub struct Plan {
     pub steps: Vec<Step>,
 }
 
-pub fn plan_build(manifest: &Manifest, layout: &Layout, synth_dir: &Path) -> Plan {
-    let mut steps: Vec<Step> = Vec::new();
+/// The build for the manifest's device, with the tools' data found through
+/// the environment the nix package (or devshell) sets.
+pub fn plan_build(manifest: &Manifest, layout: &Layout) -> Result<Plan> {
+    Ok(match &manifest.target {
+        Target::Ep2c35f672c6(pins) => plan_cyclone2(manifest, pins, layout, &synth_dir()?),
+        Target::Xc7z010clg400_1(pins) => {
+            let part = XC7Z010CLG400_1;
+            plan_xc7(manifest, part, pins, layout, &Xc7Data::from_env(part)?)
+        }
+    })
+}
 
-    let verilog: Vec<PathBuf> = match &manifest.sources {
+/// VHDL becomes Verilog through GHDL; Verilog is used as it is. Returns the
+/// Verilog files synthesis reads.
+fn verilog_sources(manifest: &Manifest, layout: &Layout, steps: &mut Vec<Step>) -> Vec<PathBuf> {
+    match &manifest.sources {
         Sources::Verilog(files) => files.clone(),
         Sources::Vhdl(files) => {
             steps.push(
@@ -164,7 +248,17 @@ pub fn plan_build(manifest: &Manifest, layout: &Layout, synth_dir: &Path) -> Pla
             );
             vec![layout.translated()]
         }
-    };
+    }
+}
+
+pub fn plan_cyclone2(
+    manifest: &Manifest,
+    pins: &[PinAssignment<QuartusPin>],
+    layout: &Layout,
+    synth_dir: &Path,
+) -> Plan {
+    let mut steps: Vec<Step> = Vec::new();
+    let verilog = verilog_sources(manifest, layout, &mut steps);
 
     steps.push(
         Tool {
@@ -188,8 +282,7 @@ pub fn plan_build(manifest: &Manifest, layout: &Layout, synth_dir: &Path) -> Pla
         packed: layout.packed(),
         placed: layout.placed(),
         routed: layout.routed(),
-        pins: manifest
-            .pins
+        pins: pins
             .iter()
             .map(|a| (a.port.to_string(), a.pin.as_str().to_string()))
             .collect(),
@@ -213,6 +306,123 @@ pub fn plan_build(manifest: &Manifest, layout: &Layout, synth_dir: &Path) -> Pla
     }
 }
 
+/// Every pin is LVCMOS33: the Zybo's PL banks (34, 35) are both powered at
+/// 3.3 V, and the manifest has no I/O standards yet.
+pub fn plan_xc7(
+    manifest: &Manifest,
+    part: Xc7Part,
+    pins: &[PinAssignment<Clg400Pin>],
+    layout: &Layout,
+    data: &Xc7Data,
+) -> Plan {
+    let mut steps: Vec<Step> = Vec::new();
+    let verilog = verilog_sources(manifest, layout, &mut steps);
+
+    steps.push(
+        Tool {
+            log: Some(layout.log("yosys")),
+            ..Tool::new("yosys: synthesis (synth_xilinx)", "yosys")
+        }
+        .arg("-q")
+        .arg("-l")
+        .arg(layout.log("yosys"))
+        .arg("-s")
+        .arg(layout.synth_script())
+        .into(),
+    );
+    steps.push(
+        Tool {
+            log: Some(layout.log("nextpnr")),
+            ..Tool::new("nextpnr: place and route", "nextpnr-himbaechel")
+        }
+        .args(["--device", part.part])
+        .arg("--chipdb")
+        .arg(&data.chipdb)
+        .arg("--json")
+        .arg(layout.netlist())
+        .arg("-o")
+        .arg(prefixed("xdc=", &layout.xdc()))
+        .arg("-o")
+        .arg(prefixed("fasm=", &layout.fasm()))
+        .arg("-q")
+        .arg("-l")
+        .arg(layout.log("nextpnr"))
+        .into(),
+    );
+    steps.push(
+        Tool::new("prjxray: FASM to frames", "fasm2frames")
+            .args(["--part", part.part])
+            .arg("--db-root")
+            .arg(&data.db)
+            .arg(layout.fasm())
+            .arg(layout.frames())
+            .into(),
+    );
+    steps.push(
+        // The .bit header names the frames file as given: relative to the
+        // build directory, it doesn't depend on where the project lives.
+        Tool {
+            cwd: Some(layout.dir.clone()),
+            ..Tool::new("prjxray: frames to .bit", "xc7frames2bit")
+        }
+        .arg("--part_file")
+        .arg(data.db.join(part.part).join("part.yaml"))
+        .args(["--part_name", part.part])
+        .arg("--frm_file")
+        .arg(file_name(&layout.frames()))
+        .arg("--output_file")
+        .arg(layout.bitstream())
+        .into(),
+    );
+
+    Plan {
+        dir: Some(layout.dir.clone()),
+        files: vec![
+            (
+                layout.synth_script(),
+                xc7_synth_script(&verilog, &manifest.top, &layout.netlist()),
+            ),
+            (layout.xdc(), xdc(pins)),
+        ],
+        steps,
+    }
+}
+
+fn file_name(path: &Path) -> &std::ffi::OsStr {
+    path.file_name().expect("layout paths name files")
+}
+
+fn prefixed(prefix: &str, path: &Path) -> OsString {
+    let mut s = OsString::from(prefix);
+    s.push(path);
+    s
+}
+
+fn xc7_synth_script(verilog: &[PathBuf], top: &str, netlist: &Path) -> String {
+    let mut script = String::new();
+    for file in verilog {
+        script += &format!("read_verilog {}\n", quoted(file));
+    }
+    // openXC7's flow (demo-projects openXC7.mk): one flat netlist, abc9 for
+    // LUT mapping with the 7-series delays.
+    script += &format!("synth_xilinx -flatten -abc9 -arch xc7 -top {top}\n");
+    script += &format!("write_json {}\n", quoted(netlist));
+    script
+}
+
+fn xdc(pins: &[PinAssignment<Clg400Pin>]) -> String {
+    pins.iter()
+        .map(|a| {
+            format!(
+                "set_property PACKAGE_PIN {pin} [get_ports {{{port}}}]\n\
+                 set_property IOSTANDARD LVCMOS33 [get_ports {{{port}}}]\n",
+                pin = a.pin,
+                port = a.port
+            )
+        })
+        .collect()
+}
+
 /// What `chipsmith flash` can load.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Loadable {
@@ -220,6 +430,9 @@ pub enum Loadable {
     Rbf(PathBuf),
     /// A JTAG sequence already, from cram or any other tool.
     Svf(PathBuf),
+    /// A 7-series `.bit`, loaded over a Digilent FT2232 cable (the Zybo's
+    /// on-board one).
+    Bit(PathBuf),
 }
 
 impl Loadable {
@@ -227,7 +440,8 @@ impl Loadable {
         match path.extension().and_then(|e| e.to_str()) {
             Some("rbf") => Ok(Loadable::Rbf(path)),
             Some("svf") => Ok(Loadable::Svf(path)),
-            _ => bail!("{}: can load .rbf or .svf files", path.display()),
+            Some("bit") => Ok(Loadable::Bit(path)),
+            _ => bail!("{}: can load .rbf, .svf or .bit files", path.display()),
         }
     }
 }
@@ -249,6 +463,7 @@ pub fn plan_flash(loadable: &Loadable) -> Plan {
                 Step::PlaySvf(svf),
             ]
         }
+        Loadable::Bit(bit) => vec![Step::LoadBit(bit.clone())],
     };
     Plan {
         dir: None,
@@ -296,6 +511,7 @@ impl Plan {
                     pins,
                 } => place_route(packed, placed, routed, pins)?,
                 Step::PlaySvf(svf) => play_svf(svf)?,
+                Step::LoadBit(bit) => load_bit(bit)?,
             }
         }
         Ok(())
@@ -370,6 +586,26 @@ fn play_svf(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn load_bit(path: &Path) -> Result<()> {
+    let file = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let payload = xc7::bit_payload(&file)?;
+    let mut cable = Ftdi::open()?;
+    let chain = xc7::scan(&mut cable)?;
+    // On a Zynq the PL shares the chain with the ARM DAP (IR 4 bits).
+    let target = chain
+        .iter()
+        .position(|t| t.ir_len == 6)
+        .context("no 7-series TAP on the JTAG chain")?;
+    let started = Instant::now();
+    xc7::load(&mut cable, &chain, target, payload)?;
+    eprintln!(
+        "    loaded {:#010x}, DONE high, in {:.1} s",
+        chain[target].idcode,
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
 fn run_tool(step: &Tool) -> Result<()> {
     let mut cmd = Command::new(&step.program);
     cmd.args(&step.args);
@@ -412,25 +648,67 @@ pub fn synth_dir() -> Result<PathBuf> {
 mod tests {
     use super::*;
 
-    fn manifest(sources: Sources) -> Manifest {
+    const DE2: &str = r#"
+        [project]
+        name = "blinky"
+        top = "blinky"
+        sources = ["x.v"]
+        [target]
+        device = "EP2C35F672C6"
+        [pins]
+        CLOCK_50 = "PIN_N2"
+        LEDR = ["PIN_AE23", "PIN_AF23"]
+    "#;
+
+    const ZYBO: &str = r#"
+        [project]
+        name = "blinky"
+        top = "blinky"
+        sources = ["x.v"]
+        [target]
+        device = "xc7z010clg400-1"
+        [pins]
+        clk = "L16"
+        led = ["M14", "M15"]
+    "#;
+
+    fn manifest_for(text: &str, sources: Sources) -> Manifest {
         let dir = std::env::temp_dir().join(format!("chipsmith-flow-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("x.v"), "").unwrap();
-        let text = r#"
-            [project]
-            name = "blinky"
-            top = "blinky"
-            sources = ["x.v"]
-            [target]
-            device = "EP2C35F672C6"
-            [pins]
-            CLOCK_50 = "PIN_N2"
-            LEDR = ["PIN_AE23", "PIN_AF23"]
-        "#;
         Manifest {
             sources,
             ..Manifest::parse(text, &dir).unwrap()
         }
+    }
+
+    fn layout(m: &Manifest) -> Layout {
+        Layout {
+            dir: "/p/build".into(),
+            name: m.name.clone(),
+            device: m.target.device(),
+        }
+    }
+
+    /// The DE2 manifest's plan, with `sources` in place of the file's.
+    fn cyclone2(sources: Sources) -> Plan {
+        let m = manifest_for(DE2, sources);
+        let Target::Ep2c35f672c6(pins) = &m.target else {
+            unreachable!()
+        };
+        plan_cyclone2(&m, pins, &layout(&m), Path::new("/synth"))
+    }
+
+    fn xc7(sources: Sources) -> Plan {
+        let m = manifest_for(ZYBO, sources);
+        let Target::Xc7z010clg400_1(pins) = &m.target else {
+            unreachable!()
+        };
+        let data = Xc7Data {
+            chipdb: "/db/chipdb-xc7z010.bin".into(),
+            db: "/xray/zynq7".into(),
+        };
+        plan_xc7(&m, XC7Z010CLG400_1, pins, &layout(&m), &data)
     }
 
     fn tool(step: &Step) -> &Tool {
@@ -446,12 +724,7 @@ mod tests {
 
     #[test]
     fn verilog_goes_straight_to_yosys() {
-        let m = manifest(Sources::Verilog(vec!["/p/src/blinky.v".into()]));
-        let layout = Layout {
-            dir: "/p/build".into(),
-            name: m.name.clone(),
-        };
-        let plan = plan_build(&m, &layout, Path::new("/synth"));
+        let plan = cyclone2(Sources::Verilog(vec!["/p/src/blinky.v".into()]));
         assert_eq!(
             labels(&plan),
             [
@@ -482,12 +755,7 @@ mod tests {
 
     #[test]
     fn vhdl_is_translated_to_verilog_and_yosys_reads_the_translation() {
-        let m = manifest(Sources::Vhdl(vec!["/p/src/blinky.vhd".into()]));
-        let layout = Layout {
-            dir: "/p/build".into(),
-            name: m.name.clone(),
-        };
-        let plan = plan_build(&m, &layout, Path::new("/synth"));
+        let plan = cyclone2(Sources::Vhdl(vec!["/p/src/blinky.vhd".into()]));
         assert_eq!(plan.steps[0].label(), "ghdl: VHDL to Verilog");
         assert_eq!(
             tool(&plan.steps[0]).stdout.as_deref(),
@@ -500,12 +768,7 @@ mod tests {
 
     #[test]
     fn pins_reach_the_placer_per_port_bit() {
-        let m = manifest(Sources::Verilog(vec![]));
-        let layout = Layout {
-            dir: "/p/build".into(),
-            name: m.name.clone(),
-        };
-        let plan = plan_build(&m, &layout, Path::new("/synth"));
+        let plan = cyclone2(Sources::Verilog(vec![]));
         let Step::PlaceRoute { pins, .. } = &plan.steps[2] else {
             panic!("{:?} is not place and route", plan.steps[2]);
         };
@@ -518,5 +781,70 @@ mod tests {
                 ("LEDR[1]", "PIN_AF23")
             ]
         );
+    }
+
+    #[test]
+    fn the_zynq_goes_through_openxc7_and_prjxray_to_a_bit() {
+        let plan = xc7(Sources::Verilog(vec!["/p/src/blinky.v".into()]));
+        assert_eq!(
+            labels(&plan),
+            [
+                "yosys: synthesis (synth_xilinx)",
+                "nextpnr: place and route",
+                "prjxray: FASM to frames",
+                "prjxray: frames to .bit"
+            ]
+        );
+        assert_eq!(
+            plan.files[0].1,
+            "read_verilog \"/p/src/blinky.v\"\nsynth_xilinx -flatten -abc9 -arch xc7 -top blinky\nwrite_json \"/p/build/netlist.json\"\n"
+        );
+        let nextpnr = tool(&plan.steps[1]);
+        assert_eq!(nextpnr.program, "nextpnr-himbaechel");
+        assert!(nextpnr
+            .args
+            .windows(2)
+            .any(|w| w == ["--device", "xc7z010clg400-1"]));
+        assert!(nextpnr
+            .args
+            .windows(2)
+            .any(|w| w == ["--chipdb", "/db/chipdb-xc7z010.bin"]));
+        assert_eq!(
+            tool(&plan.steps[2]).args.last().unwrap(),
+            "/p/build/blinky.frames"
+        );
+        let bit = tool(&plan.steps[3]);
+        assert!(bit
+            .args
+            .windows(2)
+            .any(|w| w == ["--part_file", "/xray/zynq7/xc7z010clg400-1/part.yaml"]));
+        assert!(bit
+            .args
+            .windows(2)
+            .any(|w| w == ["--frm_file", "blinky.frames"]));
+        assert_eq!(bit.cwd.as_deref(), Some(Path::new("/p/build")));
+        assert_eq!(bit.args.last().unwrap(), "/p/build/blinky.bit");
+    }
+
+    #[test]
+    fn zynq_pins_become_an_xdc_per_port_bit() {
+        let plan = xc7(Sources::Verilog(vec![]));
+        let (path, xdc) = &plan.files[1];
+        assert_eq!(path, Path::new("/p/build/pins.xdc"));
+        assert_eq!(
+            xdc,
+            "set_property PACKAGE_PIN L16 [get_ports {clk}]\n\
+             set_property IOSTANDARD LVCMOS33 [get_ports {clk}]\n\
+             set_property PACKAGE_PIN M14 [get_ports {led[0]}]\n\
+             set_property IOSTANDARD LVCMOS33 [get_ports {led[0]}]\n\
+             set_property PACKAGE_PIN M15 [get_ports {led[1]}]\n\
+             set_property IOSTANDARD LVCMOS33 [get_ports {led[1]}]\n"
+        );
+    }
+
+    #[test]
+    fn a_bit_is_loaded_over_the_ft2232() {
+        let plan = plan_flash(&Loadable::from_path("/p/build/blinky.bit".into()).unwrap());
+        assert_eq!(plan.steps, [Step::LoadBit("/p/build/blinky.bit".into())]);
     }
 }

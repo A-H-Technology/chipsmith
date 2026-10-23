@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::device::{Device, UnknownDevice};
+use crate::device::{Clg400Pin, Device, UnknownDevice};
 
 pub const FILE_NAME: &str = "chipsmith.toml";
 
@@ -17,10 +17,26 @@ pub struct Manifest {
     pub name: String,
     /// The module (or entity) whose ports are the chip's pins.
     pub top: String,
-    pub device: Device,
     pub sources: Sources,
-    /// One entry per port bit, in the order the file lists them.
-    pub pins: Vec<PinAssignment>,
+    pub target: Target,
+}
+
+/// The device and its pin assignments, one entry per port bit in the order
+/// the file lists them. Each device writes its pins its own way, so the pin
+/// type is per device: a Zynq ball on a Cyclone II can't be represented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    Ep2c35f672c6(Vec<PinAssignment<QuartusPin>>),
+    Xc7z010clg400_1(Vec<PinAssignment<Clg400Pin>>),
+}
+
+impl Target {
+    pub fn device(&self) -> Device {
+        match self {
+            Target::Ep2c35f672c6(_) => Device::Ep2c35f672c6,
+            Target::Xc7z010clg400_1(_) => Device::Xc7z010clg400_1,
+        }
+    }
 }
 
 /// The design's HDL, already expanded from globs to existing files. One
@@ -33,9 +49,9 @@ pub enum Sources {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PinAssignment {
+pub struct PinAssignment<P> {
     pub port: PortBit,
-    pub pin: Pin,
+    pub pin: P,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,23 +70,33 @@ impl fmt::Display for PortBit {
     }
 }
 
-/// A package pin by its board-manual name, e.g. `PIN_N2`. Whether the
+/// A Cyclone II package pin by its Quartus name, e.g. `PIN_N2`. Whether the
 /// package has it is checked by place-and-route against the device database.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Pin(String);
+pub struct QuartusPin(String);
 
-impl Pin {
+impl QuartusPin {
     fn parse(s: &str) -> Result<Self, ManifestError> {
         match s.strip_prefix("PIN_") {
             Some(ball) if !ball.is_empty() && ball.chars().all(|c| c.is_ascii_alphanumeric()) => {
-                Ok(Pin(s.to_string()))
+                Ok(QuartusPin(s.to_string()))
             }
-            _ => Err(ManifestError::BadPin(s.to_string())),
+            _ => Err(ManifestError::BadPin {
+                pin: s.to_string(),
+                device: Device::Ep2c35f672c6,
+                expected: "pins are written like PIN_N2",
+            }),
         }
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl fmt::Display for QuartusPin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -98,8 +124,12 @@ pub enum ManifestError {
     UnknownLanguage(PathBuf),
     #[error("sources mix Verilog ({verilog}) and VHDL ({vhdl}); use one language per design")]
     MixedLanguages { verilog: PathBuf, vhdl: PathBuf },
-    #[error("bad pin {0:?}; pins are written like PIN_N2")]
-    BadPin(String),
+    #[error("{device} has no user I/O pin {pin:?}; {expected}")]
+    BadPin {
+        pin: String,
+        device: Device,
+        expected: &'static str,
+    },
     #[error("pin {pin} is assigned to both {first} and {second}")]
     PinTwice {
         pin: String,
@@ -159,12 +189,24 @@ impl Manifest {
             path: PathBuf::from(FILE_NAME),
             source: Box::new(source),
         })?;
+        let device: Device = file.target.device.parse()?;
+        let target = match device {
+            Device::Ep2c35f672c6 => {
+                Target::Ep2c35f672c6(flatten_pins(file.pins, QuartusPin::parse)?)
+            }
+            Device::Xc7z010clg400_1 => Target::Xc7z010clg400_1(flatten_pins(file.pins, |s| {
+                Clg400Pin::parse(s).ok_or_else(|| ManifestError::BadPin {
+                    pin: s.to_string(),
+                    device,
+                    expected: "pins are the package's programmable-logic balls, like L16 (PS/MIO pins are not)",
+                })
+            })?),
+        };
         Ok(Manifest {
             name: file.project.name,
             top: file.project.top,
-            device: file.target.device.parse()?,
             sources: expand_sources(project_dir, &file.project.sources)?,
-            pins: flatten_pins(file.pins)?,
+            target,
         })
     }
 }
@@ -205,8 +247,11 @@ fn expand_sources(project_dir: &Path, patterns: &[String]) -> Result<Sources, Ma
     }
 }
 
-fn flatten_pins(table: BTreeMap<String, PinsEntry>) -> Result<Vec<PinAssignment>, ManifestError> {
-    let mut assignments: Vec<PinAssignment> = Vec::new();
+fn flatten_pins<P: PartialEq + fmt::Display>(
+    table: BTreeMap<String, PinsEntry>,
+    parse: impl Fn(&str) -> Result<P, ManifestError>,
+) -> Result<Vec<PinAssignment<P>>, ManifestError> {
+    let mut assignments: Vec<PinAssignment<P>> = Vec::new();
     for (port, entry) in table {
         let bits: Vec<(PortBit, &String)> = match &entry {
             PinsEntry::Scalar(pin) => vec![(PortBit::Scalar(port.clone()), pin)],
@@ -217,10 +262,10 @@ fn flatten_pins(table: BTreeMap<String, PinsEntry>) -> Result<Vec<PinAssignment>
                 .collect(),
         };
         for (port, pin) in bits {
-            let pin = Pin::parse(pin)?;
+            let pin = parse(pin)?;
             if let Some(first) = assignments.iter().find(|a| a.pin == pin) {
                 return Err(ManifestError::PinTwice {
-                    pin: pin.0,
+                    pin: pin.to_string(),
                     first: first.port.clone(),
                     second: port,
                 });
@@ -263,16 +308,62 @@ mod tests {
     fn a_bus_entry_assigns_list_index_i_to_port_bit_i() {
         let dir = scratch("bus", &["src/blinky.v"]);
         let m = Manifest::parse(DE2, &dir).unwrap();
-        let pins: Vec<_> = m
-            .pins
+        let Target::Ep2c35f672c6(pins) = &m.target else {
+            panic!("{:?} is not the DE2's part", m.target);
+        };
+        let pins: Vec<_> = pins
             .iter()
-            .map(|a| format!("{} {}", a.port, a.pin.as_str()))
+            .map(|a| format!("{} {}", a.port, a.pin))
             .collect();
         assert_eq!(
             pins,
             ["CLOCK_50 PIN_N2", "LEDR[0] PIN_AE23", "LEDR[1] PIN_AF23"]
         );
         assert_eq!(m.sources, Sources::Verilog(vec![dir.join("src/blinky.v")]));
+    }
+
+    const ZYBO: &str = r#"
+        [project]
+        name = "blinky"
+        top = "blinky"
+        sources = ["src/*"]
+
+        [target]
+        device = "xc7z010clg400-1"
+
+        [pins]
+        clk = "L16"
+        led = ["M14", "M15"]
+    "#;
+
+    #[test]
+    fn a_device_takes_its_own_pin_names_only() {
+        let dir = scratch("zybo", &["src/blinky.v"]);
+        let m = Manifest::parse(ZYBO, &dir).unwrap();
+        let Target::Xc7z010clg400_1(pins) = &m.target else {
+            panic!("{:?} is not the Zybo's part", m.target);
+        };
+        let pins: Vec<_> = pins
+            .iter()
+            .map(|a| format!("{} {}", a.port, a.pin))
+            .collect();
+        assert_eq!(pins, ["clk L16", "led[0] M14", "led[1] M15"]);
+
+        // A DE2 pin on the Zynq, a Zynq ball on the DE2, and the PS pin the
+        // Zybo's USB-UART is wired to.
+        for text in [
+            ZYBO.replace("\"L16\"", "\"PIN_N2\""),
+            DE2.replace("PIN_N2", "L16"),
+            ZYBO.replace("\"L16\"", "\"B12\""),
+        ] {
+            assert!(
+                matches!(
+                    Manifest::parse(&text, &dir),
+                    Err(ManifestError::BadPin { .. })
+                ),
+                "{text}"
+            );
+        }
     }
 
     #[test]

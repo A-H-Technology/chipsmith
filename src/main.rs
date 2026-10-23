@@ -20,11 +20,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// HDL to bitstream: build/<name>.rbf.
+    /// HDL to bitstream: build/<name>.rbf (Cyclone II) or .bit (7-series).
     Build,
     /// Load a bitstream into the FPGA over JTAG (volatile; gone on power cycle).
     Flash {
-        /// An .rbf or .svf; defaults to the .rbf `chipsmith build` produced.
+        /// An .rbf, .svf or .bit; defaults to what `chipsmith build` produced.
         bitstream: Option<PathBuf>,
     },
     /// Prebuild the routing graph from a chip database (the nix package does).
@@ -60,8 +60,12 @@ fn main() -> Result<()> {
     let layout = Layout::new(&project_dir, &manifest);
     match cli.command {
         Cmd::Build => {
-            eprintln!("building {} for {}", manifest.name, manifest.device);
-            flow::plan_build(&manifest, &layout, &flow::synth_dir()?).run()?;
+            eprintln!(
+                "building {} for {}",
+                manifest.name,
+                manifest.target.device()
+            );
+            flow::plan_build(&manifest, &layout)?.run()?;
             println!("{}", layout.bitstream().display());
         }
         Cmd::RoutingGraph { .. } | Cmd::Pack { .. } | Cmd::PackDiff { .. } => {
