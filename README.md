@@ -64,7 +64,15 @@ share chipsmith's own netlist IR, not Verilog.
      | uart_tx | chipsmith | 0.3 s | 528 | 13.39 ns |
 
      The routing graph (861,427 nodes, 8,325,848 pips) is flattened from
-     cyclone2-re's chip database by a nix derivation; loading it takes 2.4 s.
+     cyclone2-re's chip database by a nix derivation. Loading it took 2.4 s;
+     now 0.45 s: the name index is built only while parsing (1.05 s), the
+     2.3M wire names are one string per tile type, the large arrays are raw
+     little-endian words instead of postcard varints, and those decode on
+     parallel threads (the cost left is first-touch page faults).
+     Routing nets of one PathFinder iteration in parallel batches (each net
+     blind to the others in its batch) didn't converge on picorv32 within
+     5 minutes at batch sizes 8 and 32, against 6.6 s sequentially: parallel
+     routing needs nets that can't compete, e.g. disjoint bounding boxes.
    - Placer (done). nextpnr only packs; chipsmith places and routes. Quartus
      keeps 100% of the routes and assembles byte-identical RBFs for lfsr,
      uart_tx and picorv32:

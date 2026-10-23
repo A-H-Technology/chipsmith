@@ -281,8 +281,7 @@ fn permuting_pips(tt: &chipdb::TileType) -> Option<Vec<i8>> {
     let mut out = vec![-1i8; tt.pips.len()];
     let mut any = false;
     for (i, &(s, d)) in tt.pips.iter().enumerate() {
-        let (Some((ks, p)), Some((kd, q))) =
-            (le_pin(&tt.wires[s as usize]), le_pin(&tt.wires[d as usize]))
+        let (Some((ks, p)), Some((kd, q))) = (le_pin(tt.wires.get(s)), le_pin(tt.wires.get(d)))
         else {
             continue;
         };

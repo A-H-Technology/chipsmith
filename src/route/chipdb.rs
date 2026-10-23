@@ -22,15 +22,12 @@ pub const GRAPH_VAR: &str = "CHIPSMITH_CYCLONE2_GRAPH";
 pub const DB_VAR: &str = "CHIPSMITH_CYCLONE2_DB";
 
 /// Bump when `ChipDb`'s layout changes.
-const CACHE_MAGIC: &[u8] = b"chipsmith-routing-graph-2\n";
+const CACHE_MAGIC: &[u8] = b"chipsmith-routing-graph-4\n";
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TileType {
     pub name: String,
-    pub wires: Vec<String>,
-    /// Rebuilt from `wires` after loading a cache.
-    #[serde(skip)]
-    wire_index: HashMap<String, u32>,
+    pub wires: Names,
     /// (src wire, dst wire)
     pub pips: Vec<(u32, u32)>,
     pub bels: HashMap<String, Bel>,
@@ -55,13 +52,44 @@ pub struct Pad {
 }
 
 impl TileType {
+    /// Wire by name: a linear scan, for tests and one-off lookups. The
+    /// parser keeps its own index; the router and placer go by bel pins.
     pub fn wire(&self, name: &str) -> Option<u32> {
-        self.wire_index.get(name).copied()
+        (0..self.wires.len() as u32).find(|&i| self.wires.get(i) == name)
+    }
+}
+
+/// A tile type's wire names as one string: 2.3M separate `String`s took a
+/// second to allocate on every cache load.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Names {
+    blob: String,
+    ends: Vec<u32>,
+}
+
+impl Names {
+    fn push(&mut self, name: &str) {
+        self.blob.push_str(name);
+        self.ends.push(self.blob.len() as u32);
+    }
+
+    pub fn len(&self) -> usize {
+        self.ends.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ends.is_empty()
+    }
+
+    pub fn get(&self, i: u32) -> &str {
+        let i = i as usize;
+        let start = if i == 0 { 0 } else { self.ends[i - 1] as usize };
+        &self.blob[start..self.ends[i] as usize]
     }
 }
 
 /// One pip of one tile: an edge of the routing graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Edge {
     pub dst: NodeId,
     pub tile: u32,
@@ -76,13 +104,43 @@ pub struct ChipDb {
     pub tile_types: Vec<TileType>,
     /// Tile type of tile `y * width + x`.
     tiles: Vec<u32>,
+    // The big arrays below are stored raw by `write_cache`, not by serde:
+    // varint-decoding their ~40M integers took most of a second.
     /// First flat wire of each tile.
+    #[serde(skip)]
     wire_base: Vec<u32>,
+    #[serde(skip)]
     node_of: Vec<NodeId>,
     /// A representative tile of each node, for distance estimates.
+    #[serde(skip)]
     pub node_xy: Vec<(u16, u16)>,
+    #[serde(skip)]
     edge_start: Vec<u32>,
+    #[serde(skip)]
     edges: Vec<Edge>,
+}
+
+/// Little-endian `u32` arrays, each preceded by its length as a `u64`.
+fn put_words(out: &mut Vec<u8>, words: impl ExactSizeIterator<Item = u32>) {
+    out.extend((words.len() as u64).to_le_bytes());
+    for w in words {
+        out.extend(w.to_le_bytes());
+    }
+}
+
+struct Cursor<'a>(&'a [u8]);
+
+impl<'a> Cursor<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+        ensure!(self.0.len() >= n, "routing graph cache is truncated");
+        let (head, rest) = self.0.split_at(n);
+        self.0 = rest;
+        Ok(head)
+    }
+
+    fn len(&mut self) -> Result<usize> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()) as usize)
+    }
 }
 
 impl ChipDb {
@@ -102,6 +160,8 @@ impl ChipDb {
         let mut tile_type_of: Vec<(u32, u32, String)> = Vec::new();
         let mut node_lines: Vec<String> = Vec::new();
         let mut pad_lines: Vec<(String, String, String)> = Vec::new();
+        // Wire name -> index, per tile type; only needed while parsing.
+        let mut wire_index: Vec<HashMap<String, u32>> = Vec::new();
 
         for line in reader.lines() {
             let line = line?;
@@ -116,6 +176,7 @@ impl ChipDb {
                     let name = f.next().context("tile type name")?.to_string();
                     type_index.insert(name.clone(), tile_types.len() as u32);
                     current = Some(tile_types.len());
+                    wire_index.push(HashMap::new());
                     tile_types.push(TileType {
                         name,
                         ..Default::default()
@@ -123,15 +184,18 @@ impl ChipDb {
                 }
                 "end" => current = None,
                 "w" => {
-                    let tt = &mut tile_types[current.context("wire outside a tile type")?];
-                    let name = f.next().context("wire name")?.to_string();
-                    tt.wire_index.insert(name.clone(), tt.wires.len() as u32);
+                    let t = current.context("wire outside a tile type")?;
+                    let tt = &mut tile_types[t];
+                    let name = f.next().context("wire name")?;
+                    wire_index[t].insert(name.to_string(), tt.wires.len() as u32);
                     tt.wires.push(name);
                 }
                 "p" => {
-                    let tt = &mut tile_types[current.context("pip outside a tile type")?];
+                    let t = current.context("pip outside a tile type")?;
+                    let tt = &mut tile_types[t];
                     let (src, dst) = (f.next().context("pip src")?, f.next().context("pip dst")?);
-                    let (Some(s), Some(d)) = (tt.wire(src), tt.wire(dst)) else {
+                    let (Some(&s), Some(&d)) = (wire_index[t].get(src), wire_index[t].get(dst))
+                    else {
                         bail!("pip {src} -> {dst} in {} names an undeclared wire", tt.name);
                     };
                     tt.pips.push((s, d));
@@ -152,10 +216,11 @@ impl ChipDb {
                     current_bel = Some(name);
                 }
                 "bp" => {
-                    let tt = &mut tile_types[current.context("bel pin outside a tile type")?];
+                    let t = current.context("bel pin outside a tile type")?;
+                    let tt = &mut tile_types[t];
                     let (pin, wire) = (f.next().context("pin")?, f.next().context("pin wire")?);
-                    let w = tt
-                        .wire(wire)
+                    let w = *wire_index[t]
+                        .get(wire)
                         .with_context(|| format!("bel pin {pin} on undeclared wire {wire}"))?;
                     let bel = current_bel.as_ref().context("bel pin outside a bel")?;
                     tt.bels
@@ -204,8 +269,8 @@ impl ChipDb {
         let flat = |x: u32, y: u32, name: &str| -> Result<u32> {
             ensure!(x < width && y < height, "node wire outside the chip");
             let tile = (y * width + x) as usize;
-            let w = tile_types[tiles[tile] as usize]
-                .wire(name)
+            let w = *wire_index[tiles[tile] as usize]
+                .get(name)
                 .with_context(|| format!("node wire X{x}Y{y}/{name} undeclared"))?;
             Ok(wire_base[tile] + w)
         };
@@ -303,8 +368,27 @@ impl ChipDb {
     /// format version, so a cache from another chipsmith is refused rather
     /// than misread.
     pub fn write_cache(&self, path: &Path) -> Result<()> {
+        let header = postcard::to_stdvec(self)?;
         let mut bytes = CACHE_MAGIC.to_vec();
-        bytes.extend(postcard::to_stdvec(self)?);
+        bytes.extend((header.len() as u64).to_le_bytes());
+        bytes.extend(header);
+        put_words(&mut bytes, self.wire_base.iter().copied());
+        put_words(&mut bytes, self.node_of.iter().copied());
+        put_words(
+            &mut bytes,
+            self.node_xy
+                .iter()
+                .map(|&(x, y)| x as u32 | (y as u32) << 16),
+        );
+        put_words(&mut bytes, self.edge_start.iter().copied());
+        put_words(
+            &mut bytes,
+            self.edges
+                .iter()
+                .flat_map(|e| [e.dst, e.tile, e.pip])
+                .collect::<Vec<_>>()
+                .into_iter(),
+        );
         std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
     }
 
@@ -316,15 +400,51 @@ impl ChipDb {
                 path.display()
             )
         })?;
-        let mut db: ChipDb = postcard::from_bytes(body)?;
-        for tt in &mut db.tile_types {
-            tt.wire_index = tt
-                .wires
-                .iter()
-                .enumerate()
-                .map(|(i, w)| (w.clone(), i as u32))
-                .collect();
+        let mut c = Cursor(body);
+        let header_len = c.len()?;
+        let header = c.take(header_len)?;
+        let mut arrays: [&[u8]; 5] = [&[]; 5];
+        for a in &mut arrays {
+            let n = c.len()?;
+            *a = c.take(n * 4)?;
         }
+        ensure!(c.0.is_empty(), "routing graph cache has trailing bytes");
+
+        // Converting ~70 MB is bound by first-touch page faults, which
+        // parallelise across cores.
+        fn decode<T: Send, const N: usize>(b: &[u8], f: impl Fn([u32; N]) -> T) -> Vec<T> {
+            b.as_chunks::<4>()
+                .0
+                .as_chunks::<N>()
+                .0
+                .iter()
+                .map(|w| f(w.map(u32::from_le_bytes)))
+                .collect()
+        }
+        let [wire_base, node_of, node_xy, edge_start, edges] = arrays;
+        let (db, wire_base, node_of, node_xy, edge_start, edges) = std::thread::scope(|s| {
+            let wire_base = s.spawn(|| decode(wire_base, |[w]| w));
+            let node_of = s.spawn(|| decode(node_of, |[w]| w));
+            let node_xy = s.spawn(|| decode(node_xy, |[w]| (w as u16, (w >> 16) as u16)));
+            let edge_start = s.spawn(|| decode(edge_start, |[w]| w));
+            let edges = s.spawn(|| decode(edges, |[dst, tile, pip]| Edge { dst, tile, pip }));
+            let db = postcard::from_bytes::<ChipDb>(header);
+            let join = "decoding thread panicked";
+            (
+                db,
+                wire_base.join().expect(join),
+                node_of.join().expect(join),
+                node_xy.join().expect(join),
+                edge_start.join().expect(join),
+                edges.join().expect(join),
+            )
+        });
+        let mut db = db?;
+        db.wire_base = wire_base;
+        db.node_of = node_of;
+        db.node_xy = node_xy;
+        db.edge_start = edge_start;
+        db.edges = edges;
         Ok(db)
     }
 
@@ -389,7 +509,7 @@ impl ChipDb {
     /// `X<x>Y<y>/<wire>`, nextpnr's wire name.
     pub fn wire_name(&self, tile: u32, wire: u32) -> String {
         let (x, y) = self.tile_xy(tile);
-        format!("X{x}Y{y}/{}", self.tile_type(tile).wires[wire as usize])
+        format!("X{x}Y{y}/{}", self.tile_type(tile).wires.get(wire))
     }
 
     /// `X<x>Y<y>/<dst>/<src>`, nextpnr's pip name.
@@ -397,7 +517,7 @@ impl ChipDb {
         let tt = self.tile_type(tile);
         let (s, d) = tt.pips[pip as usize];
         let (x, y) = self.tile_xy(tile);
-        format!("X{x}Y{y}/{}/{}", tt.wires[d as usize], tt.wires[s as usize])
+        format!("X{x}Y{y}/{}/{}", tt.wires.get(d), tt.wires.get(s))
     }
 
     pub fn pip_dst_wire(&self, tile: u32, pip: u32) -> u32 {
