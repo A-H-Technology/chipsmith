@@ -21,6 +21,7 @@ use anyhow::{bail, ensure, Context, Result};
 use serde_json::Value;
 
 use crate::route::chipdb::{ChipDb, NodeId};
+use crate::timing::{self, Arc, Ps};
 
 const LES_PER_LAB: usize = 16;
 /// Signals from outside a LAB arrive on its 38 local lines, each LE input
@@ -73,27 +74,21 @@ impl Port {
         Port::Dataout,
     ];
 
+    /// The netlist's name of each port, in `ALL` order.
+    const NAMES: [&'static str; 17] = [
+        "DATAA", "DATAB", "DATAC", "DATAD", "CIN", "COUT", "COMBOUT", "DATAIN", "SDATA", "CLK",
+        "ENA", "ACLR", "SCLR", "REGOUT", "INCLK", "OUTCLK", "DATAOUT",
+    ];
+
     fn parse(name: &str) -> Option<Port> {
-        Some(match name {
-            "DATAA" => Port::DataA,
-            "DATAB" => Port::DataB,
-            "DATAC" => Port::DataC,
-            "DATAD" => Port::DataD,
-            "CIN" => Port::Cin,
-            "COUT" => Port::Cout,
-            "COMBOUT" => Port::Combout,
-            "DATAIN" => Port::Datain,
-            "SDATA" => Port::Sdata,
-            "CLK" => Port::Clk,
-            "ENA" => Port::Ena,
-            "ACLR" => Port::Aclr,
-            "SCLR" => Port::Sclr,
-            "REGOUT" => Port::Regout,
-            "INCLK" => Port::Inclk,
-            "OUTCLK" => Port::Outclk,
-            "DATAOUT" => Port::Dataout,
-            _ => return None,
-        })
+        Self::NAMES
+            .iter()
+            .position(|&n| n == name)
+            .map(|i| Self::ALL[i])
+    }
+
+    fn name(self) -> &'static str {
+        Self::NAMES[self as usize]
     }
 }
 
@@ -139,13 +134,15 @@ struct Le {
     ff: Option<usize>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Stats {
     pub les: usize,
     pub chains: usize,
     pub initial_cost: u64,
     pub cost: u64,
     pub moves: u64,
+    /// Estimated critical path, from placement distances alone.
+    pub critical: Ps,
 }
 
 /// A position: tile coordinates, used for wirelength.
@@ -163,6 +160,23 @@ struct Design {
     nets_of_le: Vec<Vec<usize>>,
     /// Driving cell of each net, for "is this LAB input local".
     driver: Vec<Option<usize>>,
+    /// Every driver-to-load connection, for timing.
+    conns: Vec<Conn>,
+    timing: timing::Graph,
+}
+
+/// One driver-to-load connection.
+#[derive(Debug, Clone, Copy)]
+struct Conn {
+    from_cell: usize,
+    to_cell: usize,
+    /// Timing nodes of the two ports.
+    from: u32,
+    to: u32,
+    /// The wirelength net it belongs to, if any.
+    net: Option<usize>,
+    /// Needs no routing: a carry chain link, or a LUT into its own register.
+    internal: bool,
 }
 
 fn read_design(json: &Value) -> Result<Design> {
@@ -210,6 +224,7 @@ fn read_design(json: &Value) -> Result<Design> {
 
     let net_count = net_ids.len();
     let mut driver: Vec<Option<usize>> = vec![None; net_count];
+    let mut driver_port: Vec<Option<Port>> = vec![None; net_count];
     let mut users: Vec<Vec<(usize, Port)>> = vec![Vec::new(); net_count];
     for (i, c) in cells.iter().enumerate() {
         for (port, net) in c.connections() {
@@ -226,6 +241,7 @@ fn read_design(json: &Value) -> Result<Design> {
                     "{}: drives a net that already has a driver",
                     c.name
                 );
+                driver_port[net as usize] = Some(port);
             } else {
                 users[net as usize].push((i, port));
             }
@@ -319,16 +335,22 @@ fn read_design(json: &Value) -> Result<Design> {
             }
         }
     }
-    let mut nets: Vec<Vec<usize>> = by_net
+    let mut keyed: Vec<(Vec<usize>, NetId)> = by_net
         .into_iter()
-        .map(|mut v| {
+        .enumerate()
+        .map(|(id, mut v)| {
             v.sort();
             v.dedup();
-            v
+            (v, id as NetId)
         })
-        .filter(|v| v.len() > 1)
+        .filter(|(v, _)| v.len() > 1)
         .collect();
-    nets.sort();
+    keyed.sort();
+    let mut net_index: Vec<Option<usize>> = vec![None; net_count];
+    for (i, (_, id)) in keyed.iter().enumerate() {
+        net_index[*id as usize] = Some(i);
+    }
+    let nets: Vec<Vec<usize>> = keyed.into_iter().map(|(v, _)| v).collect();
     let mut nets_of_le = vec![Vec::new(); les.len()];
     for (n, members) in nets.iter().enumerate() {
         for &c in members {
@@ -337,6 +359,42 @@ fn read_design(json: &Value) -> Result<Design> {
                     nets_of_le[le].push(n);
                 }
             }
+        }
+    }
+
+    // Timing: cell arcs, then every connection. A LUT's carry delay depends
+    // on its LE index, which a chain fixes (head at LE 0); elsewhere it
+    // doesn't matter.
+    let mut timing = timing::Graph::default();
+    for (i, c) in cells.iter().enumerate() {
+        let ty = match c.kind {
+            Kind::Lut => "LCELL_COMB",
+            Kind::Ff => "LCELL_FF",
+            _ => continue,
+        };
+        let le = le_of[i]
+            .and_then(|le| Some((le, chain_of[le]?)))
+            .map_or(0, |(le, ch)| {
+                chains[ch].iter().position(|&x| x == le).unwrap() % LES_PER_LAB
+            });
+        let ports: Vec<&str> = c.connections().map(|(p, _)| p.name()).collect();
+        timing.add_cell(&c.name, ty, &ports, le as u8);
+    }
+    let mut conns = Vec::new();
+    for (net, loads) in users.iter().enumerate() {
+        let (Some(d), Some(dp)) = (driver[net], driver_port[net]) else {
+            continue;
+        };
+        for &(c, p) in loads {
+            conns.push(Conn {
+                from_cell: d,
+                to_cell: c,
+                from: timing.node(&cells[d].name, dp.name()),
+                to: timing.node(&cells[c].name, p.name()),
+                net: net_index[net],
+                internal: p == Port::Cin
+                    || (p == Port::Datain && le_of[d].is_some() && le_of[d] == le_of[c]),
+            });
         }
     }
 
@@ -349,6 +407,8 @@ fn read_design(json: &Value) -> Result<Design> {
         nets,
         nets_of_le,
         driver,
+        conns,
+        timing,
     })
 }
 
@@ -491,7 +551,10 @@ struct State<'a> {
     /// Fixed cells' positions.
     /// Position of each fixed cell (pins, clock controls).
     fixed_xy: Vec<Option<Xy>>,
-    net_cost: Vec<u32>,
+    /// Each net's weight: 1, plus more the more timing-critical it is.
+    weight: Vec<f32>,
+    /// Each net's weighted wirelength.
+    net_cost: Vec<f32>,
 }
 
 impl<'a> State<'a> {
@@ -504,6 +567,10 @@ impl<'a> State<'a> {
 
     /// Half-perimeter wirelength; x counts routing and logic columns
     /// separately, so it is halved.
+    fn cost(&self, net: usize) -> f32 {
+        self.weight[net] * self.hpwl(net) as f32
+    }
+
     fn hpwl(&self, net: usize) -> u32 {
         let mut it = self.design.nets[net].iter().map(|&c| self.cell_xy(c));
         let (x0, y0) = it.next().unwrap();
@@ -517,8 +584,61 @@ impl<'a> State<'a> {
         ((hx - lx) / 2 + (hy - ly)) as u32
     }
 
-    fn total(&self) -> u64 {
-        self.net_cost.iter().map(|&c| c as u64).sum()
+    fn total(&self) -> f64 {
+        self.net_cost.iter().map(|&c| c as f64).sum()
+    }
+
+    /// Unweighted wirelength, for reporting.
+    fn wirelength(&self) -> u64 {
+        (0..self.design.nets.len())
+            .map(|n| self.hpwl(n) as u64)
+            .sum()
+    }
+
+    /// A connection's delay as the placement stands: nothing inside an LE
+    /// or along a carry chain, an LE's own LAB feedback line within a LAB,
+    /// otherwise LE buffer and LAB line plus R4/C4 wire per LAB crossed
+    /// (timing::wire_delay spread over the 4 LABs an R4/C4 spans).
+    fn conn_delay(&self, c: &Conn) -> Ps {
+        if c.internal {
+            return 0.0;
+        }
+        let ((x0, y0), (x1, y1)) = (self.cell_xy(c.from_cell), self.cell_xy(c.to_cell));
+        let (dx, dy) = ((x0 - x1).abs() / 2, (y0 - y1).abs());
+        if dx == 0 && dy == 0 {
+            return timing::wire_delay("LOCAL_LINE");
+        }
+        timing::wire_delay("LE_BUFFER")
+            + timing::wire_delay("LOCAL_INTERCONNECT")
+            + dx as Ps * timing::wire_delay("R4") / 4.0
+            + dy as Ps * timing::wire_delay("C4") / 4.0
+    }
+
+    /// Re-run timing on the current placement and reweight every net by
+    /// its most critical connection. Returns the estimated critical path.
+    fn reweight(&mut self) -> Ps {
+        let d = self.design;
+        let arcs: Vec<Arc> = d
+            .conns
+            .iter()
+            .map(|c| Arc {
+                from: c.from,
+                to: c.to,
+                delay: self.conn_delay(c),
+            })
+            .collect();
+        let analysis = d.timing.analyse(&arcs);
+        self.weight.iter_mut().for_each(|w| *w = 1.0);
+        for (c, a) in d.conns.iter().zip(&arcs) {
+            if let Some(n) = c.net {
+                let w = 1.0 + TIMING_WEIGHT * analysis.criticality(a).powf(CRIT_EXP);
+                self.weight[n] = self.weight[n].max(w);
+            }
+        }
+        for n in 0..d.nets.len() {
+            self.net_cost[n] = self.cost(n);
+        }
+        analysis.critical
     }
 
     /// nextpnr's `isBelLocationValid` for one LAB. Hot: runs on every
@@ -639,7 +759,8 @@ impl<'a> State<'a> {
             slots: vec![[None; LES_PER_LAB]; grid.tiles.len()],
             pos: vec![(usize::MAX, 0); design.les.len()],
             fixed_xy,
-            net_cost: vec![0; design.nets.len()],
+            weight: vec![1.0; design.nets.len()],
+            net_cost: vec![0.0; design.nets.len()],
         };
         // Centre outwards.
         let (cx, cy) = grid
@@ -701,7 +822,7 @@ impl<'a> State<'a> {
             }
         }
         for n in 0..design.nets.len() {
-            s.net_cost[n] = s.hpwl(n);
+            s.net_cost[n] = s.cost(n);
         }
         Ok(s)
     }
@@ -788,6 +909,11 @@ impl<'a> State<'a> {
     }
 }
 
+/// How much more a fully critical net's wirelength counts than an uncritical
+/// one's, and how sharply criticality is weighted (VPR's criticality_exp).
+const TIMING_WEIGHT: f32 = 8.0;
+const CRIT_EXP: f32 = 4.0;
+
 fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
     let d = s.design;
     let movable: Vec<usize> = (0..d.les.len())
@@ -807,7 +933,7 @@ fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
     let moves_per_t = (2.0 * (movable.len() as f64).powf(4.0 / 3.0)).max(200.0) as usize;
     let mut total_moves = 0u64;
 
-    let attempt = |s: &mut State, rng: &mut Rng, r: f64, t: f64| -> Option<i64> {
+    let attempt = |s: &mut State, rng: &mut Rng, r: f64, t: f64| -> Option<f64> {
         let le = movable[rng.below(movable.len())];
         let (x, y) = s.grid.xy[s.pos[le].0];
         let ri = r.max(1.0) as i32;
@@ -821,10 +947,10 @@ fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
         };
         let undo = s.try_move(le, lab, k)?;
         let nets = s.nets_of(&undo);
-        let before: i64 = nets.iter().map(|&n| s.net_cost[n] as i64).sum();
-        let after_costs: Vec<u32> = nets.iter().map(|&n| s.hpwl(n)).collect();
-        let delta = after_costs.iter().map(|&c| c as i64).sum::<i64>() - before;
-        if delta <= 0 || (t > 0.0 && rng.unit() < (-(delta as f64) / t).exp()) {
+        let before: f64 = nets.iter().map(|&n| s.net_cost[n] as f64).sum();
+        let after_costs: Vec<f32> = nets.iter().map(|&n| s.cost(n)).collect();
+        let delta = after_costs.iter().map(|&c| c as f64).sum::<f64>() - before;
+        if delta <= 0.0 || (t > 0.0 && rng.unit() < (-delta / t).exp()) {
             for (&n, &c) in nets.iter().zip(&after_costs) {
                 s.net_cost[n] = c;
             }
@@ -839,7 +965,7 @@ fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
     let mut deltas = Vec::new();
     for _ in 0..movable.len().max(50) {
         if let Some(dc) = attempt(s, rng, r, f64::INFINITY) {
-            deltas.push(dc as f64);
+            deltas.push(dc);
         }
     }
     let mean = deltas.iter().sum::<f64>() / deltas.len().max(1) as f64;
@@ -847,6 +973,7 @@ fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
     let mut t = 20.0 * var.sqrt();
 
     loop {
+        s.reweight();
         let mut accepted = 0;
         for _ in 0..moves_per_t {
             total_moves += 1;
@@ -862,7 +989,7 @@ fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
             _ => 0.8,
         };
         r = (r * (1.0 - 0.44 + rate)).clamp(1.0, max_r);
-        let cost = s.total() as f64;
+        let cost = s.total();
         if t < 0.005 * cost / d.nets.len().max(1) as f64 {
             break;
         }
@@ -896,8 +1023,9 @@ pub fn place_file(
         fixed_xy[c] = Some((x as i32, y as i32));
     }
     let mut state = State::initial(&design, &grid, fixed_xy)?;
-    let initial_cost = state.total();
+    let initial_cost = state.wirelength();
     let moves = anneal(&mut state, &mut Rng(0x9e37_79b9_7f4a_7c15));
+    let critical = state.reweight();
 
     let cells = json["modules"]["top"]["cells"]
         .as_object_mut()
@@ -927,7 +1055,8 @@ pub fn place_file(
         les: design.les.len(),
         chains: design.chains.len(),
         initial_cost,
-        cost: state.total(),
+        cost: state.wirelength(),
         moves,
+        critical,
     })
 }

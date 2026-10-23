@@ -353,12 +353,13 @@ fn place_route(
     let started = Instant::now();
     let p = crate::place::place_file(&graph, packed, pins, placed)?;
     eprintln!(
-        "    placed {} LEs ({} carry chains), wirelength {} -> {} in {:.1} s",
+        "    placed {} LEs ({} carry chains), wirelength {} -> {} in {:.1} s; critical path {:.2} ns (estimate)",
         p.les,
         p.chains,
         p.initial_cost,
         p.cost,
-        started.elapsed().as_secs_f64()
+        started.elapsed().as_secs_f64(),
+        p.critical / 1000.0
     );
 
     let started = Instant::now();

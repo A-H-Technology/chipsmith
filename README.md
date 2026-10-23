@@ -81,7 +81,8 @@ share chipsmith's own netlist IR, not Verilog.
      | design | placer + router | place time | setup slack @ 50 MHz (Quartus STA) |
      |---|---|---|---|
      | picorv32 | nextpnr (HeAP + SA, router2) | 50.8 s | 2.25 ns |
-     | picorv32 | chipsmith | 12.2 s | 9.10 ns |
+     | picorv32 | chipsmith, wirelength only | 12.2 s | 9.10 ns |
+     | picorv32 | chipsmith, timing-driven (below) | 22.3 s | 11.23 ns |
      | lfsr | chipsmith | 1.5 s | 12.22 ns |
      | uart_tx | chipsmith | 0.7 s | 13.16 ns |
 
@@ -116,6 +117,14 @@ share chipsmith's own netlist IR, not Verilog.
      picorv32 takes 16.7 s, up from 6.6 s: critical nets are rerouted every
      iteration, and the box distance needs a stronger A* weight (1.5) to
      search as narrowly as the old single-tile one.
+   - Timing-driven placement. The placer builds the same timing graph,
+     estimates each connection's delay from the placement (LE buffer and
+     LAB line plus R4/C4 delay per LAB crossed), reruns STA every
+     temperature and weights each net's wirelength by
+     `1 + 8 * crit^4`. picorv32 critical path in quartus_sta: 9.82 ->
+     8.79 ns (11.23 ns of slack at 50 MHz; was 2.25 ns with nextpnr).
+     Weight/exponent sweep, one seed each: 8/4 8.79 ns, 32/8 8.81 ns,
+     16/4 8.94 ns, 8/2 9.35 ns.
    - Packer: next.
 4. **Own synthesis**: techmap and LUT mapping on the IR. yosys's JSON
    netlist is the boundary until then.
