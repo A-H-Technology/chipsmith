@@ -72,14 +72,17 @@ share chipsmith's own netlist IR, not Verilog.
      | design | placer + router | place time | setup slack @ 50 MHz (Quartus STA) |
      |---|---|---|---|
      | picorv32 | nextpnr (HeAP + SA, router2) | 50.8 s | 2.25 ns |
-     | picorv32 | chipsmith | 12.2 s | 8.84 ns (at 8 moves per temperature; 2 is the default) |
+     | picorv32 | chipsmith | 12.2 s | 9.10 ns |
      | lfsr | chipsmith | 1.5 s | 12.22 ns |
      | uart_tx | chipsmith | 0.7 s | 13.16 ns |
 
      Placer speed on picorv32, same result each time: 31.8 s with std
      `HashMap`, 19.8 s with FxHash, 12.2 s with an enum of ports and dense
      net ids (no hashing per move). Recomputing high-fanout nets' bounding
-     boxes is the largest cost left (26%).
+     boxes is the largest cost left (26%). Annealing 4x longer (8 moves
+     per temperature, 139 s) ends at lower wirelength (3,903 vs 4,261) but
+     less slack (8.84 ns): wirelength is not timing, so the next gain is a
+     timing model, not more annealing.
    - Packer: next.
 4. **Own synthesis**: techmap and LUT mapping on the IR. yosys's JSON
    netlist is the boundary until then.
