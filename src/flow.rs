@@ -1,7 +1,7 @@
-//! HDL to bitstream to chip. Most stages are still external tools: GHDL
-//! (VHDL to Verilog), yosys (synthesis), nextpnr (place and route) and cram
-//! (bitstream, JTAG stream). Loading over the cable is chipsmith's own
-//! (`jtag`). Each stage is one `Step` in a `Plan`, so replacing a tool with
+//! HDL to bitstream to chip. Some stages are still external tools: GHDL
+//! (VHDL to Verilog), yosys (synthesis), nextpnr (packing and placement) and
+//! cram (bitstream, JTAG stream). Routing (`route`) and loading over the
+//! cable (`jtag`) are chipsmith's own. Each stage is one `Step` in a `Plan`, so replacing a tool with
 //! chipsmith's own code means replacing one step.
 //!
 //! Planning is pure: `plan_build` and `plan_flash` return every file to
@@ -54,6 +54,9 @@ impl Layout {
     fn pins(&self) -> PathBuf {
         self.dir.join("pins.qsf")
     }
+    fn placed(&self) -> PathBuf {
+        self.dir.join("placed.json")
+    }
     fn routed(&self) -> PathBuf {
         self.dir.join("routed.json")
     }
@@ -66,6 +69,8 @@ impl Layout {
 pub enum Step {
     /// An external program.
     Tool(Tool),
+    /// Route a placed design (nextpnr JSON) into a routed one, in process.
+    Route { placed: PathBuf, routed: PathBuf },
     /// Play an SVF over the USB-Blaster, in process.
     PlaySvf(PathBuf),
 }
@@ -74,6 +79,7 @@ impl Step {
     pub fn label(&self) -> &'static str {
         match self {
             Step::Tool(tool) => tool.label,
+            Step::Route { .. } => "route",
             Step::PlaySvf(_) => "JTAG: program over USB-Blaster",
         }
     }
@@ -165,12 +171,13 @@ pub fn plan_build(manifest: &Manifest, layout: &Layout, synth_dir: &Path) -> Pla
     steps.push(
         Tool {
             log: Some(layout.log("nextpnr")),
-            ..Tool::new("nextpnr: place and route", "nextpnr-himbaechel")
+            ..Tool::new("nextpnr: pack and place", "nextpnr-himbaechel")
         }
         .args(["--device", manifest.device.part(), "--json"])
         .arg(layout.netlist())
+        .arg("--no-route")
         .arg("--write")
-        .arg(layout.routed())
+        .arg(layout.placed())
         .arg("-o")
         .arg(prefixed("qsf=", &layout.pins()))
         .arg("--log")
@@ -178,6 +185,10 @@ pub fn plan_build(manifest: &Manifest, layout: &Layout, synth_dir: &Path) -> Pla
         .arg("-q")
         .into(),
     );
+    steps.push(Step::Route {
+        placed: layout.placed(),
+        routed: layout.routed(),
+    });
     steps.push(
         Tool::new("cram: bitstream", "cram")
             // `-`: the base image comes from the device database.
@@ -295,11 +306,28 @@ impl Plan {
             eprintln!("  {}", step.label());
             match step {
                 Step::Tool(tool) => run_tool(tool)?,
+                Step::Route { placed, routed } => route(placed, routed)?,
                 Step::PlaySvf(svf) => play_svf(svf)?,
             }
         }
         Ok(())
     }
+}
+
+fn route(placed: &Path, routed: &Path) -> Result<()> {
+    let started = Instant::now();
+    let graph = crate::route::chipdb::ChipDb::load_for_device()?;
+    let loaded = started.elapsed();
+    let stats = crate::route::route_file(&graph, placed, routed)?;
+    eprintln!(
+        "    {} nets, {} pips, {} iterations in {:.1} s (graph {:.1} s)",
+        stats.nets,
+        stats.pips,
+        stats.iterations,
+        started.elapsed().as_secs_f64(),
+        loaded.as_secs_f64()
+    );
+    Ok(())
 }
 
 fn play_svf(path: &Path) -> Result<()> {
@@ -400,7 +428,8 @@ mod tests {
             labels(&plan),
             [
                 "yosys: synthesis",
-                "nextpnr: place and route",
+                "nextpnr: pack and place",
+                "route",
                 "cram: bitstream"
             ]
         );
@@ -409,8 +438,10 @@ mod tests {
             script,
             "read_verilog \"/p/src/blinky.v\"\nrename blinky top\nscript synth/cyclone2.ys\nwrite_json \"/p/build/netlist.json\"\n"
         );
+        // nextpnr only places; chipsmith routes.
+        assert!(tool(&plan.steps[1]).args.iter().any(|a| a == "--no-route"));
         assert_eq!(
-            tool(&plan.steps[2]).args.last().unwrap(),
+            tool(&plan.steps[3]).args.last().unwrap(),
             "/p/build/blinky.rbf"
         );
     }

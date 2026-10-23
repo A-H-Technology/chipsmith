@@ -7,7 +7,8 @@ nix run github:A-H-Technology/chipsmith/open -- -C examples/blinky-vhdl build
 nix run github:A-H-Technology/chipsmith/open -- -C examples/blinky-vhdl flash
 ```
 
-The first run builds nextpnr's chip database (about 15 minutes).
+The first run builds nextpnr's chip database (about 15 minutes). A build of
+blinky takes about 9 s.
 
 ## Status
 
@@ -28,7 +29,8 @@ multipliers or PLLs, no bidirectional or registered I/O.
 |---|---|---|
 | VHDL → Verilog | GHDL `--synth --out=verilog` | stays a translator in front of the flow |
 | synthesis | yosys + `cyclone2.ys` (cyclone2-re) | to replace |
-| place and route | nextpnr-himbaechel, cyclone2 uarch (cyclone2-re) | to replace first |
+| packing and placement | nextpnr-himbaechel, cyclone2 uarch (cyclone2-re) | to replace next |
+| routing | chipsmith: PathFinder over the chip database (`src/route`) | ours |
 | bitstream | `cram pack` (cyclone2-re) | ours already |
 | JTAG stream | `cram svf` | ours already |
 | cable | chipsmith: USB-Blaster driver + SVF player (`src/jtag`) | ours |
@@ -49,6 +51,20 @@ share chipsmith's own netlist IR, not Verilog.
 3. **Own place and route**: a placer and router over the decoded routing
    graph. cyclone2-re's `just validate` checks each result against Quartus.
    This stage brings the timing model.
+   - Router (done). Quartus keeps 100% of its routes and assembles RBFs
+     byte-identical to ours for blinky, lfsr, uart_tx and picorv32. Same
+     placement, nextpnr's router2 vs ours:
+
+     | design | router | time | routing bits | setup slack @ 50 MHz (Quartus STA) |
+     |---|---|---|---|---|
+     | picorv32 | nextpnr router2 | 24.2 s | 17,209 | 2.25 ns |
+     | picorv32 | chipsmith | 9.1 s | 10,127 | 9.30 ns |
+     | lfsr | chipsmith | 0.7 s | 1,127 | 10.93 ns |
+     | uart_tx | chipsmith | 0.3 s | 528 | 13.39 ns |
+
+     The routing graph (861,427 nodes, 8,325,848 pips) is flattened from
+     cyclone2-re's chip database by a nix derivation; loading it takes 2.4 s.
+   - Placer, then packer: next.
 4. **Own synthesis**: techmap and LUT mapping on the IR. yosys's JSON
    netlist is the boundary until then.
 5. **Own Verilog frontend**: the synthesizable subset that GHDL and HDL

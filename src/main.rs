@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 
 use chipsmith::flow::{self, Layout, Loadable};
 use chipsmith::manifest::Manifest;
+use chipsmith::route::chipdb::ChipDb;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -25,10 +26,16 @@ enum Cmd {
         /// An .rbf or .svf; defaults to the .rbf `chipsmith build` produced.
         bitstream: Option<PathBuf>,
     },
+    /// Prebuild the routing graph from a chip database (the nix package does).
+    #[command(hide = true)]
+    RoutingGraph { chipdb: PathBuf, out: PathBuf },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Cmd::RoutingGraph { chipdb, out } = &cli.command {
+        return ChipDb::load(chipdb)?.write_cache(out);
+    }
     let project_dir = std::path::absolute(&cli.project_dir)?;
     let manifest = Manifest::load(&project_dir)?;
     let layout = Layout::new(&project_dir, &manifest);
@@ -38,6 +45,7 @@ fn main() -> Result<()> {
             flow::plan_build(&manifest, &layout, &flow::synth_dir()?).run()?;
             println!("{}", layout.bitstream().display());
         }
+        Cmd::RoutingGraph { .. } => unreachable!("handled before the manifest"),
         Cmd::Flash { bitstream } => {
             let loadable = Loadable::from_path(bitstream.unwrap_or_else(|| layout.bitstream()))?;
             flow::plan_flash(&loadable).run()?;

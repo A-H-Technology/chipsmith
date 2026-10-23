@@ -28,15 +28,16 @@
           open.nextpnr-cyclone2
           open.cram
         ];
-      in
-      {
-        packages.default = pkgs.callPackage ./nix/package.nix {
+        chipsmith = pkgs.callPackage ./nix/package.nix {
           inherit (open)
             nextpnr-cyclone2
             cram
             cyclone2-synth
             ;
         };
+      in
+      {
+        packages.default = chipsmith;
 
         devShells.default = pkgs.mkShell {
           packages = [
@@ -50,6 +51,10 @@
           ]
           ++ flowTools;
           CHIPSMITH_CYCLONE2_SYNTH = open.cyclone2-synth;
+          # Built by the packaged chipsmith; one built by `cargo run` with a
+          # changed graph format refuses it and parses the chip database.
+          CHIPSMITH_CYCLONE2_GRAPH = chipsmith.routingGraph;
+          CHIPSMITH_CYCLONE2_DB = "${open.cram}/db";
         };
       }
     );

@@ -11,6 +11,9 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 glob = "0.3"
 rusb = "0.9"
+serde_json = "1"
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+lzma-rust2 = { version = "0.21", default-features = false, features = ["std", "xz"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "0.9"
