@@ -1,8 +1,8 @@
-//! HDL to bitstream to chip. For now every stage is an external tool:
-//! GHDL (VHDL to Verilog), yosys (synthesis), nextpnr (place and route),
-//! cram (bitstream, JTAG stream) and openFPGALoader (cable). Each one is a
-//! `Step` in a `Plan`, so replacing a stage with chipsmith's own code means
-//! replacing one step.
+//! HDL to bitstream to chip. Most stages are still external tools: GHDL
+//! (VHDL to Verilog), yosys (synthesis), nextpnr (place and route) and cram
+//! (bitstream, JTAG stream). Loading over the cable is chipsmith's own
+//! (`jtag`). Each stage is one `Step` in a `Plan`, so replacing a tool with
+//! chipsmith's own code means replacing one step.
 //!
 //! Planning is pure: `plan_build` and `plan_flash` return every file to
 //! write and every command to run, and `Plan::run` does it.
@@ -11,7 +11,12 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use std::time::Instant;
+
 use anyhow::{bail, Context, Result};
+
+use crate::jtag::svf;
+use crate::jtag::usb_blaster::UsbBlaster;
 
 use crate::manifest::{Manifest, Sources};
 
@@ -58,7 +63,30 @@ impl Layout {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Step {
+pub enum Step {
+    /// An external program.
+    Tool(Tool),
+    /// Play an SVF over the USB-Blaster, in process.
+    PlaySvf(PathBuf),
+}
+
+impl Step {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Step::Tool(tool) => tool.label,
+            Step::PlaySvf(_) => "JTAG: program over USB-Blaster",
+        }
+    }
+}
+
+impl From<Tool> for Step {
+    fn from(tool: Tool) -> Self {
+        Step::Tool(tool)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tool {
     pub label: &'static str,
     pub program: OsString,
     pub args: Vec<OsString>,
@@ -69,9 +97,9 @@ pub struct Step {
     pub log: Option<PathBuf>,
 }
 
-impl Step {
+impl Tool {
     fn new(label: &'static str, program: &str) -> Self {
-        Step {
+        Tool {
             label,
             program: program.into(),
             args: Vec::new(),
@@ -100,42 +128,44 @@ pub struct Plan {
 }
 
 pub fn plan_build(manifest: &Manifest, layout: &Layout, synth_dir: &Path) -> Plan {
-    let mut steps = Vec::new();
+    let mut steps: Vec<Step> = Vec::new();
 
     let verilog: Vec<PathBuf> = match &manifest.sources {
         Sources::Verilog(files) => files.clone(),
         Sources::Vhdl(files) => {
             steps.push(
-                Step {
+                Tool {
                     cwd: Some(layout.dir.clone()),
                     stdout: Some(layout.translated()),
-                    ..Step::new("ghdl: VHDL to Verilog", "ghdl")
+                    ..Tool::new("ghdl: VHDL to Verilog", "ghdl")
                 }
                 .args(["--synth", "--std=08", "--out=verilog"])
                 .args(files)
-                .args(["-e", &manifest.top]),
+                .args(["-e", &manifest.top])
+                .into(),
             );
             vec![layout.translated()]
         }
     };
 
     steps.push(
-        Step {
+        Tool {
             // cyclone2.ys names its maps relative to the directory holding synth/.
             cwd: Some(synth_dir.to_path_buf()),
             log: Some(layout.log("yosys")),
-            ..Step::new("yosys: synthesis", "yosys")
+            ..Tool::new("yosys: synthesis", "yosys")
         }
         .arg("-q")
         .arg("-l")
         .arg(layout.log("yosys"))
         .arg("-s")
-        .arg(layout.synth_script()),
+        .arg(layout.synth_script())
+        .into(),
     );
     steps.push(
-        Step {
+        Tool {
             log: Some(layout.log("nextpnr")),
-            ..Step::new("nextpnr: place and route", "nextpnr-himbaechel")
+            ..Tool::new("nextpnr: place and route", "nextpnr-himbaechel")
         }
         .args(["--device", manifest.device.part(), "--json"])
         .arg(layout.netlist())
@@ -145,14 +175,16 @@ pub fn plan_build(manifest: &Manifest, layout: &Layout, synth_dir: &Path) -> Pla
         .arg(prefixed("qsf=", &layout.pins()))
         .arg("--log")
         .arg(layout.log("nextpnr"))
-        .arg("-q"),
+        .arg("-q")
+        .into(),
     );
     steps.push(
-        Step::new("cram: bitstream", "cram")
+        Tool::new("cram: bitstream", "cram")
             // `-`: the base image comes from the device database.
             .args(["pack", "-"])
             .arg(layout.routed())
-            .arg(layout.bitstream()),
+            .arg(layout.bitstream())
+            .into(),
     );
 
     Plan {
@@ -168,21 +200,47 @@ pub fn plan_build(manifest: &Manifest, layout: &Layout, synth_dir: &Path) -> Pla
     }
 }
 
-pub fn plan_flash(bitstream: &Path, jtag_stream: &Path) -> Plan {
+/// What `chipsmith flash` can load.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Loadable {
+    /// A Cyclone II raw bitstream; cram turns it into its JTAG sequence.
+    Rbf(PathBuf),
+    /// A JTAG sequence already, from cram or any other tool.
+    Svf(PathBuf),
+}
+
+impl Loadable {
+    pub fn from_path(path: PathBuf) -> Result<Self> {
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("rbf") => Ok(Loadable::Rbf(path)),
+            Some("svf") => Ok(Loadable::Svf(path)),
+            _ => bail!("{}: can load .rbf or .svf files", path.display()),
+        }
+    }
+}
+
+pub fn plan_flash(loadable: &Loadable) -> Plan {
+    let steps = match loadable {
+        Loadable::Svf(svf) => vec![Step::PlaySvf(svf.clone())],
+        Loadable::Rbf(rbf) => {
+            let svf = rbf.with_extension("svf");
+            vec![
+                // A raw .rbf shifted over JTAG configures a Cyclone II that
+                // never starts up; cram writes the JTAG sequence and checks
+                // CONF_DONE.
+                Tool::new("cram: JTAG stream", "cram")
+                    .arg("svf")
+                    .arg(rbf)
+                    .arg(&svf)
+                    .into(),
+                Step::PlaySvf(svf),
+            ]
+        }
+    };
     Plan {
         dir: None,
         files: Vec::new(),
-        steps: vec![
-            // A raw .rbf shifted over JTAG configures a Cyclone II that never
-            // starts up; cram writes the JTAG sequence and checks CONF_DONE.
-            Step::new("cram: JTAG stream", "cram")
-                .arg("svf")
-                .arg(bitstream)
-                .arg(jtag_stream),
-            Step::new("openFPGALoader: program", "openFPGALoader")
-                .args(["-c", "usb-blaster"])
-                .arg(jtag_stream),
-        ],
+        steps,
     }
 }
 
@@ -234,14 +292,28 @@ impl Plan {
                 .with_context(|| format!("writing {}", path.display()))?;
         }
         for step in &self.steps {
-            eprintln!("  {}", step.label);
-            run_step(step)?;
+            eprintln!("  {}", step.label());
+            match step {
+                Step::Tool(tool) => run_tool(tool)?,
+                Step::PlaySvf(svf) => play_svf(svf)?,
+            }
         }
         Ok(())
     }
 }
 
-fn run_step(step: &Step) -> Result<()> {
+fn play_svf(path: &Path) -> Result<()> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let commands = svf::parse(&text)?;
+    let mut cable = UsbBlaster::open()?;
+    let started = Instant::now();
+    svf::Player::new(&mut cable).play(&commands)?;
+    eprintln!("    played in {:.1} s", started.elapsed().as_secs_f64());
+    Ok(())
+}
+
+fn run_tool(step: &Tool) -> Result<()> {
     let mut cmd = Command::new(&step.program);
     cmd.args(&step.args);
     if let Some(cwd) = &step.cwd {
@@ -305,8 +377,15 @@ mod tests {
         }
     }
 
+    fn tool(step: &Step) -> &Tool {
+        match step {
+            Step::Tool(tool) => tool,
+            other => panic!("{other:?} is not a tool"),
+        }
+    }
+
     fn labels(plan: &Plan) -> Vec<&str> {
-        plan.steps.iter().map(|s| s.label).collect()
+        plan.steps.iter().map(Step::label).collect()
     }
 
     #[test]
@@ -330,7 +409,10 @@ mod tests {
             script,
             "read_verilog \"/p/src/blinky.v\"\nrename blinky top\nscript synth/cyclone2.ys\nwrite_json \"/p/build/netlist.json\"\n"
         );
-        assert_eq!(plan.steps[2].args.last().unwrap(), "/p/build/blinky.rbf");
+        assert_eq!(
+            tool(&plan.steps[2]).args.last().unwrap(),
+            "/p/build/blinky.rbf"
+        );
     }
 
     #[test]
@@ -341,9 +423,9 @@ mod tests {
             name: m.name.clone(),
         };
         let plan = plan_build(&m, &layout, Path::new("/synth"));
-        assert_eq!(plan.steps[0].label, "ghdl: VHDL to Verilog");
+        assert_eq!(plan.steps[0].label(), "ghdl: VHDL to Verilog");
         assert_eq!(
-            plan.steps[0].stdout.as_deref(),
+            tool(&plan.steps[0]).stdout.as_deref(),
             Some(Path::new("/p/build/vhdl.v"))
         );
         assert!(plan.files[0]

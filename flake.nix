@@ -27,7 +27,6 @@
           pkgs.yosys
           open.nextpnr-cyclone2
           open.cram
-          open.openfpgaloader
         ];
       in
       {
@@ -36,7 +35,6 @@
             nextpnr-cyclone2
             cram
             cyclone2-synth
-            openfpgaloader
             ;
         };
 
@@ -47,6 +45,8 @@
             pkgs.clippy
             pkgs.rustfmt
             pkgs.just
+            pkgs.pkg-config
+            pkgs.libusb1
           ]
           ++ flowTools;
           CHIPSMITH_CYCLONE2_SYNTH = open.cyclone2-synth;

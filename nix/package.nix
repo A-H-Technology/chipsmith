@@ -2,12 +2,13 @@
   lib,
   rustPlatform,
   makeWrapper,
+  pkg-config,
+  libusb1,
   ghdl,
   yosys,
   nextpnr-cyclone2,
   cram,
   cyclone2-synth,
-  openfpgaloader,
 }:
 
 rustPlatform.buildRustPackage {
@@ -24,7 +25,12 @@ rustPlatform.buildRustPackage {
   };
   cargoLock.lockFile = ../Cargo.lock;
 
-  nativeBuildInputs = [ makeWrapper ];
+  nativeBuildInputs = [
+    makeWrapper
+    pkg-config
+  ];
+  # the USB-Blaster driver (src/jtag/usb_blaster.rs)
+  buildInputs = [ libusb1 ];
 
   # Every stage chipsmith doesn't do itself yet, pinned here rather than
   # looked up on the host.
@@ -36,7 +42,6 @@ rustPlatform.buildRustPackage {
           yosys
           nextpnr-cyclone2
           cram
-          openfpgaloader
         ]
       } \
       --set CHIPSMITH_CYCLONE2_SYNTH ${cyclone2-synth}

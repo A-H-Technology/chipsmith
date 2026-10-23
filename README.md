@@ -31,7 +31,7 @@ multipliers or PLLs, no bidirectional or registered I/O.
 | place and route | nextpnr-himbaechel, cyclone2 uarch (cyclone2-re) | to replace first |
 | bitstream | `cram pack` (cyclone2-re) | ours already |
 | JTAG stream | `cram svf` | ours already |
-| cable | openFPGALoader, USB-Blaster | to replace |
+| cable | chipsmith: USB-Blaster driver + SVF player (`src/jtag`) | ours |
 
 Every stage is one `Step` in a `Plan` (`src/flow.rs`), so replacing a tool
 means replacing one step. The nix package pins every tool. The devshell
@@ -44,7 +44,8 @@ share chipsmith's own netlist IR, not Verilog.
 ## Roadmap
 
 1. **Shell out** (done): `build` and `flash` over the existing open tools.
-2. **Own cable**: drive the USB-Blaster (FTDI) from Rust, drop openFPGALoader.
+2. **Own cable** (done): a USB-Blaster driver and an SVF player in Rust.
+   `chipsmith flash` loads the DE2 in 1.4 s, and fails on CONF_DONE low.
 3. **Own place and route**: a placer and router over the decoded routing
    graph. cyclone2-re's `just validate` checks each result against Quartus.
    This stage brings the timing model.

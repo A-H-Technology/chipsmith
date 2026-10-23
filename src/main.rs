@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use chipsmith::flow::{self, Layout};
+use chipsmith::flow::{self, Layout, Loadable};
 use chipsmith::manifest::Manifest;
 
 #[derive(Parser)]
@@ -22,7 +22,7 @@ enum Cmd {
     Build,
     /// Load a bitstream into the FPGA over JTAG (volatile; gone on power cycle).
     Flash {
-        /// Defaults to the one `chipsmith build` produced.
+        /// An .rbf or .svf; defaults to the .rbf `chipsmith build` produced.
         bitstream: Option<PathBuf>,
     },
 }
@@ -39,9 +39,8 @@ fn main() -> Result<()> {
             println!("{}", layout.bitstream().display());
         }
         Cmd::Flash { bitstream } => {
-            let bitstream = bitstream.unwrap_or_else(|| layout.bitstream());
-            let jtag_stream = bitstream.with_extension("svf");
-            flow::plan_flash(&bitstream, &jtag_stream).run()?;
+            let loadable = Loadable::from_path(bitstream.unwrap_or_else(|| layout.bitstream()))?;
+            flow::plan_flash(&loadable).run()?;
         }
     }
     Ok(())
