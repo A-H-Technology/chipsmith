@@ -13,7 +13,7 @@ The first run builds nextpnr's chip database (about 15 minutes).
 
 | device | board | build | on hardware |
 |---|---|---|---|
-| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes: LUT/carry/register logic, global clocks from pins, 3.3-V LVTTL pins | yes |
+| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes: LUT/carry/register logic, global clocks from pins, 3.3-V LVTTL pins | yes (2026-10-23: blinky-vhdl built and flashed by chipsmith) |
 
 Both examples produce RBFs that are byte-identical to the
 [cyclone2-re](https://github.com/cramt/cyclone2-re) blinky, which Quartus
