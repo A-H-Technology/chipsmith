@@ -9,6 +9,8 @@
   yosys,
   cram,
   cyclone2-synth,
+  # nix/xc7.nix: the 7-series tools, chip database and prjxray-db
+  xc7,
 }:
 
 let
@@ -54,9 +56,12 @@ runCommand "chipsmith-${unwrapped.version}"
           ghdl
           yosys
           cram
+          xc7.tools
         ]
       } \
       --set CHIPSMITH_CYCLONE2_SYNTH ${cyclone2-synth} \
       --set CHIPSMITH_CYCLONE2_GRAPH ${routingGraph} \
-      --set CHIPSMITH_CYCLONE2_DB ${cram}/db
+      --set CHIPSMITH_CYCLONE2_DB ${cram}/db \
+      --set CHIPSMITH_XC7_CHIPDB ${xc7.chipdb} \
+      --set CHIPSMITH_PRJXRAY_DB ${xc7.prjxray-db}
   ''

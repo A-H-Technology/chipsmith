@@ -16,6 +16,7 @@ nextpnr.
 | device | board | build | on hardware |
 |---|---|---|---|
 | EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes: LUT/carry/register logic, global clocks from pins, 3.3-V LVTTL pins | yes (2026-10-23: blinky-vhdl built and flashed by chipsmith) |
+| xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes, all external tools (below): what yosys `synth_xilinx` and openXC7's nextpnr handle, LVCMOS33 pins | yes (2026-10-23: zybo-jtag-counter built by the nix package, flashed by chipsmith, read back over JTAG at 125.00 MHz) |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
 LEDs, about 1,100 LEs; it builds in about 70 s.
@@ -28,7 +29,52 @@ The Cyclone II limits come from cyclone2-re: no M4K RAM, multipliers or
 PLLs, no bidirectional or registered I/O. The timing model covers LE and
 register delays exactly and routing by per-element-type averages.
 
+The Zybo examples:
+
+- `examples/zybo-blinky`: a counter on LD0-LD3. Builds in about 36 s.
+- `examples/zybo-jtag-counter`: the Zybo's USB-UART is wired to the
+  Zynq's processor (PS MIO 48/49, Digilent's Zybo reference manual,
+  section 6), not to the FPGA fabric. So without software on the ARM
+  cores, no PL design can print to it. This design answers over the JTAG
+  cable instead. A BSCANE2 makes it a 64-bit USER1 register holding
+  `"ZYBO"` and a Gray-coded 125 MHz counter.
+  `cargo run --release --example xc7_user1` reads it twice, a second apart,
+  with chipsmith's own cable code. Builds in about 61 s.
+
+  ```
+  USER1 0x5a59424f0dc63866: tag "ZYBO", count 159109188
+  USER1 0x5a59424f18982cdd: tag "ZYBO", count 284149910
+  125040722 counts in 1.000 s: 125.00 MHz
+  ```
+
+  With zybo-blinky loaded instead, the same read returns all zeros.
+
+Zybo limits, all of them inherited from the tools:
+
+- Every pin is LVCMOS33. The manifest has no I/O standards yet, and the
+  Zybo's PL banks (34, 35) are both 3.3 V.
+- Pins are the package's 100 PL user I/O balls (prjxray-db's
+  `package_pins.csv`). PS pins (MIO, DDR) are rejected in the manifest.
+- The PS isn't configured. Nothing needs the ARM cores, DDR or the
+  PS clocks, and a design instantiating PS7 is untested.
+- No clock constraints reach nextpnr, so it checks timing against its
+  default 12 MHz. Its estimate still tracks Vivado's. zybo-blinky through
+  the Vivado 2026.1 oracle (xc7-re `tools/oracle.sh`, same Verilog, 8 ns
+  clock): 27 registers, 1 LUT, 7 CARRY4, WNS 5.438 ns, so a 2.562 ns
+  critical path (390.3 MHz) through the 7-CARRY4 chain. nextpnr reports
+  391.5 MHz, 0.3% apart. nextpnr reports 56 LUT BELs, against Vivado's 1
+  LUT. That is most likely route-through LUTs, not checked.
+- The flow is deterministic: two builds give the same FASM. The `.bit`
+  header still carries xc7frames2bit's build date and time.
+- The Zybo Z7 has its clock on K17. It needs only another pin map; the
+  Z7-20 (xc7z020) needs another `Device`.
+
 ## Flow
+
+Every stage is one `Step` in a `Plan` (`src/flow.rs`). The device in the
+manifest picks the plan.
+
+Cyclone II (EP2C35F672C6):
 
 | stage | today | |
 |---|---|---|
@@ -41,9 +87,22 @@ register delays exactly and routing by per-element-type averages.
 | JTAG stream | `cram svf` | ours already |
 | cable | chipsmith: USB-Blaster and FT2232 (MPSSE) drivers, SVF player, 7-series JTAG loader (`src/jtag`) | ours |
 
-Every stage is one `Step` in a `Plan` (`src/flow.rs`), so replacing a tool
-means replacing one step. The nix package pins every tool. The devshell
-pins them too.
+Zynq-7010 PL (xc7z010clg400-1), stage 1 of the roadmap: shell out.
+
+| stage | today | |
+|---|---|---|
+| VHDL → Verilog | GHDL `--synth --out=verilog` | as for Cyclone II |
+| synthesis | yosys `synth_xilinx -flatten -abc9 -arch xc7` | to replace |
+| packing, placement, routing | openXC7's nextpnr (`nextpnr-himbaechel`, xilinx uarch), chip database for xc7z010 built from prjxray-db in nix (2.5 min) | to replace |
+| FASM → frames | prjxray `fasm2frames` | to replace |
+| frames → `.bit` | prjxray `xc7frames2bit` | to replace |
+| cable | chipsmith: FT2232 (MPSSE) driver and 7-series JTAG loader (`src/jtag`), loads in 1.3 s with DONE checked | ours |
+
+openXC7's nextpnr, prjxray, fasm and prjxray-db come from one pinned
+[openXC7/toolchain-nix](https://github.com/openXC7/toolchain-nix)
+revision (`flake.nix`). That revision is the first whose nextpnr places
+BSCANE2. Replacing a tool means replacing one step. The nix package pins
+every tool. The devshell pins them too.
 
 Verilog is the input language. Anything else, VHDL today and later Chisel,
 Amaranth and the like, gets translated into it. Internally, the stages will
@@ -172,8 +231,11 @@ share chipsmith's own netlist IR, not Verilog.
 
 Next devices:
 
-- **Zybo Z7** (Zynq-7000, 7-series fabric): Project X-Ray already documents
-  it, so the work is importing prjxray-db, not reverse engineering.
+- **Zybo** (Zynq-7000, 7-series fabric): it builds and loads (above), on
+  external tools. Project X-Ray already documents the fabric, so owning
+  the stages means importing prjxray-db, not reverse engineering:
+  bitstream writer first, then packing, placement and routing. xc7-re
+  holds the groundwork.
 - **DE25-Nano** (Agilex 5): no public reverse engineering exists. First
   check whether the Secure Device Manager accepts a bitstream we write.
 
@@ -192,6 +254,11 @@ device = "EP2C35F672C6"
 CLOCK_50 = "PIN_N2"
 LEDR = ["PIN_AE23", "PIN_AF23", "PIN_AB21", "PIN_AC22"]  # LEDR[0], LEDR[1], ...
 ```
+
+The device decides how pins are written: `PIN_N2` on Cyclone II, the
+package ball (`L16`) on the Zynq. A pin of the wrong form, or one the
+package doesn't have as user I/O, is an error when the manifest loads.
+The Zynq builds `build/<name>.bit` instead of `.rbf`.
 
 Unknown keys are errors: until there is a timing model, a `[clocks]` table
 would be silently ignored, so it is rejected.
