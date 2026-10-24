@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use chipsmith::flow::{self, Layout, Loadable};
+use chipsmith::flow::{self, Flash, Layout, Persistence};
 use chipsmith::manifest::Manifest;
 use chipsmith::pack;
+use chipsmith::persist::{EpcsOp, Loader};
 use chipsmith::route::chipdb::ChipDb;
 use chipsmith::route::xray;
 
@@ -23,11 +24,23 @@ struct Cli {
 enum Cmd {
     /// HDL to bitstream: build/<name>.rbf (Cyclone II) or .bit (7-series).
     Build,
-    /// Load a bitstream into the FPGA over JTAG (volatile; gone on power cycle).
+    /// Load a bitstream into the FPGA over JTAG (volatile; gone on power
+    /// cycle), or with --persist write it into the board's configuration
+    /// flash.
     Flash {
         /// An .rbf, .svf or .bit; defaults to what `chipsmith build` produced.
         bitstream: Option<PathBuf>,
+        /// Write the configuration flash (DE2: the EPCS16), so the design
+        /// loads at power-up. The DE2's RUN/PROG switch stays in RUN.
+        #[arg(long)]
+        persist: bool,
     },
+    /// Save the DE2's whole EPCS16 to a file (read twice and compared).
+    #[command(hide = true)]
+    FlashDump { out: PathBuf },
+    /// Write a `flash-dump` file back into the DE2's EPCS16, verbatim.
+    #[command(hide = true)]
+    FlashRestore { dump: PathBuf },
     /// Prebuild the routing graph from a chip database (the nix package does).
     #[command(hide = true)]
     RoutingGraph { chipdb: PathBuf, out: PathBuf },
@@ -116,7 +129,25 @@ fn main() -> Result<()> {
         | Cmd::Lutmap { .. } => {
             unreachable!("handled before the manifest")
         }
-        Cmd::Flash { bitstream } => {
+        Cmd::FlashDump { out } => {
+            let out = std::path::absolute(out)?;
+            flow::plan_epcs(
+                &Loader::from_env(&layout.dir),
+                &layout.dir,
+                EpcsOp::Dump(out),
+            )
+            .run()?;
+        }
+        Cmd::FlashRestore { dump } => {
+            let dump = std::path::absolute(dump)?;
+            flow::plan_epcs(
+                &Loader::from_env(&layout.dir),
+                &layout.dir,
+                EpcsOp::Restore(dump),
+            )
+            .run()?;
+        }
+        Cmd::Flash { bitstream, persist } => {
             let path = match bitstream {
                 Some(path) => path,
                 None => {
@@ -129,8 +160,13 @@ fn main() -> Result<()> {
                     built
                 }
             };
-            let loadable = Loadable::from_path(path)?;
-            flow::plan_flash(&loadable).run()?;
+            let persistence = if persist {
+                Persistence::Persistent
+            } else {
+                Persistence::Volatile
+            };
+            let flash = Flash::new(path, persistence)?;
+            flow::plan_flash(&flash, &Loader::from_env(&layout.dir), &layout.dir).run()?;
         }
     }
     Ok(())

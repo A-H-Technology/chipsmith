@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::Value;
 
+use crate::hard;
 use crate::m4k::{self, AddrPort};
 
 pub type CellId = usize;
@@ -59,6 +60,8 @@ pub enum Port {
     RamDataOut(u8),
     /// A pin of the M4K bel, from `pack_m4k` on.
     M4k(m4k::Pin),
+    /// A pin of the JTAG or serial-flash block.
+    Hard(hard::Pin),
 }
 
 pub const LUT_INPUTS: [Port; 4] = [Port::DataA, Port::DataB, Port::DataC, Port::DataD];
@@ -98,6 +101,9 @@ impl Port {
         if name == "A_WE" {
             return Some(Port::RamWe);
         }
+        if let Some(p) = hard::Pin::parse(name) {
+            return Some(Port::Hard(p));
+        }
         let (base, index) = name.strip_suffix(']')?.split_once('[')?;
         let i: u8 = index.parse().ok()?;
         match base {
@@ -117,6 +123,7 @@ impl Port {
             Port::RamWe => "A_WE".into(),
             Port::RamDataOut(i) => format!("DATAOUT[{i}]").into(),
             Port::M4k(pin) => pin.to_string().into(),
+            Port::Hard(pin) => pin.name().into(),
             fixed => Self::FIXED
                 .iter()
                 .find(|(p, _)| *p == fixed)
@@ -201,6 +208,8 @@ pub enum Kind {
     ClkCtrl,
     /// An M4K RAM block; its contents (`INIT`) pass through as a parameter.
     M4k(m4k::Shape),
+    /// The JTAG or serial-flash block.
+    Hard(hard::Block),
     /// GND / VCC: the frontend's driver of a constant bit.
     Const(bool),
     /// nextpnr's top-level port cells, removed by pack_io. An inout's
@@ -259,6 +268,7 @@ impl Kind {
             Kind::Iobuf { .. } => port == Port::Combout,
             Kind::ClkCtrl => port == Port::Outclk,
             Kind::M4k(_) => matches!(port, Port::RamDataOut(_) | Port::M4k(m4k::Pin::Do(_))),
+            Kind::Hard(_) => matches!(port, Port::Hard(p) if p.is_output()),
             Kind::Const(_) => port == Port::Y,
             Kind::TopIn | Kind::TopInOut => port == Port::O,
             Kind::TopOut => false,

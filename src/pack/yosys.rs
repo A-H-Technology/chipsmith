@@ -237,7 +237,10 @@ fn kind_of(ty: &str, params: &BTreeMap<String, Value>, name: &str) -> Result<Kin
             };
             Kind::M4k(m4k::Shape::parse(mode, width).with_context(|| format!("M4K {name}"))?)
         }
-        other => bail!("{name}: cell type {other} is not a Cyclone II cell the packer knows"),
+        other => match crate::hard::Block::from_cell_type(other) {
+            Some(b) => Kind::Hard(b),
+            None => bail!("{name}: cell type {other} is not a Cyclone II cell the packer knows"),
+        },
     })
 }
 

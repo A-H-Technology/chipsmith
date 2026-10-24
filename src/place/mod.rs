@@ -22,6 +22,7 @@ use std::path::Path;
 use anyhow::{bail, ensure, Context, Result};
 use serde_json::Value;
 
+use crate::hard;
 use crate::m4k;
 use crate::route::chipdb::{ChipDb, NodeId, Pad, PadIo};
 use crate::timing::{self, Arc, Ps};
@@ -58,6 +59,7 @@ enum Port {
     Dataout,
     Oe,
     M4k(m4k::Pin),
+    Hard(hard::Pin),
 }
 
 impl Port {
@@ -91,7 +93,9 @@ impl Port {
     fn parse(name: &str) -> Option<Port> {
         match Self::NAMES.iter().position(|&n| n == name) {
             Some(i) => Some(Self::FIXED[i]),
-            None => m4k::Pin::parse(name).map(Port::M4k),
+            None => m4k::Pin::parse(name)
+                .map(Port::M4k)
+                .or_else(|| hard::Pin::parse(name).map(Port::Hard)),
         }
     }
 
@@ -116,7 +120,7 @@ impl Port {
             Port::Outclk => 15,
             Port::Dataout => 16,
             Port::Oe => 17,
-            Port::M4k(_) => return None,
+            Port::M4k(_) | Port::Hard(_) => return None,
         })
     }
 
@@ -125,7 +129,8 @@ impl Port {
             Some(i) => Self::NAMES[i].into(),
             None => match self {
                 Port::M4k(pin) => pin.to_string().into(),
-                _ => unreachable!("only M4K pins have no slot"),
+                Port::Hard(pin) => pin.name().into(),
+                _ => unreachable!("only M4K and hard-block pins have no slot"),
             },
         }
     }
@@ -144,6 +149,7 @@ enum Kind {
     Iobuf,
     ClkCtrl,
     M4k,
+    Hard(hard::Block),
 }
 
 #[derive(Debug)]
@@ -153,6 +159,8 @@ struct Cell {
     ports: [Option<NetId>; Port::FIXED.len()],
     /// An M4K's connected pins.
     m4k: Vec<(m4k::Pin, NetId)>,
+    /// A hard block's connected pins.
+    hard: Vec<(hard::Pin, NetId)>,
     ena_inv: bool,
     sclr_inv: bool,
     /// Pin buffers: the top-level port they serve (`LEDR[0]`).
@@ -164,6 +172,7 @@ impl Cell {
         match (port.index(), port) {
             (Some(i), _) => self.ports[i],
             (None, Port::M4k(pin)) => self.m4k.iter().find(|(p, _)| *p == pin).map(|&(_, n)| n),
+            (None, Port::Hard(pin)) => self.hard.iter().find(|(p, _)| *p == pin).map(|&(_, n)| n),
             (None, _) => None,
         }
     }
@@ -173,6 +182,7 @@ impl Cell {
             .into_iter()
             .filter_map(|p| Some((p, self.net(p)?)))
             .chain(self.m4k.iter().map(|&(pin, n)| (Port::M4k(pin), n)))
+            .chain(self.hard.iter().map(|&(pin, n)| (Port::Hard(pin), n)))
     }
 }
 
@@ -247,10 +257,14 @@ fn read_design(json: &Value) -> Result<Design> {
             "CY2_IOBUF" => Kind::Iobuf,
             "CLKCTRL" => Kind::ClkCtrl,
             "CY2_M4K" => Kind::M4k,
-            other => bail!("{name}: cell type {other} has nowhere to go"),
+            other => match hard::Block::from_cell_type(other) {
+                Some(b) => Kind::Hard(b),
+                None => bail!("{name}: cell type {other} has nowhere to go"),
+            },
         };
         let mut ports = [None; Port::FIXED.len()];
         let mut m4k = Vec::new();
+        let mut hard = Vec::new();
         for (port, bits) in c["connections"].as_object().context("connections")? {
             if let Some(net) = bits
                 .as_array()
@@ -264,6 +278,9 @@ fn read_design(json: &Value) -> Result<Design> {
                 match (p.index(), p) {
                     (Some(i), _) => ports[i] = Some(id),
                     (None, Port::M4k(pin)) if kind == Kind::M4k => m4k.push((pin, id)),
+                    (None, Port::Hard(pin)) if matches!(kind, Kind::Hard(b) if b.pins().contains(&pin)) => {
+                        hard.push((pin, id))
+                    }
                     _ => bail!("{name}: port {port} on a {kind:?}"),
                 }
             }
@@ -278,6 +295,7 @@ fn read_design(json: &Value) -> Result<Design> {
             kind,
             ports,
             m4k,
+            hard,
             ena_inv: flag("ENA_INV"),
             sclr_inv: flag("SCLR_INV"),
             port: c["attributes"]["PORT"].as_str().map(str::to_string),
@@ -296,7 +314,8 @@ fn read_design(json: &Value) -> Result<Design> {
                     | (Kind::Ff, Port::Regout)
                     | (Kind::Ibuf | Kind::Iobuf, Port::Combout)
                     | (Kind::ClkCtrl, Port::Outclk)
-            ) || matches!(port, Port::M4k(pin) if pin.is_output());
+            ) || matches!(port, Port::M4k(pin) if pin.is_output())
+                || matches!(port, Port::Hard(pin) if pin.is_output());
             if output {
                 ensure!(
                     driver[net as usize].replace(i).is_none(),
@@ -551,6 +570,24 @@ fn fixed_cells(
             Kind::Ibuf => false,
             Kind::Obuf | Kind::Iobuf => true,
             Kind::Lut | Kind::Ff | Kind::ClkCtrl | Kind::M4k => continue,
+            // One of each per device, at a fixed bel.
+            Kind::Hard(b) => {
+                let ((x, y), bel) = b.bel();
+                let tile = db.tile_index(x, y).context("hard block off chip")?;
+                ensure!(
+                    db.tile_type(tile).bels.contains_key(bel),
+                    "the chip database has no {bel} bel at X{x}Y{y}; it predates cyclone2-re's hard blocks"
+                );
+                ensure!(
+                    !out.values()
+                        .any(|(t, b): &(u32, String)| *t == tile && b == bel),
+                    "{}: a second {} in the design",
+                    c.name,
+                    b.cell_type()
+                );
+                out.insert(i, (tile, bel.to_string()));
+                continue;
+            }
         };
         let port = c
             .port

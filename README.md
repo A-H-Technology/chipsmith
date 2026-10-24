@@ -5,6 +5,7 @@ An open FPGA toolchain: HDL in, programmed chip out, no vendor software.
 ```
 nix run github:A-H-Technology/chipsmith/open -- -C examples/blinky-vhdl build
 nix run github:A-H-Technology/chipsmith/open -- -C examples/blinky-vhdl flash
+nix run github:A-H-Technology/chipsmith/open -- -C examples/blinky-vhdl flash --persist  # DE2: into the EPCS
 ```
 
 The first run builds cram and flattens its chip database into the router's
@@ -15,7 +16,7 @@ nextpnr.
 
 | device | board | build | on hardware |
 |---|---|---|---|
-| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes: LUT/carry/register logic, M4K RAM blocks (below), global clocks from pins, 3.3-V LVTTL pins: input, output, tri-state, bidirectional, open drain | yes (2026-10-24: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs) |
+| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes: LUT/carry/register logic, M4K RAM blocks (below), global clocks from pins, 3.3-V LVTTL pins: input, output, tri-state, bidirectional, open drain | yes (2026-10-24: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
 | xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes: what yosys `synth_xilinx` and openXC7's nextpnr handle, LVCMOS33 pins; chipsmith routes the interconnect (below) | yes (2026-10-24: zybo-jtag-counter with chipsmith's routing, flashed by chipsmith, read back over JTAG at 125.01 MHz) |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
@@ -53,8 +54,8 @@ through a row clock and the read data from the M4K buffers.
   light and a filling bar across LEDR about 12 times a second. A 512 x 9
   RAM, initialised to a Gray code, is read at the same step onto LEDG.
   KEY[0] writes SW[8:0] at the address shown, KEY[1] holds the step so the
-  value can be seen coming back. Built and validated, not yet run on the
-  DE2.
+  value can be seen coming back. Runs on the DE2, from JTAG and from the
+  EPCS.
 
 Quartus assembles chipsmith's placement and routing into the same RBF bit
 for bit (`bench/quartus-timing.sh`): checked 2026-10-24 on blinky-verilog
@@ -145,6 +146,7 @@ Cyclone II (EP2C35F672C6):
 | bitstream | `cram pack` (cyclone2-re) | ours already |
 | JTAG stream | `cram svf` | ours already |
 | cable | chipsmith: USB-Blaster and FT2232 (MPSSE) drivers, SVF player, 7-series JTAG loader (`src/jtag`) | ours |
+| configuration flash | chipsmith: serial flash loader (built by chipsmith) and EPCS16 driver (`src/persist`) | ours |
 
 Zynq-7010 PL (xc7z010clg400-1): shell out, except routing and the cable.
 
@@ -322,10 +324,65 @@ share chipsmith's own netlist IR, not Verilog.
 
 6. **Persistent flashing**: `chipsmith flash --persist` writes the board's
    configuration flash so the design survives a power cycle. `flash` as it
-   is loads configuration RAM over JTAG (fast, gone at power-off). DE2: the
-   EPCS16, written through a JTAG-to-SPI bridge design loaded first. Zybo:
-   a boot image (FSBL + bitstream) in QSPI flash, the same way, or on the
-   SD card.
+   is loads configuration RAM over JTAG (fast, gone at power-off).
+   - DE2 (done, 2026-10-24). The EP2C35 configures itself from its EPCS16
+     at power-up (active serial, RUN/PROG switch in RUN, where it normally
+     is; PROG isn't needed). chipsmith writes the EPCS over the JTAG cable
+     through a serial flash loader of its own: `src/persist/loader`, a
+     JTAG-to-SPI bridge on the FPGA's flash pins, built by chipsmith (the
+     nix package prebuilds it). It uses the Cyclone II's JTAG and
+     serial-flash hard blocks (`CY2_JTAG`, `CY2_ASMI`, `src/hard.rs`),
+     which cyclone2-re's chip database and cram gained for this; Quartus
+     assembles chipsmith's loader byte-identical. With USER0 in the IR each
+     Shift-DR is one SPI transaction, so the loader is three LUTs and no
+     clock. The image is what Quartus writes for an EPCS16 (the RBF with
+     the passive-serial option bit cleared, each byte bit-reversed; the
+     factory image is stored the same way). After writing, chipsmith reads
+     the image back, then sends `PULSE_NCONFIG` (IR 0x001), which makes the
+     FPGA reconfigure from the EPCS as at power-up, and checks CONF_DONE
+     and the USERCODE. So `flash --persist` ends with the board running the
+     design from flash.
+
+     Observed on the DE2: blinky-verilog and ram-leds written (856,076
+     bytes, about 50 s, half of it erase and page-program polling),
+     verified, and running from the EPCS after `PULSE_NCONFIG` (camera:
+     counter, then the bouncing light). A dump of the whole flash, read
+     twice and compared (`chipsmith flash-dump`, hidden, 2 MB in 134 s),
+     was saved before anything was erased. Writing it back
+     (`chipsmith flash-restore`, hidden) brought the factory design up
+     again from flash (USERCODE 0x0042b391), so the factory image is
+     restorable. A real power cycle is still to be watched.
+   - Zybo (not done). The QSPI flash hangs off the Zynq's processor (PS
+     MIO 1-6); the PL can't reach it, so a PL bridge like the DE2's can't
+     work. openFPGALoader refuses to write Zynq flash for that reason;
+     Vivado's `program_flash` runs an FSBL plus a U-Boot helper on the ARM
+     core over the debug port (traced for the ZynqMP in openFPGALoader
+     issue 654). The PS BootROM loads only a first-stage
+     loader from QSPI, never a bitstream, so a PL-only design still needs
+     a boot image: a BootROM header, a first-stage loader in OCM, the
+     bitstream. It doesn't need Xilinx's FSBL. The honest minimum is three
+     pieces chipsmith doesn't have yet:
+     1. ARM debug access over JTAG: the ADIv5 DAP on the Zybo's chain
+        (IR 4, beside the xc7z010), DPACC/APACC scans, AHB-AP memory reads
+        and writes. With that the host can drive the PS's QSPI controller
+        (0xE000D000; MIO and LQSPI clock set up in the SLCR) in I/O mode
+        and program the 128 Mbit QSPI flash itself, with no code on the ARM.
+     2. A first-stage loader of our own, built with an open ARM toolchain
+        from nixpkgs: about 40 instructions that start a PCAP DMA from the
+        QSPI linear window (0xFC000000 + offset) into the PL and wait for
+        DONE. No DDR or PLL setup for a PL-only design.
+     3. The BootROM header (UG585 section 6.3: width word, `XLNX`, loader
+        offset, length, checksum), written by chipsmith; bootgen isn't
+        needed for an unencrypted image.
+     The board then also has to boot from QSPI: the boot-mode jumper JP5
+     must be on QSPI, which only someone at the board can set (chipsmith
+     can't read it until piece 1 exists: it's SLCR BOOT_MODE,
+     0xF800025C). A PS soft reset over the DAP (SLCR PSS_RST_CTRL) would
+     then rerun the BootROM without a power cycle. On the Zybo JPROGRAM
+     only clears the PL; the PL is the PS's slave, so it doesn't reload
+     from flash the way a standalone 7-series in master mode does.
+     The SD card is the other path (BOOT.bin on FAT32, same boot image
+     and jumper).
 
 Next devices:
 
