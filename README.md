@@ -16,7 +16,7 @@ nextpnr.
 | device | board | build | on hardware |
 |---|---|---|---|
 | EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes: LUT/carry/register logic, global clocks from pins, 3.3-V LVTTL pins | yes (2026-10-24: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs) |
-| xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes, all external tools (below): what yosys `synth_xilinx` and openXC7's nextpnr handle, LVCMOS33 pins | yes (2026-10-23: zybo-jtag-counter built by the nix package, flashed by chipsmith, read back over JTAG at 125.00 MHz) |
+| xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes: what yosys `synth_xilinx` and openXC7's nextpnr handle, LVCMOS33 pins; chipsmith routes the interconnect (below) | yes (2026-10-24: zybo-jtag-counter with chipsmith's routing, flashed by chipsmith, read back over JTAG at 125.01 MHz) |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
 LEDs, about 1,200 LEs; a build takes about 85 s of CPU time.
@@ -43,12 +43,15 @@ The Zybo examples:
   cable instead. A BSCANE2 makes it a 64-bit USER1 register holding
   `"ZYBO"` and a Gray-coded 125 MHz counter.
   `cargo run --release --example xc7_user1` reads it twice, a second apart,
-  with chipsmith's own cable code. Builds in about 61 s.
+  with chipsmith's own cable code. Built in about 61 s with nextpnr's
+  routing; with chipsmith's (two nextpnr runs, below) 3 min 45 s, of
+  which 1 min 52 s CPU, on a heavily loaded machine. Two builds give the
+  same FASM. Read back 2026-10-24:
 
   ```
-  USER1 0x5a59424f0dc63866: tag "ZYBO", count 159109188
-  USER1 0x5a59424f18982cdd: tag "ZYBO", count 284149910
-  125040722 counts in 1.000 s: 125.00 MHz
+  USER1 0x5a59424f07d1540d: tag "ZYBO", count 90281993
+  USER1 0x5a59424f0abcdd7f: tag "ZYBO", count 215443882
+  125161889 counts in 1.001 s: 125.01 MHz
   ```
 
   With zybo-blinky loaded instead, the same read returns all zeros.
@@ -96,13 +99,15 @@ Cyclone II (EP2C35F672C6):
 | JTAG stream | `cram svf` | ours already |
 | cable | chipsmith: USB-Blaster and FT2232 (MPSSE) drivers, SVF player, 7-series JTAG loader (`src/jtag`) | ours |
 
-Zynq-7010 PL (xc7z010clg400-1), stage 1 of the roadmap: shell out.
+Zynq-7010 PL (xc7z010clg400-1): shell out, except routing and the cable.
 
 | stage | today | |
 |---|---|---|
 | VHDL → Verilog | GHDL `--synth --out=verilog` | as for Cyclone II |
 | synthesis | yosys `synth_xilinx -flatten -abc9 -arch xc7` | to replace |
-| packing, placement, routing | openXC7's nextpnr (`nextpnr-himbaechel`, xilinx uarch), chip database for xc7z010 built from prjxray-db in nix (2.5 min) | to replace |
+| packing, placement, site routing | openXC7's nextpnr (`nextpnr-himbaechel`, xilinx uarch), chip database for xc7z010 built from prjxray-db in nix (2.5 min) | to replace: placer next, then packer |
+| interconnect routing | chipsmith: PathFinder over the prjxray-db graph (`src/route/xray.rs`, `src/route/xc7.rs`) | ours |
+| FASM | nextpnr's FASM writer, from chipsmith's routes (`-o preplaced`, `-o prerouted`) | to replace |
 | FASM → frames | prjxray `fasm2frames` | to replace |
 | frames → `.bit` | prjxray `xc7frames2bit` | to replace |
 | cable | chipsmith: FT2232 (MPSSE) driver and 7-series JTAG loader (`src/jtag`), loads in 1.3 s with DONE checked | ours |
@@ -263,11 +268,81 @@ share chipsmith's own netlist IR, not Verilog.
 
 Next devices:
 
-- **Zybo** (Zynq-7000, 7-series fabric): it builds and loads (above), on
-  external tools. Project X-Ray already documents the fabric, so owning
-  the stages means importing prjxray-db, not reverse engineering:
-  bitstream writer first, then packing, placement and routing. xc7-re
-  holds the groundwork.
+- **Zybo** (Zynq-7000, 7-series fabric): it builds and loads (above).
+  Project X-Ray already documents the fabric, so owning the stages means
+  importing prjxray-db, not reverse engineering. xc7-re holds the
+  groundwork. Same order as for Cyclone II: router, placer, packer.
+  - Router (done, interconnect only). The routing graph comes from
+    prjxray-db (`tilegrid.json`, `tile_type_*.json`, `tileconn.json`, and
+    `segbits`/`ppips` for which pips a bitstream can express), into the
+    same `ChipDb` as the Cyclone II graph. A nix derivation
+    (`xc7-routing-graph`) prebuilds it: xc7z010 has 13,440 tiles of 90
+    types, 3,607,758 tile wires in 1,200,334 nodes and 12,346,252 pips.
+    The import takes 7.5 s in the nix build (15 s on a busy run), the
+    180 MB cache 2.0 s to load at a load
+    average of 18 (up to 8 s on the busier runs). Pips are
+    taken as nextpnr's generator takes them: bidirectional ones become one
+    pip each way, and pips with no FASM feature are dropped. Pseudo pips
+    (route-throughs of a LUT, IOB or OLOGIC) are dropped too, since they
+    need a free bel and site configuration the router doesn't model.
+
+    nextpnr's xilinx graph has the sites inside it, and chipsmith's doesn't
+    yet. So the flow is: nextpnr packs, places and routes; chipsmith keeps
+    everything of nextpnr's routing that isn't an interconnect pip (site
+    pips, the LUT pin nextpnr permuted a signal onto, route-throughs) and
+    reroutes the rest with the Cyclone II's PathFinder, between the site
+    pins nextpnr chose. nextpnr then packs the netlist again with each cell
+    pinned to its bel (`-o preplaced`) and every net locked to chipsmith's
+    route (`-o prerouted`), and writes the FASM. On both designs below it
+    bound all of chipsmith's routes unchanged (0 collided; the routes it
+    writes back are pip for pip the ones given), and its router had
+    nothing left to route. `route::xc7` also checks every route is a tree
+    of graph pips reaching all its sinks, with no node shared.
+
+    Same placement, nextpnr's router2 against chipsmith's (routing is
+    congestion-driven only: no 7-series delay model yet). Pips are
+    interconnect pips of the prjxray graph; Fmax is nextpnr's own STA of
+    each routing:
+
+    | design | router | time | pips | iterations | Fmax (nextpnr STA) |
+    |---|---|---|---|---|---|
+    | zybo-jtag-counter | nextpnr router2 | 142 s | 1,790 | 6 | 317.2 MHz |
+    | zybo-jtag-counter | chipsmith | 4.6 s | 1,764 | 2 | 312.0 MHz |
+    | picorv32 (Zybo pins, not for hardware) | nextpnr router2, in the build | 154 s | 16,443 | 8 | 181.3 MHz |
+    | picorv32 | nextpnr router2, again on that placement | 37.8 s | 16,356 | 9 | 166.3 MHz |
+    | picorv32 | chipsmith | 39.7 s | 16,259 | 4 | 143.5 MHz |
+
+    The machine was shared and loaded throughout (load averages of 10 to
+    70 on 8 cores), so times are rough: chipsmith's picorv32 routing took
+    39.7 s to 69 s across runs. The second nextpnr picorv32 row and
+    chipsmith's ran back to back at a load average near 10. nextpnr
+    spends most of the counter's 142 s on the four nets from the BSCANE2
+    in the configuration tile (24 to 38 s each). Its two picorv32 routings
+    of one placement differ by 9% in Fmax. The A*
+    distance weight is device data (`ChipDb::tile_distance`); on
+    picorv32, per tile in x/y:
+
+    | weight | time | pips | Fmax |
+    |---|---|---|---|
+    | 0.125/0.25 | 69.6 s | 16,150 | |
+    | 0.25/0.5 (default) | 39.7 s | 16,259 | 143.5 MHz |
+    | 0.5/1 | 19.3 s | 16,856 | 127.7 MHz |
+    | 1/2 | 10.9 s | 17,885 | |
+
+    Both designs' bitstreams build (fasm2frames, xc7frames2bit), and
+    zybo-jtag-counter runs on the Zybo (above). Vivado 2026.1 (xc7-re
+    `tools/oracle.sh`, its own placement and routing of the same Verilog,
+    8 ns clock) has the counter's clock domain at WNS 5.353 ns, a 2.647 ns
+    critical path (377.8 MHz), where nextpnr's STA estimates 317 MHz on
+    nextpnr's placement. Vivado can't take chipsmith's routing (that needs
+    LOC/BEL constraints and `FIXED_ROUTE` per net), so this compares
+    tools, not routings.
+
+    Open: timing-driven routing (prjxray-db's pip and wire delays into
+    `timing.rs`), which picorv32's Fmax gap calls for; the site graph,
+    so chipsmith can choose site pins and LUT pin permutations itself and
+    no longer needs nextpnr's routing to start from; and FASM from
+    chipsmith's own writer.
 - **DE25-Nano** (Agilex 5): no public reverse engineering exists. First
   check whether the Secure Device Manager accepts a bitstream we write.
 

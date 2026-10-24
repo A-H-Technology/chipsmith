@@ -7,6 +7,7 @@ use chipsmith::flow::{self, Layout, Loadable};
 use chipsmith::manifest::Manifest;
 use chipsmith::pack;
 use chipsmith::route::chipdb::ChipDb;
+use chipsmith::route::xray;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -36,6 +37,18 @@ enum Cmd {
     /// Compare two packed netlists (ours against nextpnr's `--pack-only`).
     #[command(hide = true)]
     PackDiff { ours: PathBuf, theirs: PathBuf },
+    /// Prebuild the 7-series routing graph from a prjxray-db family
+    /// directory (e.g. `.../zynq7`); the nix package does.
+    #[command(hide = true)]
+    Xc7RoutingGraph { family: PathBuf, out: PathBuf },
+    /// Route nextpnr's routed xc7 design (`--write`) again with chipsmith's
+    /// router: its `-o prerouted` and `-o preplaced` lines.
+    #[command(hide = true)]
+    Xc7Route {
+        routed: PathBuf,
+        prerouted: PathBuf,
+        preplaced: PathBuf,
+    },
     /// Map a yosys netlist's simple gates to 4-input LUTs (in place of abc).
     #[command(hide = true)]
     Lutmap { netlist: PathBuf, mapped: PathBuf },
@@ -45,6 +58,25 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
         Cmd::RoutingGraph { chipdb, out } => return ChipDb::load(chipdb)?.write_cache(out),
+        Cmd::Xc7RoutingGraph { family, out } => {
+            let part = chipsmith::device::XC7Z010CLG400_1;
+            let started = std::time::Instant::now();
+            let (db, s) = xray::import(family, part.die, part.part)?;
+            eprintln!("{s:?} in {:.1} s", started.elapsed().as_secs_f64());
+            return db.write_cache(out);
+        }
+        Cmd::Xc7Route {
+            routed,
+            prerouted,
+            preplaced,
+        } => {
+            let started = std::time::Instant::now();
+            let db = xray::load(chipsmith::device::XC7Z010CLG400_1)?;
+            eprintln!("routing graph in {:.1} s", started.elapsed().as_secs_f64());
+            let s = chipsmith::route::xc7::route_file(&db, routed, prerouted, preplaced)?;
+            eprintln!("{s:#?}");
+            return Ok(());
+        }
         Cmd::Pack { netlist, packed } => {
             let s = pack::pack_file(netlist, packed)?;
             eprintln!("{s:?}");
@@ -76,7 +108,12 @@ fn main() -> Result<()> {
             flow::plan_build(&manifest, &layout)?.run()?;
             println!("{}", layout.bitstream().display());
         }
-        Cmd::RoutingGraph { .. } | Cmd::Pack { .. } | Cmd::PackDiff { .. } | Cmd::Lutmap { .. } => {
+        Cmd::RoutingGraph { .. }
+        | Cmd::Xc7RoutingGraph { .. }
+        | Cmd::Xc7Route { .. }
+        | Cmd::Pack { .. }
+        | Cmd::PackDiff { .. }
+        | Cmd::Lutmap { .. } => {
             unreachable!("handled before the manifest")
         }
         Cmd::Flash { bitstream } => {

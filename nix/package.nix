@@ -40,11 +40,16 @@ let
   routingGraph = runCommand "cyclone2-routing-graph" { } ''
     ${lib.getExe unwrapped} routing-graph ${cram}/db/EP2C35F672C6/chipdb.txt.xz $out
   '';
+
+  # The same for the Zybo's xc7z010, imported from prjxray-db (~15 s).
+  xc7RoutingGraph = runCommand "xc7z010-routing-graph" { } ''
+    ${lib.getExe unwrapped} xc7-routing-graph ${xc7.prjxray-db}/zynq7 $out
+  '';
 in
 runCommand "chipsmith-${unwrapped.version}"
   {
     nativeBuildInputs = [ makeWrapper ];
-    passthru = { inherit unwrapped routingGraph; };
+    passthru = { inherit unwrapped routingGraph xc7RoutingGraph; };
     meta.mainProgram = "chipsmith";
   }
   # Every stage chipsmith doesn't do itself yet, pinned here rather than
@@ -63,5 +68,6 @@ runCommand "chipsmith-${unwrapped.version}"
       --set CHIPSMITH_CYCLONE2_GRAPH ${routingGraph} \
       --set CHIPSMITH_CYCLONE2_DB ${cram}/db \
       --set CHIPSMITH_XC7_CHIPDB ${xc7.chipdb} \
+      --set CHIPSMITH_XC7_GRAPH ${xc7RoutingGraph} \
       --set CHIPSMITH_PRJXRAY_DB ${xc7.prjxray-db}
   ''

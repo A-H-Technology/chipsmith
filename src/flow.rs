@@ -6,10 +6,11 @@
 //! placement (`place`), routing (`route`) and loading over the cable
 //! (`jtag`) are chipsmith's own.
 //!
-//! 7-series (Zynq-7010): every stage is still an external tool: yosys
-//! `synth_xilinx`, openXC7's nextpnr (himbaechel xilinx), prjxray's
-//! `fasm2frames` and `xc7frames2bit`. Loading over the Zybo's FT2232 cable
-//! is chipsmith's own (`jtag::ftdi`, `jtag::xc7`).
+//! 7-series (Zynq-7010): yosys `synth_xilinx`, openXC7's nextpnr
+//! (himbaechel xilinx) for packing, placement and site routing, prjxray's
+//! `fasm2frames` and `xc7frames2bit`. The interconnect routing (`route::xc7`)
+//! and loading over the Zybo's FT2232 cable (`jtag::ftdi`, `jtag::xc7`) are
+//! chipsmith's own.
 //!
 //! Each stage is one `Step` in a `Plan`, so replacing a tool with
 //! chipsmith's own code means replacing one step.
@@ -101,6 +102,15 @@ impl Layout {
     fn routed(&self) -> PathBuf {
         self.dir.join("routed.json")
     }
+    fn nextpnr_routed(&self) -> PathBuf {
+        self.dir.join("nextpnr.json")
+    }
+    fn preplaced(&self) -> PathBuf {
+        self.dir.join("preplaced.txt")
+    }
+    fn prerouted(&self) -> PathBuf {
+        self.dir.join("prerouted.txt")
+    }
     fn xdc(&self) -> PathBuf {
         self.dir.join("pins.xdc")
     }
@@ -141,6 +151,14 @@ pub enum Step {
     /// Report each clock's achieved frequency from nextpnr's `--report`;
     /// fails if one misses its constraint.
     NextpnrTiming(PathBuf),
+    /// Route a 7-series design nextpnr placed and routed (`nextpnr`) again
+    /// with chipsmith's router, in process: its routes as nextpnr's
+    /// `-o prerouted` lines, and nextpnr's placement as `-o preplaced` lines.
+    Xc7Route {
+        nextpnr: PathBuf,
+        prerouted: PathBuf,
+        preplaced: PathBuf,
+    },
     /// Play an SVF over the USB-Blaster, in process.
     PlaySvf(PathBuf),
     /// Load a 7-series `.bit` over a Digilent FT2232 cable, in process.
@@ -190,6 +208,7 @@ impl Step {
             Step::Pack { .. } => "pack",
             Step::PlaceRoute { .. } => "place and route",
             Step::NextpnrTiming(_) => "nextpnr: timing",
+            Step::Xc7Route { .. } => "route (chipsmith)",
             Step::PlaySvf(_) => "JTAG: program over USB-Blaster",
             Step::LoadBit(_) => "JTAG: program over Digilent FT2232",
         }
@@ -462,8 +481,45 @@ pub fn plan_xc7(
         .arg(layout.netlist())
         .arg("-o")
         .arg(prefixed("xdc=", &layout.xdc()))
+        .arg("--write")
+        .arg(layout.nextpnr_routed())
+        .arg("-q")
+        .arg("-l")
+        .arg(layout.log("nextpnr"))
+        .into(),
+    );
+    // nextpnr's interconnect routing is replaced by chipsmith's; nextpnr
+    // keeps the site routing, and its FASM writer writes both. nextpnr
+    // can't load the placed design it wrote (it names bels one way when
+    // writing and another when reading), so it packs the netlist again
+    // and pins each cell to its bel (`-o preplaced`); packing is
+    // deterministic, so the cells are the same.
+    steps.push(Step::Xc7Route {
+        nextpnr: layout.nextpnr_routed(),
+        prerouted: layout.prerouted(),
+        preplaced: layout.preplaced(),
+    });
+    steps.push(
+        Tool {
+            log: Some(layout.log("nextpnr-fasm")),
+            ..Tool::new("nextpnr: FASM of chipsmith's routing", "nextpnr-himbaechel")
+        }
+        .args(["--device", part.part])
+        .arg("--chipdb")
+        .arg(&data.chipdb)
+        .arg("--json")
+        .arg(layout.netlist())
+        .arg("-o")
+        .arg(prefixed("xdc=", &layout.xdc()))
+        .arg("-o")
+        .arg(prefixed("preplaced=", &layout.preplaced()))
+        .arg("-o")
+        .arg(prefixed("prerouted=", &layout.prerouted()))
         .arg("-o")
         .arg(prefixed("fasm=", &layout.fasm()))
+        .arg("--write")
+        .arg(layout.routed())
+        // Timing of chipsmith's routing, not of the routing it replaced.
         .arg("--report")
         .arg(layout.timing_report())
         // `Step::NextpnrTiming` fails the build instead, after printing
@@ -471,7 +527,7 @@ pub fn plan_xc7(
         .arg("--timing-allow-fail")
         .arg("-q")
         .arg("-l")
-        .arg(layout.log("nextpnr"))
+        .arg(layout.log("nextpnr-fasm"))
         .into(),
     );
     steps.push(Step::NextpnrTiming(layout.timing_report()));
@@ -657,6 +713,11 @@ impl Plan {
                     clock,
                 } => place_route(packed, placed, routed, pins, *clock)?,
                 Step::NextpnrTiming(report) => nextpnr_timing(report)?,
+                Step::Xc7Route {
+                    nextpnr,
+                    prerouted,
+                    preplaced,
+                } => xc7_route(nextpnr, prerouted, preplaced)?,
                 Step::PlaySvf(svf) => play_svf(svf)?,
                 Step::LoadBit(bit) => load_bit(bit)?,
             }
@@ -788,6 +849,21 @@ fn nextpnr_timing(report: &Path) -> Result<()> {
     if !failing.is_empty() {
         bail!("timing fails for clock {}", failing.join(", "));
     }
+    Ok(())
+}
+
+fn xc7_route(nextpnr: &Path, prerouted: &Path, preplaced: &Path) -> Result<()> {
+    let started = Instant::now();
+    let graph = crate::route::xray::load(XC7Z010CLG400_1)?;
+    eprintln!(
+        "    routing graph in {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
+    let r = crate::route::xc7::route_file(&graph, nextpnr, prerouted, preplaced)?;
+    eprintln!(
+        "    routed {} segments of {} nets, {} pips (nextpnr: {}), {} iterations in {:.1} s",
+        r.segments, r.nets, r.pips, r.nextpnr_pips, r.iterations, r.route_seconds
+    );
     Ok(())
 }
 
@@ -1046,6 +1122,8 @@ mod tests {
             [
                 "yosys: synthesis (synth_xilinx)",
                 "nextpnr: place and route",
+                "route (chipsmith)",
+                "nextpnr: FASM of chipsmith's routing",
                 "nextpnr: timing",
                 "prjxray: FASM to frames",
                 "prjxray: frames to .bit"
@@ -1065,19 +1143,36 @@ mod tests {
             .args
             .windows(2)
             .any(|w| w == ["--chipdb", "/db/chipdb-xc7z010.bin"]));
-        assert!(nextpnr
+        assert_eq!(
+            plan.steps[2],
+            Step::Xc7Route {
+                nextpnr: "/p/build/nextpnr.json".into(),
+                prerouted: "/p/build/prerouted.txt".into(),
+                preplaced: "/p/build/preplaced.txt".into(),
+            }
+        );
+        let fasm = tool(&plan.steps[3]);
+        assert!(fasm
             .args
             .windows(2)
             .any(|w| w == ["--report", "/p/build/timing.json"]));
         assert_eq!(
-            plan.steps[2],
+            plan.steps[4],
             Step::NextpnrTiming("/p/build/timing.json".into())
         );
+        assert!(fasm
+            .args
+            .windows(2)
+            .any(|w| w == ["-o", "preplaced=/p/build/preplaced.txt"]));
+        assert!(fasm
+            .args
+            .windows(2)
+            .any(|w| w == ["-o", "prerouted=/p/build/prerouted.txt"]));
         assert_eq!(
-            tool(&plan.steps[3]).args.last().unwrap(),
+            tool(&plan.steps[5]).args.last().unwrap(),
             "/p/build/blinky.frames"
         );
-        let bit = tool(&plan.steps[4]);
+        let bit = tool(&plan.steps[6]);
         assert!(bit
             .args
             .windows(2)

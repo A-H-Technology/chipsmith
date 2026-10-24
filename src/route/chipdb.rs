@@ -22,7 +22,7 @@ pub const GRAPH_VAR: &str = "CHIPSMITH_CYCLONE2_GRAPH";
 pub const DB_VAR: &str = "CHIPSMITH_CYCLONE2_DB";
 
 /// Bump when `ChipDb`'s layout changes.
-const CACHE_MAGIC: &[u8] = b"chipsmith-routing-graph-6\n";
+const CACHE_MAGIC: &[u8] = b"chipsmith-routing-graph-8\n";
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TileType {
@@ -70,7 +70,7 @@ pub struct Names {
 }
 
 impl Names {
-    fn push(&mut self, name: &str) {
+    pub(crate) fn push(&mut self, name: &str) {
         self.blob.push_str(name);
         self.ends.push(self.blob.len() as u32);
     }
@@ -90,6 +90,37 @@ impl Names {
     }
 }
 
+/// A site of a tile, as nextpnr's xilinx chip database names it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Site {
+    pub tile: u32,
+    /// Name relative to the tile's other sites of the same prefix, e.g.
+    /// `SLICE_X1Y0`: nextpnr's site wires and bels are `<this>.<name>`.
+    pub relative: String,
+    /// The site's primary type, e.g. `IOB33M`.
+    pub ty: String,
+}
+
+/// The tile grid, for `ChipDb::assemble`.
+pub(crate) struct Grid {
+    pub width: u32,
+    pub height: u32,
+    /// Tile type of tile `y * width + x`.
+    pub tiles: Vec<u32>,
+    pub names: Vec<String>,
+    pub distance: [f32; 2],
+    pub sites: HashMap<String, Site>,
+}
+
+/// Which node each tile wire is in, for `ChipDb::assemble`.
+pub(crate) struct Nodes {
+    /// First flat wire of each tile.
+    pub wire_base: Vec<u32>,
+    pub node_of: Vec<NodeId>,
+    pub node_box: Vec<Box>,
+    pub node_type: Vec<u8>,
+}
+
 /// One pip of one tile: an edge of the routing graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Edge {
@@ -106,6 +137,15 @@ pub struct ChipDb {
     pub tile_types: Vec<TileType>,
     /// Element type names (`R4`, `C16`, `LOCAL_INTERCONNECT`, ...).
     pub wire_types: Vec<String>,
+    /// The vendor's tile names (`INT_L_X2Y10`), where FASM needs them;
+    /// empty when tiles go by `X<x>Y<y>` only.
+    pub tile_names: Vec<String>,
+    /// What one tile of distance costs the router's A* estimate, in x and
+    /// in y, in units of one wire.
+    pub tile_distance: [f32; 2],
+    /// Sites by their absolute vendor name (`SLICE_X30Y39`), where the
+    /// device has them; empty otherwise.
+    pub sites: HashMap<String, Site>,
     /// Tile type of tile `y * width + x`.
     tiles: Vec<u32>,
     // The big arrays below are stored raw by `write_cache`, not by serde:
@@ -138,7 +178,7 @@ pub struct Box {
 }
 
 impl Box {
-    fn tile(x: u8, y: u8) -> Self {
+    pub(crate) fn tile(x: u8, y: u8) -> Self {
         Box {
             x0: x,
             y0: y,
@@ -147,7 +187,7 @@ impl Box {
         }
     }
 
-    fn add(&mut self, x: u8, y: u8) {
+    pub(crate) fn add(&mut self, x: u8, y: u8) {
         self.x0 = self.x0.min(x);
         self.y0 = self.y0.min(y);
         self.x1 = self.x1.max(x);
@@ -388,15 +428,74 @@ impl ChipDb {
             }
         }
 
-        // Edges, grouped by source node (CSR).
-        let nodes = node_box.len();
-        let mut out_degree = vec![0u32; nodes + 1];
+        let mut pads = Vec::new();
+        for (pin, tile, bel) in pad_lines {
+            let (x, y) = tile
+                .strip_prefix('X')
+                .and_then(|t| t.split_once('Y'))
+                .and_then(|(x, y)| Some((x.parse::<u32>().ok()?, y.parse::<u32>().ok()?)))
+                .with_context(|| format!("pad {pin}: tile {tile}"))?;
+            ensure!(x < width && y < height, "pad {pin} off chip");
+            pads.push(Pad {
+                pin,
+                tile: y * width + x,
+                bel,
+            });
+        }
+
+        Ok(ChipDb::assemble(
+            Grid {
+                width,
+                height,
+                tiles,
+                names: Vec::new(),
+                // Tile x counts routing and logic columns separately: halve it.
+                distance: [0.5, 1.0],
+                sites: HashMap::new(),
+            },
+            tile_types,
+            wire_types,
+            pads,
+            Nodes {
+                wire_base,
+                node_of,
+                node_box,
+                node_type,
+            },
+        ))
+    }
+
+    /// The graph from its parts: every pip of every tile becomes an edge
+    /// between the nodes its two wires are in, grouped by source node (CSR).
+    pub(crate) fn assemble(
+        grid: Grid,
+        tile_types: Vec<TileType>,
+        wire_types: Vec<String>,
+        pads: Vec<Pad>,
+        nodes: Nodes,
+    ) -> Self {
+        let Grid {
+            width,
+            height,
+            tiles,
+            names: tile_names,
+            distance: tile_distance,
+            sites,
+        } = grid;
+        let Nodes {
+            wire_base,
+            node_of,
+            node_box,
+            node_type,
+        } = nodes;
+        let count = node_box.len();
+        let mut out_degree = vec![0u32; count + 1];
         for (tile, &t) in tiles.iter().enumerate() {
             for &(s, _) in &tile_types[t as usize].pips {
                 out_degree[node_of[(wire_base[tile] + s) as usize] as usize] += 1;
             }
         }
-        let mut edge_start = Vec::with_capacity(nodes + 1);
+        let mut edge_start = Vec::with_capacity(count + 1);
         let mut acc = 0;
         for d in &out_degree {
             edge_start.push(acc);
@@ -422,28 +521,15 @@ impl ChipDb {
                 fill[src] += 1;
             }
         }
-
-        let mut pads = Vec::new();
-        for (pin, tile, bel) in pad_lines {
-            let (x, y) = tile
-                .strip_prefix('X')
-                .and_then(|t| t.split_once('Y'))
-                .and_then(|(x, y)| Some((x.parse::<u32>().ok()?, y.parse::<u32>().ok()?)))
-                .with_context(|| format!("pad {pin}: tile {tile}"))?;
-            ensure!(x < width && y < height, "pad {pin} off chip");
-            pads.push(Pad {
-                pin,
-                tile: y * width + x,
-                bel,
-            });
-        }
-
-        Ok(ChipDb {
+        ChipDb {
             pads,
             width,
             height,
             tile_types,
             wire_types,
+            tile_names,
+            tile_distance,
+            sites,
             tiles,
             wire_base,
             node_of,
@@ -451,7 +537,7 @@ impl ChipDb {
             node_type,
             edge_start,
             edges,
-        })
+        }
     }
 
     /// The flattened graph, for `read_cache`. Starts with a magic and a
@@ -475,7 +561,10 @@ impl ChipDb {
                 .collect::<Vec<_>>()
                 .into_iter(),
         );
-        std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
+        // Through a temporary file, so a reader never sees half a cache.
+        let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+        std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
     }
 
     pub fn read_cache(path: &Path) -> Result<Self> {
@@ -612,6 +701,21 @@ impl ChipDb {
 
     pub fn pip_dst_wire(&self, tile: u32, pip: u32) -> u32 {
         self.tile_type(tile).pips[pip as usize].1
+    }
+
+    /// `<tile>.<dst>.<src>`, the pip's FASM feature, on devices whose
+    /// tiles have vendor names.
+    pub fn pip_feature(&self, tile: u32, pip: u32) -> Option<String> {
+        let name = self.tile_names.get(tile as usize)?;
+        let tt = self.tile_type(tile);
+        let (s, d) = tt.pips[pip as usize];
+        Some(format!("{name}.{}.{}", tt.wires.get(d), tt.wires.get(s)))
+    }
+
+    /// The tile at `X<x>Y<y>` (nextpnr's tile names).
+    pub fn tile_by_name(&self, name: &str) -> Option<u32> {
+        let (x, y) = name.strip_prefix('X')?.split_once('Y')?;
+        self.tile_index(x.parse().ok()?, y.parse().ok()?)
     }
 }
 
