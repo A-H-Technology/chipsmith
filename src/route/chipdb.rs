@@ -22,7 +22,7 @@ pub const GRAPH_VAR: &str = "CHIPSMITH_CYCLONE2_GRAPH";
 pub const DB_VAR: &str = "CHIPSMITH_CYCLONE2_DB";
 
 /// Bump when `ChipDb`'s layout changes.
-const CACHE_MAGIC: &[u8] = b"chipsmith-routing-graph-8\n";
+const CACHE_MAGIC: &[u8] = b"chipsmith-routing-graph-9\n";
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TileType {
@@ -51,6 +51,17 @@ pub struct Pad {
     pub pin: String,
     pub tile: u32,
     pub bel: String,
+    pub io: PadIo,
+}
+
+/// What a pad's I/O element can do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PadIo {
+    /// Input, output, tri-state or bidir: the bel has an output enable.
+    Bidir,
+    /// A dedicated clock input (Cyclone II's CLK pins): no output enable,
+    /// and no route into its output data.
+    ClockInput,
 }
 
 impl TileType {
@@ -436,11 +447,18 @@ impl ChipDb {
                 .and_then(|(x, y)| Some((x.parse::<u32>().ok()?, y.parse::<u32>().ok()?)))
                 .with_context(|| format!("pad {pin}: tile {tile}"))?;
             ensure!(x < width && y < height, "pad {pin} off chip");
-            pads.push(Pad {
-                pin,
-                tile: y * width + x,
-                bel,
-            });
+            let tile = y * width + x;
+            let pins = &tile_types[tiles[tile as usize] as usize]
+                .bels
+                .get(&bel)
+                .with_context(|| format!("pad {pin}: no bel {bel} in tile {tile}"))?
+                .pins;
+            let io = if pins.contains_key("OE") {
+                PadIo::Bidir
+            } else {
+                PadIo::ClockInput
+            };
+            pads.push(Pad { pin, tile, bel, io });
         }
 
         Ok(ChipDb::assemble(

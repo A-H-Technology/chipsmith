@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use anyhow::{bail, ensure, Context, Result};
 use serde_json::{Map, Value};
 
-use super::netlist::{FfConfig, Kind, NetId, Netlist, OutData, Port, TopPort};
+use super::netlist::{Dir, FfConfig, IoeIn, Kind, NetId, Netlist, Port, TopPort};
 
 /// A bit of a yosys bit vector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,9 +221,13 @@ fn kind_of(ty: &str, params: &BTreeMap<String, Value>, name: &str) -> Result<Kin
         "CY2_IBUF" => Kind::Ibuf { port: None },
         "CY2_OBUF" => Kind::Obuf {
             port: None,
-            data: OutData::Signal { invert: false },
+            data: IoeIn::Signal { invert: false },
         },
-        "CY2_IOBUF" => bail!("bidirectional port {name} is not supported yet"),
+        "CY2_IOBUF" => Kind::Iobuf {
+            port: None,
+            data: IoeIn::Signal { invert: false },
+            oe: IoeIn::Signal { invert: false },
+        },
         other => bail!("{name}: cell type {other} is not a Cyclone II cell the packer knows"),
     })
 }
@@ -320,15 +324,16 @@ pub fn import(json: &Value) -> Result<Netlist> {
         for (pname, conn) in cd["connections"].as_object().unwrap_or(&empty) {
             let port =
                 Port::parse(pname).with_context(|| format!("{inst}: unknown port {pname}"))?;
-            let output = match dirs.get(pname).and_then(Value::as_str) {
-                Some("output") => true,
-                Some("input") => false,
-                _ => bail!("{inst}: port {pname} has no direction"),
-            };
+            let dir = dirs
+                .get(pname)
+                .and_then(Value::as_str)
+                .and_then(Dir::parse)
+                .with_context(|| format!("{inst}: port {pname} has no direction"))?;
             ensure!(
-                output == kind.is_output(port),
+                dir == kind.dir(port),
                 "{inst}: {ty}.{pname} has the wrong direction"
             );
+            let output = dir == Dir::Out;
             let b = bits(conn).with_context(|| format!("{inst}.{pname}"))?;
             let [bit] = b[..] else {
                 bail!("{inst}.{pname}: {} bits, cells take one", b.len());
@@ -368,14 +373,20 @@ pub fn import(json: &Value) -> Result<Netlist> {
         }
     }
 
+    // import_toplevel_ports: inouts last, so that they split the nets
+    // the other ports have already claimed.
+    let mut dirs = Vec::new();
     for (pname, pd) in &ports {
+        let dir = pd["direction"]
+            .as_str()
+            .and_then(Dir::parse)
+            .with_context(|| format!("port {pname} has no direction"))?;
+        dirs.push((pname, pd, dir));
+    }
+    dirs.sort_by_key(|&(_, _, dir)| dir == Dir::InOut);
+    for (pname, pd, dir) in dirs {
         let b = bits(&pd["bits"]).with_context(|| format!("port {pname}"))?;
         let (offset, upto) = offset_upto(pd);
-        let output = match pd["direction"].as_str() {
-            Some("input") => false,
-            Some("output") => true,
-            _ => bail!("bidirectional port {pname} is not supported yet"),
-        };
         let mut port_bits = Vec::new();
         for (i, &bit) in b.iter().enumerate() {
             let bname = bit_name(pname, i, b.len(), offset, upto);
@@ -393,22 +404,41 @@ pub fn import(json: &Value) -> Result<Netlist> {
                 !fe.nl.has_cell_named(&bname),
                 "cell {bname} has a top-level port's name"
             );
-            let (kind, p) = if output {
-                (Kind::TopOut, Port::I)
-            } else {
-                ensure!(
-                    fe.nl.net(net).driver.is_none(),
-                    "top-level input {bname} drives a net something else drives"
-                );
-                (Kind::TopIn, Port::O)
-            };
-            let c = fe.nl.create_cell(bname, kind);
-            fe.nl.add_port(c, p);
-            fe.nl.connect(c, p, net);
+            match dir {
+                Dir::Out => {
+                    let c = fe.nl.create_cell(bname, Kind::TopOut);
+                    fe.nl.add_port(c, Port::I);
+                    fe.nl.connect(c, Port::I, net);
+                }
+                Dir::In => {
+                    ensure!(
+                        fe.nl.net(net).driver.is_none(),
+                        "top-level input {bname} drives a net something else drives"
+                    );
+                    let c = fe.nl.create_cell(bname, Kind::TopIn);
+                    fe.nl.add_port(c, Port::O);
+                    fe.nl.connect(c, Port::O, net);
+                }
+                Dir::InOut => {
+                    // split_io: the net's driver moves to a net of its own
+                    // that feeds I; O drives the port's net.
+                    let c = fe.nl.create_cell(bname.clone(), Kind::TopInOut);
+                    fe.nl.add_port(c, Port::I);
+                    fe.nl.add_port(c, Port::O);
+                    let name = fe.unique_net_name(&format!("${bname}$iobuf_i"));
+                    let split = fe.nl.create_net(name);
+                    if let Some((d, p)) = fe.nl.net(net).driver {
+                        fe.nl.disconnect(d, p);
+                        fe.nl.connect(d, p, split);
+                    }
+                    fe.nl.connect(c, Port::I, split);
+                    fe.nl.connect(c, Port::O, net);
+                }
+            }
         }
         fe.nl.top_ports.push(TopPort {
             name: pname.clone(),
-            output,
+            dir,
             bits: port_bits,
         });
     }

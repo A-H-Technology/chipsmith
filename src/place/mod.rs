@@ -20,7 +20,7 @@ use std::path::Path;
 use anyhow::{bail, ensure, Context, Result};
 use serde_json::Value;
 
-use crate::route::chipdb::{ChipDb, NodeId};
+use crate::route::chipdb::{ChipDb, NodeId, Pad, PadIo};
 use crate::timing::{self, Arc, Ps};
 
 const LES_PER_LAB: usize = 16;
@@ -51,10 +51,11 @@ enum Port {
     Inclk,
     Outclk,
     Dataout,
+    Oe,
 }
 
 impl Port {
-    const ALL: [Port; 17] = [
+    const ALL: [Port; 18] = [
         Port::DataA,
         Port::DataB,
         Port::DataC,
@@ -72,12 +73,13 @@ impl Port {
         Port::Inclk,
         Port::Outclk,
         Port::Dataout,
+        Port::Oe,
     ];
 
     /// The netlist's name of each port, in `ALL` order.
-    const NAMES: [&'static str; 17] = [
+    const NAMES: [&'static str; 18] = [
         "DATAA", "DATAB", "DATAC", "DATAD", "CIN", "COUT", "COMBOUT", "DATAIN", "SDATA", "CLK",
-        "ENA", "ACLR", "SCLR", "REGOUT", "INCLK", "OUTCLK", "DATAOUT",
+        "ENA", "ACLR", "SCLR", "REGOUT", "INCLK", "OUTCLK", "DATAOUT", "OE",
     ];
 
     fn parse(name: &str) -> Option<Port> {
@@ -101,6 +103,8 @@ enum Kind {
     Ff,
     Ibuf,
     Obuf,
+    /// Tri-state output or bidir.
+    Iobuf,
     ClkCtrl,
 }
 
@@ -191,6 +195,7 @@ fn read_design(json: &Value) -> Result<Design> {
             "LCELL_FF" => Kind::Ff,
             "CY2_IBUF" => Kind::Ibuf,
             "CY2_OBUF" => Kind::Obuf,
+            "CY2_IOBUF" => Kind::Iobuf,
             "CLKCTRL" => Kind::ClkCtrl,
             other => bail!("{name}: cell type {other} has nowhere to go"),
         };
@@ -232,7 +237,7 @@ fn read_design(json: &Value) -> Result<Design> {
                 (c.kind, port),
                 (Kind::Lut, Port::Combout | Port::Cout)
                     | (Kind::Ff, Port::Regout)
-                    | (Kind::Ibuf, Port::Combout)
+                    | (Kind::Ibuf | Kind::Iobuf, Port::Combout)
                     | (Kind::ClkCtrl, Port::Outclk)
             );
             if output {
@@ -450,15 +455,13 @@ fn fixed_cells(
     pins: &std::collections::BTreeMap<String, String>,
 ) -> Result<HashMap<usize, (u32, String)>> {
     let mut out = HashMap::default();
-    let pads: HashMap<&str, (u32, &str)> = db
-        .pads
-        .iter()
-        .map(|p| (p.pin.as_str(), (p.tile, p.bel.as_str())))
-        .collect();
+    let pads: HashMap<&str, &Pad> = db.pads.iter().map(|p| (p.pin.as_str(), p)).collect();
     for (i, c) in design.cells.iter().enumerate() {
-        if !matches!(c.kind, Kind::Ibuf | Kind::Obuf) {
-            continue;
-        }
+        let drives = match c.kind {
+            Kind::Ibuf => false,
+            Kind::Obuf | Kind::Iobuf => true,
+            Kind::Lut | Kind::Ff | Kind::ClkCtrl => continue,
+        };
         let port = c
             .port
             .as_ref()
@@ -467,9 +470,15 @@ fn fixed_cells(
             .get(port)
             .with_context(|| format!("no pin assignment for port {port}"))?;
         let ball = pin.strip_prefix("PIN_").unwrap_or(pin);
-        let &(tile, bel) = pads
+        let pad = pads
             .get(ball)
             .with_context(|| format!("port {port}: {pin} is not a user I/O pin"))?;
+        let (tile, bel) = match (pad.io, drives) {
+            (PadIo::ClockInput, true) => {
+                bail!("port {port}: {pin} is a dedicated clock input, it can't drive")
+            }
+            (PadIo::Bidir, _) | (PadIo::ClockInput, false) => (pad.tile, pad.bel.as_str()),
+        };
         ensure!(
             !out.values()
                 .any(|(t, b): &(u32, String)| *t == tile && b == bel),

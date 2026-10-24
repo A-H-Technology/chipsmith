@@ -37,6 +37,8 @@ pub enum Port {
     Sclr,
     Regout,
     Dataout,
+    /// A tri-state pin's output enable.
+    Oe,
     Pad,
     Inclk,
     Outclk,
@@ -50,7 +52,7 @@ pub enum Port {
 pub const LUT_INPUTS: [Port; 4] = [Port::DataA, Port::DataB, Port::DataC, Port::DataD];
 
 impl Port {
-    const ALL: [(Port, &'static str); 21] = [
+    const ALL: [(Port, &'static str); 22] = [
         (Port::DataA, "DATAA"),
         (Port::DataB, "DATAB"),
         (Port::DataC, "DATAC"),
@@ -66,6 +68,7 @@ impl Port {
         (Port::Sclr, "SCLR"),
         (Port::Regout, "REGOUT"),
         (Port::Dataout, "DATAOUT"),
+        (Port::Oe, "OE"),
         (Port::Pad, "PAD"),
         (Port::Inclk, "INCLK"),
         (Port::Outclk, "OUTCLK"),
@@ -95,13 +98,41 @@ pub struct FfConfig {
     pub sclr_inv: bool,
 }
 
-/// What an output pin drives.
+/// What one of an IOE's inputs from the core (output data, output enable)
+/// carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutData {
-    /// DATAOUT, inverted in the IOE or not.
+pub enum IoeIn {
+    /// The port's net, inverted in the IOE or not.
     Signal { invert: bool },
-    /// A constant (DATAOUT unconnected).
+    /// A constant (the port unconnected).
     Const(bool),
+}
+
+/// Which way a cell port or a top-level port points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dir {
+    In,
+    Out,
+    InOut,
+}
+
+impl Dir {
+    pub fn parse(s: &str) -> Option<Dir> {
+        match s {
+            "input" => Some(Dir::In),
+            "output" => Some(Dir::Out),
+            "inout" => Some(Dir::InOut),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Dir::In => "input",
+            Dir::Out => "output",
+            Dir::InOut => "inout",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,14 +148,24 @@ pub enum Kind {
     },
     Obuf {
         port: Option<String>,
-        data: OutData,
+        data: IoeIn,
+    },
+    /// A tri-state output or a bidir (CY2_IOBUF): the pad is driven with
+    /// `data` while `oe` is high; COMBOUT, if connected, reads the pad.
+    Iobuf {
+        port: Option<String>,
+        data: IoeIn,
+        oe: IoeIn,
     },
     ClkCtrl,
     /// GND / VCC: the frontend's driver of a constant bit.
     Const(bool),
-    /// nextpnr's top-level port cells, removed by pack_io.
+    /// nextpnr's top-level port cells, removed by pack_io. An inout's
+    /// (`$nextpnr_iobuf`) takes the port net's driver on I and drives the
+    /// port net from O.
     TopIn,
     TopOut,
+    TopInOut,
 }
 
 impl Kind {
@@ -135,18 +176,60 @@ impl Kind {
         matches!(self, Kind::Ff(_))
     }
 
-    /// Ports this kind drives; every other port is an input.
-    pub fn is_output(&self, port: Port) -> bool {
+    /// The top-level port bit a pin buffer serves.
+    pub fn pin_port(&mut self) -> Option<&mut Option<String>> {
         match self {
+            Kind::Ibuf { port } | Kind::Obuf { port, .. } | Kind::Iobuf { port, .. } => Some(port),
+            _ => None,
+        }
+    }
+
+    /// The IOE input a pin buffer port is, for folding constants and
+    /// inverters into the IOE (OUT_CONST / DATA_INVERT, OE_CONST /
+    /// OE_INVERT).
+    pub fn ioe_in(&mut self, port: Port) -> Option<&mut IoeIn> {
+        if !self.is_ioe_in(port) {
+            return None;
+        }
+        match (self, port) {
+            (Kind::Obuf { data, .. } | Kind::Iobuf { data, .. }, Port::Dataout) => Some(data),
+            (Kind::Iobuf { oe, .. }, Port::Oe) => Some(oe),
+            _ => None,
+        }
+    }
+
+    pub fn is_ioe_in(&self, port: Port) -> bool {
+        matches!(
+            (self, port),
+            (Kind::Obuf { .. } | Kind::Iobuf { .. }, Port::Dataout)
+                | (Kind::Iobuf { .. }, Port::Oe)
+        )
+    }
+
+    pub fn dir(&self, port: Port) -> Dir {
+        let out = match self {
             Kind::Lut { .. } => matches!(port, Port::Combout | Port::Cout),
             Kind::Ff(_) => port == Port::Regout,
             Kind::Ibuf { .. } => port == Port::Combout,
             Kind::Obuf { .. } => port == Port::Pad,
+            Kind::Iobuf { .. } if port == Port::Pad => return Dir::InOut,
+            Kind::Iobuf { .. } => port == Port::Combout,
             Kind::ClkCtrl => port == Port::Outclk,
             Kind::Const(_) => port == Port::Y,
-            Kind::TopIn => port == Port::O,
+            Kind::TopIn | Kind::TopInOut => port == Port::O,
             Kind::TopOut => false,
+        };
+        if out {
+            Dir::Out
+        } else {
+            Dir::In
         }
+    }
+
+    /// Ports this kind drives. Every other port is a load, an inout one
+    /// too (nextpnr's `connectPort`).
+    pub fn is_output(&self, port: Port) -> bool {
+        self.dir(port) == Dir::Out
     }
 }
 
@@ -311,7 +394,7 @@ impl Interner {
 #[derive(Debug, Clone)]
 pub struct TopPort {
     pub name: String,
-    pub output: bool,
+    pub dir: Dir,
     pub bits: Vec<Option<NetId>>,
 }
 

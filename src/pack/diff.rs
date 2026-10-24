@@ -1,7 +1,8 @@
 //! Compare two packed netlists (ours and nextpnr's `--pack-only` output):
 //! the same cells by name and type, the same parameters, every connected
 //! port on the same net (by net name), and the nets in the same id order
-//! (the order the router routes them in).
+//! (the order the router routes them in), and the same top-level ports
+//! (direction, each bit's net), which cram reads pin modes from.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -12,7 +13,7 @@ use serde_json::Value;
 
 /// Flags written only when set by one side and as `0` by the other mean
 /// the same.
-const FLAGS: [&str; 3] = ["ENA_INV", "SCLR_INV", "DATA_INVERT"];
+const FLAGS: [&str; 4] = ["ENA_INV", "SCLR_INV", "DATA_INVERT", "OE_INVERT"];
 
 #[derive(Debug, PartialEq, Eq)]
 struct Cell {
@@ -27,6 +28,8 @@ struct Packed {
     cells: BTreeMap<String, Cell>,
     /// Connected nets' names in id order.
     net_order: Vec<String>,
+    /// Top-level port -> direction and each bit's net name.
+    ports: BTreeMap<String, (String, Vec<String>)>,
 }
 
 fn read(path: &Path) -> Result<Packed> {
@@ -73,7 +76,25 @@ fn read(path: &Path) -> Result<Packed> {
         .into_iter()
         .map(|id| names.get(&id).cloned().unwrap_or_else(|| format!("#{id}")))
         .collect();
-    Ok(Packed { cells, net_order })
+    let mut ports = BTreeMap::new();
+    for (name, p) in top["ports"].as_object().context("no ports")? {
+        let bits = p["bits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|b| match b.as_u64() {
+                Some(id) => names.get(&id).cloned().unwrap_or_else(|| format!("#{id}")),
+                None => b.to_string(),
+            })
+            .collect();
+        let dir = p["direction"].as_str().unwrap_or_default().to_string();
+        ports.insert(name.clone(), (dir, bits));
+    }
+    Ok(Packed {
+        cells,
+        net_order,
+        ports,
+    })
 }
 
 #[derive(Debug)]
@@ -110,6 +131,15 @@ pub fn diff_files(ours: &Path, theirs: &Path) -> Result<Diff> {
             note(&mut report, format!("only theirs: {name} ({})", cb.ty));
         }
     }
+    if a.ports != b.ports {
+        note(
+            &mut report,
+            format!(
+                "top-level ports differ\n  ours   {:?}\n  theirs {:?}",
+                a.ports, b.ports
+            ),
+        );
+    }
     let same_net_order = a.net_order == b.net_order;
     let mut types: BTreeMap<&str, usize> = BTreeMap::new();
     for c in a.cells.values() {
@@ -118,9 +148,10 @@ pub fn diff_files(ours: &Path, theirs: &Path) -> Result<Diff> {
     let equal = differences == 0;
     let _ = write!(
         report,
-        "{} cells {:?}, {} connected nets: {}; net id order {}",
+        "{} cells {:?}, {} ports, {} connected nets: {}; net id order {}",
         a.cells.len(),
         types,
+        a.ports.len(),
         a.net_order.len(),
         if equal {
             "identical".to_string()

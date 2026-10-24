@@ -15,22 +15,36 @@ nextpnr.
 
 | device | board | build | on hardware |
 |---|---|---|---|
-| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes: LUT/carry/register logic, global clocks from pins, 3.3-V LVTTL pins | yes (2026-10-24: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs) |
+| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes: LUT/carry/register logic, global clocks from pins, 3.3-V LVTTL pins: input, output, tri-state, bidirectional, open drain | yes (2026-10-24: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins) |
 | xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes: what yosys `synth_xilinx` and openXC7's nextpnr handle, LVCMOS33 pins; chipsmith routes the interconnect (below) | yes (2026-10-24: zybo-jtag-counter with chipsmith's routing, flashed by chipsmith, read back over JTAG at 125.01 MHz) |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
 LEDs, about 1,200 LEs; a build takes about 85 s of CPU time.
 
+`examples/bidir` is cyclone2-re's tri-state test: expansion-header and
+SRAM data pins driven with their output enable from a switch, an
+inverted switch, logic or a register, one open drain, all read back onto
+the red LEDs, and a tri-state green LED. An inout must be written
+`assign p = oe ? d : 1'bz` (yosys' `tribuf` and `iopadmap` make it one
+`CY2_IOBUF`); one without a tri-state driver is an error, and so is a
+driving pin on a dedicated clock input. With every switch down on the DE2
+(2026-10-24, camera): LEDR[1] blinks with the counter it drives out,
+LEDR[4] and LEDG[1] follow the open drain, the released pins read 1 and
+LEDG[0] stays off. Don't load it with SW[4] up and the SRAM driving: the
+FPGA then drives SRAM_DQ too.
+
 Quartus assembles chipsmith's placement and routing into the same RBF bit
 for bit (`bench/quartus-timing.sh`): checked 2026-10-24 on blinky-verilog
-and blinky-vhdl (16.65 ns of slack at 50 MHz) and on picorv32 (11.08 ns),
-all three built through chipsmith's LUT mapper. Since chipsmith places
+and blinky-vhdl (16.65 ns of slack at 50 MHz), on picorv32 (11.08 ns,
+again after the chip database gained the IOE output enable) and on bidir
+(16.64 ns), all built through chipsmith's LUT mapper. Since chipsmith places
 designs itself, the RBFs no longer match the
 [cyclone2-re](https://github.com/cramt/cyclone2-re) examples built with
 nextpnr's placement.
 
-The Cyclone II limits come from cyclone2-re: no M4K RAM, multipliers or
-PLLs, no bidirectional or registered I/O. The timing model covers LE and
+The Cyclone II limits come from cyclone2-re's open flow: no M4K RAM
+(cram's Quartus frontend has it, the open flow not yet), multipliers or
+PLLs, no registered I/O, LVTTL only. The timing model covers LE and
 register delays exactly and routing by per-element-type averages.
 
 The Zybo examples:
@@ -226,10 +240,17 @@ share chipsmith's own netlist IR, not Verilog.
      | uart_tx | 152 | identical, same net order | identical | byte-identical; slack 14.46 ns, data delay 5.56 ns |
      | picorv32 | 1,459 | identical, same net order | identical | byte-identical; slack 11.23 ns, data delay 8.79 ns |
      | examples/blinky-verilog, blinky-vhdl | 58 | identical, same net order | identical | (same design as blinky) |
+     | bidir (yosys `abc -lut 4`, and chipsmith's LUT mapper) | 99 | identical, same net order, same ports | not run | byte-identical; slack 16.64 ns, data delay 3.39 ns (examples/bidir) |
 
      Packing picorv32 takes 0.4 s. A design exercising the rarer rules
      (register inits of 1, active-low enables and clears, constant and
-     inverted outputs) packs identically too. Parameters nextpnr writes as
+     inverted outputs) packs identically too, and so does bidir (10
+     `CY2_IOBUF`s: constant data and enables, inverters folded into
+     `DATA_INVERT`/`OE_INVERT`, unread inputs switched off). `pack-diff`
+     compares top-level port directions too, since cram decides
+     output vs bidir mode by them. Rechecked 2026-10-24 with cyclone2-re
+     5eff911 (blinky, lfsr, uart_tx, picorv32 both mappers: identical).
+     Parameters nextpnr writes as
      `0` (a flag toggled back) chipsmith leaves out; they read the same.
 4. **Own synthesis**: techmap and LUT mapping on the IR. yosys's JSON
    netlist is the boundary until then.

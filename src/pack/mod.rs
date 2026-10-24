@@ -23,7 +23,7 @@ use serde_json::{json, Map, Value};
 
 pub use diff::diff_files;
 use mask::{fix, invert_input, normalise_carry, substitute, BUFFERS};
-use netlist::{CellId, Kind, NetId, Netlist, OutData, Port, LUT_INPUTS};
+use netlist::{CellId, IoeIn, Kind, NetId, Netlist, Port, LUT_INPUTS};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -95,7 +95,15 @@ impl Pool {
 }
 
 fn is_pad(nl: &Netlist, (c, p): (CellId, Port)) -> bool {
-    p == Port::Pad && matches!(nl.cell(c).kind, Kind::Ibuf { .. } | Kind::Obuf { .. })
+    p == Port::Pad
+        && matches!(
+            nl.cell(c).kind,
+            Kind::Ibuf { .. } | Kind::Obuf { .. } | Kind::Iobuf { .. }
+        )
+}
+
+fn is_iobuf(nl: &Netlist, c: CellId) -> bool {
+    matches!(nl.cell(c).kind, Kind::Iobuf { .. })
 }
 
 /// Name each pin buffer after the top-level port bit it serves, drop the
@@ -103,31 +111,71 @@ fn is_pad(nl: &Netlist, (c, p): (CellId, Port)) -> bool {
 fn pack_io(nl: &mut Netlist) -> Result<()> {
     for c in nl.cells() {
         let name = nl.cell(c).name.clone();
-        let buffers: Vec<CellId> = match nl.cell(c).kind {
-            Kind::TopIn => nl
-                .cell(c)
+        let cell = nl.cell(c);
+        let pad_users = |n: NetId| -> Vec<CellId> {
+            nl.users(n)
+                .into_iter()
+                .filter(|&(u, p)| p == Port::Pad && is_iobuf(nl, u))
+                .map(|(u, _)| u)
+                .collect()
+        };
+        let buffers: Vec<CellId> = match cell.kind {
+            Kind::TopIn => cell
                 .net(Port::O)
-                .map(|o| nl.users(o).into_iter().map(|(u, _)| u).collect())
+                .map(|o| {
+                    nl.users(o)
+                        .into_iter()
+                        .filter(|&(u, _)| matches!(nl.cell(u).kind, Kind::Ibuf { .. }))
+                        .map(|(u, _)| u)
+                        .collect()
+                })
                 .unwrap_or_default(),
-            Kind::TopOut => nl
-                .cell(c)
+            // A tri-state output's IOBUF has the port net on its inout
+            // PAD, so it is one of the net's users, not its driver.
+            Kind::TopOut => cell
                 .net(Port::I)
-                .and_then(|i| nl.net(i).driver)
-                .map(|(d, _)| vec![d])
+                .map(|i| {
+                    let driver = nl
+                        .net(i)
+                        .driver
+                        .filter(|&(d, _)| matches!(nl.cell(d).kind, Kind::Obuf { .. }))
+                        .map(|(d, _)| d);
+                    driver.into_iter().chain(pad_users(i)).collect()
+                })
                 .unwrap_or_default(),
+            Kind::TopInOut => {
+                let found: Vec<CellId> = [Port::I, Port::O]
+                    .into_iter()
+                    .filter_map(|p| cell.net(p))
+                    .flat_map(|n| {
+                        let driver = nl
+                            .net(n)
+                            .driver
+                            .map(|(d, _)| d)
+                            .filter(|&d| is_iobuf(nl, d));
+                        driver.into_iter().chain(pad_users(n))
+                    })
+                    .collect();
+                if found.is_empty() {
+                    bail!(
+                        "inout port {name} has no tri-state driver \
+                         (only `assign p = oe ? d : 1'bz` is supported)"
+                    );
+                }
+                found
+            }
             _ => continue,
         };
         for b in buffers {
-            match &mut nl.cell_mut(b).kind {
-                Kind::Ibuf { port } | Kind::Obuf { port, .. } => *port = Some(name.clone()),
-                _ => {}
+            if let Some(port) = nl.cell_mut(b).kind.pin_port() {
+                *port = Some(name.clone());
             }
         }
     }
 
     let mut remove = Vec::new();
     for c in nl.cells() {
-        if !matches!(nl.cell(c).kind, Kind::TopIn | Kind::TopOut) {
+        if !matches!(nl.cell(c).kind, Kind::TopIn | Kind::TopOut | Kind::TopInOut) {
             continue;
         }
         let name = &nl.cell(c).name;
@@ -158,19 +206,24 @@ fn pack_io(nl: &mut Netlist) -> Result<()> {
     }
 
     for c in nl.cells() {
-        let cell = nl.cell(c);
-        let port = match &cell.kind {
-            Kind::Ibuf { port } | Kind::Obuf { port, .. } => port,
-            _ => continue,
+        let name = nl.cell(c).name.clone();
+        let Some(port) = nl.cell_mut(c).kind.pin_port() else {
+            continue;
         };
         if port.is_none() {
-            bail!(
-                "pin buffer {} is not connected to a top-level port",
-                cell.name
-            );
+            bail!("pin buffer {name} is not connected to a top-level port");
         }
         nl.disconnect(c, Port::Pad);
         nl.remove_port(c, Port::Pad);
+        // A bidir whose input side nothing reads is a tri-state output
+        // (input buffer off, as Quartus' `output` mode).
+        if is_iobuf(nl, c) {
+            if let Some(o) = nl.cell(c).net(Port::Combout) {
+                if nl.user_count(o) == 0 {
+                    nl.disconnect(c, Port::Combout);
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -239,9 +292,9 @@ fn pack_constants(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
                         stats.const_luts += 1;
                     }
                 }
-                Kind::Obuf { .. } if p == Port::Dataout => {
-                    if let Kind::Obuf { data, .. } = &mut nl.cell_mut(c).kind {
-                        *data = OutData::Const(value);
+                _ if nl.cell(c).kind.is_ioe_in(p) => {
+                    if let Some(input) = nl.cell_mut(c).kind.ioe_in(p) {
+                        *input = IoeIn::Const(value);
                     }
                     nl.disconnect(c, p);
                 }
@@ -339,7 +392,7 @@ fn push_inversion_back(nl: &mut Netlist, inverter: CellId, input: NetId) -> bool
         .collect();
     let takes_inversion = |&(u, p): &(CellId, Port)| match nl.cell(u).kind {
         Kind::Lut { .. } => p.lut_index().is_some(),
-        Kind::Obuf { .. } => p == Port::Dataout,
+        Kind::Obuf { .. } | Kind::Iobuf { .. } => nl.cell(u).kind.is_ioe_in(p),
         Kind::Ff(_) => matches!(p, Port::Ena | Port::Sclr),
         _ => false,
     };
@@ -352,10 +405,10 @@ fn push_inversion_back(nl: &mut Netlist, inverter: CellId, input: NetId) -> bool
         let cell = nl.cell_mut(u);
         match &mut cell.kind {
             Kind::Lut { mask } => *mask = invert_input(*mask, p.lut_index().unwrap()),
-            Kind::Obuf {
-                data: OutData::Signal { invert },
-                ..
-            } => *invert = !*invert,
+            kind @ (Kind::Obuf { .. } | Kind::Iobuf { .. }) => match kind.ioe_in(p) {
+                Some(IoeIn::Signal { invert }) => *invert = !*invert,
+                _ => unreachable!("a pin buffer load on a constant input"),
+            },
             Kind::Ff(cfg) if p == Port::Ena => cfg.ena_inv = !cfg.ena_inv,
             Kind::Ff(cfg) => cfg.sclr_inv = !cfg.sclr_inv,
             _ => unreachable!("checked above"),
@@ -432,10 +485,10 @@ fn pack_lut1(nl: &mut Netlist, stats: &mut Stats) {
                         }
                     }
                 }
-                (Kind::Obuf { .. }, _) if p == Port::Dataout => {
+                (kind, _) if kind.is_ioe_in(p) => {
                     nl.reconnect(u, p, input);
-                    if let Kind::Obuf { data, .. } = &mut nl.cell_mut(u).kind {
-                        *data = OutData::Signal { invert: inv };
+                    if let Some(i) = nl.cell_mut(u).kind.ioe_in(p) {
+                        *i = IoeIn::Signal { invert: inv };
                     }
                 }
                 // A plain buffer in front of a register: the register takes
@@ -615,43 +668,40 @@ fn to_json(nl: &Netlist) -> Result<Value> {
                 }
                 "LCELL_FF"
             }
-            Kind::Ibuf { port } | Kind::Obuf { port, .. } => {
+            Kind::Ibuf { port } | Kind::Obuf { port, .. } | Kind::Iobuf { port, .. } => {
                 let port = port.as_ref().context("pin buffer without a port")?;
                 attrs.insert("PORT".into(), Value::String(port.clone()));
+                let mut ioe_in = |input: IoeIn, constant: &str, invert: &str| match input {
+                    IoeIn::Const(v) => {
+                        params.insert(constant.into(), bit(v));
+                    }
+                    IoeIn::Signal { invert: true } => {
+                        params.insert(invert.into(), bit(true));
+                    }
+                    IoeIn::Signal { invert: false } => {}
+                };
                 match cell.kind {
-                    Kind::Obuf {
-                        data: OutData::Const(v),
-                        ..
-                    } => {
-                        params.insert("OUT_CONST".into(), bit(v));
+                    Kind::Obuf { data, .. } => {
+                        ioe_in(data, "OUT_CONST", "DATA_INVERT");
                         "CY2_OBUF"
                     }
-                    Kind::Obuf {
-                        data: OutData::Signal { invert },
-                        ..
-                    } => {
-                        if invert {
-                            params.insert("DATA_INVERT".into(), bit(true));
-                        }
-                        "CY2_OBUF"
+                    Kind::Iobuf { data, oe, .. } => {
+                        ioe_in(data, "OUT_CONST", "DATA_INVERT");
+                        ioe_in(oe, "OE_CONST", "OE_INVERT");
+                        "CY2_IOBUF"
                     }
                     _ => "CY2_IBUF",
                 }
             }
             Kind::ClkCtrl => "CLKCTRL",
-            Kind::Const(_) | Kind::TopIn | Kind::TopOut => {
+            Kind::Const(_) | Kind::TopIn | Kind::TopOut | Kind::TopInOut => {
                 bail!("{}: left over after packing", cell.name)
             }
         };
         let mut dirs = Map::new();
         let mut conns = Map::new();
         for (p, net) in cell.ports() {
-            let dir = if cell.kind.is_output(p) {
-                "output"
-            } else {
-                "input"
-            };
-            dirs.insert(p.name().into(), dir.into());
+            dirs.insert(p.name().into(), cell.kind.dir(p).name().into());
             conns.insert(
                 p.name().into(),
                 json!(net.map(id).into_iter().collect::<Vec<_>>()),
@@ -691,7 +741,7 @@ fn to_json(nl: &Netlist) -> Result<Value> {
         ports.insert(
             p.name.clone(),
             json!({
-                "direction": if p.output { "output" } else { "input" },
+                "direction": p.dir.name(),
                 "bits": bits,
             }),
         );

@@ -29,7 +29,7 @@ use std::path::Path;
 use anyhow::{ensure, Context, Result};
 use serde_json::Value;
 
-use super::chipdb::{Bel, Box, ChipDb, Grid, Nodes, Pad, Site, TileType};
+use super::chipdb::{Bel, Box, ChipDb, Grid, Nodes, Pad, PadIo, Site, TileType};
 use crate::device::Xc7Part;
 
 /// A prebuilt 7-series routing graph (`chipsmith xc7-routing-graph`).
@@ -465,6 +465,7 @@ pub fn import(family: &Path, fabric: &str, part: &str) -> Result<(ChipDb, Stats)
             pin: f[0].to_string(),
             tile,
             bel: f[2].to_string(),
+            io: PadIo::Bidir,
         });
     }
 

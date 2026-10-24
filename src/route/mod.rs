@@ -229,10 +229,12 @@ impl Design {
                 if !output {
                     *loads.entry(net).or_default() += 1;
                 }
-                // Ports with no wire (the pad side of an I/O) aren't routed.
-                let Some(&wire) = pins.get(port) else {
-                    continue;
-                };
+                // The packer drops the pad side of every pin, so a connected
+                // port without a wire is a cell on a bel that can't take it
+                // (an output enable on a clock-only IOE), not one to skip.
+                let &wire = pins
+                    .get(port)
+                    .with_context(|| format!("{name}.{port}: bel {bel} has no such pin"))?;
                 let node = db.node(tile, wire);
                 let tnode = timing.node(name, port);
                 let e = ends.entry(net).or_default();

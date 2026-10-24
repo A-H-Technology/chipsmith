@@ -137,7 +137,7 @@ fn an_input_less_lut_is_a_constant_for_its_loads() {
         cell(&nl, "led_buf").kind,
         Kind::Obuf {
             port: Some("LEDR".into()),
-            data: OutData::Const(false)
+            data: IoeIn::Const(false)
         }
     );
 }
@@ -188,7 +188,7 @@ fn an_inverter_folds_into_lut_masks_and_the_pin() {
         cell(&nl, "led_buf").kind,
         Kind::Obuf {
             port: Some("LEDR".into()),
-            data: OutData::Signal { invert: true }
+            data: IoeIn::Signal { invert: true }
         }
     );
 }
@@ -328,4 +328,97 @@ fn carry_chains_get_quartus_polarity() {
         mask::normalise_carry(m, 2, true, true)
     );
     assert_ne!(cell(&nl, "c1").mask(), m);
+}
+
+/// SW in, IO inout, T a tri-state output and LEDR reading IO back.
+fn bidir_design() -> Value {
+    let cell = |ty: &str, mask: Option<u16>, conns: Value, dirs: Value| {
+        let params = match mask {
+            Some(m) => json!({"LUT_MASK": format!("{m:016b}")}),
+            None => json!({}),
+        };
+        json!({"type": ty, "parameters": params, "attributes": {},
+               "port_directions": dirs, "connections": conns})
+    };
+    json!({"modules": {"top": {
+        "attributes": {"top": "00000000000000000000000000000001"},
+        "ports": {
+            "IO": {"direction": "inout", "bits": [5]},
+            "LEDR": {"direction": "output", "bits": [3]},
+            "SW": {"direction": "input", "bits": [4]},
+            "T": {"direction": "output", "bits": [6]},
+        },
+        "cells": {
+            "sw_buf": cell("CY2_IBUF", None, json!({"PAD": [4], "COMBOUT": [12]}),
+                json!({"PAD": "input", "COMBOUT": "output"})),
+            "inv": cell("LCELL_COMB", Some(!mask::BUFFERS[0]),
+                json!({"DATAA": [12], "DATAB": ["1"], "DATAC": ["1"], "DATAD": ["1"], "COMBOUT": [20]}),
+                json!({"DATAA": "input", "DATAB": "input", "DATAC": "input", "DATAD": "input",
+                       "COMBOUT": "output"})),
+            "io_buf": cell("CY2_IOBUF", None,
+                json!({"PAD": [5], "DATAOUT": ["0"], "OE": [20], "COMBOUT": [30]}),
+                json!({"PAD": "inout", "DATAOUT": "input", "OE": "input", "COMBOUT": "output"})),
+            "led_buf": cell("CY2_OBUF", None, json!({"DATAOUT": [30], "PAD": [3]}),
+                json!({"DATAOUT": "input", "PAD": "output"})),
+            "t_buf": cell("CY2_IOBUF", None,
+                json!({"PAD": [6], "DATAOUT": [12], "OE": ["1"], "COMBOUT": [31]}),
+                json!({"PAD": "inout", "DATAOUT": "input", "OE": "input", "COMBOUT": "output"})),
+        },
+        "netnames": {"io_in": {"bits": [30]}, "sw": {"bits": [12]}, "t_in": {"bits": [31]}},
+    }}})
+}
+
+#[test]
+fn tri_state_and_bidir_pins_fold_constants_and_inverters_into_the_ioe() {
+    let mut nl = yosys::import(&bidir_design()).unwrap();
+    pack(&mut nl).unwrap();
+    assert!(find(&nl, "inv").is_none());
+    assert_eq!(
+        cell(&nl, "io_buf").kind,
+        Kind::Iobuf {
+            port: Some("IO".into()),
+            data: IoeIn::Const(false),
+            oe: IoeIn::Signal { invert: true },
+        }
+    );
+    assert_eq!(net_name(&nl, "io_buf", Port::Oe).as_deref(), Some("sw"));
+    assert_eq!(
+        net_name(&nl, "io_buf", Port::Combout).as_deref(),
+        Some("io_in")
+    );
+    // Nothing reads T's pad: its input buffer is off.
+    assert_eq!(
+        cell(&nl, "t_buf").kind,
+        Kind::Iobuf {
+            port: Some("T".into()),
+            data: IoeIn::Signal { invert: false },
+            oe: IoeIn::Const(true),
+        }
+    );
+    assert_eq!(cell(&nl, "t_buf").net(Port::Combout), None);
+    assert!(!cell(&nl, "io_buf").has_port(Port::Pad));
+
+    let json = to_json(&nl).unwrap();
+    let top = &json["modules"]["top"];
+    assert_eq!(top["ports"]["IO"]["direction"], "inout");
+    assert_eq!(top["ports"]["T"]["direction"], "output");
+    let io = &top["cells"]["io_buf"];
+    assert_eq!(io["type"], "CY2_IOBUF");
+    assert_eq!(io["parameters"]["OUT_CONST"], "0");
+    assert_eq!(io["parameters"]["OE_INVERT"], "1");
+    assert_eq!(top["cells"]["t_buf"]["parameters"]["OE_CONST"], "1");
+}
+
+#[test]
+fn an_inout_without_a_tri_state_driver_is_an_error() {
+    let mut j = bidir_design();
+    let cells = j["modules"]["top"]["cells"].as_object_mut().unwrap();
+    cells.remove("io_buf");
+    cells.remove("led_buf");
+    let mut nl = yosys::import(&j).unwrap();
+    let err = pack(&mut nl).unwrap_err().to_string();
+    assert!(
+        err.contains("inout port IO has no tri-state driver"),
+        "{err}"
+    );
 }
