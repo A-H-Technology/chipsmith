@@ -1,7 +1,7 @@
 //! The Cyclone II side of the router: a placed design in nextpnr's JSON
 //! (`nextpnr-himbaechel --no-route --write`) in, the same JSON with every
-//! net's `ROUTING` filled in the way nextpnr writes it out, so `cram pack`
-//! reads either. The search itself is `chipsmith_route`'s.
+//! net's `ROUTING` filled in the way nextpnr writes it out, so the bitstream
+//! (`bitstream::nextpnr`, cyclone2-re's `cram pack`) reads either. The search itself is `chipsmith_route`'s.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -138,7 +138,7 @@ fn dump_connections(
 }
 
 /// nextpnr's `ROUTING`: `wire;pip;strength;` per wire, the source wire with
-/// no pip. (cram only reads the pips.)
+/// no pip. (The bitstream only reads the pips.)
 fn routing_attribute(db: &ChipDb, net: &NetReq, tree: &Tree) -> String {
     let (tile, wire) = net.source_wire;
     let mut s = format!("{};;1;", db.wire_name(tile, wire));
@@ -254,7 +254,8 @@ fn read_design(db: &ChipDb, json: &Value) -> Result<Design> {
         }
     }
 
-    // One name per net carries ROUTING; cram adds up every name's pips.
+    // One name per net carries ROUTING; the bitstream adds up every name's
+    // pips.
     let mut names: HashMap<u64, String> = HashMap::new();
     for (name, n) in top["netnames"].as_object().context("no netnames")? {
         if let Some(id) = n["bits"]

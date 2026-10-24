@@ -7,6 +7,8 @@
   libusb1,
   ghdl,
   yosys,
+  # cyclone2-re's cram package, for its db/ only: the device and chip
+  # databases (ADR-0003). chipsmith assembles bitstreams itself.
   cram,
   cyclone2-synth,
   # nix/xc7.nix: the 7-series tools, chip database and prjxray-db
@@ -47,10 +49,7 @@ let
   de2Loader =
     runCommand "chipsmith-de2-flash-loader"
       {
-        nativeBuildInputs = [
-          yosys
-          cram
-        ];
+        nativeBuildInputs = [ yosys ];
         CHIPSMITH_CYCLONE2_SYNTH = cyclone2-synth;
         CHIPSMITH_CYCLONE2_GRAPH = routingGraph;
         CHIPSMITH_CYCLONE2_DB = "${cram}/db";
@@ -88,7 +87,6 @@ runCommand "chipsmith-${unwrapped.version}"
         lib.makeBinPath [
           ghdl
           yosys
-          cram
           xc7.tools
         ]
       } \

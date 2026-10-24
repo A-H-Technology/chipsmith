@@ -5,7 +5,8 @@
 //! `synth/m4k_map.v`) with logical ports: `CLK`, `A_ADDR[11:0]`,
 //! `A_DATAIN[35:0]`, `A_WE`, `B_ADDR[11:0]` and `DATAOUT[35:0]`. The packer
 //! moves them onto the pins of the chip database's `M4K` bel (`Pin`), which
-//! the placer and router see; cram reads the cell back by those pin names.
+//! the placer and router see; the bitstream (`bitstream::nextpnr`) reads the
+//! cell back by those pin names.
 
 use std::fmt;
 

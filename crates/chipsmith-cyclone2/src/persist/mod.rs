@@ -96,7 +96,7 @@ const IR_LEN: usize = 10;
 const PULSE_NCONFIG: u16 = 0x001;
 const CHECK_STATUS: u16 = 0x004;
 const USERCODE: u16 = 0x007;
-/// CHECK_STATUS's register and CONF_DONE in it (cram's `jtag.rs`, as
+/// CHECK_STATUS's register and CONF_DONE in it (`bitstream::jtag`, as
 /// Quartus' SVF checks it).
 const STATUS_BITS: usize = 1449;
 const CONF_DONE: usize = 562;
