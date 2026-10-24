@@ -117,7 +117,19 @@ fn main() -> Result<()> {
             unreachable!("handled before the manifest")
         }
         Cmd::Flash { bitstream } => {
-            let loadable = Loadable::from_path(bitstream.unwrap_or_else(|| layout.bitstream()))?;
+            let path = match bitstream {
+                Some(path) => path,
+                None => {
+                    let built = layout.bitstream();
+                    anyhow::ensure!(
+                        built.exists(),
+                        "{} doesn't exist yet; run `chipsmith build` first",
+                        built.display()
+                    );
+                    built
+                }
+            };
+            let loadable = Loadable::from_path(path)?;
             flow::plan_flash(&loadable).run()?;
         }
     }
