@@ -1,7 +1,8 @@
 //! chipsmith's Cyclone II (EP2C35) back end: packing, placement, routing,
-//! M4K RAM and hard blocks, the DE2's configuration flash, and synthesis
-//! to its cells.
+//! M4K RAM and hard blocks, the bitstream and its JTAG stream, the DE2's
+//! configuration flash, and synthesis to its cells.
 
+pub mod bitstream;
 pub mod hard;
 pub mod m4k;
 pub mod pack;

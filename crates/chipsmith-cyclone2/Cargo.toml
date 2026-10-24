@@ -1,6 +1,6 @@
 [package]
 name = "chipsmith-cyclone2"
-description = "chipsmith's Cyclone II back end: packing, placement, routing, M4K, EPCS"
+description = "chipsmith's Cyclone II back end: packing, placement, routing, M4K, bitstream, EPCS"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,5 +12,8 @@ chipsmith-netlist.workspace = true
 chipsmith-synth.workspace = true
 chipsmith-route.workspace = true
 anyhow.workspace = true
+lzma-rust2.workspace = true
+postcard.workspace = true
 rustc-hash.workspace = true
+serde.workspace = true
 serde_json.workspace = true

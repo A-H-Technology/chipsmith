@@ -3,8 +3,8 @@
 //! Input is a packed design in nextpnr's JSON (`pack`, or `nextpnr-himbaechel
 //! --pack-only --write`): LUTs, registers, pin buffers and clock controls,
 //! with carry polarity and register packing already settled. Output is the
-//! same JSON with a `NEXTPNR_BEL` on every cell, which the router and cram
-//! read.
+//! same JSON with a `NEXTPNR_BEL` on every cell, which the router and the
+//! bitstream read.
 //!
 //! What moves is an LE (a LUT and the register its output feeds, or either
 //! alone) or a whole carry chain, which starts at LE 0 of a LAB and runs

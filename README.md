@@ -9,8 +9,8 @@ nix run github:A-H-Technology/chipsmith/open -- -C examples/blinky-vhdl flash --
 nix run github:A-H-Technology/chipsmith/open -- -C examples/zybo-jtag-counter flash --ssh venus  # Zybo, through its Linux
 ```
 
-The first run builds cram and flattens its chip database into the router's
-graph. After that a build of blinky-vhdl takes about 6 s; chipsmith runs no
+The first run builds cyclone2-re's device database package and flattens
+its chip database into the router's graph. After that a build of blinky-vhdl takes about 6 s; chipsmith runs no
 nextpnr.
 
 ## Status
@@ -177,8 +177,8 @@ Cyclone II (EP2C35F672C6):
 | packing | chipsmith: cyclone2-re's nextpnr packer, ported (`crates/chipsmith-cyclone2/src/pack`) | ours |
 | placement | chipsmith: simulated annealing over LAB slots, nextpnr's LAB rules (`crates/chipsmith-cyclone2/src/place.rs`) | ours |
 | routing | chipsmith: PathFinder over the chip database (`crates/chipsmith-route`, `crates/chipsmith-cyclone2/src/route.rs`) | ours |
-| bitstream | `cram pack` (cyclone2-re) | ours already |
-| JTAG stream | `cram svf` | ours already |
+| bitstream | chipsmith: cyclone2-re's assembler (`cram pack`), moved here and still checked against Quartus by cyclone2-re's `cram` (`crates/chipsmith-cyclone2/src/bitstream`, ADR-0003) | ours |
+| JTAG stream | chipsmith: the SVF `cram svf` wrote, CONF_DONE checked (`crates/chipsmith-cyclone2/src/bitstream/jtag.rs`) | ours |
 | cable | chipsmith: USB-Blaster and FT2232 (MPSSE) drivers, SVF player, 7-series JTAG loader (`crates/chipsmith-jtag`) | ours |
 | configuration flash | chipsmith: serial flash loader (built by chipsmith) and EPCS16 driver (`crates/chipsmith-cyclone2/src/persist`) | ours |
 
@@ -323,7 +323,7 @@ share chipsmith's own netlist IR, not Verilog.
      inverted outputs) packs identically too, and so does bidir (10
      `CY2_IOBUF`s: constant data and enables, inverters folded into
      `DATA_INVERT`/`OE_INVERT`, unread inputs switched off). `pack-diff`
-     compares top-level port directions too, since cram decides
+     compares top-level port directions too, since the bitstream decides
      output vs bidir mode by them. Rechecked 2026-10-24 with cyclone2-re
      5eff911 (blinky, lfsr, uart_tx, picorv32 both mappers: identical),
      and for the M4K examples with 9cfe9be (`pack_m4k`: logical ports onto

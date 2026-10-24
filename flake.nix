@@ -2,9 +2,9 @@
   description = "chipsmith: an open FPGA toolchain, HDL in, programmed chip out";
 
   inputs = {
-    # The Cyclone II device database (cram's db/), techmap and cram.
+    # The Cyclone II device and chip databases (its db package) and techmap.
     cyclone2-re.url = "github:cramt/cyclone2-re";
-    # One nixpkgs for both, so cram and its tools are the same derivations
+    # One nixpkgs for both, so the tools are the same derivations
     # cyclone2-re's devshell already built.
     nixpkgs.follows = "cyclone2-re/nixpkgs";
     flake-utils.follows = "cyclone2-re/flake-utils";
@@ -39,14 +39,11 @@
         flowTools = [
           pkgs.ghdl
           pkgs.yosys
-          open.cram
           xc7.tools
         ];
         chipsmith = pkgs.callPackage ./nix/package.nix {
-          inherit (open)
-            cram
-            cyclone2-synth
-            ;
+          inherit (open) cyclone2-synth;
+          cyclone2-db = open.db;
           inherit xc7;
         };
       in
@@ -69,7 +66,7 @@
           ]
           ++ flowTools;
           CHIPSMITH_CYCLONE2_SYNTH = open.cyclone2-synth;
-          CHIPSMITH_CYCLONE2_DB = "${open.cram}/db";
+          CHIPSMITH_CYCLONE2_DB = "${open.db}";
           CHIPSMITH_XC7_CHIPDB = xc7.chipdb;
           CHIPSMITH_PRJXRAY_DB = xc7.prjxray-db;
           # Written on first use (and whenever the format changes), so the
