@@ -13,6 +13,9 @@
 //! say, clock controls are the nearest free one the clock pin reaches. M4K
 //! RAM blocks move between the chip's M4K sites, swapping with each other.
 
+pub mod xc7;
+pub mod xc7_delay;
+
 use std::borrow::Cow;
 use std::collections::VecDeque;
 

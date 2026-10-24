@@ -173,6 +173,22 @@ impl Graph {
         }
     }
 
+    /// A delay through a cell, for devices whose cells `add_cell` doesn't
+    /// know (7-series).
+    pub fn add_arc(&mut self, from: u32, to: u32, delay: Ps) {
+        self.cell_arcs.push(Arc { from, to, delay });
+    }
+
+    /// A path start: a register output, `delay` after the clock edge.
+    pub fn set_launch(&mut self, node: u32, delay: Ps) {
+        self.launch[node as usize] = Some(delay);
+    }
+
+    /// A path end: a register input needing `setup` before the edge.
+    pub fn set_setup(&mut self, node: u32, setup: Ps) {
+        self.setup[node as usize] = Some(setup);
+    }
+
     pub fn len(&self) -> usize {
         self.names.len()
     }

@@ -49,6 +49,19 @@ enum Cmd {
         prerouted: PathBuf,
         preplaced: PathBuf,
     },
+    /// Place nextpnr's packed xc7 netlist (`--pack-only --write`): its
+    /// `-o preplaced` lines. With `--reference`, also measure another
+    /// placement of it (nextpnr's `--write`) the same way.
+    #[command(hide = true)]
+    Xc7Place {
+        packed: PathBuf,
+        placement: PathBuf,
+        #[arg(long)]
+        reference: Option<PathBuf>,
+        /// Place for wirelength alone, without the timing model.
+        #[arg(long)]
+        wirelength_only: bool,
+    },
     /// Map a yosys netlist's simple gates to 4-input LUTs (in place of abc).
     #[command(hide = true)]
     Lutmap { netlist: PathBuf, mapped: PathBuf },
@@ -75,6 +88,39 @@ fn main() -> Result<()> {
             eprintln!("routing graph in {:.1} s", started.elapsed().as_secs_f64());
             let s = chipsmith::route::xc7::route_file(&db, routed, prerouted, preplaced)?;
             eprintln!("{s:#?}");
+            return Ok(());
+        }
+        Cmd::Xc7Place {
+            packed,
+            placement,
+            reference,
+            wirelength_only,
+        } => {
+            let started = std::time::Instant::now();
+            let db = xray::load(chipsmith::device::XC7Z010CLG400_1)?;
+            eprintln!("routing graph in {:.1} s", started.elapsed().as_secs_f64());
+            let part = chipsmith::device::XC7Z010CLG400_1;
+            let delays = chipsmith::place::xc7_delay::Delays::load(
+                &std::path::Path::new(
+                    &std::env::var_os(flow::PRJXRAY_DB_VAR)
+                        .ok_or_else(|| anyhow::anyhow!("{} is not set", flow::PRJXRAY_DB_VAR))?,
+                )
+                .join(part.family),
+            )?;
+            let outcome = chipsmith::place::xc7::place_file(
+                &db,
+                (!wirelength_only).then_some(&delays),
+                packed,
+                placement,
+            )?;
+            eprintln!("{outcome:#?}");
+            if let Some(reference) = reference {
+                let (wl, critical) =
+                    chipsmith::place::xc7::measure(&db, &delays, packed, reference)?;
+                eprintln!(
+                    "reference: wirelength {wl:.1}, estimated critical path {critical:.0} ps"
+                );
+            }
             return Ok(());
         }
         Cmd::Pack { netlist, packed } => {
@@ -111,6 +157,7 @@ fn main() -> Result<()> {
         Cmd::RoutingGraph { .. }
         | Cmd::Xc7RoutingGraph { .. }
         | Cmd::Xc7Route { .. }
+        | Cmd::Xc7Place { .. }
         | Cmd::Pack { .. }
         | Cmd::PackDiff { .. }
         | Cmd::Lutmap { .. } => {

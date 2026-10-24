@@ -351,7 +351,7 @@ fn readable_wire(db: &ChipDb, name: &str) -> Result<String> {
 /// after a bel of a site variant other than the site's primary type
 /// (`IOB_X0Y1.IOB33.OUTBUF~IOB33` in an IOB33M site). Bels of tiles without
 /// sites (`X0Y0/PSEUDO_GND`) are named that way already.
-fn bel_name(db: &ChipDb, bel: &str) -> Result<String> {
+pub(crate) fn bel_name(db: &ChipDb, bel: &str) -> Result<String> {
     let (site, name) = bel.split_once('/').context("bel name")?;
     if db.tile_by_name(site).is_some() {
         return Ok(bel.to_string());
@@ -368,6 +368,50 @@ fn bel_name(db: &ChipDb, bel: &str) -> Result<String> {
         }
     }
     Ok(out)
+}
+
+/// Check that nextpnr's routed design `routed` has every cell on the bel
+/// chipsmith's placer gave it (`placement`, `-o preplaced` lines): nextpnr
+/// binds them without complaint even where it would have to move one, so a
+/// placement it didn't take shows up only here. Returns how many cells
+/// were checked; 0 for an empty placement (nextpnr placed the design).
+pub fn check_placement(db: &ChipDb, routed: &Path, placement: &Path) -> Result<usize> {
+    let ours = std::fs::read_to_string(placement)
+        .with_context(|| format!("reading {}", placement.display()))?;
+    let ours: HashMap<&str, &str> = ours.lines().filter_map(|l| l.split_once('\t')).collect();
+    if ours.is_empty() {
+        return Ok(0);
+    }
+    let text =
+        std::fs::read_to_string(routed).with_context(|| format!("reading {}", routed.display()))?;
+    let mut json: Value = serde_json::from_str(&text)?;
+    let cells = top_module(&mut json)?["cells"]
+        .as_object()
+        .context("no cells")?;
+    let mut moved = Vec::new();
+    for (cell, bel) in &ours {
+        let theirs = cells
+            .get(*cell)
+            .with_context(|| format!("nextpnr's design has no cell {cell}"))?["attributes"]
+            ["NEXTPNR_BEL"]
+            .as_str()
+            .with_context(|| format!("nextpnr didn't place {cell}"))?;
+        let theirs = bel_name(db, theirs)?;
+        if theirs != *bel {
+            moved.push(format!("{cell}: {bel} -> {theirs}"));
+        }
+    }
+    let unplaced = cells.len() - ours.len();
+    if !moved.is_empty() || unplaced != 0 {
+        moved.sort();
+        moved.truncate(10);
+        bail!(
+            "nextpnr moved {} of chipsmith's cells and placed {unplaced} of its own: {}",
+            moved.len(),
+            moved.join("; ")
+        );
+    }
+    Ok(ours.len())
 }
 
 /// Route nextpnr's routed design `routed` again: write the routes as
