@@ -54,6 +54,7 @@
         packages = {
           default = chipsmith;
           xc7-chipdb = xc7.chipdb;
+          xc7-routing-graph = chipsmith.xc7RoutingGraph;
         };
 
         devShells.default = pkgs.mkShell {
@@ -75,6 +76,7 @@
           # shell doesn't depend on building chipsmith itself.
           shellHook = ''
             export CHIPSMITH_CYCLONE2_GRAPH=$PWD/target/routing-graph.bin
+            export CHIPSMITH_XC7_GRAPH=$PWD/target/xc7-routing-graph.bin
           '';
         };
       }

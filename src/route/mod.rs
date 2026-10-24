@@ -6,6 +6,8 @@
 //! filled in the way nextpnr writes it, so `cram pack` reads either.
 
 pub mod chipdb;
+pub mod xc7;
+pub mod xray;
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -377,6 +379,12 @@ struct Router<'a> {
     permutes: Vec<Option<Vec<i8>>>,
     fixed_inputs: &'a HashSet<(u32, u8)>,
     timing: &'a timing::Graph,
+    /// `ChipDb::tile_distance`, or `CHIPSMITH_TILE_DISTANCE=<x>,<y>` for
+    /// tuning it.
+    tile_distance: [f32; 2],
+    /// Nodes only one net may use (by index), e.g. the ends of routes
+    /// another tool has fixed. Empty when nothing is reserved.
+    owner: Vec<u32>,
 }
 
 fn permuting_pips(tt: &chipdb::TileType) -> Option<Vec<i8>> {
@@ -426,7 +434,35 @@ impl<'a> Router<'a> {
             permutes: db.tile_types.iter().map(permuting_pips).collect(),
             fixed_inputs: &design.fixed_inputs,
             timing: &design.timing,
+            owner: Vec::new(),
+            tile_distance: std::env::var("CHIPSMITH_TILE_DISTANCE")
+                .ok()
+                .and_then(|v| {
+                    let (x, y) = v.split_once(',')?;
+                    Some([x.parse().ok()?, y.parse().ok()?])
+                })
+                .unwrap_or(db.tile_distance),
         }
+    }
+
+    /// Keep `node` for net `net` alone.
+    fn reserve(&mut self, node: NodeId, net: u32) -> Result<()> {
+        if self.owner.is_empty() {
+            self.owner = vec![u32::MAX; self.db.nodes()];
+        }
+        let o = &mut self.owner[node as usize];
+        ensure!(
+            *o == u32::MAX || *o == net,
+            "node {node} is an end of two nets' routes"
+        );
+        *o = net;
+        Ok(())
+    }
+
+    fn reserved_for_other(&self, node: NodeId, net: u32) -> bool {
+        self.owner
+            .get(node as usize)
+            .is_some_and(|&o| o != u32::MAX && o != net)
     }
 
     fn usable(&self, e: &Edge) -> bool {
@@ -444,8 +480,8 @@ impl<'a> Router<'a> {
 
     fn distance(&self, a: NodeId, b: NodeId) -> f32 {
         let (dx, dy) = self.db.node_box[a as usize].gap(self.db.node_box[b as usize]);
-        // Tile x counts routing and logic columns separately: halve it.
-        dx as f32 / 2.0 + dy as f32
+        let [kx, ky] = self.tile_distance;
+        dx as f32 * kx + dy as f32 * ky
     }
 
     /// Net arcs of the current routing, for timing analysis: every routed
@@ -489,7 +525,7 @@ impl<'a> Router<'a> {
                 for &n in &trees[i].nodes {
                     self.occ[n as usize] -= 1;
                 }
-                trees[i] = self.route_net(net, &crit[i])?;
+                trees[i] = self.route_net(i as u32, net, &crit[i])?;
                 for &n in &trees[i].nodes {
                     self.occ[n as usize] += 1;
                 }
@@ -517,7 +553,7 @@ impl<'a> Router<'a> {
         bail!("routing did not converge in {MAX_ITERATIONS} iterations")
     }
 
-    fn route_net(&mut self, net: &NetReq, crit: &[f32]) -> Result<Tree> {
+    fn route_net(&mut self, index: u32, net: &NetReq, crit: &[f32]) -> Result<Tree> {
         self.tree_generation += 1;
         let mut tree = Tree {
             nodes: vec![net.source],
@@ -540,7 +576,7 @@ impl<'a> Router<'a> {
             if self.in_tree[sink as usize] == self.tree_generation {
                 continue;
             }
-            self.search(&tree.nodes, sink, crit[i])
+            self.search(index, &tree.nodes, sink, crit[i])
                 .with_context(|| format!("net {}: no route to a sink", net.name))?;
             // Walk back from the sink to the tree, then add the branch.
             let mut branch = Vec::new();
@@ -570,7 +606,7 @@ impl<'a> Router<'a> {
     /// A* from every node of `tree` to `sink`; fills `via`. Each node costs
     /// `(1 - crit)` times its congestion cost plus `crit` times its delay
     /// (in units of an R4 wire, so both terms are about 1 per hop).
-    fn search(&mut self, tree: &[NodeId], sink: NodeId, crit: f32) -> Result<()> {
+    fn search(&mut self, net: u32, tree: &[NodeId], sink: NodeId, crit: f32) -> Result<()> {
         self.generation += 1;
         let gen = self.generation;
         let mut heap = BinaryHeap::new();
@@ -594,7 +630,7 @@ impl<'a> Router<'a> {
                 continue;
             }
             for e in self.db.downhill(node) {
-                if !self.usable(e) {
+                if !self.usable(e) || self.reserved_for_other(e.dst, net) {
                     continue;
                 }
                 let m = e.dst as usize;
@@ -678,5 +714,37 @@ mod tests {
         assert!(trees[0].nodes.contains(&node("N")));
         assert!(trees[1].nodes.contains(&node("M")));
         assert!(router.occ.iter().all(|&o| o <= 1));
+    }
+
+    #[test]
+    fn a_node_reserved_for_another_net_is_avoided() {
+        // S0 reaches T0 directly through M, or through N; M is kept for net 1.
+        let db = ChipDb::parse(
+            "chip 1 1\ntt T\nw S0 W\nw M W\nw N W\nw T0 W\n\
+             p S0 M\np S0 N\np M T0\np N T0\nend\nt 0 0 T\n"
+                .as_bytes(),
+        )
+        .unwrap();
+        let node = |w: &str| db.node(0, db.tile_type(0).wire(w).unwrap());
+        let mut timing = timing::Graph::default();
+        let design = Design {
+            nets: vec![NetReq {
+                name: "a".into(),
+                source: node("S0"),
+                source_wire: (0, 0),
+                sinks: vec![node("T0")],
+                driver: timing.node("a", "O"),
+                sink_ports: vec![timing.node("a", "I")],
+                direct_ports: vec![],
+            }],
+            fixed_inputs: HashSet::new(),
+            timing,
+        };
+        let mut router = Router::new(&db, &design);
+        router.reserve(node("M"), 1).unwrap();
+        let (trees, _, _) = router.route(&design.nets).unwrap();
+        assert!(trees[0].nodes.contains(&node("N")));
+        assert!(!trees[0].nodes.contains(&node("M")));
+        assert!(router.reserve(node("M"), 0).is_err());
     }
 }
