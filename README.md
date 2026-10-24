@@ -333,6 +333,18 @@ share chipsmith's own netlist IR, not Verilog.
      `0` (a flag toggled back) chipsmith leaves out; they read the same.
 4. **Own synthesis**: techmap and LUT mapping on the IR. yosys's JSON
    netlist is the boundary until then.
+   - Netlist IR (done, 2026-10-25): `crates/chipsmith-netlist`, in
+     yosys' RTLIL cell vocabulary, with typed cells for the families
+     synthesis matches on (ADR-0004, ADR-0005). It reads and writes
+     yosys' JSON. The tests run 19 designs (the examples, the flash
+     loader, eight cyclone2-re specimens, one instance of every typed
+     RTLIL cell, every cell in yosys' `simcells.v`) through up to four
+     levels (`proc`, `synth -run :fine`, `techmap; opt`, `cyclone2.ys`),
+     64 netlists in all. For each one, read-write-read gives the same IR,
+     yosys reads our file to the same design as its own, and yosys'
+     `equiv_*` passes prove the two equivalent. picorv32 after
+     `techmap; opt` (8,417 cells, 5.6 MB) reads in 137 ms and writes in
+     73 ms.
    - LUT mapping (done, in the default Cyclone II flow). yosys runs
      `cyclone2.ys` up to `abc -lut 4` and writes `build/gates.json`.
      chipsmith maps that, and a second yosys runs the rest of the script

@@ -121,6 +121,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "chipsmith-netlist"
+version = "0.1.0"
+dependencies = [
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "chipsmith-route"
 version = "0.1.0"
 dependencies = [

@@ -11,6 +11,7 @@ repository = "https://github.com/A-H-Technology/chipsmith"
 [workspace.dependencies]
 chipsmith-cyclone2 = { path = "crates/chipsmith-cyclone2" }
 chipsmith-jtag = { path = "crates/chipsmith-jtag" }
+chipsmith-netlist = { path = "crates/chipsmith-netlist" }
 chipsmith-route = { path = "crates/chipsmith-route" }
 chipsmith-synth = { path = "crates/chipsmith-synth" }
 chipsmith-xc7 = { path = "crates/chipsmith-xc7" }

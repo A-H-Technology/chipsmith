@@ -30,6 +30,13 @@ One stage of a plan: an in-process stage or an external tool.
 **Netlist**:
 A design as cells connected by nets, at any level from RTL to device cells.
 
+**Net**:
+One bit of a module's connectivity: every port bit on the same net is connected.
+_Avoid_: wire (when a net is meant)
+
+**Wire**:
+A name for some nets, and constants, such as a port or a Verilog `wire`. Several wires can name the same net.
+
 **RTL cell**:
 A word-level operation or storage element (adder, multiplexer, register, memory) before mapping.
 
