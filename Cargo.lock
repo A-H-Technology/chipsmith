@@ -109,12 +109,9 @@ dependencies = [
  "chipsmith-jtag",
  "chipsmith-netlist",
  "chipsmith-route",
-<<<<<<< HEAD
  "chipsmith-synth",
-=======
  "lzma-rust2",
  "postcard",
->>>>>>> open
  "rustc-hash",
  "serde",
  "serde_json",
