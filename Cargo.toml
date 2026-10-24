@@ -14,6 +14,7 @@ chipsmith-jtag = { path = "crates/chipsmith-jtag" }
 chipsmith-netlist = { path = "crates/chipsmith-netlist" }
 chipsmith-route = { path = "crates/chipsmith-route" }
 chipsmith-synth = { path = "crates/chipsmith-synth" }
+chipsmith-verilog = { path = "crates/chipsmith-verilog" }
 chipsmith-xc7 = { path = "crates/chipsmith-xc7" }
 
 anyhow = "1"

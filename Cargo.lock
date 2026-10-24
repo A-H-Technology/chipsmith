@@ -145,7 +145,21 @@ name = "chipsmith-synth"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chipsmith-netlist",
+ "rustc-hash",
  "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "chipsmith-verilog"
+version = "0.1.0"
+dependencies = [
+ "chipsmith-netlist",
+ "chipsmith-synth",
+ "rustc-hash",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
