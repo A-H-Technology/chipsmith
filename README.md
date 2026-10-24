@@ -17,7 +17,7 @@ nextpnr.
 | device | board | build | on hardware |
 |---|---|---|---|
 | EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes: LUT/carry/register logic, M4K RAM blocks (below), global clocks from pins, 3.3-V LVTTL pins: input, output, tri-state, bidirectional, open drain | yes (2026-10-24: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
-| xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes: what yosys `synth_xilinx` and openXC7's nextpnr handle, LVCMOS33 pins; chipsmith routes the interconnect (below) | yes (2026-10-24: zybo-jtag-counter with chipsmith's routing, flashed by chipsmith, read back over JTAG at 125.01 MHz) |
+| xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes: what yosys `synth_xilinx` and openXC7's nextpnr's packer handle, LVCMOS33 pins; chipsmith places LUT/register/carry logic, RAM32Ms, pins, BUFGs and BSCANs and routes the interconnect (below) | yes (2026-10-24: zybo-jtag-counter with nextpnr's placement and chipsmith's routing, flashed by chipsmith, read back over JTAG at 125.01 MHz); chipsmith's placement not yet tried on the board |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
 LEDs, about 1,200 LEs; a build takes about 85 s of CPU time.
@@ -83,7 +83,7 @@ from one quartus_sta path each, and so is the M4K buffer's routing delay.
 
 The Zybo examples:
 
-- `examples/zybo-blinky`: a counter on LD0-LD3. Builds in about 36 s.
+- `examples/zybo-blinky`: a counter on LD0-LD3. Builds in about 70 s.
 - `examples/zybo-jtag-counter`: the Zybo's USB-UART is wired to the
   Zynq's processor (PS MIO 48/49, Digilent's Zybo reference manual,
   section 6), not to the FPGA fabric. So without software on the ARM
@@ -91,10 +91,10 @@ The Zybo examples:
   cable instead. A BSCANE2 makes it a 64-bit USER1 register holding
   `"ZYBO"` and a Gray-coded 125 MHz counter.
   `cargo run --release --example xc7_user1` reads it twice, a second apart,
-  with chipsmith's own cable code. Built in about 61 s with nextpnr's
-  routing; with chipsmith's (two nextpnr runs, below) 3 min 45 s, of
-  which 1 min 52 s CPU, on a heavily loaded machine. Two builds give the
-  same FASM. Read back 2026-10-24:
+  with chipsmith's own cable code. Builds in about 87 s with chipsmith's
+  placement and routing (three nextpnr runs, below). Two builds give the
+  same placement and the same FASM. Read back 2026-10-24, from the build
+  with nextpnr's placement:
 
   ```
   USER1 0x5a59424f07d1540d: tag "ZYBO", count 90281993
@@ -103,6 +103,9 @@ The Zybo examples:
   ```
 
   With zybo-blinky loaded instead, the same read returns all zeros.
+- `examples/zybo-picorv32`: `examples/picorv32`'s sources with its ports
+  on arbitrary Zybo balls, a placement and routing bench, not for
+  hardware. Builds in about 110 s.
 
 Zybo limits, all of them inherited from the tools:
 
@@ -148,13 +151,16 @@ Cyclone II (EP2C35F672C6):
 | cable | chipsmith: USB-Blaster and FT2232 (MPSSE) drivers, SVF player, 7-series JTAG loader (`src/jtag`) | ours |
 | configuration flash | chipsmith: serial flash loader (built by chipsmith) and EPCS16 driver (`src/persist`) | ours |
 
-Zynq-7010 PL (xc7z010clg400-1): shell out, except routing and the cable.
+Zynq-7010 PL (xc7z010clg400-1): shell out, except placement, routing and
+the cable.
 
 | stage | today | |
 |---|---|---|
 | VHDL → Verilog | GHDL `--synth --out=verilog` | as for Cyclone II |
 | synthesis | yosys `synth_xilinx -flatten -abc9 -arch xc7` | to replace |
-| packing, placement, site routing | openXC7's nextpnr (`nextpnr-himbaechel`, xilinx uarch), chip database for xc7z010 built from prjxray-db in nix (2.5 min) | to replace: placer next, then packer |
+| packing | openXC7's nextpnr (`nextpnr-himbaechel --pack-only`, xilinx uarch), chip database for xc7z010 built from prjxray-db in nix (2.5 min) | to replace next |
+| placement | chipsmith: simulated annealing over slices, timing-driven with prjxray-db's delays (`src/place/xc7.rs`, `src/place/xc7_delay.rs`) | ours |
+| site routing | nextpnr, routing chipsmith's placement (`-o preplaced`) | to replace |
 | interconnect routing | chipsmith: PathFinder over the prjxray-db graph (`src/route/xray.rs`, `src/route/xc7.rs`) | ours |
 | FASM | nextpnr's FASM writer, from chipsmith's routes (`-o preplaced`, `-o prerouted`) | to replace |
 | FASM → frames | prjxray `fasm2frames` | to replace |
@@ -390,6 +396,10 @@ Next devices:
   Project X-Ray already documents the fabric, so owning the stages means
   importing prjxray-db, not reverse engineering. xc7-re holds the
   groundwork. Same order as for Cyclone II: router, placer, packer.
+  The flow: yosys; nextpnr packs (`--pack-only`); chipsmith places;
+  nextpnr routes that placement (`-o preplaced`, nothing left to place)
+  for the site routing; chipsmith reroutes the interconnect; nextpnr
+  writes the FASM and times it (`--report`).
   - Router (done, interconnect only). The routing graph comes from
     prjxray-db (`tilegrid.json`, `tile_type_*.json`, `tileconn.json`, and
     `segbits`/`ppips` for which pips a bitstream can express), into the
@@ -405,7 +415,7 @@ Next devices:
     need a free bel and site configuration the router doesn't model.
 
     nextpnr's xilinx graph has the sites inside it, and chipsmith's doesn't
-    yet. So the flow is: nextpnr packs, places and routes; chipsmith keeps
+    yet. So the flow is: nextpnr routes (chipsmith's placement, below); chipsmith keeps
     everything of nextpnr's routing that isn't an interconnect pip (site
     pips, the LUT pin nextpnr permuted a signal onto, route-throughs) and
     reroutes the rest with the Cyclone II's PathFinder, between the site
@@ -461,6 +471,96 @@ Next devices:
     so chipsmith can choose site pins and LUT pin permutations itself and
     no longer needs nextpnr's routing to start from; and FASM from
     chipsmith's own writer.
+  - Placer (done). chipsmith places nextpnr's packed netlist (the cells
+    its packer writes with `--pack-only`: SLICE_LUTX, SLICE_FFX, CARRY4,
+    RAMD32, PAD, IOB33 buffers, BUFGCTRL, BSCAN) and hands every cell's
+    bel to nextpnr as `-o preplaced` lines. nextpnr binds all of them and
+    places nothing itself; `route::xc7` checks that each cell is on the
+    bel chipsmith gave it before rerouting. Packing names are
+    deterministic, so the packer's own cells (split carries, feed-through
+    LUTs, pin buffers) match by name in every later nextpnr run.
+
+    Slices are filled in shapes that are legal by construction, a subset
+    of nextpnr's `xc7_logic_tile_valid`: a BLE (a LUT in an `x6LUT` and
+    the register in the `xFF` beside it, or either alone) goes anywhere,
+    and the only per-slice rule left is one control set (clock, CE, SR
+    and their modes) per slice; a carry chain owns whole slices up its
+    column, following COUT to the next CIN through the prjxray graph (and
+    so across the HCLK row), with its S LUTs in the `x6LUT`s, its DI LUTs
+    in the `x5LUT`s and registers fed by a sum output in that bit's
+    `xFF`; a RAM32M owns a SLICEM. Chains and RAMs take the tile's X0
+    slice, as nextpnr's packer constrains them. Pins stay where the XDC
+    put them, the BSCAN for USER<n> goes to BSCAN_X0Y<n-1>, each BUFGCTRL
+    to the free one nearest its source. Anything else (block RAM, DSPs,
+    SRLs, wide muxes, I/O logic, other RAM shapes) leaves the placement
+    empty and nextpnr places the design as before. The 5LUTs and 5FFs
+    stay unused outside carry chains, so chipsmith fills more slices than
+    nextpnr does.
+
+    The annealer is the Cyclone II one's (VPR schedule, range limit,
+    half-perimeter wirelength with x at half weight, since grid x counts
+    site columns), with moves that swap BLEs, or move a chain or RAM and
+    hand the BLEs in its new slices to the slices it left, slice for
+    slice, so control sets never mix. Eight anneals run on eight threads
+    from one start with fixed seeds, and the cheapest wins: the result
+    doesn't depend on the machine.
+
+    Timing-driven: prjxray-db's timing data loads in a few lines. Cell
+    delays come from `timings/slicel.sdf` (slow corner, max: LUT 124 ps,
+    clock-to-Q 303 ps, every CARRY4 arc), routing from distance, hop by
+    hop, with the mean pip delay per wire class of `tile_type_INT_L.json`
+    (hexes up and down, quads across, then doubles and singles, plus the
+    IMUX pip). Every temperature the placer runs the STA of `timing.rs`
+    and weights each net by `1 + 20 * criticality^4`. prjxray's pip delays
+    have no wire RC, and the estimate is rough either way: picorv32's
+    critical path comes out at 5.93 ns against 5.89 ns by nextpnr's STA
+    of chipsmith's routing, jtag-counter's at 4.07 ns against 2.84 ns.
+    Only its proportions matter.
+
+    nextpnr's placement (HeAP and SA, in the old flow) against
+    chipsmith's, each routed by chipsmith's router. Fmax is nextpnr's STA
+    (`--report`) of that routing; wirelength is chipsmith's measure
+    (half-perimeter, x halved) of both placements of the same packed
+    netlist. Release builds, 8 cores; another job shared the machine.
+
+    | design | placer | wirelength | place time | Fmax, chipsmith's routing | Fmax, nextpnr's router2 |
+    |---|---|---|---|---|---|
+    | zybo-blinky | nextpnr | 165.5 | 0.7 s | 391.5 MHz | 391.5 MHz |
+    | zybo-blinky | chipsmith | 172 | 0.5 s | 391.5 MHz | 391.5 MHz |
+    | zybo-jtag-counter | nextpnr | 569 | 1.0 s | 312.0 MHz | 317.2 MHz |
+    | zybo-jtag-counter | chipsmith | 523 | 0.7 s | 352.5 MHz | 352.5 MHz |
+    | zybo-picorv32 | nextpnr | 7,562.5 | 10.0 s | 143.5 MHz | 181.3 MHz |
+    | zybo-picorv32 | chipsmith | 7,484 | 9.2 s | 169.8 MHz | 172.6 MHz |
+
+    blinky is its 7-CARRY4 chain either way. Whole builds, at a load
+    average of 5 to 8: blinky 71 s against 55 s, jtag-counter 87 s
+    against 66 s, picorv32 110 s against 101 s. The steps that changed
+    account for about 3 s of that (the `--pack-only` run takes 2 s, and
+    chipsmith's placing about what nextpnr's took); the rest is the load
+    (yosys alone took 38 s instead of 17 s on the counter).
+
+    Picking the weights, nextpnr's Fmax on chipsmith's routing (the
+    placement changes with the seeds, and one placement's Fmax moves by
+    about 10% with it):
+
+    | placer | picorv32 | jtag-counter |
+    |---|---|---|
+    | wirelength only | 132.6 MHz | 352.5 MHz |
+    | timing weight 8 (the Cyclone II's) | 137.3, 125.2 MHz | 366.2 MHz |
+    | 8, criticality^2 | 156.6 MHz | 366.2 MHz |
+    | 8, wire hops doubled | 112.1 MHz | 351.3 MHz |
+    | 20 (default) | 169.8, 156.7, 146.3 MHz | 352.5, 366.2, 366.2 MHz |
+    | 20, wire hops doubled | 160.6 MHz | 366.2 MHz |
+    | 40 | 148.3, 130.4 MHz | 366.2, 351.3 MHz |
+    | 40, criticality^2 | 152.0 MHz | 351.3 MHz |
+    | 80 | 163.4 MHz | 352.5 MHz |
+
+    Wirelength alone gives the shortest picorv32 (5,484.5, 27% under
+    nextpnr's) and the slowest; its critical path is the reset counter
+    into the high-fanout enable of most registers, which only the timing
+    weight pulls together. Open: the 5LUTs and 5FFs, a delay model with
+    the wires' RC, and chipsmith's own packer, so nextpnr's `--pack-only`
+    run goes.
 - **DE25-Nano** (Agilex 5): no public reverse engineering exists. First
   check whether the Secure Device Manager accepts a bitstream we write.
 
