@@ -32,6 +32,7 @@ use anyhow::{bail, Context, Result};
 use crate::jtag::ftdi::Ftdi;
 use crate::jtag::usb_blaster::UsbBlaster;
 use crate::jtag::{svf, xc7};
+use crate::persist::{self, EpcsOp, Loader};
 
 use crate::device::{Clg400Pin, Device, Xc7Part, XC7Z010CLG400_1};
 use crate::manifest::{Clock, Frequency, Manifest, PinAssignment, QuartusPin, Sources, Target};
@@ -163,6 +164,11 @@ pub enum Step {
     PlaySvf(PathBuf),
     /// Load a 7-series `.bit` over a Digilent FT2232 cable, in process.
     LoadBit(PathBuf),
+    /// Build the DE2's serial flash loader into this project directory.
+    BuildLoader(PathBuf),
+    /// Configure the serial flash loader (an SVF) into the DE2's FPGA over
+    /// the USB-Blaster, then read or write the EPCS through it.
+    Epcs { loader: PathBuf, op: EpcsOp },
 }
 
 /// The 7-series tools' data, resolved for one part.
@@ -211,6 +217,12 @@ impl Step {
             Step::Xc7Route { .. } => "route (chipsmith)",
             Step::PlaySvf(_) => "JTAG: program over USB-Blaster",
             Step::LoadBit(_) => "JTAG: program over Digilent FT2232",
+            Step::BuildLoader(_) => "build the serial flash loader",
+            Step::Epcs { op, .. } => match op {
+                EpcsOp::Program(_) => "EPCS: write and verify through the serial flash loader",
+                EpcsOp::Dump(_) => "EPCS: read through the serial flash loader",
+                EpcsOp::Restore(_) => "EPCS: restore a dump through the serial flash loader",
+            },
         }
     }
 }
@@ -635,7 +647,69 @@ impl Loadable {
     }
 }
 
-pub fn plan_flash(loadable: &Loadable) -> Plan {
+/// Where `chipsmith flash` puts a design.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Persistence {
+    /// Configuration RAM over JTAG: fast, gone at power-off.
+    Volatile,
+    /// The board's configuration flash, loaded from at power-up.
+    Persistent,
+}
+
+/// A `chipsmith flash`, checked against what each board can persist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Flash {
+    Volatile(Loadable),
+    /// A Cyclone II RBF into the DE2's EPCS16.
+    Epcs(PathBuf),
+}
+
+impl Flash {
+    pub fn new(path: PathBuf, persistence: Persistence) -> Result<Self> {
+        let loadable = Loadable::from_path(path)?;
+        Ok(match (persistence, loadable) {
+            (Persistence::Volatile, l) => Flash::Volatile(l),
+            (Persistence::Persistent, Loadable::Rbf(rbf)) => Flash::Epcs(rbf),
+            (Persistence::Persistent, Loadable::Svf(svf)) => bail!(
+                "{}: an SVF is a JTAG sequence, not a bitstream; persist the .rbf it came from",
+                svf.display()
+            ),
+            (Persistence::Persistent, Loadable::Bit(bit)) => bail!(
+                "{}: persistent flashing of the Zybo isn't supported yet (README, roadmap step 6)",
+                bit.display()
+            ),
+        })
+    }
+}
+
+/// The steps that bring the serial flash loader into `build_dir` and then
+/// do `op` through it.
+pub fn plan_epcs(loader: &Loader, build_dir: &Path, op: EpcsOp) -> Plan {
+    let svf = build_dir.join("flash-loader.svf");
+    let mut steps = Vec::new();
+    if let Loader::Build(dir) = loader {
+        steps.push(Step::BuildLoader(dir.clone()));
+    }
+    steps.push(
+        Tool::new("cram: serial flash loader JTAG stream", "cram")
+            .arg("svf")
+            .arg(loader.rbf())
+            .arg(&svf)
+            .into(),
+    );
+    steps.push(Step::Epcs { loader: svf, op });
+    Plan {
+        dir: Some(build_dir.to_path_buf()),
+        files: Vec::new(),
+        steps,
+    }
+}
+
+pub fn plan_flash(flash: &Flash, loader: &Loader, build_dir: &Path) -> Plan {
+    let loadable = match flash {
+        Flash::Volatile(l) => l,
+        Flash::Epcs(rbf) => return plan_epcs(loader, build_dir, EpcsOp::Program(rbf.clone())),
+    };
     let steps = match loadable {
         Loadable::Svf(svf) => vec![Step::PlaySvf(svf.clone())],
         Loadable::Rbf(rbf) => {
@@ -720,6 +794,8 @@ impl Plan {
                 } => xc7_route(nextpnr, prerouted, preplaced)?,
                 Step::PlaySvf(svf) => play_svf(svf)?,
                 Step::LoadBit(bit) => load_bit(bit)?,
+                Step::BuildLoader(dir) => persist::build_loader(dir)?,
+                Step::Epcs { loader, op } => persist::run_epcs(loader, op)?,
             }
         }
         Ok(())
@@ -1218,9 +1294,62 @@ mod tests {
         assert!((fmax["$abc$21083$aiger$o100"].slack_ns() - 5.446).abs() < 1e-3);
     }
 
+    fn volatile(path: &str) -> Flash {
+        Flash::new(path.into(), Persistence::Volatile).unwrap()
+    }
+
     #[test]
     fn a_bit_is_loaded_over_the_ft2232() {
-        let plan = plan_flash(&Loadable::from_path("/p/build/blinky.bit".into()).unwrap());
+        let loader = Loader::Prebuilt("/l.rbf".into());
+        let plan = plan_flash(
+            &volatile("/p/build/blinky.bit"),
+            &loader,
+            Path::new("/p/build"),
+        );
         assert_eq!(plan.steps, [Step::LoadBit("/p/build/blinky.bit".into())]);
+    }
+
+    #[test]
+    fn a_persistent_rbf_goes_through_the_serial_flash_loader() {
+        let flash = Flash::new("/p/build/blinky.rbf".into(), Persistence::Persistent).unwrap();
+        assert_eq!(flash, Flash::Epcs("/p/build/blinky.rbf".into()));
+        let build = Path::new("/p/build");
+        let plan = plan_flash(
+            &flash,
+            &Loader::Build("/p/build/flash-loader".into()),
+            build,
+        );
+        assert_eq!(
+            labels(&plan),
+            [
+                "build the serial flash loader",
+                "cram: serial flash loader JTAG stream",
+                "EPCS: write and verify through the serial flash loader"
+            ]
+        );
+        assert_eq!(
+            tool(&plan.steps[1]).args,
+            [
+                "svf",
+                "/p/build/flash-loader/build/loader.rbf",
+                "/p/build/flash-loader.svf"
+            ]
+        );
+        assert_eq!(
+            plan.steps[2],
+            Step::Epcs {
+                loader: "/p/build/flash-loader.svf".into(),
+                op: EpcsOp::Program("/p/build/blinky.rbf".into())
+            }
+        );
+        // The nix package's prebuilt loader needs no build step.
+        let plan = plan_flash(&flash, &Loader::Prebuilt("/nix/l.rbf".into()), build);
+        assert_eq!(plan.steps.len(), 2);
+    }
+
+    #[test]
+    fn only_an_rbf_can_be_persisted() {
+        assert!(Flash::new("/x.svf".into(), Persistence::Persistent).is_err());
+        assert!(Flash::new("/x.bit".into(), Persistence::Persistent).is_err());
     }
 }

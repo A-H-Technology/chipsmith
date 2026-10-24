@@ -605,6 +605,9 @@ fn pack_lut1(nl: &mut Netlist, stats: &mut Stats) {
                 // source straight from its LAB line. An inverter stays: the
                 // block inverts no data or address pin.
                 (Kind::M4k(_), _) if !inv => nl.reconnect(u, p, input),
+                // Likewise into the JTAG and serial-flash blocks, which
+                // invert nothing either.
+                (Kind::Hard(_), _) if !inv => nl.reconnect(u, p, input),
                 (Kind::Ff(_), _) if matches!(p, Port::Ena | Port::Sclr) => {
                     nl.reconnect(u, p, input);
                     if let Kind::Ff(cfg) = &mut nl.cell_mut(u).kind {
@@ -806,6 +809,7 @@ fn to_json(nl: &Netlist) -> Result<Value> {
                 }
             }
             Kind::ClkCtrl => "CLKCTRL",
+            Kind::Hard(b) => b.cell_type(),
             Kind::M4k(shape) => {
                 // As yosys wrote them: a string and a 32-bit binary number.
                 params.insert("MODE".into(), Value::String(shape.mode_name().into()));

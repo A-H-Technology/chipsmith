@@ -23,7 +23,7 @@ pub const DB_VAR: &str = "CHIPSMITH_CYCLONE2_DB";
 
 /// Bump when `ChipDb`'s layout changes, or the chip database gains
 /// something the router needs (a stale cache would silently lack it).
-const CACHE_MAGIC: &[u8] = b"chipsmith-routing-graph-10\n";
+const CACHE_MAGIC: &[u8] = b"chipsmith-routing-graph-11\n";
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TileType {

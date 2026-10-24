@@ -1,0 +1,12 @@
+# chipsmith's serial flash loader for the DE2 (top.v). The nix package
+# prebuilds it; elsewhere `chipsmith flash --persist` builds it first.
+[project]
+name = "loader"
+top = "top"
+sources = ["top.v"]
+
+[target]
+device = "EP2C35F672C6"
+
+[pins]
+LEDG = ["PIN_AE22", "PIN_AF22"]
