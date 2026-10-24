@@ -107,7 +107,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chipsmith-jtag",
+ "chipsmith-netlist",
  "chipsmith-route",
+ "chipsmith-synth",
  "rustc-hash",
  "serde_json",
 ]
@@ -145,6 +147,8 @@ name = "chipsmith-synth"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chipsmith-netlist",
+ "rustc-hash",
  "serde_json",
 ]
 

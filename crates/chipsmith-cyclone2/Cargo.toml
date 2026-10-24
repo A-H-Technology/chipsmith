@@ -8,6 +8,8 @@ repository.workspace = true
 
 [dependencies]
 chipsmith-jtag.workspace = true
+chipsmith-netlist.workspace = true
+chipsmith-synth.workspace = true
 chipsmith-route.workspace = true
 anyhow.workspace = true
 rustc-hash.workspace = true

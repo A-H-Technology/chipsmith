@@ -17,8 +17,12 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use chipsmith_netlist::{CellKind, Const, GateOp, Lut, Module, Net, SigBit, State};
+
 use anyhow::{bail, ensure, Context, Result};
 use serde_json::{json, Map, Value};
+
+use crate::rewrite::{Namer, Subst};
 
 const K: usize = 4;
 /// Cuts kept per node.
@@ -213,6 +217,17 @@ struct Network {
     max_bit: u64,
 }
 
+/// The gates of a netlist, before they become an AIG: each gate output
+/// bit's operator and inputs, and the gate outputs read by anything else.
+/// Bits are yosys' JSON bit numbers, or IR net indices.
+struct GateList {
+    driver: HashMap<u64, (Op, Vec<Sig>)>,
+    /// Sorted, deduplicated.
+    read: Vec<u64>,
+    gate_cells: Vec<String>,
+    max_bit: u64,
+}
+
 impl Network {
     fn read(module: &Value) -> Result<Network> {
         let cells = module["cells"].as_object().context("no cells")?;
@@ -278,12 +293,18 @@ impl Network {
                 );
             }
         }
-        read.retain(|b| driver.contains_key(b));
-        read.sort();
-        read.dedup();
+        Network::build(GateList::new(driver, read, gate_cells, max_bit))
+    }
 
-        // Build the AIG depth first from every output, with an explicit
-        // stack (gate chains can be thousands deep).
+    /// Builds the AIG depth first from every output, with an explicit
+    /// stack (gate chains can be thousands deep).
+    fn build(gl: GateList) -> Result<Network> {
+        let GateList {
+            driver,
+            read,
+            gate_cells,
+            max_bit,
+        } = gl;
         let mut aig = Aig::new();
         let mut lit_of: HashMap<u64, Lit> = HashMap::new();
         let mut on_stack: HashSet<u64> = HashSet::new();
@@ -329,6 +350,25 @@ impl Network {
             gate_cells,
             max_bit,
         })
+    }
+}
+
+impl GateList {
+    fn new(
+        driver: HashMap<u64, (Op, Vec<Sig>)>,
+        mut read: Vec<u64>,
+        gate_cells: Vec<String>,
+        max_bit: u64,
+    ) -> GateList {
+        read.retain(|b| driver.contains_key(b));
+        read.sort();
+        read.dedup();
+        GateList {
+            driver,
+            read,
+            gate_cells,
+            max_bit,
+        }
     }
 }
 
@@ -770,10 +810,31 @@ fn keep_only_top(json: &mut Value) -> Result<()> {
     Ok(())
 }
 
-/// Map the gates of module `top` in `json` to `$lut` cells, in place.
-pub fn map(json: &mut Value) -> Result<Stats> {
-    let net = Network::read(&json["modules"]["top"])?;
-    let mut m = Mapper::new(&net);
+/// What a LUT input or an alias is: a bit the gates don't drive (or a LUT
+/// output), or a constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Leaf {
+    Bit(u64),
+    Const(bool),
+}
+
+/// A mapped LUT: `tt` over `inputs` (at most K), driving bit `y`.
+struct LutOut {
+    inputs: Vec<Leaf>,
+    tt: u16,
+    y: u64,
+}
+
+/// The mapper's result, independent of the netlist format: the LUTs, and
+/// the gate output bits that are now another signal.
+struct Mapping {
+    luts: Vec<LutOut>,
+    aliases: Vec<(u64, Leaf)>,
+    stats: Stats,
+}
+
+fn compute(net: &Network) -> Mapping {
+    let mut m = Mapper::new(net);
     m.pass(None);
     let mut cover = m.cover();
     for _ in 0..AREA_PASSES {
@@ -812,11 +873,11 @@ pub fn map(json: &mut Value) -> Result<Stats> {
             next_bit - 1
         });
     }
-    let leaf_value = |l: u32| -> Value {
+    let leaf_value = |l: u32| -> Leaf {
         match aig.nodes[l as usize] {
-            Node::Leaf(b) => json!(b),
-            Node::And(..) => json!(bit_of[&l]),
-            Node::Const => json!("0"),
+            Node::Leaf(b) => Leaf::Bit(b),
+            Node::And(..) => Leaf::Bit(bit_of[&l]),
+            Node::Const => Leaf::Const(false),
         }
     };
     // A cut's table over the LUTs as emitted.
@@ -831,59 +892,108 @@ pub fn map(json: &mut Value) -> Result<Stats> {
             })
     };
 
-    let cells = json["modules"]["top"]["cells"]
-        .as_object_mut()
-        .context("no cells")?;
-    for name in &net.gate_cells {
-        cells.remove(name);
-    }
-    let mut luts = 0;
-    let mut emit = |cells: &mut Map<String, Value>, inputs: Vec<Value>, tt: u16, y: u64| {
-        cells.insert(format!("$chipsmith$lut${y}"), lut_cell(&inputs, tt, y));
-        luts += 1;
-    };
+    let mut luts = Vec::new();
     for &v in &cover {
         let n = &m.nodes[v as usize];
         let cut = &n.cuts[n.best];
         let inputs = cut.leaves.iter().map(|&l| leaf_value(l)).collect();
         let inv = if flipped.contains(&v) { 0xffff } else { 0 };
-        emit(cells, inputs, table(cut) ^ inv, bit_of[&v]);
+        luts.push(LutOut {
+            inputs,
+            tt: table(cut) ^ inv,
+            y: bit_of[&v],
+        });
     }
     // Every other output bit computes something already available: the
     // same node in the same polarity (structural hashing merged it), a leaf,
     // or a constant. Readers of such a bit read that instead, the way yosys
     // would merge the two nets. Only an AND read in both polarities needs a
     // second LUT, its cut with the table inverted.
-    let mut alias: HashMap<u64, Value> = HashMap::new();
+    let mut aliases = Vec::new();
     let mut second: HashMap<u32, u64> = HashMap::new();
     for &(b, l) in &net.outputs {
         let v = node(l);
         let want_flipped = inverted(l);
         let target = match aig.nodes[v as usize] {
             Node::And(..) if bit_of[&v] == b => continue,
-            Node::And(..) if flipped.contains(&v) == want_flipped => json!(bit_of[&v]),
+            Node::And(..) if flipped.contains(&v) == want_flipped => Leaf::Bit(bit_of[&v]),
             Node::And(..) => {
                 if let Some(&other) = second.get(&v) {
-                    json!(other)
+                    Leaf::Bit(other)
                 } else {
                     let n = &m.nodes[v as usize];
                     let cut = &n.cuts[n.best];
                     let inputs = cut.leaves.iter().map(|&l| leaf_value(l)).collect();
                     let inv = if want_flipped { 0xffff } else { 0 };
-                    emit(cells, inputs, table(cut) ^ inv, b);
+                    luts.push(LutOut {
+                        inputs,
+                        tt: table(cut) ^ inv,
+                        y: b,
+                    });
                     second.insert(v, b);
                     continue;
                 }
             }
-            Node::Leaf(src) if !want_flipped => json!(src),
+            Node::Leaf(src) if !want_flipped => Leaf::Bit(src),
             Node::Leaf(src) => {
-                emit(cells, vec![json!(src)], !VAR[0], b);
+                luts.push(LutOut {
+                    inputs: vec![Leaf::Bit(src)],
+                    tt: !VAR[0],
+                    y: b,
+                });
                 continue;
             }
-            Node::Const => json!(if want_flipped { "1" } else { "0" }),
+            Node::Const => Leaf::Const(want_flipped),
         };
-        alias.insert(b, target);
+        aliases.push((b, target));
     }
+    let stats = Stats {
+        gates: net.gate_cells.len(),
+        and_nodes: aig
+            .nodes
+            .iter()
+            .filter(|n| matches!(n, Node::And(..)))
+            .count(),
+        luts: luts.len(),
+        depth: m.max_depth(),
+    };
+    Mapping {
+        luts,
+        aliases,
+        stats,
+    }
+}
+
+fn leaf_json(l: Leaf) -> Value {
+    match l {
+        Leaf::Bit(b) => json!(b),
+        Leaf::Const(v) => json!(if v { "1" } else { "0" }),
+    }
+}
+
+/// Map the gates of module `top` in `json` to `$lut` cells, in place.
+pub fn map(json: &mut Value) -> Result<Stats> {
+    let net = Network::read(&json["modules"]["top"])?;
+    let mapping = compute(&net);
+
+    let cells = json["modules"]["top"]["cells"]
+        .as_object_mut()
+        .context("no cells")?;
+    for name in &net.gate_cells {
+        cells.remove(name);
+    }
+    for l in &mapping.luts {
+        let inputs: Vec<Value> = l.inputs.iter().map(|&i| leaf_json(i)).collect();
+        cells.insert(
+            format!("$chipsmith$lut${}", l.y),
+            lut_cell(&inputs, l.tt, l.y),
+        );
+    }
+    let alias: HashMap<u64, Value> = mapping
+        .aliases
+        .iter()
+        .map(|&(b, t)| (b, leaf_json(t)))
+        .collect();
     let substitute = |bits: &mut Value| {
         for bit in bits.as_array_mut().into_iter().flatten() {
             if let Some(t) = bit.as_u64().and_then(|b| alias.get(&b)) {
@@ -912,16 +1022,131 @@ pub fn map(json: &mut Value) -> Result<Stats> {
     for n in module["netnames"].as_object_mut().into_iter().flatten() {
         substitute(&mut n.1["bits"]);
     }
-    Ok(Stats {
-        gates: net.gate_cells.len(),
-        and_nodes: aig
-            .nodes
-            .iter()
-            .filter(|n| matches!(n, Node::And(..)))
-            .count(),
-        luts,
-        depth: m.max_depth(),
+    Ok(mapping.stats)
+}
+
+/// The IR's gates as the mapper's operators. `$_TBUF_` and the
+/// AOI/OAI gates aren't mapped: lowering never makes them.
+fn ir_op(op: GateOp) -> Option<Op> {
+    Some(match op {
+        GateOp::And => Op::And,
+        GateOp::Nand => Op::Nand,
+        GateOp::Or => Op::Or,
+        GateOp::Nor => Op::Nor,
+        GateOp::Xor => Op::Xor,
+        GateOp::Xnor => Op::Xnor,
+        GateOp::AndNot => Op::AndNot,
+        GateOp::OrNot => Op::OrNot,
+        GateOp::Not => Op::Not,
+        GateOp::Buf => Op::Buf,
+        GateOp::Mux => Op::Mux,
+        _ => return None,
     })
+}
+
+fn ir_sig(b: SigBit) -> Sig {
+    match b {
+        SigBit::Net(n) => Sig::Bit(n.index() as u64),
+        // Undriven or don't-care: any value is correct; 0 keeps logic small.
+        SigBit::Const(s) => Sig::Const(s == State::One),
+    }
+}
+
+/// Map a module's gates to `$lut` cells, in place: the IR form of [`map`],
+/// with net indices for bit numbers.
+pub fn map_module(module: &mut Module) -> Result<Stats> {
+    let mut driver: HashMap<u64, (Op, Vec<Sig>)> = HashMap::new();
+    let mut read = Vec::new();
+    let mut gate_cells = Vec::new();
+    let mut is_gate = vec![false; module.cells.len()];
+    for (i, c) in module.cells.iter().enumerate() {
+        let CellKind::Gate(g) = &c.kind else {
+            continue;
+        };
+        let Some(op) = ir_op(g.op()) else {
+            continue;
+        };
+        let SigBit::Net(y) = g.y else {
+            bail!("gate {} drives a constant", c.name)
+        };
+        let ins = g.inputs().iter().map(|&b| ir_sig(b)).collect();
+        ensure!(
+            driver.insert(y.index() as u64, (op, ins)).is_none(),
+            "net {} has two drivers",
+            y.index()
+        );
+        gate_cells.push(c.name.clone());
+        is_gate[i] = true;
+    }
+    for (i, c) in module.cells.iter().enumerate() {
+        if is_gate[i] {
+            continue;
+        }
+        c.kind.for_each_port(|p| {
+            if p.dir != Some(chipsmith_netlist::Dir::Out) {
+                read.extend(p.bits.iter().filter_map(|b| b.net()).map(|n| n.index() as u64));
+            }
+        });
+    }
+    for (_, w, dir) in module.ports() {
+        if dir.drives() {
+            read.extend(w.bits.iter().filter_map(|b| b.net()).map(|n| n.index() as u64));
+        }
+    }
+    let max_bit = module.net_count() as u64;
+    // Nets by index: the mapper speaks indices, the IR hands out nets.
+    let mut nets: Vec<Option<Net>> = vec![None; module.net_count()];
+    let mut see = |b: &SigBit| {
+        if let SigBit::Net(n) = b {
+            nets[n.index()] = Some(*n);
+        }
+    };
+    module.wires.iter().for_each(|w| w.bits.iter().for_each(&mut see));
+    for c in &module.cells {
+        c.kind.for_each_port(|p| p.bits.iter().for_each(&mut see));
+    }
+    let net_at = |i: u64| nets[i as usize].expect("the mapper only names the module's nets");
+    let net = Network::build(GateList::new(driver, read, gate_cells, max_bit))?;
+    let mapping = compute(&net);
+
+    let mut keep = is_gate.into_iter();
+    module.cells.retain(|_| !keep.next().expect("one flag per cell"));
+    // Fresh bits past the module's nets become new nets, in order.
+    let mut fresh: HashMap<u64, Net> = HashMap::new();
+    let mut sig_of = |module: &mut Module, b: u64| -> SigBit {
+        if b < max_bit {
+            return SigBit::Net(net_at(b));
+        }
+        SigBit::Net(*fresh.entry(b).or_insert_with(|| module.new_net()))
+    };
+    let mut namer = Namer::new(module, "lut");
+    for l in &mapping.luts {
+        let a: Vec<SigBit> = if l.inputs.is_empty() {
+            vec![SigBit::ZERO]
+        } else {
+            l.inputs
+                .iter()
+                .map(|&i| match i {
+                    Leaf::Bit(b) => sig_of(module, b),
+                    Leaf::Const(v) => SigBit::Const(State::from(v)),
+                })
+                .collect()
+        };
+        let width = a.len();
+        let table = Const((0..1usize << width).map(|i| State::from(l.tt >> i & 1 == 1)).collect());
+        let y = sig_of(module, l.y);
+        module.add_cell(namer.fresh(), CellKind::Lut(Lut { a, y, table }));
+    }
+    let mut subst = Subst::new(module);
+    for &(b, t) in &mapping.aliases {
+        let target = match t {
+            Leaf::Bit(t) => sig_of(module, t),
+            Leaf::Const(v) => SigBit::Const(State::from(v)),
+        };
+        subst.set(net_at(b), target);
+    }
+    subst.apply(module);
+    Ok(mapping.stats)
 }
 
 #[cfg(test)]

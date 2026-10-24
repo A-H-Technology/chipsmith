@@ -1,0 +1,91 @@
+//! chipsmith's synthesis for the Cyclone II: a flat RTL netlist (yosys'
+//! `proc; flatten` level, or chipsmith's Verilog front end) to the cells
+//! cyclone2-re's `synth/cyclone2.ys` produces and [`crate::pack`] reads:
+//! `LCELL_COMB`, `LCELL_FF`, `CY2_M4K` and the pin buffers.
+//!
+//! The device-independent passes are chipsmith-synth's; this module runs
+//! them in yosys' order and adds what is the Cyclone II's own: carry
+//! chains, the LE register, M4K blocks and pins.
+
+mod arith;
+pub mod cells;
+mod ff;
+mod io;
+
+use anyhow::{bail, Context, Result};
+use chipsmith_netlist::{attr, is_set, CellKind, Design, Module};
+use chipsmith_synth::{alumacc, clean, lutmap, memory, techmap};
+
+/// What each stage left, for checking stages one at a time.
+pub trait Observer {
+    fn stage(&mut self, name: &str, m: &Module);
+}
+
+impl Observer for () {
+    fn stage(&mut self, _: &str, _: &Module) {}
+}
+
+/// Synthesizes the design's top module. The result holds that module
+/// alone, in Cyclone II cells.
+pub fn synthesize(design: Design) -> Result<Design> {
+    synthesize_observed(design, &mut ())
+}
+
+pub fn synthesize_observed(design: Design, obs: &mut dyn Observer) -> Result<Design> {
+    let mut tops: Vec<Module> = design
+        .modules
+        .into_iter()
+        .filter(|m| is_set(&m.attributes, attr::TOP))
+        .collect();
+    let mut m = match tops.len() {
+        1 => tops.pop().expect("one"),
+        n => bail!("expected one top module, found {n}"),
+    };
+    run(&mut m, obs).with_context(|| format!("synthesizing {}", m.name))?;
+    Ok(Design { modules: vec![m] })
+}
+
+fn run(m: &mut Module, obs: &mut dyn Observer) -> Result<()> {
+    if let Some(c) = m.cells.iter().find(|c| match &c.kind {
+        CellKind::Other(g) => !g.ty.starts_with('$') && !is_device_cell(&g.ty),
+        _ => false,
+    }) {
+        bail!(
+            "cell {} instantiates {}: the design must be flat",
+            c.name,
+            c.kind.type_name()
+        );
+    }
+    let clean = |m: &mut Module| clean::clean(m, cells::REMOVABLE);
+    clean(m);
+    memory::collect(m)?;
+    memory::merge_registers(m)?;
+    memory::map_to_logic(m, |_| true)?;
+    clean(m);
+    alumacc::alumacc(m);
+    clean(m);
+    obs.stage("coarse", m);
+
+    arith::map(m);
+    techmap::lower(m, |k| techmap::is_lowerable(k) || matches!(k, CellKind::Ff(_)))?;
+    clean(m);
+    obs.stage("gates", m);
+
+    ff::map(m)?;
+    lutmap::map_module(m)?;
+    io::luts(m);
+    clean(m);
+    obs.stage("luts", m);
+
+    io::pads(m)?;
+    clean(m);
+    obs.stage("cells", m);
+    clean::purge_wires(m);
+    Ok(())
+}
+
+/// Cells of cyclone2-re's library a design may instantiate itself.
+fn is_device_cell(ty: &str) -> bool {
+    crate::hard::Block::from_cell_type(ty).is_some()
+        || [cells::LCELL_COMB, cells::LCELL_FF, cells::M4K].contains(&ty)
+}
