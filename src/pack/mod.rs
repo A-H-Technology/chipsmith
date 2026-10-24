@@ -25,6 +25,8 @@ pub use diff::diff_files;
 use mask::{fix, invert_input, normalise_carry, substitute, BUFFERS};
 use netlist::{CellId, IoeIn, Kind, NetId, Netlist, Port, LUT_INPUTS};
 
+use crate::m4k::{AddrPort, Mode, Pin, Width};
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Stats {
     pub luts: usize,
@@ -40,6 +42,7 @@ pub struct Stats {
     /// One-input LUT loads folded, and the LUTs that left.
     pub folded: usize,
     pub removed_luts: usize,
+    pub m4ks: usize,
 }
 
 /// Pack `netlist` (yosys JSON), write `packed`.
@@ -58,6 +61,7 @@ pub fn pack_file(netlist: &Path, packed: &Path) -> Result<Stats> {
 fn pack(nl: &mut Netlist) -> Result<Stats> {
     let mut stats = Stats::default();
     pack_io(nl)?;
+    pack_m4k(nl, &mut stats)?;
     pack_constants(nl, &mut stats)?;
     pack_lut1(nl, &mut stats);
     pack_lut_ff(nl, &mut stats)?;
@@ -223,6 +227,109 @@ fn pack_io(nl: &mut Netlist) -> Result<()> {
                     nl.disconnect(c, Port::Combout);
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// M4K: the logical ports synth/m4k_map.v gives a CY2_M4K become the
+/// block's physical pins (`m4k::Pin`): CLK -> CLK0, A_WE -> WE,
+/// A_DATAIN[c] -> DI<c>, DATAOUT[c] -> DO<c>, address bit p of port A or B
+/// -> `Pin::addr`. An n-bit address uses bits 12 - n ..= 11; libmap ties
+/// the ones below to 0 and they are dropped, as are data bits past the
+/// width and constant data inputs. A_WE never driven is a ROM.
+fn pack_m4k(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
+    // Driven by GND/VCC, or not at all; a net without a driver isn't.
+    let constant = |nl: &Netlist, n: Option<NetId>| {
+        n.is_none_or(|n| {
+            nl.net(n)
+                .driver
+                .is_some_and(|(d, _)| matches!(nl.cell(d).kind, Kind::Const(_)))
+        })
+    };
+    for c in nl.cells() {
+        let Kind::M4k(shape) = nl.cell(c).kind else {
+            continue;
+        };
+        stats.m4ks += 1;
+        let name = nl.cell(c).name.clone();
+        let width = shape.width();
+        let (bits, low_addr) = (width.bits(), 12 - width.addr_bits());
+        let dual = shape.mode() == Mode::SimpleDual;
+        let we = nl.cell(c).net(Port::RamWe);
+        let writes = !constant(nl, we);
+        if let Some(we) = we.filter(|_| !writes) {
+            if nl
+                .net(we)
+                .driver
+                .is_some_and(|(d, _)| nl.cell(d).kind == Kind::Const(true))
+            {
+                bail!("M4K {name}: write enable tied high is not supported");
+            }
+        }
+        if dual && !writes && width != Width::X36 {
+            bail!("M4K {name}: a read-only simple dual port narrower than x36 is not supported");
+        }
+        // nextpnr iterates a cell's ports newest first.
+        let old: Vec<(Port, Option<NetId>)> = nl.cell(c).ports().collect();
+        let mut pins: Vec<(Pin, NetId)> = Vec::new();
+        let mut outs: Vec<(Pin, NetId)> = Vec::new();
+        for &(port, net) in old.iter().rev() {
+            nl.disconnect(c, port);
+            nl.remove_port(c, port);
+            match port {
+                Port::RamDataOut(k) => {
+                    // Read bits nothing uses stay off the routing (and out of
+                    // the atom width Quartus is given).
+                    if k < bits && nl.has_users(net) {
+                        outs.push((Pin::Do(k), net.unwrap()));
+                    }
+                }
+                Port::Clk => {
+                    let Some(n) = net.filter(|&n| !constant(nl, Some(n))) else {
+                        bail!("M4K {name}: clock not driven");
+                    };
+                    pins.push((Pin::Clk0, n));
+                }
+                Port::RamWe => {
+                    if let Some(n) = net.filter(|_| writes) {
+                        pins.push((Pin::We, n));
+                    }
+                }
+                Port::RamDataIn(k) => {
+                    if let Some(n) = net.filter(|&n| writes && k < bits && !constant(nl, Some(n))) {
+                        pins.push((Pin::Di(k), n));
+                    }
+                }
+                Port::RamAddr(ab, p) => {
+                    // A read-only x36 simple dual port reads on port B; port
+                    // A then has nothing.
+                    let unused = match ab {
+                        AddrPort::A => dual && !writes,
+                        AddrPort::B => !dual,
+                    };
+                    if unused || p < low_addr {
+                        continue;
+                    }
+                    let Some(n) = net.filter(|&n| !constant(nl, Some(n))) else {
+                        bail!(
+                            "M4K {name}: address pin {} is a constant; memories shallower than \
+                             their M4K configuration are not supported",
+                            port.name()
+                        );
+                    };
+                    pins.push((Pin::addr(ab, p), n));
+                }
+                other => bail!("M4K {name}: unknown port {}", other.name()),
+            }
+        }
+        for (pin, n) in pins.into_iter().chain(outs) {
+            let port = Port::M4k(pin);
+            if nl.cell(c).has_port(port) {
+                bail!("M4K {name}: pin {pin} used twice");
+            }
+            nl.add_port(c, port);
+            nl.connect(c, port, n);
         }
     }
     Ok(())
@@ -494,6 +601,10 @@ fn pack_lut1(nl: &mut Netlist, stats: &mut Stats) {
                 // A plain buffer in front of a register: the register takes
                 // the source on its sync load path instead.
                 (Kind::Ff(_), _) if p == Port::Datain && !inv => nl.reconnect(u, p, input),
+                // A buffer in front of an M4K input: the block takes the
+                // source straight from its LAB line. An inverter stays: the
+                // block inverts no data or address pin.
+                (Kind::M4k(_), _) if !inv => nl.reconnect(u, p, input),
                 (Kind::Ff(_), _) if matches!(p, Port::Ena | Port::Sclr) => {
                     nl.reconnect(u, p, input);
                     if let Kind::Ff(cfg) = &mut nl.cell_mut(u).kind {
@@ -601,17 +712,18 @@ fn pack_carry(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
     Ok(())
 }
 
-/// A global clock control on every net that clocks a register. Which one
-/// is the placer's choice.
+/// A global clock control on every net that clocks a register or an M4K.
+/// Which one is the placer's choice.
 fn pack_clocks(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
+    let is_clock = |nl: &Netlist, (u, p): (CellId, Port)| match nl.cell(u).kind {
+        Kind::Ff(_) => p == Port::Clk,
+        Kind::M4k(_) => p == Port::M4k(Pin::Clk0),
+        _ => false,
+    };
     let clocks: Vec<NetId> = nl
         .nets()
         .into_iter()
-        .filter(|&n| {
-            nl.users(n)
-                .iter()
-                .any(|&(u, p)| nl.cell(u).kind.is_ff() && p == Port::Clk)
-        })
+        .filter(|&n| nl.users(n).into_iter().any(|u| is_clock(nl, u)))
         .collect();
     for ni in clocks {
         let name = nl.net(ni).name.clone();
@@ -624,7 +736,7 @@ fn pack_clocks(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
         nl.add_port(cc, Port::Outclk);
         let g = nl.create_net(format!("{name}$global"));
         for (u, p) in nl.users(ni) {
-            if nl.cell(u).kind.is_ff() && p == Port::Clk {
+            if is_clock(nl, (u, p)) {
                 nl.reconnect(u, p, g);
             }
         }
@@ -694,6 +806,15 @@ fn to_json(nl: &Netlist) -> Result<Value> {
                 }
             }
             Kind::ClkCtrl => "CLKCTRL",
+            Kind::M4k(shape) => {
+                // As yosys wrote them: a string and a 32-bit binary number.
+                params.insert("MODE".into(), Value::String(shape.mode_name().into()));
+                params.insert(
+                    "WIDTH".into(),
+                    Value::String(format!("{:032b}", shape.width().bits())),
+                );
+                "CY2_M4K"
+            }
             Kind::Const(_) | Kind::TopIn | Kind::TopOut | Kind::TopInOut => {
                 bail!("{}: left over after packing", cell.name)
             }
@@ -703,7 +824,7 @@ fn to_json(nl: &Netlist) -> Result<Value> {
         for (p, net) in cell.ports() {
             dirs.insert(p.name().into(), cell.kind.dir(p).name().into());
             conns.insert(
-                p.name().into(),
+                p.name().into_owned(),
                 json!(net.map(id).into_iter().collect::<Vec<_>>()),
             );
         }

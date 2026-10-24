@@ -744,12 +744,13 @@ fn pack(netlist: &Path, packed: &Path) -> Result<()> {
     let started = Instant::now();
     let s = crate::pack::pack_file(netlist, packed)?;
     eprintln!(
-        "    {} LUTs, {} registers ({} on the sync load path), {} carry chains, {} clocks in {:.1} s; \
+        "    {} LUTs, {} registers ({} on the sync load path), {} carry chains, {} M4Ks, {} clocks in {:.1} s; \
          removed {} stuck registers, {} constant and {} one-input LUTs",
         s.luts,
         s.ffs,
         s.sdata,
         s.chains,
+        s.m4ks,
         s.clocks,
         started.elapsed().as_secs_f64(),
         s.stuck_ffs,

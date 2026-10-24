@@ -11,15 +11,19 @@
 //! first). Net ids are what nextpnr writes, the order names were first
 //! interned (`Interner`); the router routes nets in id order.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::Value;
+
+use crate::m4k::{self, AddrPort};
 
 pub type CellId = usize;
 pub type NetId = usize;
 
 /// Every port a cell can have, from the yosys cells (synth/cyclone2.ys),
-/// the clock control the packer adds and nextpnr's frontend cells.
+/// the clock control the packer adds and nextpnr's frontend cells. A bus
+/// port is one port per bit, as nextpnr's frontend splits it (`A_ADDR[3]`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Port {
     DataA,
@@ -47,12 +51,20 @@ pub enum Port {
     /// Top-level port cells: input port's output, output port's input.
     O,
     I,
+    /// CY2_M4K's logical ports (synth/m4k_map.v), until `pack_m4k` moves
+    /// them onto the block's pins. Its clock is `Clk`.
+    RamAddr(AddrPort, u8),
+    RamDataIn(u8),
+    RamWe,
+    RamDataOut(u8),
+    /// A pin of the M4K bel, from `pack_m4k` on.
+    M4k(m4k::Pin),
 }
 
 pub const LUT_INPUTS: [Port; 4] = [Port::DataA, Port::DataB, Port::DataC, Port::DataD];
 
 impl Port {
-    const ALL: [(Port, &'static str); 22] = [
+    const FIXED: [(Port, &'static str); 22] = [
         (Port::DataA, "DATAA"),
         (Port::DataB, "DATAB"),
         (Port::DataC, "DATAC"),
@@ -77,12 +89,41 @@ impl Port {
         (Port::I, "I"),
     ];
 
+    /// A yosys cell port (bit) name. M4K pins aren't: only the packer
+    /// creates those.
     pub fn parse(name: &str) -> Option<Port> {
-        Self::ALL.iter().find(|(_, n)| *n == name).map(|&(p, _)| p)
+        if let Some(&(p, _)) = Self::FIXED.iter().find(|(_, n)| *n == name) {
+            return Some(p);
+        }
+        if name == "A_WE" {
+            return Some(Port::RamWe);
+        }
+        let (base, index) = name.strip_suffix(']')?.split_once('[')?;
+        let i: u8 = index.parse().ok()?;
+        match base {
+            "A_ADDR" if i < 12 => Some(Port::RamAddr(AddrPort::A, i)),
+            "B_ADDR" if i < 12 => Some(Port::RamAddr(AddrPort::B, i)),
+            "A_DATAIN" if i < 36 => Some(Port::RamDataIn(i)),
+            "DATAOUT" if i < 36 => Some(Port::RamDataOut(i)),
+            _ => None,
+        }
     }
 
-    pub fn name(self) -> &'static str {
-        Self::ALL[self as usize].1
+    pub fn name(self) -> Cow<'static, str> {
+        match self {
+            Port::RamAddr(AddrPort::A, i) => format!("A_ADDR[{i}]").into(),
+            Port::RamAddr(AddrPort::B, i) => format!("B_ADDR[{i}]").into(),
+            Port::RamDataIn(i) => format!("A_DATAIN[{i}]").into(),
+            Port::RamWe => "A_WE".into(),
+            Port::RamDataOut(i) => format!("DATAOUT[{i}]").into(),
+            Port::M4k(pin) => pin.to_string().into(),
+            fixed => Self::FIXED
+                .iter()
+                .find(|(p, _)| *p == fixed)
+                .expect("every other port is in FIXED")
+                .1
+                .into(),
+        }
     }
 
     /// Which LUT input (A = 0 .. D = 3) this is.
@@ -158,6 +199,8 @@ pub enum Kind {
         oe: IoeIn,
     },
     ClkCtrl,
+    /// An M4K RAM block; its contents (`INIT`) pass through as a parameter.
+    M4k(m4k::Shape),
     /// GND / VCC: the frontend's driver of a constant bit.
     Const(bool),
     /// nextpnr's top-level port cells, removed by pack_io. An inout's
@@ -215,6 +258,7 @@ impl Kind {
             Kind::Iobuf { .. } if port == Port::Pad => return Dir::InOut,
             Kind::Iobuf { .. } => port == Port::Combout,
             Kind::ClkCtrl => port == Port::Outclk,
+            Kind::M4k(_) => matches!(port, Port::RamDataOut(_) | Port::M4k(m4k::Pin::Do(_))),
             Kind::Const(_) => port == Port::Y,
             Kind::TopIn | Kind::TopInOut => port == Port::O,
             Kind::TopOut => false,

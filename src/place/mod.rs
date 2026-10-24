@@ -10,8 +10,10 @@
 //! alone) or a whole carry chain, which starts at LE 0 of a LAB and runs
 //! LE k -> k+1, LE 15 -> LE 0 of the LAB below. A LAB holds 16 LEs and has
 //! to satisfy the rules `lab_ok` checks; pins sit where the pin assignments
-//! say, clock controls are the nearest free one the clock pin reaches.
+//! say, clock controls are the nearest free one the clock pin reaches. M4K
+//! RAM blocks move between the chip's M4K sites, swapping with each other.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
@@ -20,6 +22,7 @@ use std::path::Path;
 use anyhow::{bail, ensure, Context, Result};
 use serde_json::Value;
 
+use crate::m4k;
 use crate::route::chipdb::{ChipDb, NodeId, Pad, PadIo};
 use crate::timing::{self, Arc, Ps};
 
@@ -32,6 +35,8 @@ const LUT_INPUTS: [Port; 4] = [Port::DataA, Port::DataB, Port::DataC, Port::Data
 
 /// Every cell port the packed netlist uses: a closed set, so cells keep
 /// their nets in an array indexed by it rather than a map keyed by name.
+/// M4K pins, of which there are many but only on a few cells, are kept
+/// apart (`Cell::m4k`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Port {
     DataA,
@@ -52,10 +57,11 @@ enum Port {
     Outclk,
     Dataout,
     Oe,
+    M4k(m4k::Pin),
 }
 
 impl Port {
-    const ALL: [Port; 18] = [
+    const FIXED: [Port; 18] = [
         Port::DataA,
         Port::DataB,
         Port::DataC,
@@ -76,21 +82,52 @@ impl Port {
         Port::Oe,
     ];
 
-    /// The netlist's name of each port, in `ALL` order.
+    /// The netlist's name of each port, in `FIXED` order.
     const NAMES: [&'static str; 18] = [
         "DATAA", "DATAB", "DATAC", "DATAD", "CIN", "COUT", "COMBOUT", "DATAIN", "SDATA", "CLK",
         "ENA", "ACLR", "SCLR", "REGOUT", "INCLK", "OUTCLK", "DATAOUT", "OE",
     ];
 
     fn parse(name: &str) -> Option<Port> {
-        Self::NAMES
-            .iter()
-            .position(|&n| n == name)
-            .map(|i| Self::ALL[i])
+        match Self::NAMES.iter().position(|&n| n == name) {
+            Some(i) => Some(Self::FIXED[i]),
+            None => m4k::Pin::parse(name).map(Port::M4k),
+        }
     }
 
-    fn name(self) -> &'static str {
-        Self::NAMES[self as usize]
+    /// Slot in `Cell::ports`; None for an M4K pin.
+    fn index(self) -> Option<usize> {
+        Some(match self {
+            Port::DataA => 0,
+            Port::DataB => 1,
+            Port::DataC => 2,
+            Port::DataD => 3,
+            Port::Cin => 4,
+            Port::Cout => 5,
+            Port::Combout => 6,
+            Port::Datain => 7,
+            Port::Sdata => 8,
+            Port::Clk => 9,
+            Port::Ena => 10,
+            Port::Aclr => 11,
+            Port::Sclr => 12,
+            Port::Regout => 13,
+            Port::Inclk => 14,
+            Port::Outclk => 15,
+            Port::Dataout => 16,
+            Port::Oe => 17,
+            Port::M4k(_) => return None,
+        })
+    }
+
+    fn name(self) -> Cow<'static, str> {
+        match self.index() {
+            Some(i) => Self::NAMES[i].into(),
+            None => match self {
+                Port::M4k(pin) => pin.to_string().into(),
+                _ => unreachable!("only M4K pins have no slot"),
+            },
+        }
     }
 }
 
@@ -106,13 +143,16 @@ enum Kind {
     /// Tri-state output or bidir.
     Iobuf,
     ClkCtrl,
+    M4k,
 }
 
 #[derive(Debug)]
 struct Cell {
     name: String,
     kind: Kind,
-    ports: [Option<NetId>; Port::ALL.len()],
+    ports: [Option<NetId>; Port::FIXED.len()],
+    /// An M4K's connected pins.
+    m4k: Vec<(m4k::Pin, NetId)>,
     ena_inv: bool,
     sclr_inv: bool,
     /// Pin buffers: the top-level port they serve (`LEDR[0]`).
@@ -121,13 +161,18 @@ struct Cell {
 
 impl Cell {
     fn net(&self, port: Port) -> Option<NetId> {
-        self.ports[port as usize]
+        match (port.index(), port) {
+            (Some(i), _) => self.ports[i],
+            (None, Port::M4k(pin)) => self.m4k.iter().find(|(p, _)| *p == pin).map(|&(_, n)| n),
+            (None, _) => None,
+        }
     }
 
     fn connections(&self) -> impl Iterator<Item = (Port, NetId)> + '_ {
-        Port::ALL
+        Port::FIXED
             .into_iter()
             .filter_map(|p| Some((p, self.net(p)?)))
+            .chain(self.m4k.iter().map(|&(pin, n)| (Port::M4k(pin), n)))
     }
 }
 
@@ -158,6 +203,10 @@ struct Design {
     le_of: Vec<Option<usize>>,
     chains: Vec<Vec<usize>>,
     chain_of: Vec<Option<usize>>,
+    /// M4K cells, and each cell's index among them.
+    rams: Vec<usize>,
+    ram_of: Vec<Option<usize>>,
+    nets_of_ram: Vec<Vec<usize>>,
     /// Nets that count for wirelength: their cells. Clock nets (driven by
     /// a clock control) don't; they ride the global network.
     nets: Vec<Vec<usize>>,
@@ -197,9 +246,11 @@ fn read_design(json: &Value) -> Result<Design> {
             "CY2_OBUF" => Kind::Obuf,
             "CY2_IOBUF" => Kind::Iobuf,
             "CLKCTRL" => Kind::ClkCtrl,
+            "CY2_M4K" => Kind::M4k,
             other => bail!("{name}: cell type {other} has nowhere to go"),
         };
-        let mut ports = [None; Port::ALL.len()];
+        let mut ports = [None; Port::FIXED.len()];
+        let mut m4k = Vec::new();
         for (port, bits) in c["connections"].as_object().context("connections")? {
             if let Some(net) = bits
                 .as_array()
@@ -209,7 +260,12 @@ fn read_design(json: &Value) -> Result<Design> {
                 let p =
                     Port::parse(port).with_context(|| format!("{name}: unknown port {port}"))?;
                 let next = net_ids.len() as NetId;
-                ports[p as usize] = Some(*net_ids.entry(net).or_insert(next));
+                let id = *net_ids.entry(net).or_insert(next);
+                match (p.index(), p) {
+                    (Some(i), _) => ports[i] = Some(id),
+                    (None, Port::M4k(pin)) if kind == Kind::M4k => m4k.push((pin, id)),
+                    _ => bail!("{name}: port {port} on a {kind:?}"),
+                }
             }
         }
         let flag = |p: &str| {
@@ -221,6 +277,7 @@ fn read_design(json: &Value) -> Result<Design> {
             name: name.clone(),
             kind,
             ports,
+            m4k,
             ena_inv: flag("ENA_INV"),
             sclr_inv: flag("SCLR_INV"),
             port: c["attributes"]["PORT"].as_str().map(str::to_string),
@@ -239,7 +296,7 @@ fn read_design(json: &Value) -> Result<Design> {
                     | (Kind::Ff, Port::Regout)
                     | (Kind::Ibuf | Kind::Iobuf, Port::Combout)
                     | (Kind::ClkCtrl, Port::Outclk)
-            );
+            ) || matches!(port, Port::M4k(pin) if pin.is_output());
             if output {
                 ensure!(
                     driver[net as usize].replace(i).is_none(),
@@ -356,13 +413,24 @@ fn read_design(json: &Value) -> Result<Design> {
         net_index[*id as usize] = Some(i);
     }
     let nets: Vec<Vec<usize>> = keyed.into_iter().map(|(v, _)| v).collect();
+    let rams: Vec<usize> = (0..cells.len())
+        .filter(|&i| cells[i].kind == Kind::M4k)
+        .collect();
+    let mut ram_of = vec![None; cells.len()];
+    for (r, &c) in rams.iter().enumerate() {
+        ram_of[c] = Some(r);
+    }
     let mut nets_of_le = vec![Vec::new(); les.len()];
+    let mut nets_of_ram = vec![Vec::new(); rams.len()];
     for (n, members) in nets.iter().enumerate() {
         for &c in members {
-            if let Some(le) = le_of[c] {
-                if nets_of_le[le].last() != Some(&n) {
-                    nets_of_le[le].push(n);
-                }
+            let of = match (le_of[c], ram_of[c]) {
+                (Some(le), _) => &mut nets_of_le[le],
+                (_, Some(r)) => &mut nets_of_ram[r],
+                _ => continue,
+            };
+            if of.last() != Some(&n) {
+                of.push(n);
             }
         }
     }
@@ -375,6 +443,7 @@ fn read_design(json: &Value) -> Result<Design> {
         let ty = match c.kind {
             Kind::Lut => "LCELL_COMB",
             Kind::Ff => "LCELL_FF",
+            Kind::M4k => "CY2_M4K",
             _ => continue,
         };
         let le = le_of[i]
@@ -382,7 +451,8 @@ fn read_design(json: &Value) -> Result<Design> {
             .map_or(0, |(le, ch)| {
                 chains[ch].iter().position(|&x| x == le).unwrap() % LES_PER_LAB
             });
-        let ports: Vec<&str> = c.connections().map(|(p, _)| p.name()).collect();
+        let ports: Vec<Cow<str>> = c.connections().map(|(p, _)| p.name()).collect();
+        let ports: Vec<&str> = ports.iter().map(|p| p.as_ref()).collect();
         timing.add_cell(&c.name, ty, &ports, le as u8);
     }
     let mut conns = Vec::new();
@@ -394,8 +464,8 @@ fn read_design(json: &Value) -> Result<Design> {
             conns.push(Conn {
                 from_cell: d,
                 to_cell: c,
-                from: timing.node(&cells[d].name, dp.name()),
-                to: timing.node(&cells[c].name, p.name()),
+                from: timing.node(&cells[d].name, &dp.name()),
+                to: timing.node(&cells[c].name, &p.name()),
                 net: net_index[net],
                 internal: p == Port::Cin
                     || (p == Port::Datain && le_of[d].is_some() && le_of[d] == le_of[c]),
@@ -409,6 +479,9 @@ fn read_design(json: &Value) -> Result<Design> {
         le_of,
         chains,
         chain_of,
+        rams,
+        ram_of,
+        nets_of_ram,
         nets,
         nets_of_le,
         driver,
@@ -417,26 +490,43 @@ fn read_design(json: &Value) -> Result<Design> {
     })
 }
 
-/// The LABs of the chip.
+/// The LABs and M4K sites of the chip.
 struct Grid {
     /// LAB index -> its tile.
     tiles: Vec<u32>,
     xy: Vec<Xy>,
     at: HashMap<Xy, usize>,
+    /// M4K site index -> its tile, and its position.
+    ram_tiles: Vec<u32>,
+    ram_xy: Vec<Xy>,
 }
+
+/// The M4K bel's name in its tile.
+const M4K_BEL: &str = "M4K";
 
 impl Grid {
     fn new(db: &ChipDb) -> Self {
         let (mut tiles, mut xy, mut at) = (Vec::new(), Vec::new(), HashMap::default());
+        let (mut ram_tiles, mut ram_xy) = (Vec::new(), Vec::new());
         for tile in 0..db.width * db.height {
-            if db.tile_type(tile).bels.contains_key("LE0.LUT") {
-                let (x, y) = db.tile_xy(tile);
+            let (x, y) = db.tile_xy(tile);
+            let bels = &db.tile_type(tile).bels;
+            if bels.contains_key("LE0.LUT") {
                 at.insert((x as i32, y as i32), tiles.len());
                 xy.push((x as i32, y as i32));
                 tiles.push(tile);
+            } else if bels.get(M4K_BEL).is_some_and(|b| b.ty == "M4K") {
+                ram_xy.push((x as i32, y as i32));
+                ram_tiles.push(tile);
             }
         }
-        Grid { tiles, xy, at }
+        Grid {
+            tiles,
+            xy,
+            at,
+            ram_tiles,
+            ram_xy,
+        }
     }
 
     /// The LABs a chain of `len` LEs starting at `lab` occupies.
@@ -460,7 +550,7 @@ fn fixed_cells(
         let drives = match c.kind {
             Kind::Ibuf => false,
             Kind::Obuf | Kind::Iobuf => true,
-            Kind::Lut | Kind::Ff | Kind::ClkCtrl => continue,
+            Kind::Lut | Kind::Ff | Kind::ClkCtrl | Kind::M4k => continue,
         };
         let port = c
             .port
@@ -557,9 +647,11 @@ struct State<'a> {
     slots: Vec<[Option<usize>; LES_PER_LAB]>,
     /// (LAB, LE index) of each LE.
     pos: Vec<(usize, usize)>,
-    /// Fixed cells' positions.
     /// Position of each fixed cell (pins, clock controls).
     fixed_xy: Vec<Option<Xy>>,
+    /// M4K site of each M4K, and the M4K at each site.
+    ram_site: Vec<usize>,
+    site_ram: Vec<Option<usize>>,
     /// Each net's weight: 1, plus more the more timing-critical it is.
     weight: Vec<f32>,
     /// Each net's weighted wirelength.
@@ -568,9 +660,11 @@ struct State<'a> {
 
 impl<'a> State<'a> {
     fn cell_xy(&self, cell: usize) -> Xy {
-        match self.design.le_of[cell] {
-            Some(le) => self.grid.xy[self.pos[le].0],
-            None => self.fixed_xy[cell].expect("every cell is an LE or fixed"),
+        let d = self.design;
+        match (d.le_of[cell], d.ram_of[cell]) {
+            (Some(le), _) => self.grid.xy[self.pos[le].0],
+            (_, Some(r)) => self.grid.ram_xy[self.ram_site[r]],
+            _ => self.fixed_xy[cell].expect("every cell is an LE, an M4K or fixed"),
         }
     }
 
@@ -757,8 +851,13 @@ impl Rng {
     }
 }
 
-/// A move, kept so it can be undone: every LE that moved and where it was.
-struct Undo(Vec<(usize, usize, usize)>);
+/// A move, kept so it can be undone.
+enum Undo {
+    /// Every LE that moved, and the LAB and slot it was in.
+    Les(Vec<(usize, usize, usize)>),
+    /// Every M4K that moved, and the site it was on.
+    Rams(Vec<(usize, usize)>),
+}
 
 impl<'a> State<'a> {
     fn initial(design: &'a Design, grid: &'a Grid, fixed_xy: Vec<Option<Xy>>) -> Result<Self> {
@@ -768,6 +867,8 @@ impl<'a> State<'a> {
             slots: vec![[None; LES_PER_LAB]; grid.tiles.len()],
             pos: vec![(usize::MAX, 0); design.les.len()],
             fixed_xy,
+            ram_site: vec![usize::MAX; design.rams.len()],
+            site_ram: vec![None; grid.ram_tiles.len()],
             weight: vec![1.0; design.nets.len()],
             net_cost: vec![0.0; design.nets.len()],
         };
@@ -830,6 +931,22 @@ impl<'a> State<'a> {
                 next += 1;
             }
         }
+
+        ensure!(
+            design.rams.len() <= grid.ram_tiles.len(),
+            "the design has {} M4K blocks, the chip {}",
+            design.rams.len(),
+            grid.ram_tiles.len()
+        );
+        let mut sites: Vec<usize> = (0..grid.ram_tiles.len()).collect();
+        sites.sort_by_key(|&i| {
+            let (x, y) = grid.ram_xy[i];
+            ((x - centre.0).abs() / 2 + (y - centre.1).abs(), i)
+        });
+        for (r, &site) in sites.iter().take(design.rams.len()).enumerate() {
+            s.ram_site[r] = site;
+            s.site_ram[site] = Some(r);
+        }
         for n in 0..design.nets.len() {
             s.net_cost[n] = s.cost(n);
         }
@@ -851,12 +968,10 @@ impl<'a> State<'a> {
                     return None;
                 }
             }
-            let undo = Undo(
-                chain
-                    .iter()
-                    .map(|&x| (x, self.pos[x].0, self.pos[x].1))
-                    .collect(),
-            );
+            let moved: Vec<(usize, usize, usize)> = chain
+                .iter()
+                .map(|&x| (x, self.pos[x].0, self.pos[x].1))
+                .collect();
             for &x in chain {
                 let (l, kk) = self.pos[x];
                 self.slots[l][kk] = None;
@@ -865,9 +980,10 @@ impl<'a> State<'a> {
                 let (l, kk) = target(i);
                 self.put(x, l, kk);
             }
-            let mut touched: Vec<usize> = undo.0.iter().map(|&(_, l, _)| l).chain(labs).collect();
+            let mut touched: Vec<usize> = moved.iter().map(|&(_, l, _)| l).chain(labs).collect();
             touched.sort();
             touched.dedup();
+            let undo = Undo::Les(moved);
             if touched.iter().all(|&l| self.lab_ok(l)) {
                 return Some(undo);
             }
@@ -886,7 +1002,7 @@ impl<'a> State<'a> {
             self.put(o, from, fk);
         }
         self.put(le, lab, k);
-        let undo = Undo(undo);
+        let undo = Undo::Les(undo);
         if self.lab_ok(lab) && (from == lab || self.lab_ok(from)) {
             return Some(undo);
         }
@@ -894,24 +1010,67 @@ impl<'a> State<'a> {
         None
     }
 
-    fn undo(&mut self, undo: &Undo) {
-        for &(le, _, _) in &undo.0 {
-            let (l, k) = self.pos[le];
-            if self.slots[l][k] == Some(le) {
-                self.slots[l][k] = None;
-            }
+    /// Move M4K `r` to `site`, swapping with the one there.
+    fn try_move_ram(&mut self, r: usize, site: usize) -> Option<Undo> {
+        let from = self.ram_site[r];
+        if from == site {
+            return None;
         }
-        for &(le, l, k) in &undo.0 {
-            self.put(le, l, k);
+        let mut moved = vec![(r, from)];
+        if let Some(o) = self.site_ram[site] {
+            moved.push((o, site));
+            self.put_ram(o, from);
+        } else {
+            self.site_ram[from] = None;
+        }
+        self.put_ram(r, site);
+        Some(Undo::Rams(moved))
+    }
+
+    fn put_ram(&mut self, r: usize, site: usize) {
+        self.ram_site[r] = site;
+        self.site_ram[site] = Some(r);
+    }
+
+    fn undo(&mut self, undo: &Undo) {
+        match undo {
+            Undo::Les(moved) => {
+                for &(le, _, _) in moved {
+                    let (l, k) = self.pos[le];
+                    if self.slots[l][k] == Some(le) {
+                        self.slots[l][k] = None;
+                    }
+                }
+                for &(le, l, k) in moved {
+                    self.put(le, l, k);
+                }
+            }
+            Undo::Rams(moved) => {
+                for &(r, _) in moved {
+                    let site = self.ram_site[r];
+                    if self.site_ram[site] == Some(r) {
+                        self.site_ram[site] = None;
+                    }
+                }
+                for &(r, site) in moved {
+                    self.put_ram(r, site);
+                }
+            }
         }
     }
 
     fn nets_of(&self, undo: &Undo) -> Vec<usize> {
-        let mut nets: Vec<usize> = undo
-            .0
-            .iter()
-            .flat_map(|&(le, _, _)| self.design.nets_of_le[le].iter().copied())
-            .collect();
+        let d = self.design;
+        let mut nets: Vec<usize> = match undo {
+            Undo::Les(moved) => moved
+                .iter()
+                .flat_map(|&(le, _, _)| d.nets_of_le[le].iter().copied())
+                .collect(),
+            Undo::Rams(moved) => moved
+                .iter()
+                .flat_map(|&(r, _)| d.nets_of_ram[r].iter().copied())
+                .collect(),
+        };
         nets.sort();
         nets.dedup();
         nets
@@ -928,7 +1087,7 @@ fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
     let movable: Vec<usize> = (0..d.les.len())
         .filter(|&le| d.chain_of[le].is_none_or(|c| d.chains[c][0] == le))
         .collect();
-    if movable.is_empty() {
+    if movable.is_empty() && d.rams.is_empty() {
         return 0;
     }
     let max_r = s
@@ -939,22 +1098,38 @@ fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
         .max()
         .unwrap_or(1) as f64;
     let mut r = max_r;
-    let moves_per_t = (2.0 * (movable.len() as f64).powf(4.0 / 3.0)).max(200.0) as usize;
+    let objects = movable.len() + d.rams.len();
+    let moves_per_t = (2.0 * (objects as f64).powf(4.0 / 3.0)).max(200.0) as usize;
     let mut total_moves = 0u64;
 
     let attempt = |s: &mut State, rng: &mut Rng, r: f64, t: f64| -> Option<f64> {
-        let le = movable[rng.below(movable.len())];
-        let (x, y) = s.grid.xy[s.pos[le].0];
+        let pick = rng.below(objects);
         let ri = r.max(1.0) as i32;
-        let tx = x + 2 * (rng.below(2 * ri as usize + 1) as i32 - ri);
-        let ty = y + rng.below(2 * ri as usize + 1) as i32 - ri;
-        let &lab = s.grid.at.get(&(tx, ty))?;
-        let k = if d.chain_of[le].is_some() {
-            0
+        let undo = if let Some(&le) = movable.get(pick) {
+            let (x, y) = s.grid.xy[s.pos[le].0];
+            let tx = x + 2 * (rng.below(2 * ri as usize + 1) as i32 - ri);
+            let ty = y + rng.below(2 * ri as usize + 1) as i32 - ri;
+            let &lab = s.grid.at.get(&(tx, ty))?;
+            let k = if d.chain_of[le].is_some() {
+                0
+            } else {
+                rng.below(LES_PER_LAB)
+            };
+            s.try_move(le, lab, k)?
         } else {
-            rng.below(LES_PER_LAB)
+            // M4K columns are far apart: pick among the sites in range
+            // rather than a point that is almost never one.
+            let ram = pick - movable.len();
+            let (x, y) = s.grid.ram_xy[s.ram_site[ram]];
+            let near: Vec<usize> = (0..s.grid.ram_xy.len())
+                .filter(|&i| {
+                    let (sx, sy) = s.grid.ram_xy[i];
+                    (sx - x).abs() / 2 <= ri && (sy - y).abs() <= ri
+                })
+                .collect();
+            let site = near[rng.below(near.len())];
+            s.try_move_ram(ram, site)?
         };
-        let undo = s.try_move(le, lab, k)?;
         let nets = s.nets_of(&undo);
         let before: f64 = nets.iter().map(|&n| s.net_cost[n] as f64).sum();
         let after_costs: Vec<f32> = nets.iter().map(|&n| s.cost(n)).collect();
@@ -1040,13 +1215,14 @@ pub fn place_file(
         .as_object_mut()
         .context("no cells")?;
     for (i, c) in design.cells.iter().enumerate() {
-        let (tile, bel) = match design.le_of[i] {
-            Some(le) => {
+        let (tile, bel) = match (design.le_of[i], design.ram_of[i]) {
+            (Some(le), _) => {
                 let (lab, k) = state.pos[le];
                 let half = if c.kind == Kind::Lut { "LUT" } else { "FF" };
                 (grid.tiles[lab], format!("LE{k}.{half}"))
             }
-            None => fixed[&i].clone(),
+            (_, Some(r)) => (grid.ram_tiles[state.ram_site[r]], M4K_BEL.to_string()),
+            _ => fixed[&i].clone(),
         };
         let (x, y) = db.tile_xy(tile);
         let attrs = cells

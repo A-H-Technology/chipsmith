@@ -15,7 +15,7 @@ nextpnr.
 
 | device | board | build | on hardware |
 |---|---|---|---|
-| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes: LUT/carry/register logic, global clocks from pins, 3.3-V LVTTL pins: input, output, tri-state, bidirectional, open drain | yes (2026-10-24: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins) |
+| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes: LUT/carry/register logic, M4K RAM blocks (below), global clocks from pins, 3.3-V LVTTL pins: input, output, tri-state, bidirectional, open drain | yes (2026-10-24: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins) |
 | xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes: what yosys `synth_xilinx` and openXC7's nextpnr handle, LVCMOS33 pins; chipsmith routes the interconnect (below) | yes (2026-10-24: zybo-jtag-counter with chipsmith's routing, flashed by chipsmith, read back over JTAG at 125.01 MHz) |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
@@ -33,19 +33,52 @@ LEDR[4] and LEDG[1] follow the open drain, the released pins read 1 and
 LEDG[0] stays off. Don't load it with SW[4] up and the SRAM driving: the
 FPGA then drives SRAM_DQ too.
 
+M4K RAM blocks (4,608 bits each, 105 on the EP2C35) come from yosys'
+`memory_libmap` with cyclone2-re's `synth/m4k.txt`: memories with
+synchronous reads on one clock, single port x1 to x18 (read-during-write
+returns the new data), simple dual port x1 to x36 (one write port, one
+read port, old data), ROMs, initial contents. A memory has to fill its
+block at its width (e.g. 512 x 9, 256 x 18): shallower ones stay in logic,
+and so do asynchronous reads. Not yet: byte enables, clock enables, output
+registers, two clocks, true dual port, mixed widths, a single-port x36.
+The packer moves a `CY2_M4K` onto the block's physical pins (some address
+bits enter on data pins), the placer swaps blocks between M4K sites, and
+the router reaches their inputs through the block's LAB lines, the clock
+through a row clock and the read data from the M4K buffers.
+
+- `examples/ram`: one memory of each shape (7 blocks), written from a
+  counter and the switches, read data folded onto the LEDs.
+- `examples/ram_widths`: the widths `ram` doesn't use (10 blocks).
+- `examples/ram-leds`: a hardware demo. A 256 x 18 ROM steps a bouncing
+  light and a filling bar across LEDR about 12 times a second. A 512 x 9
+  RAM, initialised to a Gray code, is read at the same step onto LEDG.
+  KEY[0] writes SW[8:0] at the address shown, KEY[1] holds the step so the
+  value can be seen coming back. Built and validated, not yet run on the
+  DE2.
+
 Quartus assembles chipsmith's placement and routing into the same RBF bit
 for bit (`bench/quartus-timing.sh`): checked 2026-10-24 on blinky-verilog
-and blinky-vhdl (16.65 ns of slack at 50 MHz), on picorv32 (11.08 ns,
-again after the chip database gained the IOE output enable) and on bidir
-(16.64 ns), all built through chipsmith's LUT mapper. Since chipsmith places
+and blinky-vhdl (16.65 ns of slack at 50 MHz), on picorv32 (10.60 ns
+since cyclone2-re 9cfe9be, see below; 11.08 ns before) and on bidir
+(16.64 ns), all built through chipsmith's LUT mapper, and on ram
+(16.21 ns), ram_widths (14.80 ns) and ram-leds (14.80 ns).
+picorv32 has no M4K; its slack moved because cyclone2-re's synthesis
+script gained `memory_libmap`, which renames yosys' cells and nets. Same
+logic, same 1,175 LEs, but other net ids and so another placement. The
+same chipsmith with the previous script places it at 11.08 ns again.
+An inverter from a pin straight into an M4K's write enable, or into a
+register, doesn't validate: quartus_map removes the one-input LUT and
+folds it into the block (cram doesn't model that bit yet) or re-creates
+it elsewhere. The bitstream still works; `ram-leds` registers its key. Since chipsmith places
 designs itself, the RBFs no longer match the
 [cyclone2-re](https://github.com/cramt/cyclone2-re) examples built with
 nextpnr's placement.
 
-The Cyclone II limits come from cyclone2-re's open flow: no M4K RAM
-(cram's Quartus frontend has it, the open flow not yet), multipliers or
-PLLs, no registered I/O, LVTTL only. The timing model covers LE and
-register delays exactly and routing by per-element-type averages.
+The Cyclone II limits come from cyclone2-re's open flow: M4K RAM only in
+the shapes above, no multipliers or PLLs, no registered I/O, LVTTL only.
+The timing model covers LE and register delays exactly and routing by
+per-element-type averages. M4K clock-to-output (3.33 ns) and setup are
+from one quartus_sta path each, and so is the M4K buffer's routing delay.
 
 The Zybo examples:
 
@@ -223,7 +256,8 @@ share chipsmith's own netlist IR, not Verilog.
      masks, `DATA_INVERT`, `ENA_INV`/`SCLR_INV`; pushed back into the driver
      or made an inverted copy of it in front of a register), registers
      paired with their LUT or put on the sync-load path, carry chains in
-     Quartus' polarity, a clock control per clock (the placer picks which).
+     Quartus' polarity, a clock control per clock (the placer picks which),
+     M4K blocks on their physical pins.
      Some rules depend on visiting order (folding one buffer can make
      another LUT a buffer; the first register to claim a LUT gets it), so
      the netlist iterates the way nextpnr's containers do and imports yosys'
@@ -241,6 +275,9 @@ share chipsmith's own netlist IR, not Verilog.
      | picorv32 | 1,459 | identical, same net order | identical | byte-identical; slack 11.23 ns, data delay 8.79 ns |
      | examples/blinky-verilog, blinky-vhdl | 58 | identical, same net order | identical | (same design as blinky) |
      | bidir (yosys `abc -lut 4`, and chipsmith's LUT mapper) | 99 | identical, same net order, same ports | not run | byte-identical; slack 16.64 ns, data delay 3.39 ns (examples/bidir) |
+     | examples/ram (7 M4Ks) | 241 | identical, same net order | not run | byte-identical; slack 16.21 ns, data delay 3.83 ns (estimate 16.20 ns) |
+     | examples/ram_widths (10 M4Ks) | 171 | identical, same net order | not run | byte-identical; slack 14.80 ns, data delay 5.22 ns (estimate 15.24 ns) |
+     | examples/ram-leds (2 M4Ks) | 128 | identical, same net order | not run | byte-identical; slack 14.80 ns, data delay 5.28 ns (estimate 15.11 ns) |
 
      Packing picorv32 takes 0.4 s. A design exercising the rarer rules
      (register inits of 1, active-low enables and clears, constant and
@@ -249,7 +286,10 @@ share chipsmith's own netlist IR, not Verilog.
      `DATA_INVERT`/`OE_INVERT`, unread inputs switched off). `pack-diff`
      compares top-level port directions too, since cram decides
      output vs bidir mode by them. Rechecked 2026-10-24 with cyclone2-re
-     5eff911 (blinky, lfsr, uart_tx, picorv32 both mappers: identical).
+     5eff911 (blinky, lfsr, uart_tx, picorv32 both mappers: identical),
+     and for the M4K examples with 9cfe9be (`pack_m4k`: logical ports onto
+     the block's pins, buffers in front of its inputs folded, its clock
+     through a clock control).
      Parameters nextpnr writes as
      `0` (a flag toggled back) chipsmith leaves out; they read the same.
 4. **Own synthesis**: techmap and LUT mapping on the IR. yosys's JSON

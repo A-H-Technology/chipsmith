@@ -21,8 +21,9 @@ pub const GRAPH_VAR: &str = "CHIPSMITH_CYCLONE2_GRAPH";
 /// cyclone2-re's `db/` directory, holding `EP2C35F672C6/chipdb.txt.xz`.
 pub const DB_VAR: &str = "CHIPSMITH_CYCLONE2_DB";
 
-/// Bump when `ChipDb`'s layout changes.
-const CACHE_MAGIC: &[u8] = b"chipsmith-routing-graph-9\n";
+/// Bump when `ChipDb`'s layout changes, or the chip database gains
+/// something the router needs (a stale cache would silently lack it).
+const CACHE_MAGIC: &[u8] = b"chipsmith-routing-graph-10\n";
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TileType {
