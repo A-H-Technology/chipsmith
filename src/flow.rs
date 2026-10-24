@@ -73,6 +73,11 @@ impl Layout {
         };
         self.dir.join(format!("{}.{extension}", self.name))
     }
+    /// The `.bit` as Linux's Zynq fpga-manager takes it (`xc7::zynq_bin`),
+    /// for nixos-fpga's `hardware.fpga.bitstream`.
+    pub fn zynq_bin(&self) -> PathBuf {
+        self.dir.join(format!("{}.bin", self.name))
+    }
     fn translated(&self) -> PathBuf {
         self.dir.join("vhdl.v")
     }
@@ -174,6 +179,15 @@ pub enum Step {
     PlaySvf(PathBuf),
     /// Load a 7-series `.bit` over a Digilent FT2232 cable, in process.
     LoadBit(PathBuf),
+    /// Hold the fabric's interrupt lines into the Zynq's processor inactive,
+    /// in the yosys netlist, in process (`tie_off_ps7`).
+    Ps7TieOff(PathBuf),
+    /// Write a `.bit`'s payload as Linux's Zynq fpga-manager takes it, in
+    /// process.
+    ZynqBin { bit: PathBuf, bin: PathBuf },
+    /// Load a 7-series `.bit` into a Zynq's PL through `/dev/fpga-load` on
+    /// `host`, piped over ssh.
+    LoadBitSsh { bit: PathBuf, host: String },
     /// Build the DE2's serial flash loader into this project directory.
     BuildLoader(PathBuf),
     /// Configure the serial flash loader (an SVF) into the DE2's FPGA over
@@ -228,6 +242,9 @@ impl Step {
             Step::Xc7Route { .. } => "route (chipsmith)",
             Step::PlaySvf(_) => "JTAG: program over USB-Blaster",
             Step::LoadBit(_) => "JTAG: program over Digilent FT2232",
+            Step::LoadBitSsh { .. } => "ssh: load through the board's fpga-manager",
+            Step::ZynqBin { .. } => ".bit to .bin for Linux's fpga-manager",
+            Step::Ps7TieOff(_) => "PS7: the fabric's interrupts to the ARM cores held off",
             Step::BuildLoader(_) => "build the serial flash loader",
             Step::Epcs { op, .. } => match op {
                 EpcsOp::Program(_) => "EPCS: write and verify through the serial flash loader",
@@ -492,6 +509,7 @@ pub fn plan_xc7(
         .arg(layout.synth_script())
         .into(),
     );
+    steps.push(Step::Ps7TieOff(layout.netlist()));
     // nextpnr's packer turns yosys' cells into bel types (and splits
     // carries, adds feed-through LUTs, places the pins from the XDC);
     // chipsmith places what it wrote. Every later nextpnr run packs the
@@ -613,6 +631,10 @@ pub fn plan_xc7(
         .arg(layout.bitstream())
         .into(),
     );
+    steps.push(Step::ZynqBin {
+        bit: layout.bitstream(),
+        bin: layout.zynq_bin(),
+    });
 
     Plan {
         dir: Some(layout.dir.clone()),
@@ -701,17 +723,44 @@ pub enum Persistence {
     Persistent,
 }
 
-/// A `chipsmith flash`, checked against what each board can persist.
+/// How `chipsmith flash` reaches the board.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Via {
+    /// A JTAG cable on this machine.
+    Jtag,
+    /// Linux on the board's own CPU, over ssh: nixos-fpga's `/dev/fpga-load`.
+    Ssh(String),
+}
+
+/// A `chipsmith flash`, checked against what each board can persist and
+/// what each way in can load.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Flash {
     Volatile(Loadable),
     /// A Cyclone II RBF into the DE2's EPCS16.
     Epcs(PathBuf),
+    /// A 7-series `.bit` into a Zynq's PL from its own Linux.
+    Ssh {
+        bit: PathBuf,
+        host: String,
+    },
 }
 
 impl Flash {
-    pub fn new(path: PathBuf, persistence: Persistence) -> Result<Self> {
+    pub fn new(path: PathBuf, persistence: Persistence, via: Via) -> Result<Self> {
         let loadable = Loadable::from_path(path)?;
+        if let Via::Ssh(host) = via {
+            return match (persistence, loadable) {
+                (Persistence::Volatile, Loadable::Bit(bit)) => Ok(Flash::Ssh { bit, host }),
+                (Persistence::Persistent, _) => bail!(
+                    "--persist --ssh: set hardware.fpga.bitstream in {host}'s NixOS config to the \
+                     build's .bin (next to the .bit) instead; nixos-fpga loads it at every boot"
+                ),
+                (Persistence::Volatile, _) => {
+                    bail!("--ssh loads a Zynq's PL from its own Linux, which takes a .bit")
+                }
+            };
+        }
         Ok(match (persistence, loadable) {
             (Persistence::Volatile, l) => Flash::Volatile(l),
             (Persistence::Persistent, Loadable::Rbf(rbf)) => Flash::Epcs(rbf),
@@ -754,6 +803,16 @@ pub fn plan_flash(flash: &Flash, loader: &Loader, build_dir: &Path) -> Plan {
     let loadable = match flash {
         Flash::Volatile(l) => l,
         Flash::Epcs(rbf) => return plan_epcs(loader, build_dir, EpcsOp::Program(rbf.clone())),
+        Flash::Ssh { bit, host } => {
+            return Plan {
+                dir: None,
+                files: Vec::new(),
+                steps: vec![Step::LoadBitSsh {
+                    bit: bit.clone(),
+                    host: host.clone(),
+                }],
+            }
+        }
     };
     let steps = match loadable {
         Loadable::Svf(svf) => vec![Step::PlaySvf(svf.clone())],
@@ -841,6 +900,18 @@ impl Plan {
                 } => xc7_route(nextpnr, placement, prerouted, preplaced)?,
                 Step::PlaySvf(svf) => play_svf(svf)?,
                 Step::LoadBit(bit) => load_bit(bit)?,
+                Step::LoadBitSsh { bit, host } => load_bit_ssh(bit, host)?,
+                Step::ZynqBin { bit, bin } => zynq_bin(bit, bin)?,
+                Step::Ps7TieOff(netlist) => {
+                    let read = || -> Result<serde_json::Value> {
+                        Ok(serde_json::from_slice(&std::fs::read(netlist)?)?)
+                    };
+                    let mut json =
+                        read().with_context(|| format!("reading {}", netlist.display()))?;
+                    tie_off_ps7(&mut json)?;
+                    std::fs::write(netlist, serde_json::to_vec(&json)?)
+                        .with_context(|| format!("writing {}", netlist.display()))?;
+                }
                 Step::BuildLoader(dir) => persist::build_loader(dir)?,
                 Step::Epcs { loader, op } => persist::run_epcs(loader, op)?,
             }
@@ -1058,6 +1129,96 @@ fn load_bit(path: &Path) -> Result<()> {
     eprintln!(
         "    loaded {:#010x}, DONE high, in {:.1} s",
         chain[target].idcode,
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+/// The PS7's IRQF2P[19:16] are the ARM cores' FIQ and IRQ, straight from
+/// the fabric and active high; an interconnect input that nothing drives
+/// reads as 1. So a design without a PS7 asserts FIQ on both cores, and the
+/// first time the PL->PS level shifters are on with Linux running (Linux
+/// loading it, or a JTAG load under U-Boot) both cores spin in the FIQ
+/// handler for good. This gives such a design a PS7 with IRQF2P tied to 0,
+/// or ties off the IRQF2P of the design's own PS7 if it leaves it open.
+fn tie_off_ps7(netlist: &mut serde_json::Value) -> Result<()> {
+    let zeros = || serde_json::json!(vec!["0"; 20]);
+    let top = netlist["modules"]
+        .as_object_mut()
+        .context("netlist has no modules")?
+        .values_mut()
+        .find(|m| {
+            m["attributes"]["top"]
+                .as_str()
+                .is_some_and(|t| t.ends_with('1'))
+        })
+        .context("netlist has no top module")?;
+    let cells = top["cells"]
+        .as_object_mut()
+        .context("top module has no cells")?;
+    if let Some(ps7) = cells.values_mut().find(|c| c["type"] == "PS7") {
+        let connections = ps7["connections"]
+            .as_object_mut()
+            .context("PS7 without connections")?;
+        connections.entry("IRQF2P").or_insert_with(zeros);
+        ps7["port_directions"]["IRQF2P"] = "input".into();
+    } else {
+        cells.insert(
+            "chipsmith_ps7".into(),
+            serde_json::json!({
+                "hide_name": 0,
+                "type": "PS7",
+                "parameters": {},
+                "attributes": {},
+                "port_directions": { "IRQF2P": "input" },
+                "connections": { "IRQF2P": zeros() },
+            }),
+        );
+    }
+    Ok(())
+}
+
+fn zynq_bin(bit: &Path, bin: &Path) -> Result<()> {
+    let file = std::fs::read(bit).with_context(|| format!("reading {}", bit.display()))?;
+    std::fs::write(bin, xc7::zynq_bin(xc7::bit_payload(&file)?)?)
+        .with_context(|| format!("writing {}", bin.display()))
+}
+
+fn load_bit_ssh(path: &Path, host: &str) -> Result<()> {
+    let file = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let bin = xc7::zynq_bin(xc7::bit_payload(&file)?)?;
+    let started = Instant::now();
+    // The load runs when /dev/fpga-load is closed and its error is close()'s,
+    // which cat reports. The manager's state confirms the PL came up.
+    let mut child = Command::new("ssh")
+        .arg(host)
+        .arg("cat > /dev/fpga-load && cat /sys/class/fpga_manager/fpga0/state")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("running ssh")?;
+    {
+        use std::io::Write;
+        let mut stdin = child.stdin.take().context("ssh's stdin")?;
+        stdin
+            .write_all(&bin)
+            .with_context(|| format!("sending the bitstream to {host}"))?;
+    }
+    let out = child.wait_with_output().context("waiting for ssh")?;
+    if !out.status.success() {
+        bail!(
+            "{host}: loading through /dev/fpga-load failed ({})",
+            out.status
+        );
+    }
+    let state = String::from_utf8_lossy(&out.stdout);
+    let state = state.trim();
+    if state != "operating" {
+        bail!("{host}: fpga-manager is {state:?} after the load, not \"operating\"");
+    }
+    eprintln!(
+        "    loaded {} KiB, manager operating, in {:.1} s",
+        bin.len() / 1024,
         started.elapsed().as_secs_f64()
     );
     Ok(())
@@ -1286,6 +1447,7 @@ mod tests {
             labels(&plan),
             [
                 "yosys: synthesis (synth_xilinx)",
+                "PS7: the fabric's interrupts to the ARM cores held off",
                 "nextpnr: pack",
                 "place (chipsmith)",
                 "nextpnr: route chipsmith's placement",
@@ -1293,14 +1455,15 @@ mod tests {
                 "nextpnr: FASM of chipsmith's routing",
                 "nextpnr: timing",
                 "prjxray: FASM to frames",
-                "prjxray: frames to .bit"
+                "prjxray: frames to .bit",
+                ".bit to .bin for Linux's fpga-manager"
             ]
         );
         assert_eq!(
             plan.files[0].1,
             "read_verilog \"/p/src/blinky.v\"\nsynth_xilinx -flatten -abc9 -arch xc7 -top blinky\nwrite_json \"/p/build/netlist.json\"\n"
         );
-        let pack = tool(&plan.steps[1]);
+        let pack = tool(&plan.steps[2]);
         assert_eq!(pack.program, "nextpnr-himbaechel");
         assert!(pack
             .args
@@ -1316,19 +1479,19 @@ mod tests {
             .windows(2)
             .any(|w| w == ["--write", "/p/build/packed.json"]));
         assert_eq!(
-            plan.steps[2],
+            plan.steps[3],
             Step::Xc7Place {
                 packed: "/p/build/packed.json".into(),
                 placement: "/p/build/placement.txt".into(),
             }
         );
         // nextpnr routes chipsmith's placement, with nothing left to place.
-        assert!(tool(&plan.steps[3])
+        assert!(tool(&plan.steps[4])
             .args
             .windows(2)
             .any(|w| w == ["-o", "preplaced=/p/build/placement.txt"]));
         assert_eq!(
-            plan.steps[4],
+            plan.steps[5],
             Step::Xc7Route {
                 nextpnr: "/p/build/nextpnr.json".into(),
                 placement: "/p/build/placement.txt".into(),
@@ -1336,13 +1499,13 @@ mod tests {
                 preplaced: "/p/build/preplaced.txt".into(),
             }
         );
-        let fasm = tool(&plan.steps[5]);
+        let fasm = tool(&plan.steps[6]);
         assert!(fasm
             .args
             .windows(2)
             .any(|w| w == ["--report", "/p/build/timing.json"]));
         assert_eq!(
-            plan.steps[6],
+            plan.steps[7],
             Step::NextpnrTiming("/p/build/timing.json".into())
         );
         assert!(fasm
@@ -1354,10 +1517,10 @@ mod tests {
             .windows(2)
             .any(|w| w == ["-o", "prerouted=/p/build/prerouted.txt"]));
         assert_eq!(
-            tool(&plan.steps[7]).args.last().unwrap(),
+            tool(&plan.steps[8]).args.last().unwrap(),
             "/p/build/blinky.frames"
         );
-        let bit = tool(&plan.steps[8]);
+        let bit = tool(&plan.steps[9]);
         assert!(bit
             .args
             .windows(2)
@@ -1368,6 +1531,59 @@ mod tests {
             .any(|w| w == ["--frm_file", "blinky.frames"]));
         assert_eq!(bit.cwd.as_deref(), Some(Path::new("/p/build")));
         assert_eq!(bit.args.last().unwrap(), "/p/build/blinky.bit");
+        assert_eq!(
+            plan.steps[1],
+            Step::Ps7TieOff("/p/build/netlist.json".into())
+        );
+        assert_eq!(
+            plan.steps[10],
+            Step::ZynqBin {
+                bit: "/p/build/blinky.bit".into(),
+                bin: "/p/build/blinky.bin".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_design_without_a_ps7_gets_one_with_its_interrupts_tied_off() {
+        let mut netlist = serde_json::json!({"modules": {
+            "lib": {"attributes": {}, "cells": {}},
+            "top": {"attributes": {"top": "00000000000000000000000000000001"}, "cells": {}},
+        }});
+        tie_off_ps7(&mut netlist).unwrap();
+        let ps7 = &netlist["modules"]["top"]["cells"]["chipsmith_ps7"];
+        assert_eq!(ps7["type"], "PS7");
+        assert_eq!(
+            ps7["connections"]["IRQF2P"],
+            serde_json::json!(vec!["0"; 20])
+        );
+        assert_eq!(netlist["modules"]["lib"]["cells"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn a_designs_own_ps7_keeps_its_interrupts_or_gets_them_tied_off() {
+        let ps7 = |connections| {
+            serde_json::json!({"modules": {"top": {
+                "attributes": {"top": "1"},
+                "cells": {"mine": {"type": "PS7", "port_directions": {}, "connections": connections}},
+            }}})
+        };
+        let mut open = ps7(serde_json::json!({}));
+        tie_off_ps7(&mut open).unwrap();
+        let cells = &open["modules"]["top"]["cells"];
+        assert_eq!(cells.as_object().unwrap().len(), 1);
+        assert_eq!(
+            cells["mine"]["connections"]["IRQF2P"],
+            serde_json::json!(vec!["0"; 20])
+        );
+
+        let driven = serde_json::json!({"IRQF2P": vec![5; 20]});
+        let mut used = ps7(driven.clone());
+        tie_off_ps7(&mut used).unwrap();
+        assert_eq!(
+            used["modules"]["top"]["cells"]["mine"]["connections"],
+            driven
+        );
     }
 
     #[test]
@@ -1403,7 +1619,37 @@ mod tests {
     }
 
     fn volatile(path: &str) -> Flash {
-        Flash::new(path.into(), Persistence::Volatile).unwrap()
+        Flash::new(path.into(), Persistence::Volatile, Via::Jtag).unwrap()
+    }
+
+    #[test]
+    fn a_bit_over_ssh_goes_to_the_boards_fpga_manager() {
+        let flash = Flash::new(
+            "/p/build/blinky.bit".into(),
+            Persistence::Volatile,
+            Via::Ssh("venus".into()),
+        )
+        .unwrap();
+        let plan = plan_flash(
+            &flash,
+            &Loader::Prebuilt("/l.rbf".into()),
+            Path::new("/p/build"),
+        );
+        assert_eq!(
+            plan.steps,
+            [Step::LoadBitSsh {
+                bit: "/p/build/blinky.bit".into(),
+                host: "venus".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn ssh_takes_a_volatile_bit_only() {
+        let ssh = || Via::Ssh("venus".into());
+        assert!(Flash::new("/x.rbf".into(), Persistence::Volatile, ssh()).is_err());
+        assert!(Flash::new("/x.svf".into(), Persistence::Volatile, ssh()).is_err());
+        assert!(Flash::new("/x.bit".into(), Persistence::Persistent, ssh()).is_err());
     }
 
     #[test]
@@ -1419,7 +1665,12 @@ mod tests {
 
     #[test]
     fn a_persistent_rbf_goes_through_the_serial_flash_loader() {
-        let flash = Flash::new("/p/build/blinky.rbf".into(), Persistence::Persistent).unwrap();
+        let flash = Flash::new(
+            "/p/build/blinky.rbf".into(),
+            Persistence::Persistent,
+            Via::Jtag,
+        )
+        .unwrap();
         assert_eq!(flash, Flash::Epcs("/p/build/blinky.rbf".into()));
         let build = Path::new("/p/build");
         let plan = plan_flash(
@@ -1457,7 +1708,7 @@ mod tests {
 
     #[test]
     fn only_an_rbf_can_be_persisted() {
-        assert!(Flash::new("/x.svf".into(), Persistence::Persistent).is_err());
-        assert!(Flash::new("/x.bit".into(), Persistence::Persistent).is_err());
+        assert!(Flash::new("/x.svf".into(), Persistence::Persistent, Via::Jtag).is_err());
+        assert!(Flash::new("/x.bit".into(), Persistence::Persistent, Via::Jtag).is_err());
     }
 }

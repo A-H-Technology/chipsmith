@@ -116,6 +116,23 @@ pub fn bit_payload(file: &[u8]) -> Result<&[u8]> {
     }
 }
 
+/// A `.bit` payload as the Zynq's devcfg driver takes it (Xilinx calls it a
+/// byte-swapped `.bin`): every 32-bit word little-endian, so the sync word
+/// reads `66 55 99 aa`. The PCAP DMA moves whole words.
+pub fn zynq_bin(payload: &[u8]) -> Result<Vec<u8>> {
+    ensure!(
+        payload.len().is_multiple_of(4),
+        ".bit payload is {} bytes, not whole 32-bit words",
+        payload.len()
+    );
+    Ok(payload
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|&[a, b, c, d]| [d, c, b, a])
+        .collect())
+}
+
 /// Load `bitstream` (a `.bit` payload) into TAP `target` of `chain`: clear
 /// the configuration, wait for INIT, then play the load and check DONE.
 pub fn load<C: Cable>(cable: &mut C, chain: &[Tap], target: usize, bitstream: &[u8]) -> Result<()> {
@@ -284,6 +301,16 @@ mod tests {
         };
         let set: Vec<usize> = (0..m.len).filter(|&i| bit(&m.bytes, i)).collect();
         assert_eq!(set, [4 + IR_DONE]);
+    }
+
+    #[test]
+    fn zynq_bin_swaps_each_word() {
+        let sync = [0xff, 0xff, 0xff, 0xff, 0xaa, 0x99, 0x55, 0x66];
+        assert_eq!(
+            zynq_bin(&sync).unwrap(),
+            [0xff, 0xff, 0xff, 0xff, 0x66, 0x55, 0x99, 0xaa]
+        );
+        assert!(zynq_bin(&[0xaa, 0x99, 0x55]).is_err());
     }
 
     #[test]

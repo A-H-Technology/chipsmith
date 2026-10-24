@@ -6,6 +6,7 @@ An open FPGA toolchain: HDL in, programmed chip out, no vendor software.
 nix run github:A-H-Technology/chipsmith/open -- -C examples/blinky-vhdl build
 nix run github:A-H-Technology/chipsmith/open -- -C examples/blinky-vhdl flash
 nix run github:A-H-Technology/chipsmith/open -- -C examples/blinky-vhdl flash --persist  # DE2: into the EPCS
+nix run github:A-H-Technology/chipsmith/open -- -C examples/zybo-jtag-counter flash --ssh venus  # Zybo, through its Linux
 ```
 
 The first run builds cram and flattens its chip database into the router's
@@ -17,7 +18,7 @@ nextpnr.
 | device | board | build | on hardware |
 |---|---|---|---|
 | EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes: LUT/carry/register logic, M4K RAM blocks (below), global clocks from pins, 3.3-V LVTTL pins: input, output, tri-state, bidirectional, open drain | yes (2026-10-24: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
-| xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes: what yosys `synth_xilinx` and openXC7's nextpnr's packer handle, LVCMOS33 pins; chipsmith places LUT/register/carry logic, RAM32Ms, pins, BUFGs and BSCANs and routes the interconnect (below) | yes (2026-10-24: zybo-jtag-counter with nextpnr's placement and chipsmith's routing, flashed by chipsmith, read back over JTAG at 125.01 MHz); chipsmith's placement not yet tried on the board |
+| xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes: what yosys `synth_xilinx` and openXC7's nextpnr's packer handle, LVCMOS33 pins; chipsmith places LUT/register/carry logic, RAM32Ms, pins, BUFGs, BSCANs and the PS7 and routes the interconnect (below) | yes (2026-10-24: zybo-jtag-counter placed and routed by chipsmith, read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga) |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
 LEDs, about 1,200 LEs; a build takes about 85 s of CPU time.
@@ -93,13 +94,13 @@ The Zybo examples:
   `cargo run --release --example xc7_user1` reads it twice, a second apart,
   with chipsmith's own cable code. Builds in about 87 s with chipsmith's
   placement and routing (three nextpnr runs, below). Two builds give the
-  same placement and the same FASM. Read back 2026-10-24, from the build
-  with nextpnr's placement:
+  same placement and the same FASM. Read back 2026-10-24, chipsmith's
+  placement and routing, loaded with `flash --ssh`:
 
   ```
-  USER1 0x5a59424f07d1540d: tag "ZYBO", count 90281993
-  USER1 0x5a59424f0abcdd7f: tag "ZYBO", count 215443882
-  125161889 counts in 1.001 s: 125.01 MHz
+  USER1 0x5a59424fd795d8f0: tag "ZYBO", count 2598801568
+  USER1 0x5a59424ff37745fb: tag "ZYBO", count 2723838290
+  125036722 counts in 1.000 s: 125.00 MHz
   ```
 
   With zybo-blinky loaded instead, the same read returns all zeros.
@@ -113,8 +114,17 @@ Zybo limits, all of them inherited from the tools:
   Zybo's PL banks (34, 35) are both 3.3 V.
 - Pins are the package's 100 PL user I/O balls (prjxray-db's
   `package_pins.csv`). PS pins (MIO, DDR) are rejected in the manifest.
-- The PS isn't configured. Nothing needs the ARM cores, DDR or the
-  PS clocks, and a design instantiating PS7 is untested.
+- The PS isn't configured from the fabric side beyond one thing: every
+  design gets a PS7 whose IRQF2P inputs are tied to 0 (the build's "PS7"
+  step, or the design's own PS7 if it leaves IRQF2P open). IRQF2P[19:16]
+  are the ARM cores' FIQ and IRQ, active high, and an interconnect input
+  nothing drives reads as 1. So a design without a PS7, Vivado's
+  PL-only blinky included, holds FIQ on both cores, and the moment the
+  PL->PS level shifters come on under Linux (Linux loading it, or a JTAG
+  load while U-Boot runs) both cores spin in the FIQ handler. Observed on
+  venus, halted over JTAG: both cores in `__fiq_svc`/`ct_nmi_enter`; with
+  IRQF2P tied to 0 Linux stays up. Designs that use the PS beyond that
+  (AXI, PS clocks, interrupts to Linux) are untested.
 - Both Zybo examples declare their 125 MHz clock in `[clocks]`, which
   reaches nextpnr as an XDC `create_clock`. nextpnr's estimate tracks
   Vivado's. zybo-blinky through the Vivado 2026.1 oracle (xc7-re
@@ -130,6 +140,27 @@ Zybo limits, all of them inherited from the tools:
   header still carries xc7frames2bit's build date and time.
 - The Zybo Z7 has its clock on K17. It needs only another pin map; the
   Z7-20 (xc7z020) needs another `Device`.
+
+### Loading a Zybo from its own Linux
+
+`chipsmith flash --ssh HOST` loads the PL from Linux on the Zybo's ARM
+cores instead of over the JTAG cable: no cable or cable drivers on the
+host, any board on the network. HOST runs NixOS with
+[nixos-fpga](https://github.com/A-H-Technology/nixos-fpga)'s
+`digilent-zybo` module, whose `/dev/fpga-load` hands a bitstream to the
+kernel's fpga-manager (the Zynq's devcfg/PCAP), and the ssh user must be
+in its `fpga` group. chipsmith sends the `.bit`'s payload with every
+32-bit word byte-swapped, the format the Zynq driver takes, then checks
+the manager reports `operating`. The transfer and load of zybo-jtag-counter's
+2 MB take about 0.5 s; the rest is the ssh login.
+
+Every Zybo build also writes that format next to the `.bit`
+(`build/<name>.bin`). Set nixos-fpga's `hardware.fpga.bitstream` to it and
+the board loads it at every boot, which is the Zybo's persistent flashing
+(roadmap step 6). Observed 2026-10-24 on venus: zybo-blinky and
+zybo-jtag-counter loaded with `flash --ssh`, the JTAG readback following
+each (zeros, then `"ZYBO"` at 125.00 MHz), Linux up throughout; blinky
+loaded by the boot service on a reboot.
 
 ## Flow
 
@@ -358,7 +389,14 @@ share chipsmith's own netlist IR, not Verilog.
      (`chipsmith flash-restore`, hidden) brought the factory design up
      again from flash (USERCODE 0x0042b391), so the factory image is
      restorable. A real power cycle is still to be watched.
-   - Zybo (not done). The QSPI flash hangs off the Zynq's processor (PS
+   - Zybo (done, 2026-10-24, through Linux). With NixOS on the board,
+     nixos-fpga's `hardware.fpga.bitstream` loads the build's `.bin` at
+     every boot ("Loading a Zybo from its own Linux", above), so
+     `--persist` with `--ssh` points there instead of writing flash.
+     Without Linux, persistence means writing a boot image to QSPI, which
+     is still not done:
+
+     The QSPI flash hangs off the Zynq's processor (PS
      MIO 1-6); the PL can't reach it, so a PL bridge like the DE2's can't
      work. openFPGALoader refuses to write Zynq flash for that reason;
      Vivado's `program_flash` runs an FSBL plus a U-Boot helper on the ARM

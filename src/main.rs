@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use chipsmith::flow::{self, Flash, Layout, Persistence};
+use chipsmith::flow::{self, Flash, Layout, Persistence, Via};
 use chipsmith::manifest::Manifest;
 use chipsmith::pack;
 use chipsmith::persist::{EpcsOp, Loader};
@@ -34,6 +34,11 @@ enum Cmd {
         /// loads at power-up. The DE2's RUN/PROG switch stays in RUN.
         #[arg(long)]
         persist: bool,
+        /// Load a Zynq's PL from Linux on the board instead of over JTAG:
+        /// ssh to HOST and write the bitstream to nixos-fpga's
+        /// /dev/fpga-load.
+        #[arg(long, value_name = "HOST")]
+        ssh: Option<String>,
     },
     /// Save the DE2's whole EPCS16 to a file (read twice and compared).
     #[command(hide = true)]
@@ -194,7 +199,11 @@ fn main() -> Result<()> {
             )
             .run()?;
         }
-        Cmd::Flash { bitstream, persist } => {
+        Cmd::Flash {
+            bitstream,
+            persist,
+            ssh,
+        } => {
             let path = match bitstream {
                 Some(path) => path,
                 None => {
@@ -212,7 +221,11 @@ fn main() -> Result<()> {
             } else {
                 Persistence::Volatile
             };
-            let flash = Flash::new(path, persistence)?;
+            let via = match ssh {
+                Some(host) => Via::Ssh(host),
+                None => Via::Jtag,
+            };
+            let flash = Flash::new(path, persistence, via)?;
             flow::plan_flash(&flash, &Loader::from_env(&layout.dir), &layout.dir).run()?;
         }
     }

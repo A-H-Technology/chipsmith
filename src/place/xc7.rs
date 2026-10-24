@@ -2,7 +2,7 @@
 //!
 //! Input is nextpnr's packed netlist (`nextpnr-himbaechel --pack-only
 //! --write`): its packer has already turned yosys' cells into bel types
-//! (SLICE_LUTX, SLICE_FFX, CARRY4, PAD, IOB33_*, BUFGCTRL, BSCAN), split and
+//! (SLICE_LUTX, SLICE_FFX, CARRY4, PAD, IOB33_*, BUFGCTRL, BSCAN, PS7), split and
 //! rechained the carries, added the feed-through LUTs and placed the pins
 //! from the XDC. Which LUTs and registers share a slice, and where every
 //! slice, carry chain, RAM and clock buffer goes, is decided here. The output
@@ -28,8 +28,8 @@
 //!
 //! Carry chains and RAMs go in the even slice of a tile (X0, the SLICEM of a
 //! CLBLM), as nextpnr's packer constrains them. Pins are where the XDC put
-//! them; the BSCAN for USER<n> is BSCAN_X0Y<n-1>; each BUFGCTRL takes the
-//! free one nearest its source.
+//! them; the BSCAN for USER<n> is BSCAN_X0Y<n-1>; the PS7 has the one PS7
+//! site; each BUFGCTRL takes the free one nearest its source.
 //!
 //! The cost is half-perimeter wirelength, x counted at half weight: grid x
 //! advances by two or more per interconnect column (site columns are
@@ -88,6 +88,8 @@ enum Kind {
     Bscan {
         chain: u32,
     },
+    /// The Zynq's processor system, as seen from the fabric.
+    Ps7,
     Gnd,
     Vcc,
 }
@@ -255,6 +257,7 @@ fn read_design(json: &Value) -> Result<std::result::Result<Design, Unsupported>>
                     n => n as u32,
                 },
             },
+            "PS7_PS7" => Kind::Ps7,
             "PSEUDO_GND" => Kind::Gnd,
             "PSEUDO_VCC" => Kind::Vcc,
             other => return Ok(Err(Unsupported(format!("cell {name} of type {other}")))),
@@ -621,7 +624,7 @@ impl Timing {
                         }
                     }
                 }
-                // Pins, the BSCAN and clock buffers neither launch nor
+                // Pins, the BSCAN, the PS7 and clock buffers neither launch nor
                 // capture: like Quartus' and nextpnr's reports with only a
                 // clock constraint, paths run register to register.
                 _ => {}
@@ -1378,7 +1381,7 @@ fn bels(db: &ChipDb, d: &Design, g: &Grid, s: &State) -> Result<Vec<(String, Str
     Ok(lines)
 }
 
-/// The cells that don't move: pins and their buffers, BSCANs, the constant
+/// The cells that don't move: pins and their buffers, BSCANs, the PS7, the constant
 /// drivers, and BUFGCTRLs (each the free one nearest its source). Returns
 /// (cell, bel as nextpnr reads it, position).
 fn fixed_bels(db: &ChipDb, d: &Design, g: &Grid) -> Result<Vec<(CellId, String, Xy)>> {
@@ -1436,6 +1439,19 @@ fn fixed_bels(db: &ChipDb, d: &Design, g: &Grid) -> Result<Vec<(CellId, String, 
                 out.push((
                     i as CellId,
                     bel_name(db, &format!("{site}/BSCAN"))?,
+                    (x as i32, y as i32),
+                ));
+            }
+            Kind::Ps7 => {
+                let site = "PS7_X0Y0";
+                let s = db
+                    .sites
+                    .get(site)
+                    .with_context(|| format!("PS7 {}: no site {site}", c.name))?;
+                let (x, y) = db.tile_xy(s.tile);
+                out.push((
+                    i as CellId,
+                    bel_name(db, &format!("{site}/PS7"))?,
                     (x as i32, y as i32),
                 ));
             }
