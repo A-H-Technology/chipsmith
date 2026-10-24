@@ -48,6 +48,9 @@
   libxcursor = (pkgs.libxcursor or pkgs.xorg.libXcursor).outPath;
   libxinerama = (pkgs.libxinerama or pkgs.xorg.libXinerama).outPath;
   libuuid = pkgs.util-linux.lib.outPath;
+  # libbrotlidec.so.1, for Quartus Prime Pro's qcore/linux64/libQt6Network.so.6
+  # (quartus_sta loads it; Pro doesn't ship brotli).
+  brotli = pkgs.brotli.lib.outPath;
 }
 // pkgs.lib.optionalAttrs i686 {
   glibc32 = pkgs.pkgsi686Linux.glibc.outPath;
