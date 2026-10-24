@@ -1,0 +1,11 @@
+[package]
+name = "chipsmith-jtag"
+description = "JTAG cables (USB-Blaster, FT2232), an SVF player and the 7-series JTAG loader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rusb.workspace = true

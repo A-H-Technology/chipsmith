@@ -23,13 +23,13 @@ let
       fileset = lib.fileset.unions [
         ../Cargo.toml
         ../Cargo.lock
-        ../src
+        ../crates
       ];
     };
     cargoLock.lockFile = ../Cargo.lock;
 
     nativeBuildInputs = [ pkg-config ];
-    # the USB-Blaster driver (src/jtag/usb_blaster.rs)
+    # the USB-Blaster driver (crates/chipsmith-jtag/src/usb_blaster.rs)
     buildInputs = [ libusb1 ];
 
     meta.mainProgram = "chipsmith";
@@ -41,8 +41,9 @@ let
     ${lib.getExe unwrapped} routing-graph ${cram}/db/EP2C35F672C6/chipdb.txt.xz $out
   '';
 
-  # The DE2's serial flash loader (src/persist/loader), built by chipsmith
-  # itself once here, so `flash --persist` doesn't synthesise it every time.
+  # The DE2's serial flash loader
+  # (crates/chipsmith-cyclone2/src/persist/loader), built by chipsmith itself
+  # once here, so `flash --persist` doesn't synthesise it every time.
   de2Loader =
     runCommand "chipsmith-de2-flash-loader"
       {
@@ -55,7 +56,7 @@ let
         CHIPSMITH_CYCLONE2_DB = "${cram}/db";
       }
       ''
-        cp -r ${../src/persist/loader} loader
+        cp -r ${../crates/chipsmith-cyclone2/src/persist/loader} loader
         chmod -R u+w loader
         ${lib.getExe unwrapped} -C loader build
         install -D loader/build/loader.rbf $out/loader.rbf

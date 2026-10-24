@@ -7,6 +7,8 @@ crates/
   chipsmith-netlist   the netlist IR, shared by front end and synthesis (ADR-0004)
   chipsmith-verilog   Verilog parser and elaborator -> netlist
   chipsmith-synth     device-independent synthesis: RTL passes, LUT mapping
+  chipsmith-route     shared by the device back ends: routing graph,
+                      PathFinder router, timing graph
   chipsmith-cyclone2  Cyclone II: synthesis mapping, packing, placement,
                       routing, timing, bitstream, JTAG stream, EPCS image
   chipsmith-xc7       7-series: placement, routing, delays, Zynq .bin
@@ -14,7 +16,9 @@ crates/
   chipsmith           the binary: manifest, flow (Plan/Step), CLI
 ```
 
-Dependencies point down: `chipsmith` uses everything; device crates use `chipsmith-netlist`, `chipsmith-synth` and `chipsmith-jtag`; nothing depends on `chipsmith`. Device-independent algorithms move into a shared crate only once a second device actually shares them; until then they stay in the device crate that has them.
+Dependencies point down: `chipsmith` uses everything; device crates use `chipsmith-netlist`, `chipsmith-synth`, `chipsmith-route` and `chipsmith-jtag`, never each other; nothing depends on `chipsmith`. Device-independent algorithms move into a shared crate only once a second device actually shares them; until then they stay in the device crate that has them.
+
+`chipsmith-route` is the first such crate. The 7-series router reuses the Cyclone II's PathFinder, its `ChipDb` graph (prjxray-db is imported into the same structure) and its timing graph, so those three were shared before the split, not Cyclone II code. Each device keeps its own side: reading its placed design into the router's `Design` and writing the routes back.
 
 ## Considered options
 

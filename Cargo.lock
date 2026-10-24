@@ -88,16 +88,64 @@ name = "chipsmith"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chipsmith-cyclone2",
+ "chipsmith-jtag",
+ "chipsmith-route",
+ "chipsmith-synth",
+ "chipsmith-xc7",
  "clap",
  "glob",
- "lzma-rust2",
- "postcard",
- "rusb",
- "rustc-hash",
  "serde",
  "serde_json",
  "thiserror",
  "toml",
+]
+
+[[package]]
+name = "chipsmith-cyclone2"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chipsmith-jtag",
+ "chipsmith-route",
+ "rustc-hash",
+ "serde_json",
+]
+
+[[package]]
+name = "chipsmith-jtag"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rusb",
+]
+
+[[package]]
+name = "chipsmith-route"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lzma-rust2",
+ "postcard",
+ "serde",
+]
+
+[[package]]
+name = "chipsmith-synth"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+]
+
+[[package]]
+name = "chipsmith-xc7"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chipsmith-route",
+ "rustc-hash",
+ "serde_json",
 ]
 
 [[package]]

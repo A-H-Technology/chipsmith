@@ -1,0 +1,13 @@
+[package]
+name = "chipsmith-route"
+description = "The routing graph, PathFinder router and timing graph chipsmith's device back ends share"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+lzma-rust2.workspace = true
+postcard.workspace = true
+serde.workspace = true

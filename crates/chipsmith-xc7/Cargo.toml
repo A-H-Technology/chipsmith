@@ -1,0 +1,13 @@
+[package]
+name = "chipsmith-xc7"
+description = "chipsmith's 7-series back end: placement, routing, prjxray-db import, Zynq .bin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chipsmith-route.workspace = true
+anyhow.workspace = true
+rustc-hash.workspace = true
+serde_json.workspace = true

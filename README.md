@@ -164,7 +164,7 @@ loaded by the boot service on a reboot.
 
 ## Flow
 
-Every stage is one `Step` in a `Plan` (`src/flow.rs`). The device in the
+Every stage is one `Step` in a `Plan` (`crates/chipsmith/src/flow.rs`). The device in the
 manifest picks the plan.
 
 Cyclone II (EP2C35F672C6):
@@ -173,14 +173,14 @@ Cyclone II (EP2C35F672C6):
 |---|---|---|
 | VHDL → Verilog | GHDL `--synth --out=verilog` | stays a translator in front of the flow |
 | synthesis | yosys runs cyclone2-re's `cyclone2.ys` in two halves around the LUT mapping | to replace |
-| LUT mapping | chipsmith: AIG plus priority cuts, in place of `abc -lut 4` (`src/synth/lutmap.rs`) | ours |
-| packing | chipsmith: cyclone2-re's nextpnr packer, ported (`src/pack`) | ours |
-| placement | chipsmith: simulated annealing over LAB slots, nextpnr's LAB rules (`src/place`) | ours |
-| routing | chipsmith: PathFinder over the chip database (`src/route`) | ours |
+| LUT mapping | chipsmith: AIG plus priority cuts, in place of `abc -lut 4` (`crates/chipsmith-synth/src/lutmap.rs`) | ours |
+| packing | chipsmith: cyclone2-re's nextpnr packer, ported (`crates/chipsmith-cyclone2/src/pack`) | ours |
+| placement | chipsmith: simulated annealing over LAB slots, nextpnr's LAB rules (`crates/chipsmith-cyclone2/src/place.rs`) | ours |
+| routing | chipsmith: PathFinder over the chip database (`crates/chipsmith-route`, `crates/chipsmith-cyclone2/src/route.rs`) | ours |
 | bitstream | `cram pack` (cyclone2-re) | ours already |
 | JTAG stream | `cram svf` | ours already |
-| cable | chipsmith: USB-Blaster and FT2232 (MPSSE) drivers, SVF player, 7-series JTAG loader (`src/jtag`) | ours |
-| configuration flash | chipsmith: serial flash loader (built by chipsmith) and EPCS16 driver (`src/persist`) | ours |
+| cable | chipsmith: USB-Blaster and FT2232 (MPSSE) drivers, SVF player, 7-series JTAG loader (`crates/chipsmith-jtag`) | ours |
+| configuration flash | chipsmith: serial flash loader (built by chipsmith) and EPCS16 driver (`crates/chipsmith-cyclone2/src/persist`) | ours |
 
 Zynq-7010 PL (xc7z010clg400-1): shell out, except placement, routing and
 the cable.
@@ -190,13 +190,13 @@ the cable.
 | VHDL → Verilog | GHDL `--synth --out=verilog` | as for Cyclone II |
 | synthesis | yosys `synth_xilinx -flatten -abc9 -arch xc7` | to replace |
 | packing | openXC7's nextpnr (`nextpnr-himbaechel --pack-only`, xilinx uarch), chip database for xc7z010 built from prjxray-db in nix (2.5 min) | to replace next |
-| placement | chipsmith: simulated annealing over slices, timing-driven with prjxray-db's delays (`src/place/xc7.rs`, `src/place/xc7_delay.rs`) | ours |
+| placement | chipsmith: simulated annealing over slices, timing-driven with prjxray-db's delays (`crates/chipsmith-xc7/src/place.rs`, `crates/chipsmith-xc7/src/delay.rs`) | ours |
 | site routing | nextpnr, routing chipsmith's placement (`-o preplaced`) | to replace |
-| interconnect routing | chipsmith: PathFinder over the prjxray-db graph (`src/route/xray.rs`, `src/route/xc7.rs`) | ours |
+| interconnect routing | chipsmith: PathFinder over the prjxray-db graph (`crates/chipsmith-xc7/src/xray.rs`, `crates/chipsmith-xc7/src/route.rs`) | ours |
 | FASM | nextpnr's FASM writer, from chipsmith's routes (`-o preplaced`, `-o prerouted`) | to replace |
 | FASM → frames | prjxray `fasm2frames` | to replace |
 | frames → `.bit` | prjxray `xc7frames2bit` | to replace |
-| cable | chipsmith: FT2232 (MPSSE) driver and 7-series JTAG loader (`src/jtag`), loads in 1.3 s with DONE checked | ours |
+| cable | chipsmith: FT2232 (MPSSE) driver and 7-series JTAG loader (`crates/chipsmith-jtag`), loads in 1.3 s with DONE checked | ours |
 
 openXC7's nextpnr, prjxray, fasm and prjxray-db come from one pinned
 [openXC7/toolchain-nix](https://github.com/openXC7/toolchain-nix)
@@ -256,7 +256,7 @@ share chipsmith's own netlist IR, not Verilog.
      per temperature, 139 s) ends at lower wirelength (3,903 vs 4,261) but
      less slack (8.84 ns): wirelength is not timing, so the next gain is a
      timing model, not more annealing.
-   - Timing model (`src/timing.rs`) and timing-driven routing. Cell delays
+   - Timing model (`crates/chipsmith-route/src/timing.rs`) and timing-driven routing. Cell delays
      are Quartus' DMF values (cyclone2-re docs/timing-model.md), routing
      delays quartus_sta's median per element type; register-to-register
      paths only, like Quartus with just a clock constraint. After each
@@ -288,7 +288,7 @@ share chipsmith's own netlist IR, not Verilog.
      8.79 ns (11.23 ns of slack at 50 MHz; was 2.25 ns with nextpnr).
      Weight/exponent sweep, one seed each: 8/4 8.79 ns, 32/8 8.81 ns,
      16/4 8.94 ns, 8/2 9.35 ns.
-   - Packer (done). `src/pack` is the `pack()` of cyclone2-re's nextpnr
+   - Packer (done). `crates/chipsmith-cyclone2/src/pack` is the `pack()` of cyclone2-re's nextpnr
      uarch in Rust: pin buffers named after their port bits, constants
      folded into LUT masks and pins, stuck-at-GND registers and input-less
      LUTs removed, one-input LUTs folded into their loads (inversions into
@@ -365,10 +365,10 @@ share chipsmith's own netlist IR, not Verilog.
    - DE2 (done, 2026-10-24). The EP2C35 configures itself from its EPCS16
      at power-up (active serial, RUN/PROG switch in RUN, where it normally
      is; PROG isn't needed). chipsmith writes the EPCS over the JTAG cable
-     through a serial flash loader of its own: `src/persist/loader`, a
+     through a serial flash loader of its own: `crates/chipsmith-cyclone2/src/persist/loader`, a
      JTAG-to-SPI bridge on the FPGA's flash pins, built by chipsmith (the
      nix package prebuilds it). It uses the Cyclone II's JTAG and
-     serial-flash hard blocks (`CY2_JTAG`, `CY2_ASMI`, `src/hard.rs`),
+     serial-flash hard blocks (`CY2_JTAG`, `CY2_ASMI`, `crates/chipsmith-cyclone2/src/hard.rs`),
      which cyclone2-re's chip database and cram gained for this; Quartus
      assembles chipsmith's loader byte-identical. With USER0 in the IR each
      Shift-DR is one SPI transaction, so the loader is three LUTs and no
@@ -462,7 +462,7 @@ Next devices:
     route (`-o prerouted`), and writes the FASM. On both designs below it
     bound all of chipsmith's routes unchanged (0 collided; the routes it
     writes back are pip for pip the ones given), and its router had
-    nothing left to route. `route::xc7` also checks every route is a tree
+    nothing left to route. `chipsmith_xc7::route` also checks every route is a tree
     of graph pips reaching all its sinks, with no node shared.
 
     Same placement, nextpnr's router2 against chipsmith's (routing is
@@ -513,7 +513,7 @@ Next devices:
     its packer writes with `--pack-only`: SLICE_LUTX, SLICE_FFX, CARRY4,
     RAMD32, PAD, IOB33 buffers, BUFGCTRL, BSCAN) and hands every cell's
     bel to nextpnr as `-o preplaced` lines. nextpnr binds all of them and
-    places nothing itself; `route::xc7` checks that each cell is on the
+    places nothing itself; `chipsmith_xc7::route` checks that each cell is on the
     bel chipsmith gave it before rerouting. Packing names are
     deterministic, so the packer's own cells (split carries, feed-through
     LUTs, pin buffers) match by name in every later nextpnr run.
@@ -645,10 +645,25 @@ Unknown keys are errors, so a misspelt table can't be silently ignored.
 
 ```
 nix develop
-cargo test
-cargo clippy --all-targets -- -D warnings
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 cargo run -- -C examples/blinky-verilog build
 ```
+
+A Cargo workspace, one crate per concern
+([ADR-0002](docs/adr/0002-cargo-workspace-by-concern.md)):
+
+| crate | |
+|---|---|
+| `crates/chipsmith` | the binary: manifest, devices, the flow (`Plan`, `Step`), CLI |
+| `crates/chipsmith-synth` | device-independent synthesis: LUT mapping |
+| `crates/chipsmith-route` | what both back ends share: the routing graph (`ChipDb`), the PathFinder router, the timing graph |
+| `crates/chipsmith-cyclone2` | Cyclone II: packing, placement, routing (nextpnr JSON in and out), M4K, hard blocks, EPCS and its serial flash loader |
+| `crates/chipsmith-xc7` | 7-series: prjxray-db import, placement, delays, routing, Zynq `.bin` |
+| `crates/chipsmith-jtag` | cables (USB-Blaster, FT2232), SVF player, 7-series JTAG loader |
+
+Cargo examples sit with their crate and run from the root by name, e.g.
+`cargo run --release --example xc7_user1` (`chipsmith-jtag`).
 
 The Quartus toolchain manager that used to be chipsmith lives on the `main`
 branch.

@@ -1,12 +1,20 @@
-[package]
-name = "chipsmith"
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "An open FPGA toolchain: HDL in, bitstream out, chip programmed"
 repository = "https://github.com/A-H-Technology/chipsmith"
 
-[dependencies]
+[workspace.dependencies]
+chipsmith-cyclone2 = { path = "crates/chipsmith-cyclone2" }
+chipsmith-jtag = { path = "crates/chipsmith-jtag" }
+chipsmith-route = { path = "crates/chipsmith-route" }
+chipsmith-synth = { path = "crates/chipsmith-synth" }
+chipsmith-xc7 = { path = "crates/chipsmith-xc7" }
+
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 glob = "0.3"

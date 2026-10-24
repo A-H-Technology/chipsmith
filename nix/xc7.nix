@@ -14,7 +14,7 @@
 let
   inherit (openxc7) nextpnr prjxray prjxray-db fasm;
 
-  # The dies chipsmith has a Device for (src/device.rs).
+  # The dies chipsmith has a Device for (crates/chipsmith/src/device.rs).
   dies = [ "xc7z010" ];
 
   # toolchain-nix's nextpnr-xilinx-chipdb.zynq7 builds all five Zynq dies
