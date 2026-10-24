@@ -11,6 +11,7 @@ use anyhow::{bail, ensure, Context, Result};
 use serde_json::{Map, Value};
 
 use super::netlist::{Dir, FfConfig, IoeIn, Kind, NetId, Netlist, Port, TopPort};
+use crate::m4k;
 
 /// A bit of a yosys bit vector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,12 +229,20 @@ fn kind_of(ty: &str, params: &BTreeMap<String, Value>, name: &str) -> Result<Kin
             data: IoeIn::Signal { invert: false },
             oe: IoeIn::Signal { invert: false },
         },
+        "CY2_M4K" => {
+            let mode = params.get("MODE").and_then(Value::as_str);
+            let width = params.get("WIDTH").and_then(int);
+            let (Some(mode), Some(width)) = (mode, width) else {
+                bail!("M4K {name}: MODE or WIDTH missing");
+            };
+            Kind::M4k(m4k::Shape::parse(mode, width).with_context(|| format!("M4K {name}"))?)
+        }
         other => bail!("{name}: cell type {other} is not a Cyclone II cell the packer knows"),
     })
 }
 
 /// The parameters `Kind` holds; the rest pass through.
-const TYPED_PARAMS: [&str; 1] = ["LUT_MASK"];
+const TYPED_PARAMS: [&str; 3] = ["LUT_MASK", "MODE", "WIDTH"];
 
 pub fn import(json: &Value) -> Result<Netlist> {
     let modules = json["modules"].as_object().context("no modules")?;
@@ -322,31 +331,31 @@ pub fn import(json: &Value) -> Result<Netlist> {
             fe.nl.ids.intern(p);
         }
         for (pname, conn) in cd["connections"].as_object().unwrap_or(&empty) {
-            let port =
-                Port::parse(pname).with_context(|| format!("{inst}: unknown port {pname}"))?;
             let dir = dirs
                 .get(pname)
                 .and_then(Value::as_str)
                 .and_then(Dir::parse)
                 .with_context(|| format!("{inst}: port {pname} has no direction"))?;
-            ensure!(
-                dir == kind.dir(port),
-                "{inst}: {ty}.{pname} has the wrong direction"
-            );
             let output = dir == Dir::Out;
             let b = bits(conn).with_context(|| format!("{inst}.{pname}"))?;
-            let [bit] = b[..] else {
-                bail!("{inst}.{pname}: {} bits, cells take one", b.len());
-            };
-            fe.nl.ids.intern(pname);
-            fe.nl.add_port(c, port);
-            let Some(net) = fe.bit_net(bit, || format!("{inst}.{pname}$const")) else {
-                continue;
-            };
-            if output && fe.nl.net(net).driver.is_some() {
-                bail!("net {} has two drivers", fe.nl.net(net).name);
+            for (i, &bit) in b.iter().enumerate() {
+                let bname = bit_name(pname, i, b.len(), 0, false);
+                let port =
+                    Port::parse(&bname).with_context(|| format!("{inst}: unknown port {bname}"))?;
+                ensure!(
+                    dir == kind.dir(port),
+                    "{inst}: {ty}.{bname} has the wrong direction"
+                );
+                fe.nl.ids.intern(&bname);
+                fe.nl.add_port(c, port);
+                let Some(net) = fe.bit_net(bit, || format!("{inst}.{bname}$const")) else {
+                    continue;
+                };
+                if output && fe.nl.net(net).driver.is_some() {
+                    bail!("net {} has two drivers", fe.nl.net(net).name);
+                }
+                fe.nl.connect(c, port, net);
             }
-            fe.nl.connect(c, port, net);
         }
         let attrs = object(&cd["attributes"]);
         for k in attrs.keys().chain(params.keys()) {

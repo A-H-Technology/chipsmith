@@ -28,6 +28,9 @@ pub fn wire_delay(wire_type: &str) -> Ps {
         // An LE's output back into its own LAB (STA LOCAL_LINE).
         "LOCAL_LINE" => 229.0,
         "LE_BUFFER" => 56.0,
+        // M4K read data onto the routing. One connection measured, not a
+        // median: M4K_BUFFER, two R4s and a LAB line in 975 ps.
+        "M4K_BUFFER" => 143.0,
         "IO_DATAIN" => 66.0,
         "BLK_CLK_BUF" => 96.0,
         "LAB_CLK" => 363.0,
@@ -83,6 +86,17 @@ fn register_setup(port: &str) -> Option<Ps> {
         _ => return None,
     })
 }
+
+/// M4K read clock to data out, with no output register (the address is
+/// registered, the read data isn't). quartus_sta on an M4K feeding a LUT and
+/// register: address register uTco 209 ps plus 2,993 ps to `portadataout`,
+/// plus the 124 ps the block's clock arrives after an LE register's (cell
+/// delay 0.661 vs 0.537 ns; skew isn't otherwise modelled).
+const M4K_TCO: Ps = 209.0 + 2993.0 + 124.0;
+/// M4K input register setup: quartus_sta's 142 ps cell delay into the
+/// address register and its -35 ps uTsu, less the same 124 ps of later
+/// clock.
+const M4K_TSU: Ps = 142.0 - 35.0 - 124.0;
 
 /// A delay from one timing node to another.
 #[derive(Debug, Clone, Copy)]
@@ -142,6 +156,16 @@ impl Graph {
                     } else if let Some(s) = register_setup(p) {
                         let n = self.node(cell, p);
                         self.setup[n as usize] = Some(s);
+                    }
+                }
+            }
+            "CY2_M4K" => {
+                for &p in ports {
+                    let n = self.node(cell, p);
+                    if p.starts_with("DO") {
+                        self.launch[n as usize] = Some(M4K_TCO);
+                    } else if p != "CLK0" {
+                        self.setup[n as usize] = Some(M4K_TSU);
                     }
                 }
             }
@@ -281,6 +305,30 @@ impl Analysis {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An M4K's read data into a register, and a register into its address.
+    #[test]
+    fn an_m4k_launches_and_captures() {
+        let mut g = Graph::default();
+        g.add_cell("m", "CY2_M4K", &["CLK0", "WA0", "DO0"], 0);
+        g.add_cell("a", "LCELL_FF", &["REGOUT"], 0);
+        g.add_cell("b", "LCELL_FF", &["DATAIN"], 0);
+        let nets = [
+            Arc {
+                from: g.node("m", "DO0"),
+                to: g.node("b", "DATAIN"),
+                delay: 500.0,
+            },
+            Arc {
+                from: g.node("a", "REGOUT"),
+                to: g.node("m", "WA0"),
+                delay: 500.0,
+            },
+        ];
+        let t = g.analyse(&nets);
+        assert_eq!(t.critical, M4K_TCO + 500.0 + 84.0 + TSU);
+        assert!(t.criticality(&nets[1]) < 1.0);
+    }
 
     /// reg a -> LUT x (DATAA) -> reg b, and reg a -> reg c directly.
     #[test]

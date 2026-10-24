@@ -422,3 +422,107 @@ fn an_inout_without_a_tri_state_driver_is_an_error() {
         "{err}"
     );
 }
+
+/// One CY2_M4K reading and writing through port A, clocked by CLOCK_50:
+/// address and write enable from SW, data in from a buffer of SW, read bit
+/// 0 onto LEDR. `width` bits wide; libmap ties the address bits below the
+/// block's depth and the data bits past the width to 0.
+fn single_port_ram(width: u8) -> Value {
+    let abits = crate::m4k::Width::from_bits(width.into())
+        .unwrap()
+        .addr_bits();
+    let addr: Vec<Value> = (0..12)
+        .map(|p| {
+            if p < 12 - abits {
+                json!("0")
+            } else {
+                json!(12)
+            }
+        })
+        .collect();
+    let din: Vec<Value> = (0..36)
+        .map(|k| if k < width { json!(20) } else { json!("0") })
+        .collect();
+    let dout: Vec<Value> = (0..36)
+        .map(|k| json!(if k == 0 { 11 } else { 100 + k }))
+        .collect();
+    let mut d = design(&[(
+        "buf",
+        "LCELL_COMB",
+        Some(mask::BUFFERS[0]),
+        json!({"DATAA": [12], "DATAB": ["1"], "DATAC": ["1"], "DATAD": ["1"], "COMBOUT": [20]}),
+    )]);
+    let ins = ["CLK", "A_ADDR", "A_DATAIN", "A_WE", "B_ADDR"];
+    let dirs: Map<String, Value> = ins
+        .iter()
+        .map(|p| (p.to_string(), json!("input")))
+        .chain([("DATAOUT".to_string(), json!("output"))])
+        .collect();
+    d["modules"]["top"]["cells"]["ram"] = json!({
+        "type": "CY2_M4K",
+        "parameters": {"MODE": "SINGLE", "WIDTH": format!("{width:032b}"), "INIT": "0".repeat(4608)},
+        "attributes": {},
+        "port_directions": dirs,
+        "connections": {
+            "CLK": [10], "A_ADDR": addr, "A_DATAIN": din, "A_WE": [12],
+            "B_ADDR": vec![json!("0"); 12], "DATAOUT": dout,
+        },
+    });
+    d
+}
+
+#[test]
+fn an_m4k_moves_onto_its_physical_pins() {
+    let mut nl = yosys::import(&single_port_ram(2)).unwrap();
+    let stats = pack(&mut nl).unwrap();
+    assert_eq!(stats.m4ks, 1);
+    let ram = cell(&nl, "ram");
+    let mut pins: Vec<String> = ram
+        .ports()
+        .filter(|(_, n)| n.is_some())
+        .map(|(p, _)| p.name().into_owned())
+        .collect();
+    pins.sort();
+    // 11 address bits (1 to 11), 2 data bits, write enable, clock, one read
+    // bit in use.
+    let mut want: Vec<String> = ["DI13", "DI14", "DI15", "WA11", "WA0", "WA1", "WA2"]
+        .into_iter()
+        .chain([
+            "WA3", "WA4", "WA5", "WA6", "DI0", "DI1", "WE", "CLK0", "DO0",
+        ])
+        .map(String::from)
+        .collect();
+    want.sort();
+    assert_eq!(pins, want);
+    // The data-in buffer folded away; the clock goes through a clock control.
+    assert!(find(&nl, "buf").is_none());
+    assert_eq!(
+        net_name(&nl, "ram", Port::M4k(Pin::Di(0))).as_deref(),
+        Some("sw")
+    );
+    assert_eq!(stats.clocks, 1);
+    let clk = cell(&nl, "ram").net(Port::M4k(Pin::Clk0)).unwrap();
+    assert!(
+        matches!(nl.net(clk).driver, Some((d, Port::Outclk)) if nl.cell(d).kind == Kind::ClkCtrl)
+    );
+    assert_eq!(
+        net_name(&nl, "ram", Port::M4k(Pin::Do(0))).as_deref(),
+        Some("led")
+    );
+}
+
+#[test]
+fn unsupported_m4k_shapes_are_refused() {
+    let mut x36 = single_port_ram(18);
+    x36["modules"]["top"]["cells"]["ram"]["parameters"]["WIDTH"] = json!(format!("{:032b}", 36));
+    let e = yosys::import(&x36).unwrap_err();
+    assert!(format!("{e:#}").contains("packed mode"), "{e:#}");
+
+    // An address bit the block uses tied to a constant: a memory shallower
+    // than its configuration.
+    let mut shallow = single_port_ram(18);
+    shallow["modules"]["top"]["cells"]["ram"]["connections"]["A_ADDR"][11] = json!("0");
+    let mut nl = yosys::import(&shallow).unwrap();
+    let e = pack(&mut nl).unwrap_err();
+    assert!(e.to_string().contains("A_ADDR[11] is a constant"), "{e}");
+}
