@@ -1,0 +1,81 @@
+# chipsmith
+
+An open FPGA toolchain: HDL in, programmed chip out, with no vendor software.
+
+## Flow
+
+**Project**:
+A directory with a `chipsmith.toml` manifest naming the sources, the device, the pins and the clocks.
+_Avoid_: design (when the directory is meant), workspace
+
+**Manifest**:
+The `chipsmith.toml` that describes a project.
+
+**Build**:
+Turning a project's HDL into a bitstream.
+_Avoid_: compile, implement
+
+**Flash**:
+Putting a bitstream onto a board, volatile (configuration RAM) or persistent (configuration flash).
+_Avoid_: program, download, upload
+
+**Plan**:
+Every file a build or flash writes and every step it runs, decided before any of it happens.
+
+**Step**:
+One stage of a plan: an in-process stage or an external tool.
+
+## Synthesis
+
+**Netlist**:
+A design as cells connected by nets, at any level from RTL to device cells.
+
+**RTL cell**:
+A word-level operation or storage element (adder, multiplexer, register, memory) before mapping.
+
+**Device cell**:
+A cell the target device has: a LUT, a register, a carry, a RAM block, a pin buffer.
+_Avoid_: primitive (when a device cell is meant)
+
+**LUT mapping**:
+Covering a netlist's logic with the device's look-up tables.
+
+## Cyclone II
+
+**LE**:
+Logic element: one 4-input LUT and the register it can feed, plus carry logic.
+_Avoid_: slice, cell (for the Cyclone II)
+
+**LAB**:
+Logic array block: 16 LEs that share clock, enable and clear signals.
+
+**M4K**:
+A 4,608-bit RAM block.
+
+**RBF**:
+Raw binary file: a Cyclone II bitstream.
+
+**EPCS**:
+The serial configuration flash a Cyclone II loads itself from at power-up.
+
+**Chip database**:
+The reverse-engineered description of a device's sites, routing and configuration bits, produced outside chipsmith.
+_Avoid_: chipdb (except as a file name), device model
+
+## 7-series and Zynq
+
+**PL**:
+The Zynq's programmable logic, the FPGA fabric.
+_Avoid_: fabric (when the Zynq's is meant)
+
+**PS**:
+The Zynq's processor system: the ARM cores and their peripherals.
+
+**Slice**:
+A 7-series logic site: four 6-input LUTs, eight registers, a carry chain.
+
+## Cables
+
+**Cable**:
+A JTAG adapter chipsmith drives: the USB-Blaster or an FT2232.
+_Avoid_: programmer, adapter
