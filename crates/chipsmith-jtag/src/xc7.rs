@@ -2,7 +2,8 @@
 //! as a sequence for the SVF player: the device sits in a chain (on a Zynq,
 //! behind the ARM debug port), so every IR and DR shift pads the other
 //! devices into BYPASS, and INIT and DONE are checked against TDO the way
-//! `cram svf` checks CONF_DONE.
+//! the Cyclone II's SVF (chipsmith-cyclone2 `bitstream::jtag`) checks
+//! CONF_DONE.
 //!
 //! Sequence as openFPGALoader (src/xilinx.cpp) runs it: JPROGRAM, wait for
 //! INIT, CFG_IN, the bitstream (each byte MSB first), JSTART, 2000 TCKs,

@@ -1,0 +1,1043 @@
+//! nextpnr frontend: a routed himbaechel JSON (`nextpnr-himbaechel --write`,
+//! uarch cyclone2, or chipsmith's router, `route.rs`) -> physical netlist.
+//! The parsed design (`Routed`) is public: cyclone2-re's
+//! `cram quartus-export` writes it out as Quartus constraints, so its oracle
+//! can assemble exactly this placement and routing.
+//!
+//! Wire and bel names follow the chip database (cyclone2-re's `chipdb.rs`,
+//! which documents them).
+
+use anyhow::{bail, ensure, Context, Result};
+use serde_json::Value;
+use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
+
+use super::device::{Device, Node};
+
+use super::device::element_name;
+use super::hard::{self, Asmi, Hard, HardInput, Jtag};
+use super::io::{
+    Dir, Input, IoDb, OutData, Output, OutputEnable, PinUse, Standard, UnusedPins, BLOCK_CLK_N,
+    BLOCK_CLK_P,
+};
+use super::logic::{
+    clock_slots, Aclr, ClkCtrl, Ctl, Domain, GlobalClock, LabConfig, LeConfig, LeSource, Logic,
+    Lut, Reg, Sload,
+};
+use super::m4k::{self, Content, Controls, CtlSrc, M4k, Mode, ReadPort, Sel, Width};
+use super::phys::{PhysDesign, Pip, RoutedNet};
+
+/// A nextpnr wire, by what it is in the device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Wire {
+    /// A routing-graph element.
+    Node(Node),
+    /// LOCAL_LINE k of LAB (x, y): LE k's direct output into its own LAB.
+    LocalLine {
+        x: u32,
+        y: u32,
+        k: u32,
+    },
+    /// A pin of LE k (LUT input A..D, COMB, Q, CLK).
+    Le {
+        x: u32,
+        y: u32,
+        k: u32,
+        pin: LePin,
+    },
+    /// Output data / output enable / pad-to-core of the I/O element at
+    /// logic tile (x, y), bel z.
+    Ioe {
+        x: u32,
+        y: u32,
+        z: u32,
+        pin: IoePin,
+    },
+    ClkIn {
+        g: u32,
+    },
+    /// LAB control line k (rcf LAB_CONTROL_MUX).
+    Ctrl {
+        x: u32,
+        y: u32,
+        k: u32,
+    },
+    /// A pin of the M4K block at (x, y), or one of its control inputs.
+    M4k {
+        x: u32,
+        y: u32,
+        pin: M4kPin,
+    },
+    /// An input of the JTAG or serial-flash block.
+    Hard(HardInput),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum M4kPin {
+    /// An input behind a source mux over the block's LAB lines.
+    In(m4k::Input),
+    /// Control input k (`RAM_PIA_TO_INPUT_YGR` k, rcf
+    /// `M4K_LEFT_CONTROL_INPUT`), fed from a LAB line.
+    Ctl(u8),
+    /// A control pin behind a fast mux: `m4k::CONTROL_PINS[i]`.
+    Fast(u8),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LePin {
+    /// Physical LE input A..D (fed by the LAB's lines).
+    Input(usize),
+    /// Logical LUT input DATAA..DATAD (a cell pin), fed by any physical one.
+    Logical(usize),
+    Comb,
+    Q,
+    Clk,
+    Ena,
+    Aclr,
+    Sclr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IoePin {
+    DataOut,
+    Oe,
+    CombOut,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Bel {
+    Lut { x: u32, y: u32, k: u32 },
+    Ff { x: u32, y: u32, k: u32 },
+    Ioe { x: u32, y: u32, z: u32 },
+    ClkCtrl { g: u32 },
+    M4k { x: u32, y: u32 },
+    Jtag,
+    Asmi,
+}
+
+#[derive(Debug)]
+pub struct Cell {
+    pub ty: String,
+    pub bel: Bel,
+    pub params: HashMap<String, String>,
+    pub attrs: HashMap<String, String>,
+    /// port -> net id (only connected ports)
+    pub conns: HashMap<String, u64>,
+}
+
+#[derive(Debug)]
+pub struct PipUse {
+    pub src: Wire,
+    pub dst: Wire,
+}
+
+#[derive(Debug, Default)]
+pub struct Net {
+    pub name: String,
+    pub pips: Vec<PipUse>,
+}
+
+pub struct Routed {
+    pub cells: BTreeMap<String, Cell>,
+    pub nets: BTreeMap<u64, Net>,
+    /// Top-level port (bus) name -> direction.
+    pub ports: HashMap<String, PortDir>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortDir {
+    In,
+    Out,
+    InOut,
+}
+
+fn tile_xy(t: &str) -> Result<(u32, u32)> {
+    let r = t.strip_prefix('X').with_context(|| format!("tile {t}"))?;
+    let (x, y) = r.split_once('Y').with_context(|| format!("tile {t}"))?;
+    Ok((x.parse()?, y.parse()?))
+}
+
+fn num(s: &str, prefix: &str) -> Option<u32> {
+    s.strip_prefix(prefix)?.parse().ok()
+}
+
+fn find(dev: &Device, x: u32, y: u32, e: i16, z: i16, idx: u32) -> Result<Node> {
+    let v: Vec<Node> = dev
+        .at(x as i16, y as i16, z, idx as i16)
+        .iter()
+        .copied()
+        .filter(|&n| dev.element_enum(n) == e)
+        .collect();
+    match v[..] {
+        [n] => Ok(n),
+        _ => bail!("{} {} at X{x} Y{y} S{z} I{idx}", v.len(), element_name(e)),
+    }
+}
+
+fn wire(dev: &Device, tx: u32, ty: u32, name: &str) -> Result<Wire> {
+    if let Some(n) = num(name, "G") {
+        return Ok(Wire::Node(Node(n)));
+    }
+    let (x, y) = (tx / 2, ty);
+    if let Some(l) = num(name, "LI") {
+        return Ok(Wire::Node(find(dev, x, y, 276, 0, l)?));
+    }
+    if let Some(i) = num(name, "LEB") {
+        return Ok(Wire::Node(find(dev, x, y, 45, 0, i)?));
+    }
+    if let Some(b) = num(name, "BCB") {
+        return Ok(Wire::Node(find(dev, x, y, 560, 0, b)?));
+    }
+    if let Some(k) = num(name, "MB") {
+        return Ok(Wire::Node(find(dev, x, y, 278, 0, k)?));
+    }
+    if let Some(pin) = name.strip_prefix("M4K.") {
+        let pin = if let Some(k) = num(pin, "CTL") {
+            M4kPin::Ctl(k as u8)
+        } else if let Some(i) = m4k::CONTROL_PINS.iter().position(|p| p.0 == pin) {
+            M4kPin::Fast(i as u8)
+        } else {
+            M4kPin::In(m4k::Input::from_pin_name(pin).with_context(|| format!("wire {name}"))?)
+        };
+        return Ok(Wire::M4k { x, y, pin });
+    }
+    if let Some(k) = num(name, "LL") {
+        return Ok(Wire::LocalLine { x, y, k });
+    }
+    if let Some(k) = num(name, "CTRL") {
+        return Ok(Wire::Ctrl { x, y, k });
+    }
+    if let Some((bel, pin)) = name.split_once('.') {
+        if let Some(k) = num(bel, "LE") {
+            let pin = match pin {
+                "IA" => LePin::Logical(0),
+                "IB" => LePin::Logical(1),
+                "IC" => LePin::Logical(2),
+                "ID" => LePin::Logical(3),
+                "A" => LePin::Input(0),
+                "B" => LePin::Input(1),
+                "C" => LePin::Input(2),
+                "D" => LePin::Input(3),
+                "COMB" => LePin::Comb,
+                "Q" => LePin::Q,
+                "CLK" => LePin::Clk,
+                "ENA" => LePin::Ena,
+                "ACLR" => LePin::Aclr,
+                "SCLR" => LePin::Sclr,
+                _ => bail!("wire {name}"),
+            };
+            return Ok(Wire::Le { x, y, k, pin });
+        }
+        if let Some(z) = num(bel, "IOE") {
+            let pin = match pin {
+                "DATAOUT" => IoePin::DataOut,
+                "OE" => IoePin::Oe,
+                "COMBOUT" => IoePin::CombOut,
+                _ => bail!("wire {name}"),
+            };
+            return Ok(Wire::Ioe { x, y, z, pin });
+        }
+        if let Some(g) = num(bel, "CLKCTRL") {
+            return Ok(Wire::ClkIn { g });
+        }
+        if let Some(h) = HardInput::ALL
+            .into_iter()
+            .find(|h| h.bel_pin() == (bel, pin))
+        {
+            return Ok(Wire::Hard(h));
+        }
+    }
+    bail!("unknown wire {name} in tile X{tx}Y{ty}")
+}
+
+fn bel(tx: u32, ty: u32, name: &str) -> Result<Bel> {
+    let (x, y) = (tx / 2, ty);
+    if let Some(k) = name.strip_suffix(".LUT").and_then(|b| num(b, "LE")) {
+        return Ok(Bel::Lut { x, y, k });
+    }
+    if let Some(k) = name.strip_suffix(".FF").and_then(|b| num(b, "LE")) {
+        return Ok(Bel::Ff { x, y, k });
+    }
+    if let Some(z) = num(name, "IOE") {
+        return Ok(Bel::Ioe { x, y, z });
+    }
+    if let Some(g) = num(name, "CLKCTRL") {
+        return Ok(Bel::ClkCtrl { g });
+    }
+    if name == "M4K" {
+        return Ok(Bel::M4k { x, y });
+    }
+    if name == "JTAG" {
+        return Ok(Bel::Jtag);
+    }
+    if name == "ASMI" {
+        return Ok(Bel::Asmi);
+    }
+    bail!("unknown bel {name}")
+}
+
+fn strs(v: &Value) -> HashMap<String, String> {
+    v.as_object()
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn read(dev: &Device, path: &Path) -> Result<Routed> {
+    let j: Value = serde_json::from_str(
+        &std::fs::read_to_string(path).with_context(|| path.display().to_string())?,
+    )?;
+    let m = j["modules"]["top"].as_object().context("no module top")?;
+    let mut cells = BTreeMap::new();
+    for (name, c) in m["cells"].as_object().context("cells")? {
+        let attrs = strs(&c["attributes"]);
+        let b = attrs
+            .get("NEXTPNR_BEL")
+            .with_context(|| format!("{name} is not placed"))?;
+        let (t, bn) = b.split_once('/').context("bel name")?;
+        let (tx, ty) = tile_xy(t)?;
+        let mut conns = HashMap::new();
+        for (p, bits) in c["connections"].as_object().context("connections")? {
+            if let Some(id) = bits
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(Value::as_u64)
+            {
+                conns.insert(p.clone(), id);
+            }
+        }
+        cells.insert(
+            name.clone(),
+            Cell {
+                ty: c["type"].as_str().unwrap_or("").to_string(),
+                bel: bel(tx, ty, bn)?,
+                params: strs(&c["parameters"]),
+                attrs,
+                conns,
+            },
+        );
+    }
+    let mut nets: BTreeMap<u64, Net> = BTreeMap::new();
+    for (name, n) in m["netnames"].as_object().context("netnames")? {
+        let Some(id) = n["bits"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(Value::as_u64)
+        else {
+            continue;
+        };
+        let net = nets.entry(id).or_default();
+        let routing = n["attributes"]["ROUTING"].as_str().unwrap_or("");
+        if net.name.is_empty() || !routing.is_empty() {
+            net.name = name.clone();
+        }
+        let parts: Vec<&str> = routing.split(';').collect();
+        for t in parts.chunks(3) {
+            let [_, pip, _] = t else { continue };
+            if pip.is_empty() {
+                continue;
+            }
+            let mut f = pip.split('/');
+            let (Some(tile), Some(dst), Some(src)) = (f.next(), f.next(), f.next()) else {
+                bail!("pip {pip}")
+            };
+            let (tx, ty) = tile_xy(tile)?;
+            net.pips.push(PipUse {
+                src: wire(dev, tx, ty, src)?,
+                dst: wire(dev, tx, ty, dst)?,
+            });
+        }
+    }
+    let mut ports = HashMap::new();
+    for (name, p) in m["ports"].as_object().context("ports")? {
+        let d = match p["direction"].as_str() {
+            Some("input") => PortDir::In,
+            Some("output") => PortDir::Out,
+            Some("inout") => PortDir::InOut,
+            d => bail!("port {name}: direction {d:?}"),
+        };
+        ports.insert(name.clone(), d);
+    }
+    Ok(Routed { cells, nets, ports })
+}
+
+/// Logical -> physical LUT input of each LE (from the permutation pips).
+pub type Perm = HashMap<(u32, u32, u32), [Option<usize>; 4]>;
+
+pub fn perms(nets: &BTreeMap<u64, Net>) -> Perm {
+    let mut out: Perm = HashMap::new();
+    for p in nets.values().flat_map(|n| &n.pips) {
+        if let (
+            Wire::Le {
+                pin: LePin::Input(ph),
+                ..
+            },
+            Wire::Le {
+                x,
+                y,
+                k,
+                pin: LePin::Logical(lg),
+            },
+        ) = (p.src, p.dst)
+        {
+            out.entry((x, y, k)).or_default()[lg] = Some(ph);
+        }
+    }
+    out
+}
+
+/// The truth table over physical inputs. Unrouted logical inputs keep their
+/// own position: the mask doesn't depend on them, except in carry LEs,
+/// where C is the carry in and D picks sum or carry and both stay put.
+fn physical_mask(logical: u16, perm: [Option<usize>; 4]) -> u16 {
+    let mut out = 0u16;
+    for idx_p in 0..16 {
+        let mut idx_l = 0;
+        for (q, p) in perm.iter().enumerate() {
+            idx_l |= (idx_p >> p.unwrap_or(q) & 1) << q;
+        }
+        out |= (logical >> idx_l & 1) << idx_p;
+    }
+    out
+}
+
+pub fn flag(c: &Cell, p: &str) -> bool {
+    c.params.get(p).is_some_and(|v| v.contains('1'))
+}
+
+pub fn lut_mask(c: &Cell) -> Result<u16> {
+    let s = c.params.get("LUT_MASK").context("LUT_MASK")?;
+    Ok(u16::from_str_radix(s, 2)?)
+}
+
+/// What a packed CY2_M4K cell (nextpnr/cyclone2 `pack_m4k`: physical pin
+/// names, MODE, WIDTH, INIT) configures, before routing.
+pub struct M4kShape {
+    /// Simple dual port (port A writes, port B reads), else single port.
+    pub dual: bool,
+    pub width: Width,
+    /// Data bits the design uses: the physical width, less the top P/9
+    /// columns of a x9/x18/x36 port when no data pin there is connected. That
+    /// is the atom width Quartus is given (x8, x16, x32 are physically x9,
+    /// x18, x36 with bit k in column k, VQM experiment q1).
+    pub bits: u32,
+    pub writes: bool,
+    pub content: Content,
+}
+
+impl M4kShape {
+    pub fn of(c: &Cell) -> Result<M4kShape> {
+        let p = |k: &str| c.params.get(k).with_context(|| format!("M4K without {k}"));
+        let dual = match p("MODE")?.trim() {
+            "SINGLE" => false,
+            "SIMPLE_DUAL" => true,
+            m => bail!("M4K mode {m}"),
+        };
+        let w = u32::from_str_radix(p("WIDTH")?.trim(), 2)?;
+        let width = match w {
+            1 => Width::X1,
+            2 => Width::X2,
+            4 => Width::X4,
+            9 => Width::X9,
+            18 => Width::X18,
+            36 => Width::X36,
+            _ => bail!("M4K width {w}"),
+        };
+        let used = |col: u32| {
+            c.conns.contains_key(&format!("DI{col}")) || c.conns.contains_key(&format!("DO{col}"))
+        };
+        let bits = if w >= 9 && (w - w / 9..w).all(|col| !used(col)) {
+            w - w / 9
+        } else {
+            w
+        };
+        // INIT: MSB first, bit l = linear position l (libmap's layout, which
+        // skips every ninth position for x1/x2/x4 as the block does). Bits
+        // the ports can't see stay 0, as in Quartus' contents.
+        let init = p("INIT")?.trim().as_bytes();
+        ensure!(init.len() == m4k::BITS, "M4K INIT has {} bits", init.len());
+        let mut content = Content::default();
+        for l in 0..m4k::BITS {
+            let seen = if w < 9 {
+                l % 9 != 8
+            } else {
+                (width.column(l) as u32) < bits
+            };
+            if init[init.len() - 1 - l] == b'1' && seen {
+                content.set_linear(l);
+            }
+        }
+        Ok(M4kShape {
+            dual,
+            width,
+            bits,
+            writes: c.conns.contains_key("WE"),
+            content,
+        })
+    }
+
+    pub fn mode(&self) -> Mode {
+        let port = ReadPort {
+            width: self.width,
+            out_reg: None,
+        };
+        if self.dual {
+            Mode::SimpleDual {
+                write: self.writes.then_some(self.width),
+                read: port,
+                read_clock: Sel::Zero,
+            }
+        } else {
+            Mode::Single { a: port }
+        }
+    }
+}
+
+/// Package pin at an I/O bel.
+pub fn pin_at(io: &IoDb, x: u32, y: u32, z: u32) -> Result<&super::io::Pin> {
+    let clock = z >= 8;
+    io.pins
+        .values()
+        .find(|p| {
+            (p.xyz.0 as u32, p.xyz.1 as u32, p.xyz.2 as u32) == (x, y, z % 8)
+                && clock == [BLOCK_CLK_P, BLOCK_CLK_N].contains(&p.ioe.block)
+        })
+        .with_context(|| format!("no pin at X{x} Y{y} IOE{z}"))
+}
+
+fn le_at(les: &mut BTreeMap<(u32, u32, u32), LeConfig>, x: u32, y: u32, k: u32) -> &mut LeConfig {
+    les.entry((x, y, k)).or_insert_with(|| LeConfig {
+        x,
+        y,
+        le: k,
+        lut: None,
+        inputs: [None; 4],
+        carry_in: false,
+        reg_feedback: false,
+        reg: None,
+        comb_out: [false; 3],
+    })
+}
+
+impl Routed {
+    /// Direction of the top-level port a pin buffer's `PORT` (`name` or
+    /// `name[i]`) belongs to.
+    pub fn port_dir(&self, port: &str) -> Result<PortDir> {
+        let (b, _) = split_port(port);
+        self.ports
+            .get(port)
+            .or_else(|| self.ports.get(b))
+            .copied()
+            .with_context(|| format!("no top-level port {port}"))
+    }
+
+    pub fn to_phys(&self, dev: &Device, io: &IoDb) -> Result<PhysDesign> {
+        let mut les: BTreeMap<(u32, u32, u32), LeConfig> = BTreeMap::new();
+        let mut clk_buf: HashMap<(u32, u32, u32), u8> = HashMap::new();
+        let mut ena: HashMap<(u32, u32, u32), u8> = HashMap::new();
+        let mut aclr: HashMap<(u32, u32, u32), Aclr> = HashMap::new();
+        let mut sclr: HashMap<(u32, u32, u32), u8> = HashMap::new();
+        let mut pia: HashMap<(u32, u32, u32), LeSource> = HashMap::new();
+        let mut clk_in: HashMap<u32, u8> = HashMap::new();
+        let mut data_line: HashMap<(u32, u32, u32), u32> = HashMap::new();
+        let mut oe_line: HashMap<(u32, u32, u32), u32> = HashMap::new();
+        let mut datain: HashMap<(u32, u32, u32), [bool; 2]> = HashMap::new();
+        let mut ram_in: HashMap<(u32, u32), BTreeMap<m4k::Input, u8>> = HashMap::new();
+        let mut ram_pia: HashMap<(u32, u32), [Option<u8>; 8]> = HashMap::new();
+        let mut ram_ctl: HashMap<(u32, u32, u8), CtlSrc> = HashMap::new();
+        let mut hard_in: HashMap<HardInput, hard::Line> = HashMap::new();
+        let mut nets = Vec::new();
+        for n in self.nets.values() {
+            let mut pips = Vec::new();
+            for p in &n.pips {
+                match (p.src, p.dst) {
+                    (Wire::Node(s), Wire::Node(d)) => pips.push(
+                        Pip::new(dev, s, d)
+                            .with_context(|| format!("{}: no edge {s:?} -> {d:?}", n.name))?,
+                    ),
+                    (
+                        Wire::Le {
+                            pin: LePin::Input(_),
+                            ..
+                        },
+                        Wire::Le {
+                            pin: LePin::Logical(_),
+                            ..
+                        },
+                    ) => {}
+                    // M4K inputs and control inputs: a LAB line of the block
+                    // through its source mux; control pins: a control input
+                    // or a row clock through their fast mux.
+                    (
+                        Wire::Node(s),
+                        Wire::M4k {
+                            x,
+                            y,
+                            pin: pin @ (M4kPin::In(_) | M4kPin::Ctl(_)),
+                        },
+                    ) => {
+                        let t = &dev.routing.templates
+                            [dev.routing.elements[s.0 as usize].template as usize];
+                        ensure!(
+                            t.element_enum == 276,
+                            "{}: M4K input from {}",
+                            n.name,
+                            element_name(t.element_enum)
+                        );
+                        let line = t.index as u8;
+                        match pin {
+                            M4kPin::In(i) => {
+                                ram_in.entry((x, y)).or_default().insert(i, line);
+                            }
+                            M4kPin::Ctl(k) => {
+                                ram_pia.entry((x, y)).or_default()[k as usize] = Some(line)
+                            }
+                            M4kPin::Fast(_) => unreachable!(),
+                        }
+                    }
+                    (Wire::Node(s), Wire::Hard(h)) => {
+                        let t = &dev.routing.templates
+                            [dev.routing.elements[s.0 as usize].template as usize];
+                        ensure!(
+                            t.element_enum == 276,
+                            "{}: {h:?} from {}",
+                            n.name,
+                            element_name(t.element_enum)
+                        );
+                        hard_in.insert(h, hard::Line::new(t.index as u32)?);
+                    }
+                    (
+                        Wire::M4k {
+                            pin: M4kPin::Ctl(k),
+                            ..
+                        },
+                        Wire::M4k {
+                            x,
+                            y,
+                            pin: M4kPin::Fast(f),
+                        },
+                    ) => {
+                        ram_ctl.insert((x, y, f), CtlSrc::Control(k));
+                    }
+                    (
+                        Wire::Node(s),
+                        Wire::M4k {
+                            x,
+                            y,
+                            pin: M4kPin::Fast(f),
+                        },
+                    ) => {
+                        let t = &dev.routing.templates
+                            [dev.routing.elements[s.0 as usize].template as usize];
+                        ensure!(
+                            t.element_enum == 560,
+                            "{}: M4K control from {}",
+                            n.name,
+                            element_name(t.element_enum)
+                        );
+                        ram_ctl.insert((x, y, f), CtlSrc::Global(t.index as u8));
+                    }
+                    (
+                        src,
+                        dst @ (Wire::Le {
+                            pin: LePin::Input(_),
+                            ..
+                        }
+                        | Wire::Ctrl { .. }),
+                    ) => {
+                        let s = match src {
+                            Wire::Node(s) => {
+                                let t = &dev.routing.templates
+                                    [dev.routing.elements[s.0 as usize].template as usize];
+                                ensure!(
+                                    t.element_enum == 276,
+                                    "{}: LE input from {}",
+                                    n.name,
+                                    element_name(t.element_enum)
+                                );
+                                LeSource::Line(t.index as u8)
+                            }
+                            Wire::LocalLine { k: j, .. } => LeSource::Feedback(j as u8),
+                            w => bail!("{}: LE input from {w:?}", n.name),
+                        };
+                        match dst {
+                            Wire::Le {
+                                x,
+                                y,
+                                k,
+                                pin: LePin::Input(i),
+                            } => le_at(&mut les, x, y, k).inputs[i] = Some(s),
+                            Wire::Ctrl { x, y, k } => {
+                                pia.insert((x, y, k), s);
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    (Wire::Ctrl { k: line, .. }, Wire::Le { x, y, k, pin }) => {
+                        let line = line as u8;
+                        match pin {
+                            LePin::Ena => ena.insert((x, y, k), line),
+                            LePin::Sclr => sclr.insert((x, y, k), line),
+                            LePin::Aclr => aclr.insert((x, y, k), Aclr::Pia(line)).map(|_| 0),
+                            p => bail!("{}: control line into LE pin {p:?}", n.name),
+                        };
+                    }
+                    (
+                        Wire::Node(s),
+                        Wire::Le {
+                            x,
+                            y,
+                            k,
+                            pin: LePin::Aclr,
+                        },
+                    ) => {
+                        let t = &dev.routing.templates
+                            [dev.routing.elements[s.0 as usize].template as usize];
+                        aclr.insert((x, y, k), Aclr::Global(t.index as u8));
+                    }
+                    (Wire::Le { x, y, k, pin }, dst) if matches!(pin, LePin::Comb | LePin::Q) => {
+                        let o = match dst {
+                            Wire::Node(d) => {
+                                let t = &dev.routing.templates
+                                    [dev.routing.elements[d.0 as usize].template as usize];
+                                ensure!(
+                                    t.element_enum == 45,
+                                    "{}: LE output into {}",
+                                    n.name,
+                                    element_name(t.element_enum)
+                                );
+                                t.index as u32 - 2 * k
+                            }
+                            Wire::LocalLine { .. } => 2,
+                            w => bail!("{}: LE output into {w:?}", n.name),
+                        };
+                        le_at(&mut les, x, y, k).comb_out[o as usize] = pin == LePin::Comb;
+                    }
+                    (
+                        Wire::Node(s),
+                        Wire::Le {
+                            x,
+                            y,
+                            k,
+                            pin: LePin::Clk,
+                        },
+                    ) => {
+                        let t = &dev.routing.templates
+                            [dev.routing.elements[s.0 as usize].template as usize];
+                        clk_buf.insert((x, y, k), t.index as u8);
+                    }
+                    (Wire::Node(s), Wire::ClkIn { g }) => {
+                        let t = &dev.routing.templates
+                            [dev.routing.elements[s.0 as usize].template as usize];
+                        clk_in.insert(g, t.index as u8);
+                    }
+                    (
+                        Wire::Node(s),
+                        Wire::Ioe {
+                            x,
+                            y,
+                            z,
+                            pin: pin @ (IoePin::DataOut | IoePin::Oe),
+                        },
+                    ) => {
+                        let t = &dev.routing.templates
+                            [dev.routing.elements[s.0 as usize].template as usize];
+                        ensure!(
+                            t.element_enum == 276,
+                            "{}: pin {pin:?} from {}",
+                            n.name,
+                            element_name(t.element_enum)
+                        );
+                        let m = if pin == IoePin::Oe {
+                            &mut oe_line
+                        } else {
+                            &mut data_line
+                        };
+                        m.insert((x, y, z), t.index as u32);
+                    }
+                    (
+                        Wire::Ioe {
+                            x,
+                            y,
+                            z,
+                            pin: IoePin::CombOut,
+                        },
+                        Wire::Node(d),
+                    ) => {
+                        let t = &dev.routing.templates
+                            [dev.routing.elements[d.0 as usize].template as usize];
+                        if t.element_enum == 301 {
+                            datain.entry((x, y, z)).or_default()[t.index as usize] = true;
+                        }
+                    }
+                    (s, d) => bail!("{}: unexpected pip {s:?} -> {d:?}", n.name),
+                }
+            }
+            nets.push(RoutedNet {
+                name: n.name.clone(),
+                pips,
+            });
+        }
+
+        let perm = perms(&self.nets);
+        let mut clkctrls = Vec::new();
+        let mut pins = Vec::new();
+        let mut m4ks = Vec::new();
+        let mut hard = Hard::default();
+        let mut ff_domain: HashMap<(u32, u32, u32), Domain> = HashMap::new();
+        let sdata: std::collections::HashSet<(u32, u32, u32)> = self
+            .cells
+            .values()
+            .filter_map(|c| match c.bel {
+                Bel::Ff { x, y, k } if c.conns.contains_key("SDATA") => Some((x, y, k)),
+                _ => None,
+            })
+            .collect();
+        let sclr_inv: std::collections::HashSet<(u32, u32, u32)> = self
+            .cells
+            .values()
+            .filter_map(|c| match c.bel {
+                Bel::Ff { x, y, k } if flag(c, "SCLR_INV") => Some((x, y, k)),
+                _ => None,
+            })
+            .collect();
+        for (name, c) in &self.cells {
+            match (c.ty.as_str(), c.bel) {
+                ("LCELL_COMB", Bel::Lut { x, y, k }) => {
+                    let l = le_at(&mut les, x, y, k);
+                    l.lut = Some(Lut {
+                        mask: physical_mask(
+                            lut_mask(c)?,
+                            perm.get(&(x, y, k)).copied().unwrap_or_default(),
+                        ),
+                    });
+                    l.carry_in = c.conns.contains_key("CIN");
+                }
+                ("LCELL_FF", Bel::Ff { x, y, k }) => {
+                    let b = *clk_buf
+                        .get(&(x, y, k))
+                        .with_context(|| format!("{name}: clock not routed"))?;
+                    let e = ena.get(&(x, y, k)).map(|&line| Ctl {
+                        line,
+                        inverted: flag(c, "ENA_INV"),
+                    });
+                    ff_domain.insert((x, y, k), (b, false, e));
+                }
+                ("CY2_M4K", Bel::M4k { x, y }) => {
+                    let shape = M4kShape::of(c).with_context(|| name.clone())?;
+                    let ctl = |pin: &str| -> Option<CtlSrc> {
+                        let f = m4k::CONTROL_PINS.iter().position(|p| p.0 == pin)? as u8;
+                        ram_ctl.get(&(x, y, f)).copied()
+                    };
+                    for (i, (pin, _, _)) in m4k::CONTROL_PINS.iter().enumerate() {
+                        if !["CLK0", "WE"].contains(pin) && ram_ctl.contains_key(&(x, y, i as u8)) {
+                            bail!("{name}: M4K {pin} not modelled in the open flow");
+                        }
+                    }
+                    let mut controls = Controls {
+                        pia: ram_pia.get(&(x, y)).copied().unwrap_or_default(),
+                        ..Default::default()
+                    };
+                    controls.clock[0] =
+                        Some(ctl("CLK0").with_context(|| format!("{name}: clock not routed"))?);
+                    controls.write_enable = ctl("WE");
+                    ensure!(
+                        controls.write_enable.is_some() == shape.writes,
+                        "{name}: write enable not routed"
+                    );
+                    m4ks.push(M4k {
+                        x,
+                        y,
+                        mode: shape.mode(),
+                        controls,
+                        inputs: ram_in.remove(&(x, y)).unwrap_or_default(),
+                        content: shape.content,
+                    });
+                }
+                ("CY2_JTAG", Bel::Jtag) => {
+                    hard.jtag = Some(Jtag {
+                        tdouser: hard_in.get(&HardInput::Tdouser).copied(),
+                    })
+                }
+                ("CY2_ASMI", Bel::Asmi) => {
+                    let need = |h: HardInput| {
+                        hard_in
+                            .get(&h)
+                            .copied()
+                            .with_context(|| format!("{name}: {h:?} not routed"))
+                    };
+                    hard.asmi = Some(Asmi {
+                        dclk: need(HardInput::Dclk)?,
+                        sce: need(HardInput::Sce)?,
+                        sdo: need(HardInput::Sdo)?,
+                    });
+                }
+                ("CLKCTRL", Bel::ClkCtrl { g }) => {
+                    let input = *clk_in
+                        .get(&g)
+                        .with_context(|| format!("{name}: input not routed"))?;
+                    clkctrls.push(ClkCtrl {
+                        g: g as u8,
+                        input,
+                        core_line: None,
+                    });
+                }
+                ("CY2_IBUF" | "CY2_OBUF" | "CY2_IOBUF", Bel::Ioe { x, y, z }) => {
+                    let p = pin_at(io, x, y, z)?;
+                    let input = Input {
+                        comb: datain.get(&(x, y, z)).copied().unwrap_or_default(),
+                        reg: None,
+                    };
+                    let data = || -> Result<OutData> {
+                        Ok(
+                            match (c.params.get("OUT_CONST"), data_line.get(&(x, y, z))) {
+                                (Some(v), _) => OutData::Const(v.ends_with('1')),
+                                (None, Some(&line)) => OutData::Line {
+                                    line,
+                                    inverted: flag(c, "DATA_INVERT"),
+                                    reg: None,
+                                },
+                                _ => bail!("{name}: output data neither routed nor constant"),
+                            },
+                        )
+                    };
+                    let output = || -> Result<Output> {
+                        let enable = match (
+                            c.ty.as_str(),
+                            c.params.get("OE_CONST"),
+                            oe_line.get(&(x, y, z)),
+                        ) {
+                            ("CY2_OBUF", _, _) => OutputEnable::Always,
+                            (_, Some(v), _) if v.ends_with('1') => OutputEnable::Always,
+                            // Never driven: what Quartus makes of such an
+                            // inout, an open drain releasing the pad.
+                            (_, Some(_), _) => {
+                                return Ok(Output {
+                                    drive: None,
+                                    data: OutData::Const(true),
+                                    enable: OutputEnable::OpenDrain,
+                                })
+                            }
+                            (_, None, Some(&line)) => OutputEnable::Line {
+                                line,
+                                inverted: flag(c, "OE_INVERT"),
+                                reg: None,
+                            },
+                            (_, None, None) => {
+                                bail!("{name}: output enable neither routed nor constant")
+                            }
+                        };
+                        Ok(Output {
+                            drive: None,
+                            data: data()?,
+                            enable,
+                        })
+                    };
+                    // As in Quartus, the port's direction decides: an
+                    // `output` keeps its input buffer off, every bit of an
+                    // `inout` is a bidir (whether or not the core reads it).
+                    let port = c
+                        .attrs
+                        .get("PORT")
+                        .with_context(|| format!("{name}: no PORT"))?;
+                    let dir = match (c.ty.as_str(), self.port_dir(port)?) {
+                        ("CY2_IBUF", PortDir::In) => Dir::In(input),
+                        ("CY2_OBUF" | "CY2_IOBUF", PortDir::Out) => Dir::Out(output()?),
+                        ("CY2_OBUF" | "CY2_IOBUF", PortDir::InOut) => Dir::Bidir(input, output()?),
+                        (t, d) => bail!("{name}: {t} on an {d:?} port"),
+                    };
+                    pins.push(PinUse {
+                        pin: p.name.clone(),
+                        port: port.clone(),
+                        standard: Standard::Lvttl33,
+                        pull_up: false,
+                        bus_hold: false,
+                        dir,
+                    });
+                }
+                (t, b) => bail!("{name}: cell type {t} on {b:?}"),
+            }
+        }
+        let mut labs: BTreeMap<(u32, u32), LabConfig> = BTreeMap::new();
+        let mut by_lab: BTreeMap<(u32, u32), Vec<Domain>> = BTreeMap::new();
+        for (&(x, y, _), d) in &ff_domain {
+            by_lab.entry((x, y)).or_default().push(*d);
+        }
+        for (&xy, v) in &by_lab {
+            let slots = clock_slots(v).with_context(|| format!("LAB {xy:?}"))?;
+            let lab = labs.entry(xy).or_default();
+            for (j, d) in slots.iter().enumerate() {
+                if let Some(d) = d {
+                    lab.clocks[j] = Some(GlobalClock {
+                        buf: d.0,
+                        inverted: d.1,
+                    });
+                    lab.enables[j] = d.2;
+                }
+            }
+            for (&(x, y, k), d) in ff_domain.iter().filter(|((x, y, _), _)| (*x, *y) == xy) {
+                let clock = slots.iter().position(|s| *s == Some(*d)).unwrap() as u8;
+                let a = aclr.get(&(x, y, k)).copied();
+                let sc = sclr.get(&(x, y, k)).map(|&line| Ctl {
+                    line,
+                    inverted: sclr_inv.contains(&(x, y, k)),
+                });
+                if let Some(a) = a {
+                    ensure!(lab.aclr.is_none_or(|o| o == a), "LAB {xy:?}: two clears");
+                    lab.aclr = Some(a);
+                }
+                if let Some(c) = sc {
+                    ensure!(
+                        lab.sync.sclr.is_none_or(|o| o == c),
+                        "LAB {xy:?}: two sync clears"
+                    );
+                    lab.sync.sclr = Some(c);
+                }
+                // A cleared register takes LAB clear line 0 (the model's
+                // only one).
+                // Registers on the sync load path load SDATA (input C) every
+                // cycle through the LAB's sload, tied high.
+                let sload = sdata.contains(&(x, y, k));
+                if sload {
+                    lab.sync.sload = Some(Sload::Const);
+                }
+                le_at(&mut les, x, y, k).reg = Some(Reg {
+                    clock,
+                    aclr: a.map(|_| 0),
+                    sync: sc.is_some() || sload,
+                });
+            }
+        }
+        for l in les.values() {
+            labs.entry((l.x, l.y)).or_default();
+        }
+        for (&(x, y, k), &src) in &pia {
+            labs.entry((x, y)).or_default().pia[k as usize] = Some(src);
+        }
+        Ok(PhysDesign {
+            logic: Logic {
+                les: les.into_values().collect(),
+                clkctrls,
+                labs,
+            },
+            pins,
+            unused_pins: UnusedPins::InputTriStated,
+            m4ks,
+            hard,
+            nets,
+        })
+    }
+}
+
+/// `name[3]` -> ("name", Some(3)).
+pub fn split_port(p: &str) -> (&str, Option<u32>) {
+    if let Some((b, i)) = p.strip_suffix(']').and_then(|s| s.split_once('[')) {
+        if let Ok(i) = i.parse() {
+            return (b, Some(i));
+        }
+    }
+    (p, None)
+}

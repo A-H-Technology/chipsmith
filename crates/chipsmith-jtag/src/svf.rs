@@ -443,7 +443,7 @@ mod tests {
         v.iter().rev().fold(0, |acc, &b| acc << 1 | b as u64)
     }
 
-    /// cram's sequence, with a 16-bit stand-in for the 6.8 Mbit stream and a
+    /// The Cyclone II's sequence (chipsmith-cyclone2 `bitstream::jtag`), with a 16-bit stand-in for the 6.8 Mbit stream and a
     /// 12-bit status register whose bit 9 plays CONF_DONE.
     const CONFIG: &str = "\
 ! EP2C35 JTAG configuration, written by cram

@@ -1,5 +1,6 @@
 //! JTAG: the TAP state machine, the `Cable` that clocks it, and an SVF
-//! player on top. A bitstream writer emits SVF (`cram svf`), so loading a
+//! player on top. A bitstream writer emits SVF (chipsmith-cyclone2's
+//! `bitstream::jtag`), so loading a
 //! device is "play this SVF", whatever the vendor.
 
 pub mod ftdi;

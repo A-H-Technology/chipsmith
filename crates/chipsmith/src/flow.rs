@@ -1,9 +1,9 @@
 //! HDL to bitstream to chip. The device decides the flow.
 //!
 //! Cyclone II: some stages are still external tools: GHDL (VHDL to
-//! Verilog), yosys (synthesis, except LUT mapping) and cram (bitstream,
-//! JTAG stream). LUT mapping (`chipsmith_synth::lutmap`), packing,
-//! placement and routing (`chipsmith_cyclone2`) and loading over the cable
+//! Verilog) and yosys (synthesis, except LUT mapping). LUT mapping
+//! (`chipsmith_synth::lutmap`), packing, placement, routing, the bitstream
+//! and its JTAG stream (`chipsmith_cyclone2`) and loading over the cable
 //! (`chipsmith_jtag`) are chipsmith's own.
 //!
 //! 7-series (Zynq-7010): yosys `synth_xilinx`, openXC7's nextpnr
@@ -30,6 +30,7 @@ use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 
+use chipsmith_cyclone2::bitstream;
 use chipsmith_cyclone2::persist::{self, EpcsOp, Loader};
 use chipsmith_jtag::ftdi::Ftdi;
 use chipsmith_jtag::usb_blaster::UsbBlaster;
@@ -157,6 +158,13 @@ pub enum Step {
         pins: BTreeMap<String, String>,
         clock: Option<Frequency>,
     },
+    /// Assemble a routed design (nextpnr JSON) into an RBF, in process
+    /// (`chipsmith_cyclone2::bitstream`).
+    Bitstream { routed: PathBuf, rbf: PathBuf },
+    /// Write the JTAG configuration of an RBF as an SVF, in process. A raw
+    /// RBF shifted over JTAG configures a Cyclone II that never starts up;
+    /// the SVF has the JTAG framing and checks CONF_DONE.
+    Svf { rbf: PathBuf, svf: PathBuf },
     /// Report each clock's achieved frequency from nextpnr's `--report`;
     /// fails if one misses its constraint.
     NextpnrTiming(PathBuf),
@@ -236,6 +244,8 @@ impl Step {
             Step::Lutmap { .. } => "LUT mapping",
             Step::Pack { .. } => "pack",
             Step::PlaceRoute { .. } => "place and route",
+            Step::Bitstream { .. } => "bitstream",
+            Step::Svf { .. } => "JTAG stream",
             Step::NextpnrTiming(_) => "nextpnr: timing",
             Step::Xc7Place { .. } => "place (chipsmith)",
             Step::Xc7Route { .. } => "route (chipsmith)",
@@ -457,14 +467,10 @@ pub fn plan_cyclone2(
             .collect(),
         clock: clock.map(|c| c.frequency),
     });
-    steps.push(
-        Tool::new("cram: bitstream", "cram")
-            // `-`: the base image comes from the device database.
-            .args(["pack", "-"])
-            .arg(layout.routed())
-            .arg(layout.bitstream())
-            .into(),
-    );
+    steps.push(Step::Bitstream {
+        routed: layout.routed(),
+        rbf: layout.bitstream(),
+    });
 
     Plan {
         dir: Some(layout.dir.clone()),
@@ -693,9 +699,9 @@ fn xdc(pins: &[PinAssignment<Clg400Pin>], clocks: &[Clock]) -> String {
 /// What `chipsmith flash` can load.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Loadable {
-    /// A Cyclone II raw bitstream; cram turns it into its JTAG sequence.
+    /// A Cyclone II raw bitstream, loaded through its JTAG sequence.
     Rbf(PathBuf),
-    /// A JTAG sequence already, from cram or any other tool.
+    /// A JTAG sequence already, from chipsmith or any other tool.
     Svf(PathBuf),
     /// A 7-series `.bit`, loaded over a Digilent FT2232 cable (the Zybo's
     /// on-board one).
@@ -783,13 +789,10 @@ pub fn plan_epcs(loader: &Loader, build_dir: &Path, op: EpcsOp) -> Plan {
     if let Loader::Build(dir) = loader {
         steps.push(Step::BuildLoader(dir.clone()));
     }
-    steps.push(
-        Tool::new("cram: serial flash loader JTAG stream", "cram")
-            .arg("svf")
-            .arg(loader.rbf())
-            .arg(&svf)
-            .into(),
-    );
+    steps.push(Step::Svf {
+        rbf: loader.rbf(),
+        svf: svf.clone(),
+    });
     steps.push(Step::Epcs { loader: svf, op });
     Plan {
         dir: Some(build_dir.to_path_buf()),
@@ -818,14 +821,10 @@ pub fn plan_flash(flash: &Flash, loader: &Loader, build_dir: &Path) -> Plan {
         Loadable::Rbf(rbf) => {
             let svf = rbf.with_extension("svf");
             vec![
-                // A raw .rbf shifted over JTAG configures a Cyclone II that
-                // never starts up; cram writes the JTAG sequence and checks
-                // CONF_DONE.
-                Tool::new("cram: JTAG stream", "cram")
-                    .arg("svf")
-                    .arg(rbf)
-                    .arg(&svf)
-                    .into(),
+                Step::Svf {
+                    rbf: rbf.clone(),
+                    svf: svf.clone(),
+                },
                 Step::PlaySvf(svf),
             ]
         }
@@ -889,6 +888,8 @@ impl Plan {
                     pins,
                     clock,
                 } => place_route(packed, placed, routed, pins, *clock)?,
+                Step::Bitstream { routed, rbf } => bitstream(routed, rbf)?,
+                Step::Svf { rbf, svf } => bitstream::svf_file(rbf, svf)?,
                 Step::NextpnrTiming(report) => nextpnr_timing(report)?,
                 Step::Xc7Place { packed, placement } => xc7_place(packed, placement)?,
                 Step::Xc7Route {
@@ -997,6 +998,27 @@ fn place_route(
             if slack < 0.0 { "; FAILS timing" } else { "" }
         );
     }
+    Ok(())
+}
+
+fn bitstream(routed: &Path, rbf: &Path) -> Result<()> {
+    let started = Instant::now();
+    let db = bitstream::load_db()?;
+    eprintln!(
+        "    device database in {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
+    let started = Instant::now();
+    let s = bitstream::pack_file(&db, routed, rbf)?;
+    eprintln!(
+        "    {} LEs, {} pins, {} nets: model bits {:?} + {} replicated-frame I/O bits in {:.1} s",
+        s.les,
+        s.pins,
+        s.nets,
+        s.bits,
+        s.rep_bits,
+        started.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 
@@ -1358,7 +1380,7 @@ mod tests {
                 "yosys: LUTs to Cyclone II cells",
                 "pack",
                 "place and route",
-                "cram: bitstream"
+                "bitstream"
             ]
         );
         assert_eq!(
@@ -1402,8 +1424,11 @@ mod tests {
             }
         );
         assert_eq!(
-            tool(&plan.steps[5]).args.last().unwrap(),
-            "/p/build/blinky.rbf"
+            plan.steps[5],
+            Step::Bitstream {
+                routed: "/p/build/routed.json".into(),
+                rbf: "/p/build/blinky.rbf".into()
+            }
         );
     }
 
@@ -1694,17 +1719,16 @@ mod tests {
             labels(&plan),
             [
                 "build the serial flash loader",
-                "cram: serial flash loader JTAG stream",
+                "JTAG stream",
                 "EPCS: write and verify through the serial flash loader"
             ]
         );
         assert_eq!(
-            tool(&plan.steps[1]).args,
-            [
-                "svf",
-                "/p/build/flash-loader/build/loader.rbf",
-                "/p/build/flash-loader.svf"
-            ]
+            plan.steps[1],
+            Step::Svf {
+                rbf: "/p/build/flash-loader/build/loader.rbf".into(),
+                svf: "/p/build/flash-loader.svf".into()
+            }
         );
         assert_eq!(
             plan.steps[2],
