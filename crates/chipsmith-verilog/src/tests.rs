@@ -233,3 +233,22 @@ fn errors_inside_macros_report_the_use() {
     let e = error("`define BAD (1 +)\nmodule top(output y);\n  assign y = `BAD;\nendmodule");
     assert!(e.starts_with("t.v:3:14:"), "{e}");
 }
+
+#[test]
+fn constant_values_as_integers() {
+    use crate::elab::ConstVal;
+    let c = |s: &str, signed: bool| ConstVal {
+        bits: Const::parse(s).unwrap().0,
+        signed,
+        string: false,
+    };
+    assert_eq!(c("1111", true).as_i64(), Some(-1));
+    assert_eq!(c("1111", false).as_i64(), Some(15));
+    assert_eq!(c("1x11", false).as_i64(), None);
+    let wide_neg = format!("{}10", "1".repeat(68));
+    assert_eq!(c(&wide_neg, true).as_i64(), Some(-2));
+    let wide_pos = format!("1{}", "0".repeat(69));
+    assert_eq!(c(&wide_pos, false).as_i64(), None);
+    let max = format!("0{}", "1".repeat(63));
+    assert_eq!(c(&max, true).as_i64(), Some(i64::MAX));
+}

@@ -72,34 +72,26 @@ impl ConstVal {
 
     /// The value as an integer, if defined and in range.
     pub fn as_i64(&self) -> Option<i64> {
-        if self
-            .bits
-            .iter()
-            .any(|b| !matches!(b, State::Zero | State::One))
-        {
+        if self.bits.iter().any(|b| !matches!(b, State::Zero | State::One)) {
             return None;
         }
-        let neg = self.signed && self.bits.last() == Some(&State::One);
-        let significant = self
-            .bits
-            .iter()
-            .rposition(|&b| b != if neg { State::One } else { State::Zero })
-            .map_or(0, |i| i + 1);
-        if significant > 62 {
+        // Bits above 64 must repeat the sign (or be 0 if unsigned).
+        let sign = if self.signed {
+            *self.bits.last()?
+        } else {
+            State::Zero
+        };
+        if self.bits.len() > 64 && self.bits[64..].iter().any(|&b| b != sign) {
             return None;
         }
-        let mut v: i64 = 0;
-        for (i, b) in self.bits.iter().take(63).enumerate() {
-            if *b == State::One {
-                v |= 1 << i;
-            }
+        let low = self.bits.len().min(64);
+        let mut v: i128 = (0..low)
+            .filter(|&i| self.bits[i] == State::One)
+            .fold(0, |v, i| v | 1 << i);
+        if sign == State::One {
+            v -= 1i128 << low;
         }
-        if neg {
-            let w = self.bits.len().min(63);
-            v -= 1 << w;
-            // Bits above 63 were all ones: the value is already right.
-        }
-        Some(v)
+        i64::try_from(v).ok()
     }
 
     pub fn is_true(&self) -> Option<bool> {
