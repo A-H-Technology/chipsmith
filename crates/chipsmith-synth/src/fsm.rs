@@ -232,9 +232,11 @@ pub fn compare_states(m: &mut Module) -> usize {
     let by_q: FxHashMap<SigSpec, &StateRegister> = regs.iter().map(|r| (r.q.clone(), r)).collect();
     let mut g = Gates::new(m, "fsm");
     let mut subst = Subst::new(g.m);
-    let mut remove = vec![false; g.m.cells.len()];
+    let n = g.m.cells.len();
+    let mut remove = vec![false; n];
     let mut count = 0;
-    for i in 0..g.m.cells.len() {
+    #[allow(clippy::needless_range_loop)] // gates get added while it runs
+    for i in 0..n {
         let CellKind::Binary(b) = &g.m.cells[i].kind else {
             continue;
         };
