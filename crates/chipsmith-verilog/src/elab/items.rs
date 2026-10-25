@@ -90,7 +90,9 @@ pub(crate) fn elaborate_module<'a>(
             bail!(p.span, "port `{}` has no direction declared", p.name);
         }
     }
-    if let Some(unused) = m.overrides.keys().find(|k| {
+    // A library cell takes any parameters (they're passed on to the
+    // cell); only the ones it declares shape its ports.
+    if let Some(unused) = m.overrides.keys().filter(|_| !lib).find(|k| {
         !ast.items.iter().any(|i| match i {
             Item::Param(p) => p.assigns.iter().any(|(n, _)| &*n.name == k.as_str()),
             _ => false,

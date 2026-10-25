@@ -807,8 +807,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 self.vars[v].name
             ),
             Mode::Cont => bail!(span, "`{}` can't be assigned here", self.vars[v].name),
-            Mode::Initial => return Ok(()),
-            Mode::Comb | Mode::Clocked => {}
+            Mode::Initial | Mode::Comb | Mode::Clocked => {}
         }
         if !self.vars[v].variable {
             bail!(
@@ -816,6 +815,9 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 "`{}` is a net; procedural code can only assign variables (declare it `reg`)",
                 self.vars[v].name
             );
+        }
+        if env.mode == Mode::Initial {
+            return Ok(());
         }
         let (mine, other) = if blocking {
             (&mut env.blocking, &env.nonblocking)
