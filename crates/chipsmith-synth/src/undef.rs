@@ -148,7 +148,7 @@ fn exclusive_selects(m: &mut Module) {
 
 pub fn refine(m: &mut Module) -> Result<()> {
     define_inits(m);
-    exclusive_selects(m);
+    if std::env::var_os("NO_EXCL").is_none() { exclusive_selects(m); }
     techmap::lower(m, |k| {
         matches!(k, CellKind::Binary(b) if b.op == BinaryOp::Shiftx)
     })?;

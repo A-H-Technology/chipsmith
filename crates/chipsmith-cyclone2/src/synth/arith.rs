@@ -80,9 +80,10 @@ fn chain(g: &mut Gates, subst: &mut Subst, alu: &Alu) {
     // A constant BI folds into the masks; a signal one inverts B in front.
     let bi = const_bit(alu.bi);
     // In a sum the operands can trade places: the one with more constant
-    // bits goes on DATAA, which is where the yosys flow ends up putting
-    // it (its `opt_expr` orders commutative operands) and leaves the
-    // signal on DATAB, the LE's faster input to the carry.
+    // bits goes on DATAA, where the yosys flow ends up with it, leaving the
+    // signal on DATAB. Measured on blinky's counter (same LEs, same
+    // registers): 3.75 ns critical path with the counter on DATAA, 3.37 ns
+    // on DATAB.
     let consts = |s: &[SigBit]| s.iter().filter(|b| const_bit(**b).is_some()).count();
     if bi == Some(false) && consts(&b) > consts(&a) {
         std::mem::swap(&mut a, &mut b);

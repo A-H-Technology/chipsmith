@@ -243,7 +243,6 @@ fn a_wrong_lut_bit_is_caught() {
     let s = synthesize("blinky-broken", "blinky", &files);
     let mut gate = s.stages.cells.clone().unwrap();
     let m = &mut gate.modules[0];
-    // Bit 8 of the first adder LE's mask: its sum with DATAA = 0.
     let le = m
         .cells
         .iter_mut()
@@ -252,10 +251,17 @@ fn a_wrong_lut_bit_is_caught() {
     let CellKind::Other(g) = &mut le.kind else {
         unreachable!()
     };
+    // The mask entry COMBOUT reads with every signal input 0 (and the
+    // constant ones as they are): one the counter's bit 0 reaches.
+    let one = |p: &str| g.port(p).unwrap().sig[0] == chipsmith_netlist::SigBit::ONE;
+    let index = usize::from(one("DATAA"))
+        | usize::from(one("DATAB")) << 1
+        | usize::from(one("DATAC") && one("CIN")) << 2
+        | usize::from(one("DATAD")) << 3;
     let Some(ParamValue::Bits(mask)) = g.params.get_mut("LUT_MASK") else {
         panic!("LCELL_COMB without LUT_MASK")
     };
-    mask.0[8] = match mask.0[8] {
+    mask.0[index] = match mask.0[index] {
         chipsmith_netlist::State::One => chipsmith_netlist::State::Zero,
         _ => chipsmith_netlist::State::One,
     };
