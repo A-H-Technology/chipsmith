@@ -274,13 +274,23 @@ fn every_stage_is_equivalent() {
             ));
         }
     }
-    for (ex, top) in [("blinky-verilog", "blinky"), ("bidir", "top"), ("ram-leds", "top")] {
+    for (ex, top) in [
+        ("blinky-verilog", "blinky"),
+        ("bidir", "top"),
+        ("ram-leds", "top"),
+    ] {
         let files = example(ex);
         let dir = scratch(&format!("{ex}-stages"));
         let rtl = support::rtl(&dir, top, &files);
         let mut all = All::default();
         synthesize_observed(support::frontend(top, &files), &mut all).unwrap();
-        let refined = all.0.iter().find(|(n, _)| n == "refined").unwrap().1.clone();
+        let refined = all
+            .0
+            .iter()
+            .find(|(n, _)| n == "refined")
+            .unwrap()
+            .1
+            .clone();
         for (name, stage) in &all.0 {
             let d = scratch(&format!("{ex}-stage-{name}"));
             support::check(&d, &rtl, &refined, stage)

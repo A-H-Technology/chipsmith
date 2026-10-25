@@ -11,6 +11,6 @@ The reason is the proof. Resolving x is a refinement: the result does one of the
 
 ## Consequences
 
-- Exclusive selects cost logic where yosys gets them for free: on picorv32, 1,085 LUTs against 1,079 without them, same registers.
+- Exclusive selects cost logic where yosys gets them for free: on picorv32, 1,058 LUTs against 1,052 without them, same registers.
 - Each x is decided once, before optimisation; a choice that would have been cheaper in a later context is lost.
 - The power-up rule is one function (`chipsmith_synth::rewrite::define_inits`) the checker applies to the RTL too. A different rule changes which registers are provably stuck, so it changes in one place.

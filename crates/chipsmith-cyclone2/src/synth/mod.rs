@@ -105,7 +105,7 @@ fn run(m: &mut Module, obs: &mut dyn Observer) -> Result<Stats> {
     obs.stage("alumacc", m);
     let m4ks = m4k::map(m);
     obs.stage("m4k", m);
-    memory::map_to_logic(m, |_| true)?;
+    memory::map_to_logic(m)?;
     define_inits(m);
     opt::lower_bitwise(m)?;
     opt::opt_seq(m, removable)?;

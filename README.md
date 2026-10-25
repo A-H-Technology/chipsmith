@@ -368,6 +368,46 @@ share chipsmith's own netlist IR, not Verilog.
      mapper is the next gain. More cuts per node (16, 32), more recovery
      passes, or relaxing depth by a level didn't help (844 to 847). An earlier comparison (842 vs 847) had
      counted abc's 75 one-input buffer LUTs, which `opt -fast` removes.
+   - Synthesis (done, 2026-10-25, not in the flow yet):
+     `chipsmith_cyclone2::synth::synthesize` takes the front end's netlist
+     (or yosys' `proc; flatten`) to the cells `cyclone2.ys` makes, in place
+     of both yosys halves: flatten, tri-states (`chipsmith_synth::tribuf`),
+     memories collected and their read registers merged where an M4K takes
+     them, undefined values resolved once (ADR-0007), state registers
+     compared by the bits that tell their values apart (`fsm`), the `opt`
+     loop (constants and merging on gates, `$mux`/`$pmux` folding,
+     `opt_muxtree`, `opt_dff`), registers stuck at their power-up value
+     found as a fixed point (`opt::seqconst`), `wreduce`, `alumacc`, M4Ks
+     (`m4k.txt`'s rules and costs, `m4k_map.v`), the other memories to
+     registers, carry chains (`arith_map.v`), lowering to gates, the LE
+     register (`dfflegalize` to the six types, `cells_map.v`), the LUT
+     mapper on the IR (same LUTs and depth as on yosys' JSON), pin buffers
+     (`iopadmap`). Measured with chipsmith's front end, packer, placer and
+     router (`cargo run --release --example de2_synth`, `--yosys` for the
+     yosys flow as the build runs it):
+
+     | design | LUTs | registers | LEs | carry chains | M4Ks | Fmax (estimate) |
+     |---|---|---|---|---|---|---|
+     | picorv32 | 1,058 (yosys flow 1,062) | 431 (434) | 1,171 (1,175) | 8 (8) | 0 | 123.4 MHz (114.4) |
+     | ram | 151 (151) | 32 (32) | 151 (151) | 1 (1) | 7 (7) | 263.2 MHz (263.2) |
+     | ram_widths | 78 (78) | 32 (32) | 78 (78) | 1 (1) | 10 (10) | 263.2 MHz (210.0) |
+     | ram-leds | 40 (40) | 34 (34) | 42 (42) | 2 (2) | 2 (2) | 198.5 MHz (204.3) |
+     | bidir | 28 (28) | 27 (27) | 29 (29) | 1 (1) | 0 | 296.5 MHz (296.5) |
+     | blinky-verilog, blinky-vhdl | 26 (26) | 26 (26) | 26 (26) | 1 (1) | 0 | 296.5 MHz (296.5) |
+     | persist loader | 3 (3) | 0 (0) | 3 (3) | 0 | 0 | no clock |
+
+     The M4K cells (mode, width, contents, which pins are tied) are the
+     yosys flow's, cell for cell. picorv32 synthesizes in 1 s (yosys 14 s).
+     `crates/chipsmith-cyclone2/tests/synth.rs` proves every example, the
+     loader and five specimens sequentially equivalent to yosys' RTL of the
+     same Verilog, every stage on three of them, and that a flipped LUT
+     bit fails the proof. The check is chipsmith-netlist's `equiv_*`
+     script in two steps (ADR-0007): the RTL against the netlist with x
+     resolved, then that against the result, with the registers synthesis
+     made constant (989 on picorv32) and its state registers' value sets
+     first proven invariant by `sat -tempinduct`, and M4Ks compared at
+     their ports. All 174 plain-Verilog cyclone2-re specimens pass it and
+     the packer.
 5. **Own Verilog frontend**: the synthesizable subset that GHDL and HDL
    generators emit.
    - Elaboration (done, 2026-10-25, not in the flow yet): `crates/chipsmith-verilog`

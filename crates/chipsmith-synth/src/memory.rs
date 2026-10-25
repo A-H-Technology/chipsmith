@@ -551,10 +551,10 @@ fn address_register(
     })
 }
 
-/// `memory_map`: the memories `select` picks become a register per word
-/// (named `memid[i]`, as yosys names them), write logic per word and a
-/// multiplexer tree per read port.
-pub fn map_to_logic(m: &mut Module, select: impl Fn(&Mem) -> bool) -> Result<()> {
+/// `memory_map`: every memory left becomes a register per word (named
+/// `memid[i]`, as yosys names them), write logic per word and a multiplexer
+/// tree per read port.
+pub fn map_to_logic(m: &mut Module) -> Result<()> {
     let mut namer = Namer::new(m, "memmap");
     let cells = std::mem::take(&mut m.cells);
     let mut out = Vec::new();
@@ -562,7 +562,7 @@ pub fn map_to_logic(m: &mut Module, select: impl Fn(&Mem) -> bool) -> Result<()>
     let mut subst = Subst::new(m);
     for c in cells {
         match c.kind {
-            CellKind::Mem(mem) if select(&mem) => {
+            CellKind::Mem(mem) => {
                 let mut add = |kind: CellKind| {
                     out.push(Cell {
                         name: namer.fresh(),
