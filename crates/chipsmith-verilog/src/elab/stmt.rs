@@ -949,6 +949,14 @@ impl<'a, 'd> ModElab<'a, 'd> {
         if s.is_empty() {
             return SigBit::ONE;
         }
+        // A constant x or z left in the pattern (not a don't-care of
+        // casez/casex) only matches an x or z, which hardware never has:
+        // the item is dead, as yosys' proc_rmdead finds.
+        if p.iter()
+            .any(|b| matches!(b, SigBit::Const(State::X | State::Z)))
+        {
+            return SigBit::ZERO;
+        }
         if s.len() == 1 && p[0] == SigBit::ONE {
             return s[0];
         }

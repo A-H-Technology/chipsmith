@@ -463,3 +463,115 @@ endmodule
 "#,
     );
 }
+
+#[test]
+fn loops_and_named_blocks() {
+    equiv(
+        "loops",
+        r#"
+module top(input clk, input [7:0] a, input [2:0] n, output reg [7:0] r, output reg [3:0] c, output reg [7:0] s);
+  // yosys only runs while loops in constant functions.
+  function [7:0] reverse_while(input [7:0] v);
+    integer k;
+    begin
+      k = 0;
+      reverse_while = 0;
+      while (k < 8) begin
+        reverse_while[7 - k] = v[k];
+        k = k + 1;
+      end
+    end
+  endfunction
+  localparam [7:0] R = reverse_while(8'b00010111);
+  always @(a or n) begin : count
+    reg [3:0] acc;
+    integer j;
+    acc = 0;
+    for (j = 0; j < 8; j = j + 1)
+      if (a[j]) acc = acc + 1;
+    c = acc;
+  end
+  always @(posedge clk) begin
+    r <= a ^ R;
+    s <= a;
+    repeat (3) s <= {s[6:0], s[7]};
+  end
+endmodule
+"#,
+    );
+}
+
+#[test]
+fn instances_and_ports() {
+    equiv(
+        "ports",
+        r#"
+module leaf(input [3:0] a, input b, inout c, output [3:0] y, output z);
+  assign y = a ^ {4{b}};
+  assign z = c;
+  assign c = b ? a[0] : 1'bz;
+endmodule
+module pass(input [7:0] i, output [7:0] o);
+  assign o = i;
+endmodule
+module top(input [3:0] a, input b, inout c, output [3:0] y, output z, output [7:0] o1, o2, output w);
+  (* keep *) leaf l0 (.a(a), .b(b), .c(c), .y(y), .z());
+  leaf l1 (a, , c, , z);                  // positional, gaps left open
+  pass p0 (.i({a, a}), .o({o1[3:0], o1[7:4]}));
+  pass p1 (.i(8'sd5 - 1), .o(o2));
+  assign w = undeclared_net;              // implicit net, driven below
+  assign undeclared_net = b;
+endmodule
+"#,
+    );
+}
+
+#[test]
+fn odd_ranges_and_memories() {
+    equiv(
+        "ranges",
+        r#"
+module top(input clk, input we, input [4:0] wa, ra, input [7:0] d, input [0:7] u, input [3:0] k,
+           output reg [7:0] q, output [3:0] lo, hi, output [1:0] mid, output reg [7:0] g);
+  reg [7:0] m [16:31];                    // starts at 16
+  reg [0:7] n [3:0];                      // descending word index, ascending bits
+  always @(posedge clk) begin
+    if (we) m[wa] <= d;
+    if (we) n[wa[1:0]] <= u;
+    q <= m[ra];
+    g <= n[ra[1:0]];
+  end
+  assign lo = u[4:7];
+  assign hi = u[0:3];
+  assign mid = u[k +: 2];
+endmodule
+"#,
+    );
+}
+
+#[test]
+fn case_details() {
+    equiv(
+        "cases",
+        r#"
+module top(input [2:0] s, input [3:0] a, input [1:0] v, output reg [3:0] y, output reg [3:0] z, output reg w);
+  always @* begin
+    case (s)
+      3'b000, 3'b111: y = a;
+      3'b001: y = ~a;
+      3'b01x: y = 4'h5;          // x in a plain case item never matches
+      default: y = 4'hf;
+    endcase
+    // A multi-bit condition is reduced to one bit.
+    if (v) z = a; else z = 4'd0;
+    case (v)                    // every value covered: no latch
+      2'd0: w = 1'b0;
+      2'd1: w = a[0];
+      2'd2: w = a[1];
+      2'd3: w = 1'b1;
+    endcase
+  end
+endmodule
+"#,
+    );
+}

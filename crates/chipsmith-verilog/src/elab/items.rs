@@ -1297,7 +1297,8 @@ fn check_drivers(m: &Module) -> std::result::Result<(), String> {
         let is_tri = matches!(c.kind, CellKind::Tribuf(_));
         let mut bad = None;
         c.kind.for_each_port(|p| {
-            if !p.dir.is_some_and(|d| d.drives()) {
+            // An inout may be one of several drivers of a bus.
+            if p.dir != Some(Dir::Out) {
                 return;
             }
             for b in p.bits {
