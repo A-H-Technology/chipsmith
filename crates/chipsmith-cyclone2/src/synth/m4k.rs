@@ -157,6 +157,11 @@ fn pins(addr: &[SigBit], depth: usize) -> SigSpec {
     a
 }
 
+/// Whether the blocks take this memory.
+pub fn mappable(mem: &Mem) -> bool {
+    plan(mem).is_some()
+}
+
 /// Maps every memory the blocks take; returns how many blocks.
 pub fn map(m: &mut Module) -> usize {
     let mut count = 0;

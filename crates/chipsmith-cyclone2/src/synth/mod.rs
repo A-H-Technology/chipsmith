@@ -62,9 +62,12 @@ fn run(m: &mut Module, obs: &mut dyn Observer) -> Result<()> {
     let removable = cells::REMOVABLE;
     clean(m);
     tribuf::tribuf(m);
+    // Read registers go into memories before power-up values are decided:
+    // a block's address register can't hold one.
+    memory::collect(m)?;
+    memory::merge_registers(m, m4k::mappable)?;
     undef::refine(m)?;
     obs.stage("refined", m);
-    memory::collect(m)?;
     opt::lower_bitwise(m)?;
     opt::opt_seq(m, removable)?;
     obs.stage("opt", m);
@@ -74,7 +77,6 @@ fn run(m: &mut Module, obs: &mut dyn Observer) -> Result<()> {
     alumacc::alumacc(m);
     opt::opt(m, removable);
     obs.stage("alumacc", m);
-    memory::merge_registers(m)?;
     m4k::map(m);
     obs.stage("m4k", m);
     memory::map_to_logic(m, |_| true)?;

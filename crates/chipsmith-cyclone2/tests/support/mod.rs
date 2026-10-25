@@ -200,6 +200,189 @@ fn logic_memories(gate: &Module) -> Vec<String> {
     ids
 }
 
+fn top_mut(d: &mut Design) -> &mut Module {
+    d.modules
+        .iter_mut()
+        .find(|m| m.name == "top")
+        .expect("a top module")
+}
+
+/// Memories synthesis put in M4K blocks: named by its blocks,
+/// `memid.0.<block>`.
+fn block_memories(gate: &Module) -> Vec<String> {
+    let mut ids: Vec<String> = gate
+        .cells
+        .iter()
+        .filter(|c| c.kind.type_name() == "CY2_M4K")
+        .filter_map(|c| c.name.rsplit_once(".0.").map(|(id, _)| id.to_owned()))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// A port for a cut. An output gets nets of its own, through buffers:
+/// were the port to name the logic's nets, yosys could take its name for
+/// them and `equiv_make` would join them with the other side's port.
+fn add_port(m: &mut Module, name: String, dir: chipsmith_netlist::Dir, bits: Vec<SigBit>) {
+    let bits = if dir == chipsmith_netlist::Dir::Out {
+        bits.into_iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let y = SigBit::Net(m.new_net());
+                m.add_cell(
+                    format!("$cut${name}${i}"),
+                    CellKind::Gate(Gate::new(GateOp::Buf, &[b], y).unwrap()),
+                );
+                y
+            })
+            .collect()
+    } else {
+        bits
+    };
+    let mut w = Wire::new(name, bits);
+    w.port = Some(dir);
+    m.wires.push(w);
+}
+
+/// A memory's interface as both sides cut it: read data in, the rest out.
+#[derive(Debug, Clone)]
+pub struct MemShape {
+    width: usize,
+    abits: usize,
+}
+
+/// Replaces each `$mem_v2` by ports: its read data become an input
+/// `__mem_<id>_rdata`, its addresses, write data and enable outputs.
+fn cut_memories(m: &mut Module) -> Result<BTreeMap<String, MemShape>, String> {
+    use chipsmith_netlist::Dir;
+    let mut shapes = BTreeMap::new();
+    let mut ports = Vec::new();
+    let mut masked = Vec::new();
+    let mut subst = chipsmith_synth::rewrite::Subst::new(m);
+    let mut keep = Vec::new();
+    for c in std::mem::take(&mut m.cells) {
+        let CellKind::Mem(mem) = &c.kind else {
+            keep.push(c);
+            continue;
+        };
+        let id = mem.memid.trim_start_matches('\\').to_owned();
+        let [rd] = &mem.rd[..] else {
+            return Err(format!("memory {id}: not one read port"));
+        };
+        let abits = (usize::BITS - mem.size.saturating_sub(1).leading_zeros()) as usize;
+        let rdata = (0..mem.width).map(|_| SigBit::Net(m.new_net())).collect::<Vec<_>>();
+        for (q, n) in rd.data.iter().zip(&rdata) {
+            if let (SigBit::Net(q), n) = (q, n) {
+                subst.set(*q, *n);
+            }
+        }
+        ports.push((format!("__mem_{id}_rdata"), Dir::In, rdata));
+        ports.push((format!("__mem_{id}_raddr"), Dir::Out, rd.addr[..abits].to_vec()));
+        if let Some(w) = mem.wr.first() {
+            // What is written only matters where it is written: masked by
+            // the enable, so x in what isn't written can't differ.
+            let en: Vec<SigBit> = w.en.clone();
+            let addr = w.addr[..abits].to_vec();
+            let data = w.data.clone();
+            masked.push((format!("__mem_{id}_waddr"), addr, vec![en[0]; abits]));
+            masked.push((format!("__mem_{id}_wdata"), data, en.clone()));
+            ports.push((format!("__mem_{id}_we"), Dir::Out, vec![en[0]]));
+        }
+        shapes.insert(id, MemShape { width: mem.width, abits });
+    }
+    m.cells = keep;
+    for (name, dir, bits) in ports {
+        add_port(m, name, dir, bits);
+    }
+    for (name, bits, en) in masked {
+        let bits = mask(m, &name, &bits, &en);
+        add_port(m, name, Dir::Out, bits);
+    }
+    subst.apply(m);
+    Ok(shapes)
+}
+
+/// `bits & en`, bit by bit.
+fn mask(m: &mut Module, name: &str, bits: &[SigBit], en: &[SigBit]) -> Vec<SigBit> {
+    bits.iter()
+        .zip(en)
+        .enumerate()
+        .map(|(i, (&b, &e))| {
+            let y = SigBit::Net(m.new_net());
+            m.add_cell(
+                format!("$cut${name}$en${i}"),
+                CellKind::Gate(Gate::new(GateOp::And, &[b, e], y).unwrap()),
+            );
+            y
+        })
+        .collect()
+}
+
+/// The blocks' side of [`cut_memories`].
+fn cut_blocks(m: &mut Module, shapes: &BTreeMap<String, MemShape>) -> Result<(), String> {
+    use chipsmith_netlist::Dir;
+    let mut blocks: BTreeMap<String, Vec<(usize, chipsmith_netlist::Generic)>> = BTreeMap::new();
+    m.cells.retain(|c| {
+        if let (CellKind::Other(g), Some((id, b))) = (&c.kind, c.name.rsplit_once(".0.")) {
+            if g.ty == "CY2_M4K" {
+                blocks
+                    .entry(id.to_owned())
+                    .or_default()
+                    .push((b.parse().unwrap_or(0), g.clone()));
+                return false;
+            }
+        }
+        true
+    });
+    let mut subst = chipsmith_synth::rewrite::Subst::new(m);
+    for (id, mut bs) in blocks {
+        bs.sort_by_key(|b| b.0);
+        let shape = shapes
+            .get(&id)
+            .ok_or_else(|| format!("M4K for {id}, which isn't a memory"))?;
+        let port = |g: &chipsmith_netlist::Generic, p: &str| g.port(p).unwrap().sig.clone();
+        let g0 = &bs[0].1;
+        let width = g0.params["WIDTH"].bits().and_then(|c| c.as_u64()).unwrap() as usize;
+        let single = g0.params["MODE"].str() == Some("SINGLE");
+        let top = |a: Vec<SigBit>| a[12 - shape.abits..].to_vec();
+        let rdata: Vec<SigBit> = (0..shape.width).map(|_| SigBit::Net(m.new_net())).collect();
+        let mut wdata = Vec::new();
+        for (b, g) in &bs {
+            let dout = port(g, "DATAOUT");
+            let din = port(g, "A_DATAIN");
+            for k in 0..width {
+                let col = b * width + k;
+                if col < shape.width {
+                    if let SigBit::Net(n) = dout[k] {
+                        subst.set(n, rdata[col]);
+                    }
+                    wdata.push(din[k]);
+                }
+            }
+        }
+        let we = port(g0, "A_WE")[0];
+        let (raddr, waddr) = if single {
+            (top(port(g0, "A_ADDR")), top(port(g0, "A_ADDR")))
+        } else {
+            (top(port(g0, "B_ADDR")), top(port(g0, "A_ADDR")))
+        };
+        add_port(m, format!("__mem_{id}_rdata"), Dir::In, rdata);
+        add_port(m, format!("__mem_{id}_raddr"), Dir::Out, raddr);
+        if we != SigBit::ZERO {
+            let n = format!("__mem_{id}_waddr");
+            let waddr = mask(m, &n, &waddr, &vec![we; waddr.len()]);
+            add_port(m, n, Dir::Out, waddr);
+            let n = format!("__mem_{id}_wdata");
+            let wdata = mask(m, &n, &wdata, &vec![we; wdata.len()]);
+            add_port(m, n, Dir::Out, wdata);
+            add_port(m, format!("__mem_{id}_we"), Dir::Out, vec![we]);
+        }
+    }
+    subst.apply(m);
+    Ok(())
+}
+
 /// yosys proves `gate` equivalent to `gold` (both JSON files, the
 /// memories already as they should be compared), with x in `gold` read as
 /// "any value". Returns how many `$equiv` it proved.
@@ -244,18 +427,38 @@ fn equiv(dir: &Path, name: &str, gold: &Path, gate: &Path) -> Result<usize, Stri
 /// `design` with its memories collected, the ones in `to_logic` made into
 /// registers yosys' way (which names the words as synthesis does), and
 /// every register given a power-up value by synthesis' rule.
-fn prep_memories(dir: &Path, name: &str, design: &Path, to_logic: &[String]) -> Result<Design, String> {
+fn prep_memories(
+    dir: &Path,
+    name: &str,
+    design: &Path,
+    to_logic: &[String],
+    in_blocks: &[String],
+) -> Result<Design, String> {
     let mut map = String::new();
+    // A memory in M4Ks reads synchronously: its read registers merged in
+    // as yosys does (`memory_dff`), so its ports line up with the blocks'.
+    for id in in_blocks {
+        map += &format!("memory_dff m:{id} t:$memrd* r:MEMID=\\{id} %i %u t:*dff* %u\n");
+    }
+    map += "memory_collect\n";
     for id in to_logic {
         map += &format!("memory_map t:$mem_v2 r:MEMID=\\{id} %i\n");
     }
+    // Power-up values first, as synthesis decides them before anything
+    // else: merged read registers carry theirs into the memory.
+    let mut d = read(design);
+    for m in &mut d.modules {
+        chipsmith_synth::rewrite::define_inits(m);
+    }
+    let with_inits = dir.join(format!("{name}_in.json"));
+    write(&d, &with_inits);
     let out = dir.join(format!("{name}.json"));
     yosys(
         dir,
         name,
         &format!(
-            "read_json {}\nhierarchy -top top\nproc\nflatten\nmemory_collect\n{map}opt_clean\nwrite_json {}\n",
-            design.display(),
+            "read_json {}\nhierarchy -top top\nproc\nflatten\n{map}opt_clean\nwrite_json {}\n",
+            with_inits.display(),
             out.display()
         ),
         dir,
@@ -282,14 +485,31 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
     let gate_path = dir.join("gate.json");
     write(gate, &gate_path);
 
-    let gold = prep_memories(dir, "gold_prep", rtl, &to_logic)?;
+    // Memories in blocks are compared at their ports (cut out on both
+    // sides): their contents and configuration are checked against the
+    // yosys flow's cells instead.
+    let in_blocks = block_memories(gate_mod);
+    let mut gold = prep_memories(dir, "gold_prep", rtl, &to_logic, &[])?;
+    let mut early = prep_memories(dir, "refined_prep", &refined_path, &to_logic, &[])?;
+    if !in_blocks.is_empty() {
+        cut_memories(top_mut(&mut gold))?;
+        cut_memories(top_mut(&mut early))?;
+    }
     let gold_path = dir.join("gold.json");
     write(&gold, &gold_path);
-    let mut mid = prep_memories(dir, "refined_prep", &refined_path, &to_logic)?;
-    let mid_path = dir.join("mid.json");
-    write(&mid, &mid_path);
-    let first = equiv(dir, "equiv_refine", &gold_path, &mid_path)?;
+    let early_path = dir.join("early.json");
+    write(&early, &early_path);
+    let first = equiv(dir, "equiv_refine", &gold_path, &early_path)?;
 
+    // Against the blocks, which read synchronously, the memories with
+    // their read registers merged in, as yosys' `memory_dff` does.
+    let mut mid = prep_memories(dir, "mid_prep", &refined_path, &to_logic, &in_blocks)?;
+    let mut cut_gate = gate.clone();
+    if !in_blocks.is_empty() {
+        let shapes = cut_memories(top_mut(&mut mid))?;
+        let gt = cut_gate.modules.iter_mut().find(|m| !m.is_blackbox()).expect("top");
+        cut_blocks(gt, &shapes)?;
+    }
     let gm = mid.modules.iter_mut().find(|m| m.name == "top").expect("top");
     // Claims: a gate wire bit that is constant where `refined` has a
     // register.
@@ -408,9 +628,11 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
         let consts: HashMap<Net, bool> = claims.iter().map(|(n, v)| (*n, *v)).collect();
         chipsmith_synth::opt::seqconst::apply(gm, &consts);
     }
+    let cut_gate_path = dir.join("gate_cut.json");
+    write(&cut_gate, &cut_gate_path);
     let sub_path = dir.join("mid_constants.json");
     write(&mid, &sub_path);
-    let second = equiv(dir, "equiv_synth", &sub_path, &gate_path)?;
+    let second = equiv(dir, "equiv_synth", &sub_path, &cut_gate_path)?;
     Ok(Proof {
         constant_registers: claims.len(),
         equivalences: first + second,

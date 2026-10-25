@@ -342,7 +342,11 @@ pub(crate) fn drop_bits(ff: &mut Ff<Word>, drop: &[bool]) {
 /// the read happens at the edge, before any write on it, so it returns the
 /// old data. Failing that, a register on its whole address does: then the
 /// read sees writes on the same edge (new data).
-pub fn merge_registers(m: &mut Module) -> Result<()> {
+///
+/// Only where `accept` takes the memory with its registers merged: a
+/// memory that will be registers and multiplexers anyway is better off
+/// keeping its registers where they are.
+pub fn merge_registers(m: &mut Module, accept: impl Fn(&Mem) -> bool) -> Result<()> {
     let init = inits(m);
     let readers = readers(m);
     let mut ff_drop: HashMap<usize, Vec<bool>> = HashMap::new();
@@ -362,17 +366,27 @@ pub fn merge_registers(m: &mut Module) -> Result<()> {
         let CellKind::Mem(mem) = &c.kind else {
             continue;
         };
+        let mut candidate = mem.clone();
+        let mut drops = ff_drop.clone();
+        let mut ports = Vec::new();
         for (pi, rd) in mem.rd.iter().enumerate() {
             if rd.sync.is_some() {
                 continue;
             }
-            if let Some(port) = output_register(m, &readers, &init, mem, rd, &mut ff_drop) {
-                updates.push((ci, pi, port));
+            if let Some(port) = output_register(m, &readers, &init, mem, rd, &mut drops) {
+                ports.push((pi, port));
                 continue;
             }
-            if let Some(port) = address_register(m, &q_of, mem, rd) {
-                updates.push((ci, pi, port));
+            if let Some(port) = address_register(m, &q_of, &init, mem, rd) {
+                ports.push((pi, port));
             }
+        }
+        for (pi, port) in &ports {
+            candidate.rd[*pi] = port.clone();
+        }
+        if !ports.is_empty() && accept(&candidate) {
+            updates.extend(ports.into_iter().map(|(pi, p)| (ci, pi, p)));
+            ff_drop = drops;
         }
     }
     for (ci, pi, port) in updates {
@@ -466,9 +480,14 @@ fn output_register(
 fn address_register(
     m: &Module,
     q_of: &[Option<(usize, usize)>],
+    init: &rustc_hash::FxHashMap<Net, State>,
     mem: &Mem,
     rd: &MemRd,
 ) -> Option<MemRd> {
+    // A power-up address would be lost (yosys' `memory_dff` refuses too).
+    if rd.addr.iter().any(|b| b.net().is_some_and(|n| init.contains_key(&n))) {
+        return None;
+    }
     let mut clk: Option<Ctrl> = None;
     let mut addr = Vec::new();
     for b in &rd.addr {

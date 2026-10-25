@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 chipsmith-cyclone2.workspace = true
 chipsmith-jtag.workspace = true
+chipsmith-netlist.workspace = true
 chipsmith-route.workspace = true
 chipsmith-synth.workspace = true
 chipsmith-xc7.workspace = true

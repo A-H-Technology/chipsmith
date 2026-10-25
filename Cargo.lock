@@ -90,6 +90,7 @@ dependencies = [
  "anyhow",
  "chipsmith-cyclone2",
  "chipsmith-jtag",
+ "chipsmith-netlist",
  "chipsmith-route",
  "chipsmith-synth",
  "chipsmith-xc7",
