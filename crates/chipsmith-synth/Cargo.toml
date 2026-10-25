@@ -1,6 +1,6 @@
 [package]
 name = "chipsmith-synth"
-description = "chipsmith's device-independent synthesis: RTL optimization, techmap to gates, LUT mapping"
+description = "chipsmith's device-independent synthesis: flattening, RTL optimization, techmap to gates, LUT mapping"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,3 +11,4 @@ chipsmith-netlist.workspace = true
 anyhow.workspace = true
 rustc-hash.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true

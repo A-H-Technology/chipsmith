@@ -27,6 +27,9 @@ One stage of a plan: an in-process stage or an external tool.
 
 ## Synthesis
 
+**Elaboration**:
+Turning parsed Verilog into a netlist: parameters evaluated, generate blocks expanded, one module per parameter set, procedures lowered to RTL cells.
+
 **Netlist**:
 A design as cells connected by nets, at any level from RTL to device cells.
 

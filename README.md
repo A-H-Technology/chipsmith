@@ -370,6 +370,16 @@ share chipsmith's own netlist IR, not Verilog.
      counted abc's 75 one-input buffer LUTs, which `opt -fast` removes.
 5. **Own Verilog frontend**: the synthesizable subset that GHDL and HDL
    generators emit.
+   - Elaboration (done, 2026-10-25, not in the flow yet): `crates/chipsmith-verilog`
+     reads Verilog to the netlist yosys has after `read_verilog; hierarchy;
+     proc`, and `chipsmith_synth::flatten` flattens it. Every example
+     (picorv32, the RAMs, bidir, the Zybo designs, the persist loader),
+     GHDL's translation of the VHDL ones and all 250 of cyclone2-re's
+     specimens are proven sequentially equivalent to yosys' front end
+     (`crates/chipsmith-verilog/tests`). Through `cyclone2.ys` the DE2
+     examples give the same cells as with yosys' front end, except
+     picorv32: 989 LUTs instead of 993 (ADR-0006). picorv32 elaborates in
+     0.1 s, against 1.2 s for yosys.
 
 6. **Persistent flashing**: `chipsmith flash --persist` writes the board's
    configuration flash so the design survives a power cycle. `flash` as it
