@@ -56,6 +56,21 @@ impl<'a, 'd> ModElab<'a, 'd> {
         }
     }
 
+    /// A function or task by name: inside a function its own name is its
+    /// result variable, which a recursive call looks past.
+    pub fn resolve_callable(&self, mut scope: ScopeId, id: &Ident) -> Result<Sym<'a>> {
+        loop {
+            let s = &self.scopes[scope];
+            if let Some((sym @ (Sym::Func(..) | Sym::Task(..)), _)) = s.names.get(&id.name) {
+                return Ok(sym.clone());
+            }
+            match s.parent {
+                Some(p) => scope = p,
+                None => bail!(id.span, "`{}` is not a function or task", id.name),
+            }
+        }
+    }
+
     /// `blk[2].x`: a name inside generate blocks.
     pub fn resolve_hier(
         &mut self,
@@ -265,7 +280,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 }
             }
             ExprKind::Call { name, .. } => {
-                let Sym::Func(f, def) = self.resolve(scope, name)? else {
+                let Sym::Func(f, def) = self.resolve_callable(scope, name)? else {
                     bail!(name.span, "`{}` is not a function", name.name);
                 };
                 self.function_ty(f, def)?
@@ -448,7 +463,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 into_ctx(v, ctx)
             }
             ExprKind::Call { name, args } => {
-                let Sym::Func(f, def) = self.resolve(scope, name)? else {
+                let Sym::Func(f, def) = self.resolve_callable(scope, name)? else {
                     bail!(name.span, "`{}` is not a function", name.name);
                 };
                 let v = self.call_function(f, def, args, scope, env, span)?;

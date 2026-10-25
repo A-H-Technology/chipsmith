@@ -345,7 +345,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
         env: &mut Env,
         span: Span,
     ) -> Result<()> {
-        let Sym::Task(t, def) = self.resolve(scope, name)? else {
+        let Sym::Task(t, def) = self.resolve_callable(scope, name)? else {
             bail!(name.span, "`{}` is not a task", name.name);
         };
         if self.depth > 256 {
@@ -694,21 +694,31 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 let mut cur = self.current(slot, env);
                 let n = dim.width();
                 let (pos, signed) = self.position(index, index_ty, dim, delta, span);
-                for p0 in 0..n.saturating_sub(width - 1) {
-                    let pw = pos.len().max(64 - (p0 as u64).leading_zeros() as usize + 1);
-                    let pc = konst(&chipsmith_netlist::Const::from_int(p0 as i64, pw).0);
+                // Starts below 0 or near the top write the bits that are
+                // in range.
+                let first = if signed { 1 - width as i64 } else { 0 };
+                for p0 in first..n as i64 {
+                    let lo = p0.max(0) as usize;
+                    let hi = ((p0 + width as i64) as usize).min(n);
+                    if lo >= hi {
+                        continue;
+                    }
+                    let pw = pos.len().max(64 - p0.unsigned_abs().leading_zeros() as usize + 1);
+                    let pc = konst(&chipsmith_netlist::Const::from_int(p0, pw).0);
+                    let pos_w = crate::build::extend(&pos, pw, signed);
                     let hit = self.b.binary(
                         chipsmith_netlist::BinaryOp::Eq,
-                        pos.clone(),
+                        pos_w,
                         signed,
                         pc,
                         signed,
                         1,
                         span,
                     )[0];
-                    let old = cur[p0..p0 + width].to_vec();
-                    let new = self.b.mux(hit, old, v.clone(), span);
-                    cur[p0..p0 + width].copy_from_slice(&new);
+                    let old = cur[lo..hi].to_vec();
+                    let k0 = (lo as i64 - p0) as usize;
+                    let new = self.b.mux(hit, old, v[k0..k0 + (hi - lo)].to_vec(), span);
+                    cur[lo..hi].copy_from_slice(&new);
                 }
                 env.set(slot, cur);
                 self.mark_assigned(slot, 0..n, env);

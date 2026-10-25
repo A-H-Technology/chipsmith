@@ -149,12 +149,13 @@ impl<'a, 'd> ModElab<'a, 'd> {
         }
         let mut stmt = unwrap_block(body);
         let mut resets = Vec::new();
-        while resets.len() + 1 < edges.len() {
+        let n_async = edges.len() - 1;
+        while resets.len() < n_async {
             let StmtKind::If { cond, then, els } = &stmt.kind else {
                 bail!(
                     stmt.span,
                     "with {} edges in the event list, the block must start with `if` testing the asynchronous ones",
-                    edges.len()
+                    n_async + 1
                 );
             };
             let Some((sig_e, level)) = reset_test(cond) else {
