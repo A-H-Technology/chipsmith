@@ -11,6 +11,7 @@ mod arith;
 pub mod cells;
 mod ff;
 mod io;
+mod m4k;
 
 use anyhow::{bail, Context, Result};
 use chipsmith_netlist::{attr, is_set, CellKind, Design, Module};
@@ -74,6 +75,8 @@ fn run(m: &mut Module, obs: &mut dyn Observer) -> Result<()> {
     opt::opt(m, removable);
     obs.stage("alumacc", m);
     memory::merge_registers(m)?;
+    m4k::map(m);
+    obs.stage("m4k", m);
     memory::map_to_logic(m, |_| true)?;
     define_inits(m);
     opt::lower_bitwise(m)?;
