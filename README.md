@@ -10,33 +10,35 @@ nix run github:A-H-Technology/chipsmith/open -- -C examples/zybo-jtag-counter fl
 ```
 
 The first run builds cyclone2-re's device database package and flattens
-its chip database into the router's graph. After that a build of blinky-vhdl takes about 6 s; chipsmith runs no
-nextpnr.
+its chip database into the router's graph. After that a build of blinky-vhdl takes about 6 s. A DE2 build
+runs no program but chipsmith between the Verilog and the chip: no yosys,
+no nextpnr, no cram. GHDL translates VHDL in front of it.
 
 ## Status
 
 | device | board | build | on hardware |
 |---|---|---|---|
-| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes: LUT/carry/register logic, M4K RAM blocks (below), global clocks from pins, 3.3-V LVTTL pins: input, output, tri-state, bidirectional, open drain | yes (2026-10-24: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
+| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis; on hardware still pending for this flow): LUT/carry/register logic, M4K RAM blocks (below), global clocks from pins, 3.3-V LVTTL pins: input, output, tri-state, bidirectional, open drain | yes (2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
 | xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes: what yosys `synth_xilinx` and openXC7's nextpnr's packer handle, LVCMOS33 pins; chipsmith places LUT/register/carry logic, RAM32Ms, pins, BUFGs, BSCANs and the PS7 and routes the interconnect (below) | yes (2026-10-24: zybo-jtag-counter placed and routed by chipsmith, read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga) |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
-LEDs, about 1,200 LEs; a build takes about 85 s of CPU time.
+LEDs, 1,171 LEs; a build takes about 42 s, half of it placement.
 
 `examples/bidir` is cyclone2-re's tri-state test: expansion-header and
 SRAM data pins driven with their output enable from a switch, an
 inverted switch, logic or a register, one open drain, all read back onto
 the red LEDs, and a tri-state green LED. An inout must be written
-`assign p = oe ? d : 1'bz` (yosys' `tribuf` and `iopadmap` make it one
-`CY2_IOBUF`); one without a tri-state driver is an error, and so is a
+`assign p = oe ? d : 1'bz` (synthesis' `tribuf` and pin buffers make it
+one `CY2_IOBUF`); one without a tri-state driver is an error, and so is a
 driving pin on a dedicated clock input. With every switch down on the DE2
 (2026-10-24, camera): LEDR[1] blinks with the counter it drives out,
 LEDR[4] and LEDG[1] follow the open drain, the released pins read 1 and
 LEDG[0] stays off. Don't load it with SW[4] up and the SRAM driving: the
 FPGA then drives SRAM_DQ too.
 
-M4K RAM blocks (4,608 bits each, 105 on the EP2C35) come from yosys'
-`memory_libmap` with cyclone2-re's `synth/m4k.txt`: memories with
+M4K RAM blocks (4,608 bits each, 105 on the EP2C35) come from chipsmith's
+synthesis (`crates/chipsmith-cyclone2/src/synth/m4k.rs`, the rules and costs
+of cyclone2-re's `synth/m4k.txt` for yosys' `memory_libmap`): memories with
 synchronous reads on one clock, single port x1 to x18 (read-during-write
 returns the new data), simple dual port x1 to x36 (one write port, one
 read port, old data), ROMs, initial contents. A memory has to fill its
@@ -63,7 +65,10 @@ for bit (`bench/quartus-timing.sh`): checked 2026-10-24 on blinky-verilog
 and blinky-vhdl (16.65 ns of slack at 50 MHz), on picorv32 (10.60 ns
 since cyclone2-re 9cfe9be, see below; 11.08 ns before) and on bidir
 (16.64 ns), all built through chipsmith's LUT mapper, and on ram
-(16.21 ns), ram_widths (14.80 ns) and ram-leds (14.80 ns).
+(16.21 ns), ram_widths (14.80 ns) and ram-leds (14.80 ns). Those were
+yosys-synthesized. chipsmith's synthesis gives the same RBF only for the
+blinkies and the flash loader (the others have other cell and net names,
+so another placement) and hasn't been through Quartus yet.
 picorv32 has no M4K; its slack moved because cyclone2-re's synthesis
 script gained `memory_libmap`, which renames yosys' cells and nets. Same
 logic, same 1,175 LEs, but other net ids and so another placement. The
@@ -172,7 +177,8 @@ Cyclone II (EP2C35F672C6):
 | stage | today | |
 |---|---|---|
 | VHDL → Verilog | GHDL `--synth --out=verilog` | stays a translator in front of the flow |
-| synthesis | yosys runs cyclone2-re's `cyclone2.ys` in two halves around the LUT mapping | ours, not switched on yet: `chipsmith_cyclone2::synth` (roadmap step 4) replaces both halves |
+| Verilog front end | chipsmith: preprocessor, parser, elaboration to yosys' `proc` level, with the Cyclone II cell library (`crates/chipsmith-verilog`, `crates/chipsmith-cyclone2/src/synth/cells.v`) | ours |
+| synthesis | chipsmith: what cyclone2-re's `cyclone2.ys` does, on chipsmith's netlist IR (`crates/chipsmith-synth`, `crates/chipsmith-cyclone2/src/synth`) | ours |
 | LUT mapping | chipsmith: AIG plus priority cuts, in place of `abc -lut 4` (`crates/chipsmith-synth/src/lutmap.rs`) | ours |
 | packing | chipsmith: cyclone2-re's nextpnr packer, ported (`crates/chipsmith-cyclone2/src/pack`) | ours |
 | placement | chipsmith: simulated annealing over LAB slots, nextpnr's LAB rules (`crates/chipsmith-cyclone2/src/place.rs`) | ours |
@@ -181,6 +187,10 @@ Cyclone II (EP2C35F672C6):
 | JTAG stream | chipsmith: the SVF `cram svf` wrote, CONF_DONE checked (`crates/chipsmith-cyclone2/src/bitstream/jtag.rs`) | ours |
 | cable | chipsmith: USB-Blaster and FT2232 (MPSSE) drivers, SVF player, 7-series JTAG loader (`crates/chipsmith-jtag`) | ours |
 | configuration flash | chipsmith: serial flash loader (built by chipsmith) and EPCS16 driver (`crates/chipsmith-cyclone2/src/persist`) | ours |
+
+The plan is `[ghdl,] synthesis, pack, place and route, bitstream`. yosys
+and cyclone2-re's techmap are test oracles now (ADR-0004): the devshell has
+them, the build doesn't run them.
 
 Zynq-7010 PL (xc7z010clg400-1): shell out, except placement, routing and
 the cable.
@@ -331,8 +341,9 @@ share chipsmith's own netlist IR, not Verilog.
      through a clock control).
      Parameters nextpnr writes as
      `0` (a flag toggled back) chipsmith leaves out; they read the same.
-4. **Own synthesis**: techmap and LUT mapping on the IR. yosys's JSON
-   netlist is the boundary until then.
+4. **Own synthesis** (done for the DE2, in the build since 2026-10-25):
+   techmap and LUT mapping on the IR. yosys' JSON stays the netlist format
+   between stages (ADR-0004).
    - Netlist IR (done, 2026-10-25): `crates/chipsmith-netlist`, in
      yosys' RTLIL cell vocabulary, with typed cells for the families
      synthesis matches on (ADR-0004, ADR-0005). It reads and writes
@@ -345,11 +356,11 @@ share chipsmith's own netlist IR, not Verilog.
      `equiv_*` passes prove the two equivalent. picorv32 after
      `techmap; opt` (8,417 cells, 5.6 MB) reads in 137 ms and writes in
      73 ms.
-   - LUT mapping (done, in the default Cyclone II flow). yosys runs
-     `cyclone2.ys` up to `abc -lut 4` and writes `build/gates.json`.
-     chipsmith maps that, and a second yosys runs the rest of the script
-     from `opt -fast` on. chipsmith cuts the script at plan time, and the
-     build fails if `abc -lut 4` isn't there exactly once. Measured
+   - LUT mapping (done, 2026-10-24). First switched on between two yosys
+     runs: yosys ran `cyclone2.ys` up to `abc -lut 4` and wrote
+     `gates.json`, chipsmith mapped that, and a second yosys ran the rest
+     of the script from `opt -fast` on. Now it runs inside chipsmith's
+     synthesis (below). Measured
      2026-10-24, the same design through both flows; slack is from
      `bench/quartus-timing.sh` (byte-identical assembly in every row):
 
@@ -359,7 +370,8 @@ share chipsmith's own netlist IR, not Verilog.
      | picorv32 | chipsmith | 842 | 1,062 (1,175) | 11.08 ns |
      | blinky-verilog, blinky-vhdl | either | 0 (all carry) | 26 (26) | 16.65 ns, same RBF |
 
-     `bench/lutmap-vs-abc.sh build/` maps one `gates.json` both ways
+     `bench/lutmap-vs-abc.sh <dir>` maps one `gates.json` (from
+     `de2_synth --yosys`) both ways
      (LUTs after `opt -fast`). On picorv32, abc's mapper alone
      (`strash; if -K 4`) gives 847 LUTs and chipsmith's 842, so the
      mapping itself is on par. The 9% gap comes from abc's logic
@@ -368,7 +380,7 @@ share chipsmith's own netlist IR, not Verilog.
      mapper is the next gain. More cuts per node (16, 32), more recovery
      passes, or relaxing depth by a level didn't help (844 to 847). An earlier comparison (842 vs 847) had
      counted abc's 75 one-input buffer LUTs, which `opt -fast` removes.
-   - Synthesis (done, 2026-10-25, not in the flow yet):
+   - Synthesis (done, 2026-10-25, the DE2 build's since then):
      `chipsmith_cyclone2::synth::synthesize` takes the front end's netlist
      (or yosys' `proc; flatten`) to the cells `cyclone2.ys` makes, in place
      of both yosys halves: flatten, tri-states (`chipsmith_synth::tribuf`),
@@ -384,7 +396,7 @@ share chipsmith's own netlist IR, not Verilog.
      mapper on the IR (same LUTs and depth as on yosys' JSON), pin buffers
      (`iopadmap`). Measured with chipsmith's front end, packer, placer and
      router (`cargo run --release --example de2_synth`, `--yosys` for the
-     yosys flow as the build runs it):
+     yosys flow as the build ran it before):
 
      | design | LUTs | registers | LEs | carry chains | M4Ks | Fmax (estimate) |
      |---|---|---|---|---|---|---|
@@ -408,9 +420,18 @@ share chipsmith's own netlist IR, not Verilog.
      first proven invariant by `sat -tempinduct`, and M4Ks compared at
      their ports. All 174 plain-Verilog cyclone2-re specimens pass it and
      the packer.
-5. **Own Verilog frontend**: the synthesizable subset that GHDL and HDL
-   generators emit.
-   - Elaboration (done, 2026-10-25, not in the flow yet): `crates/chipsmith-verilog`
+   - In the build (2026-10-25): one `synthesis` step (front end, the cell
+     library `crates/chipsmith-cyclone2/src/synth/cells.v`, synthesis,
+     netlist JSON) replaced both yosys runs and the LUT mapping step. Every
+     DE2 example and the flash loader build to the same RBF as `de2_synth`,
+     byte for byte; for blinky-verilog, blinky-vhdl and the loader that is
+     also the RBF the yosys flow built. picorv32 builds in 42 s (41.6 s CPU), against 50 s
+     (50.0 s CPU) through yosys. The nix
+     package carries no cyclone2-re techmap any more, and yosys only for
+     the Zybo.
+5. **Own Verilog frontend** (done for the DE2, in the build since
+   2026-10-25): the synthesizable subset that GHDL and HDL generators emit.
+   - Elaboration (done, 2026-10-25, the DE2 build's front end since then): `crates/chipsmith-verilog`
      reads Verilog to the netlist yosys has after `read_verilog; hierarchy;
      proc`, and `chipsmith_synth::flatten` flattens it. Every example
      (picorv32, the RAMs, bidir, the Zybo designs, the persist loader),
@@ -696,7 +717,7 @@ On the Zynq each clock becomes an XDC `create_clock` for nextpnr; the
 build prints nextpnr's Fmax and slack per clock and fails if one misses
 its constraint. Cyclone II takes at most one clock, because chipsmith's
 timing model times one clock domain. The build prints the estimated
-slack after routing and doesn't fail on it: the estimate is not sign-off (picorv32: 11.90 ns estimated, 11.08 ns in Quartus). The
+slack after routing and doesn't fail on it: the estimate is not sign-off (yosys-synthesized picorv32: 11.26 ns estimated, 10.60 ns in Quartus). The
 placer and router stay timing-driven against the critical path itself,
 whatever the clock. Without `[clocks]`, nextpnr times against its default
 12 MHz and Cyclone II reports no slack.

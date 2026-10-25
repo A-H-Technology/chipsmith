@@ -1,8 +1,8 @@
 //! yosys as the oracle for chipsmith's Cyclone II synthesis (ADR-0004):
 //! the RTL it elaborates, the netlist cyclone2-re's `cyclone2.ys` makes
 //! from it, and a sequential equivalence check between an RTL netlist and
-//! a synthesized one. Needs yosys and `CHIPSMITH_CYCLONE2_SYNTH`: run in
-//! the devshell.
+//! a synthesized one. Needs yosys and `CHIPSMITH_CYCLONE2_SYNTH` (for
+//! `yosys_flow`): run in the devshell.
 //!
 //! The check is yosys' `equiv_make`/`equiv_struct`/`equiv_simple`/
 //! `equiv_induct` (chipsmith-netlist's round-trip test's script) with two
@@ -13,8 +13,8 @@
 //!   RTL itself (`sat -tempinduct`: true at power-up, kept by every clock
 //!   edge), and then the RTL's registers are replaced by the constants, so
 //!   induction compares designs with the same registers.
-//! - The Cyclone II cells get simulation models (cyclone2-re's
-//!   `cells_sim.v` only declares them).
+//! - The Cyclone II cells get simulation models (the cell library,
+//!   `cells::LIBRARY`, only declares them).
 
 #![allow(dead_code)]
 
@@ -22,12 +22,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use chipsmith_cyclone2::synth::cells;
 use chipsmith_netlist::{
     read_json, write_json, CellKind, Design, Gate, GateOp, Module, Net, SigBit, State, Wire,
 };
 
 /// Behavioural models of the cells synthesis emits, as the packer and the
-/// hardware read them (cyclone2-re's `cells_sim.v` comments).
+/// hardware read them (`cells::LIBRARY`'s comments).
 pub const SIM_MODELS: &str = r#"
 module LCELL_COMB (input DATAA, input DATAB, input DATAC, input DATAD, input CIN,
                    output COMBOUT, output COUT);
@@ -109,7 +110,8 @@ fn quoted(files: &[PathBuf]) -> String {
 /// flatten`, the device library read as blackboxes, top renamed `top`).
 pub fn rtl(dir: &Path, top: &str, files: &[PathBuf]) -> PathBuf {
     let json = dir.join("rtl.json");
-    let lib = synth_dir().join("synth/cells_sim.v");
+    let lib = dir.join("cells.v");
+    std::fs::write(&lib, cells::LIBRARY).unwrap();
     let rename = if top == "top" {
         String::new()
     } else {
@@ -125,8 +127,8 @@ pub fn rtl(dir: &Path, top: &str, files: &[PathBuf]) -> PathBuf {
     json
 }
 
-/// What the yosys flow makes of the design, as chipsmith's build runs it
-/// today: cyclone2-re's `cyclone2.ys` cut at `abc -lut 4`, chipsmith's
+/// What the yosys flow makes of the design, as chipsmith's build ran it
+/// before its own synthesis: cyclone2-re's `cyclone2.ys` cut at `abc -lut 4`, chipsmith's
 /// LUT mapper in between.
 pub fn yosys_flow(dir: &Path, top: &str, files: &[PathBuf]) -> Result<PathBuf, String> {
     let script = std::fs::read_to_string(synth_dir().join("synth/cyclone2.ys")).unwrap();
@@ -163,11 +165,11 @@ pub fn yosys_flow(dir: &Path, top: &str, files: &[PathBuf]) -> Result<PathBuf, S
     Ok(json)
 }
 
-/// chipsmith's own front end's netlist of the design (what the flow will
-/// synthesize), the top renamed `top` as the yosys netlists have it.
+/// chipsmith's own front end's netlist of the design (what the build
+/// synthesizes), the top renamed `top` as the yosys netlists have it.
 pub fn frontend(top: &str, files: &[PathBuf]) -> Design {
     let mut fe = chipsmith_verilog::Frontend::new();
-    fe.read_library(&synth_dir().join("synth/cells_sim.v"))
+    fe.read_library_source(cells::LIBRARY_NAME, cells::LIBRARY)
         .unwrap_or_else(|e| panic!("{e}"));
     for f in files {
         fe.read_file(f).unwrap_or_else(|e| panic!("{e}"));

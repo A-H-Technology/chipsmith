@@ -136,7 +136,7 @@ fn run(m: &mut Module, obs: &mut dyn Observer) -> Result<Stats> {
     })
 }
 
-/// Cells of cyclone2-re's library a design may instantiate itself.
+/// Device cells ([`cells::LIBRARY`]) a design may instantiate itself.
 fn is_device_cell(ty: &str) -> bool {
     crate::hard::Block::from_cell_type(ty).is_some()
         || [cells::LCELL_COMB, cells::LCELL_FF, cells::M4K].contains(&ty)

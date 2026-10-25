@@ -1,5 +1,5 @@
 //! The Cyclone II's JTAG and serial-flash hard blocks, one of each per
-//! device. cyclone2-re's synthesis library has them as `CY2_JTAG` (the TAP's
+//! device. The cell library (`synth/cells.v`) has them as `CY2_JTAG` (the TAP's
 //! signals during a user instruction, and the TDO it shifts out) and
 //! `CY2_ASMI` (DCLK, nCSO and ASDO of the configuration flash driven from
 //! the core, DATA0 read back). Together they make a serial flash loader:

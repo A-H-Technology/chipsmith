@@ -1,13 +1,16 @@
-//! End to end on the DE2 with chipsmith's own front end and synthesis: a
-//! project's HDL through `chipsmith_verilog` and `chipsmith_cyclone2::synth`,
-//! then the packer, placer, router and bitstream assembler the build uses,
-//! to an .rbf. With `--yosys` the netlist comes from the yosys flow the
-//! build runs today instead (the same back end after it), for comparing
-//! the two; with `--yosys-rtl` yosys elaborates (`proc; flatten`) and
-//! chipsmith synthesizes.
+//! End to end on the DE2, step by step: a project's HDL through
+//! `chipsmith_verilog` and `chipsmith_cyclone2::synth`, then the packer,
+//! placer, router and bitstream assembler, to an .rbf: the pipeline
+//! `chipsmith build` runs, with each stage's numbers on one line. With
+//! `--yosys` the netlist comes from the yosys flow the build ran before
+//! chipsmith's synthesis replaced it (cyclone2-re's `cyclone2.ys` with
+//! chipsmith's LUT mapper; the same back end after it), for comparing the
+//! two; with `--yosys-rtl` yosys elaborates (`proc; flatten`) and chipsmith
+//! synthesizes.
 //!
 //! `de2_synth [--yosys | --yosys-rtl] <project dir> <scratch dir>`. Needs
-//! the devshell (yosys for the comparisons, GHDL for VHDL).
+//! the devshell for the comparisons (yosys, `CHIPSMITH_CYCLONE2_SYNTH`) and
+//! for VHDL (GHDL).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -16,6 +19,7 @@ use std::time::Instant;
 
 use anyhow::{bail, ensure, Context, Result};
 use chipsmith::manifest::{Manifest, Sources, Target};
+use chipsmith_cyclone2::synth::cells;
 use chipsmith_cyclone2::{bitstream, pack, place, route, synth};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -154,13 +158,15 @@ fn main() -> Result<()> {
     } else {
         let design = if mode == Mode::YosysRtl {
             let rtl = dir.join("rtl.json");
+            let library = dir.join("cells.v");
+            std::fs::write(&library, cells::LIBRARY)?;
             yosys(
                 &dir,
                 &dir,
                 "rtl",
                 &format!(
                     "read_verilog -lib {}\nread_verilog {}\n{rename}hierarchy -check -top top\nproc\nflatten\nwrite_json {}\n",
-                    synth_dir()?.join("synth/cells_sim.v").display(),
+                    library.display(),
                     quoted(&files),
                     rtl.display()
                 ),
@@ -168,7 +174,7 @@ fn main() -> Result<()> {
             chipsmith_netlist::read_json(&std::fs::read(&rtl)?)?
         } else {
             let mut fe = chipsmith_verilog::Frontend::new();
-            fe.read_library(&synth_dir()?.join("synth/cells_sim.v"))?;
+            fe.read_library_source(cells::LIBRARY_NAME, cells::LIBRARY)?;
             for f in &files {
                 fe.read_file(f)?;
             }

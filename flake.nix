@@ -2,7 +2,8 @@
   description = "chipsmith: an open FPGA toolchain, HDL in, programmed chip out";
 
   inputs = {
-    # The Cyclone II device and chip databases (its db package) and techmap.
+    # The Cyclone II device and chip databases (its db package), and the
+    # yosys techmap the tests compare chipsmith's synthesis against.
     cyclone2-re.url = "github:cramt/cyclone2-re";
     # One nixpkgs for both, so the tools are the same derivations
     # cyclone2-re's devshell already built.
@@ -42,7 +43,6 @@
           xc7.tools
         ];
         chipsmith = pkgs.callPackage ./nix/package.nix {
-          inherit (open) cyclone2-synth;
           cyclone2-db = open.db;
           inherit xc7;
         };
@@ -65,6 +65,9 @@
             pkgs.libusb1
           ]
           ++ flowTools;
+          # cyclone2-re's yosys flow, the oracle chipsmith's synthesis is
+          # tested against (ADR-0004; tests, `de2_synth --yosys`). The
+          # build doesn't read it.
           CHIPSMITH_CYCLONE2_SYNTH = open.cyclone2-synth;
           CHIPSMITH_CYCLONE2_DB = "${open.db}";
           CHIPSMITH_XC7_CHIPDB = xc7.chipdb;

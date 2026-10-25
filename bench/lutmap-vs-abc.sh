@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # chipsmith's LUT mapper against yosys' abc on the same gates.
 #
-#   bench/lutmap-vs-abc.sh <build dir>
+#   bench/lutmap-vs-abc.sh <dir>
 #
-# Reads <build dir>/gates.json (what `chipsmith build` hands the mapper) and
+# Reads <dir>/gates.json, yosys' gates before LUT mapping, as
+# `cargo run --release --example de2_synth -- --yosys <project> <dir>`
+# writes them (the build maps chipsmith's own gates in memory), and
 # prints the LUT count after `opt -fast` (which drops abc's buffer LUTs)
 # for: chipsmith, abc's mapper alone (`strash; if -K 4`), and abc's full
 # `abc -lut 4` script (with logic optimisation: choices, mfs2, lutpack).

@@ -1,10 +1,11 @@
 //! HDL to bitstream to chip. The device decides the flow.
 //!
-//! Cyclone II: some stages are still external tools: GHDL (VHDL to
-//! Verilog) and yosys (synthesis, except LUT mapping). LUT mapping
-//! (`chipsmith_synth::lutmap`), packing, placement, routing, the bitstream
-//! and its JTAG stream (`chipsmith_cyclone2`) and loading over the cable
-//! (`chipsmith_jtag`) are chipsmith's own.
+//! Cyclone II: no external program between the Verilog and the chip
+//! (ADR-0001). GHDL translates VHDL to Verilog in front of the flow; the
+//! Verilog front end (`chipsmith_verilog`), synthesis
+//! (`chipsmith_cyclone2::synth`), packing, placement, routing, the
+//! bitstream and its JTAG stream (`chipsmith_cyclone2`) and loading over the
+//! cable (`chipsmith_jtag`) are chipsmith's own.
 //!
 //! 7-series (Zynq-7010): yosys `synth_xilinx`, openXC7's nextpnr
 //! (himbaechel xilinx) for packing, site routing and FASM, prjxray's
@@ -18,8 +19,8 @@
 //!
 //! Planning is pure: `plan_cyclone2`, `plan_xc7` and `plan_flash` return
 //! every file to write and every command to run, and `Plan::run` does it.
-//! `plan_build` only adds reading the tools' locations (and cyclone2-re's
-//! synthesis script) from the environment.
+//! `plan_build` only adds reading the 7-series tools' data from the
+//! environment.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -32,6 +33,7 @@ use anyhow::{bail, Context, Result};
 
 use chipsmith_cyclone2::bitstream;
 use chipsmith_cyclone2::persist::{self, EpcsOp, Loader};
+use chipsmith_cyclone2::synth::cells;
 use chipsmith_jtag::ftdi::Ftdi;
 use chipsmith_jtag::usb_blaster::UsbBlaster;
 use chipsmith_jtag::{svf, xc7};
@@ -39,9 +41,6 @@ use chipsmith_jtag::{svf, xc7};
 use crate::device::{Clg400Pin, Device, Xc7Part, XC7Z010CLG400_1};
 use crate::manifest::{Clock, Frequency, Manifest, PinAssignment, QuartusPin, Sources, Target};
 
-/// Where the cyclone2-re yosys techmap lives: a directory holding `synth/`.
-/// Set by the nix wrapper and the devshell.
-pub const SYNTH_DIR_VAR: &str = "CHIPSMITH_CYCLONE2_SYNTH";
 /// A directory of nextpnr-himbaechel xilinx chip databases,
 /// `chipdb-<die>.bin`. Set by the nix wrapper and the devshell.
 pub const XC7_CHIPDB_VAR: &str = "CHIPSMITH_XC7_CHIPDB";
@@ -81,20 +80,9 @@ impl Layout {
     fn translated(&self) -> PathBuf {
         self.dir.join("vhdl.v")
     }
+    /// 7-series: yosys' script.
     fn synth_script(&self) -> PathBuf {
         self.dir.join("synth.ys")
-    }
-    /// Cyclone II: synthesis after LUT mapping.
-    fn cells_script(&self) -> PathBuf {
-        self.dir.join("cells.ys")
-    }
-    /// Cyclone II: the netlist as simple gates and registers, before LUT
-    /// mapping.
-    fn gates(&self) -> PathBuf {
-        self.dir.join("gates.json")
-    }
-    fn luts(&self) -> PathBuf {
-        self.dir.join("luts.json")
     }
     fn netlist(&self) -> PathBuf {
         self.dir.join("netlist.json")
@@ -142,10 +130,15 @@ impl Layout {
 pub enum Step {
     /// An external program.
     Tool(Tool),
-    /// Map a yosys netlist's simple gates to 4-input LUTs, in process
-    /// (`synth::lutmap::map_file`).
-    Lutmap { gates: PathBuf, luts: PathBuf },
-    /// Pack a yosys netlist into LEs, pins and clock controls (nextpnr's
+    /// Read Verilog with the Cyclone II cell library, elaborate `top` and
+    /// synthesize it to Cyclone II cells, in process (`chipsmith_verilog`,
+    /// `chipsmith_cyclone2::synth`); writes the netlist as yosys JSON.
+    Synth {
+        verilog: Vec<PathBuf>,
+        top: String,
+        netlist: PathBuf,
+    },
+    /// Pack a yosys JSON netlist into LEs, pins and clock controls (nextpnr's
     /// JSON), in process.
     Pack { netlist: PathBuf, packed: PathBuf },
     /// Place a packed design (nextpnr JSON) and route it, in process.
@@ -241,7 +234,7 @@ impl Step {
     pub fn label(&self) -> &'static str {
         match self {
             Step::Tool(tool) => tool.label,
-            Step::Lutmap { .. } => "LUT mapping",
+            Step::Synth { .. } => "synthesis",
             Step::Pack { .. } => "pack",
             Step::PlaceRoute { .. } => "place and route",
             Step::Bitstream { .. } => "bitstream",
@@ -316,13 +309,9 @@ pub struct Plan {
 /// the environment the nix package (or devshell) sets.
 pub fn plan_build(manifest: &Manifest, layout: &Layout) -> Result<Plan> {
     Ok(match &manifest.target {
-        Target::Ep2c35f672c6 { pins, clock } => plan_cyclone2(
-            manifest,
-            pins,
-            clock.as_ref(),
-            layout,
-            &Cyclone2Synth::from_env()?,
-        ),
+        Target::Ep2c35f672c6 { pins, clock } => {
+            plan_cyclone2(manifest, pins, clock.as_ref(), layout)
+        }
         Target::Xc7z010clg400_1 { pins, clocks } => {
             let part = XC7Z010CLG400_1;
             plan_xc7(
@@ -335,63 +324,6 @@ pub fn plan_build(manifest: &Manifest, layout: &Layout) -> Result<Plan> {
             )
         }
     })
-}
-
-/// cyclone2-re's `synth/cyclone2.ys`, cut at its LUT mapping so
-/// chipsmith's mapper runs in place of `abc -lut 4`. Cut at plan time
-/// rather than copied into chipsmith, so cyclone2-re stays the one place
-/// the techmap is written; a script whose cut point moved or doubled fails
-/// here instead of synthesising something else.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Cyclone2Synth {
-    /// The directory holding `synth/`; the script names its maps relative
-    /// to it.
-    dir: PathBuf,
-    /// Up to the LUT mapping: simple gates and registers.
-    to_gates: String,
-    /// After it: LUTs and registers to Cyclone II cells, I/O buffers, checks.
-    to_cells: String,
-}
-
-impl Cyclone2Synth {
-    /// The line chipsmith's LUT mapper replaces.
-    const LUT_MAPPING: &str = "abc -lut 4";
-    const SCRIPT: &str = "synth/cyclone2.ys";
-
-    pub fn parse(dir: PathBuf, script: &str) -> Result<Self> {
-        let lines: Vec<&str> = script.lines().collect();
-        let cuts: Vec<usize> = (0..lines.len())
-            .filter(|&i| lines[i].trim() == Self::LUT_MAPPING)
-            .collect();
-        let [cut] = cuts[..] else {
-            bail!(
-                "{} has {} `{}` lines, expected exactly one to replace with chipsmith's LUT mapper",
-                dir.join(Self::SCRIPT).display(),
-                cuts.len(),
-                Self::LUT_MAPPING
-            );
-        };
-        let join = |lines: &[&str]| lines.iter().map(|l| format!("{l}\n")).collect();
-        Ok(Cyclone2Synth {
-            to_gates: join(&lines[..cut]),
-            to_cells: join(&lines[cut + 1..]),
-            dir,
-        })
-    }
-
-    pub fn from_env() -> Result<Self> {
-        let dir = std::env::var_os(SYNTH_DIR_VAR)
-            .map(PathBuf::from)
-            .with_context(|| {
-                format!(
-                    "{SYNTH_DIR_VAR} is not set; run chipsmith from its nix package or `nix develop`"
-                )
-            })?;
-        let path = dir.join(Self::SCRIPT);
-        let script = std::fs::read_to_string(&path)
-            .with_context(|| format!("{SYNTH_DIR_VAR}: reading {}", path.display()))?;
-        Self::parse(dir, &script)
-    }
 }
 
 /// VHDL becomes Verilog through GHDL; Verilog is used as it is. Returns the
@@ -421,38 +353,14 @@ pub fn plan_cyclone2(
     pins: &[PinAssignment<QuartusPin>],
     clock: Option<&Clock>,
     layout: &Layout,
-    synth: &Cyclone2Synth,
 ) -> Plan {
     let mut steps: Vec<Step> = Vec::new();
     let verilog = verilog_sources(manifest, layout, &mut steps);
-
-    let yosys = |label, script: PathBuf, log: &str| -> Step {
-        Tool {
-            cwd: Some(synth.dir.clone()),
-            log: Some(layout.log(log)),
-            ..Tool::new(label, "yosys")
-        }
-        .arg("-q")
-        .arg("-l")
-        .arg(layout.log(log))
-        .arg("-s")
-        .arg(script)
-        .into()
-    };
-    steps.push(yosys(
-        "yosys: synthesis to gates",
-        layout.synth_script(),
-        "yosys",
-    ));
-    steps.push(Step::Lutmap {
-        gates: layout.gates(),
-        luts: layout.luts(),
+    steps.push(Step::Synth {
+        verilog,
+        top: manifest.top.clone(),
+        netlist: layout.netlist(),
     });
-    steps.push(yosys(
-        "yosys: LUTs to Cyclone II cells",
-        layout.cells_script(),
-        "yosys-cells",
-    ));
     steps.push(Step::Pack {
         netlist: layout.netlist(),
         packed: layout.packed(),
@@ -474,16 +382,7 @@ pub fn plan_cyclone2(
 
     Plan {
         dir: Some(layout.dir.clone()),
-        files: vec![
-            (
-                layout.synth_script(),
-                gates_script(&verilog, &manifest.top, synth, &layout.gates()),
-            ),
-            (
-                layout.cells_script(),
-                cells_script(synth, &layout.luts(), &layout.netlist()),
-            ),
-        ],
+        files: Vec::new(),
         steps,
     }
 }
@@ -837,31 +736,6 @@ pub fn plan_flash(flash: &Flash, loader: &Loader, build_dir: &Path) -> Plan {
     }
 }
 
-fn gates_script(verilog: &[PathBuf], top: &str, synth: &Cyclone2Synth, gates: &Path) -> String {
-    let mut script = String::new();
-    for file in verilog {
-        script += &format!("read_verilog {}\n", quoted(file));
-    }
-    // cyclone2.ys synthesises the module called `top`.
-    if top != "top" {
-        script += &format!("rename {top} top\n");
-    }
-    script += &synth.to_gates;
-    script += &format!("write_json {}\n", quoted(gates));
-    script
-}
-
-fn cells_script(synth: &Cyclone2Synth, luts: &Path, netlist: &Path) -> String {
-    // The cell library first, with its parameters: the mapped netlist holds
-    // `top` only (see `Step::Lutmap`).
-    let mut script = String::from("read_verilog -lib synth/cells_sim.v\n");
-    script += &format!("read_json {}\n", quoted(luts));
-    script += "hierarchy -top top\n";
-    script += &synth.to_cells;
-    script += &format!("write_json {}\n", quoted(netlist));
-    script
-}
-
 fn quoted(path: &Path) -> String {
     format!("\"{}\"", path.display())
 }
@@ -879,7 +753,11 @@ impl Plan {
             eprintln!("  {}", step.label());
             match step {
                 Step::Tool(tool) => run_tool(tool)?,
-                Step::Lutmap { gates, luts } => lutmap(gates, luts)?,
+                Step::Synth {
+                    verilog,
+                    top,
+                    netlist,
+                } => synth(verilog, top, netlist)?,
                 Step::Pack { netlist, packed } => pack(netlist, packed)?,
                 Step::PlaceRoute {
                     packed,
@@ -920,18 +798,38 @@ impl Plan {
     }
 }
 
-fn lutmap(gates: &Path, luts: &Path) -> Result<()> {
+fn synth(verilog: &[PathBuf], top: &str, netlist: &Path) -> Result<()> {
     let started = Instant::now();
-    let s = chipsmith_synth::lutmap::map_file(gates, luts)?;
+    let mut fe = chipsmith_verilog::Frontend::new();
+    fe.read_library_source(cells::LIBRARY_NAME, cells::LIBRARY)?;
+    for file in verilog {
+        fe.read_file(file)?;
+    }
+    let design = fe.elaborate(top)?;
     eprintln!(
-        "    {} gates ({} AIG ANDs) to {} LUTs, depth {}, in {:.1} s",
-        s.gates,
-        s.and_nodes,
-        s.luts,
-        s.depth,
+        "    elaborated {} modules in {:.1} s",
+        design.modules.iter().filter(|m| !m.is_blackbox()).count(),
         started.elapsed().as_secs_f64()
     );
-    Ok(())
+
+    let started = Instant::now();
+    let out = chipsmith_cyclone2::synth::synthesize(design)?;
+    let s = out.stats;
+    eprintln!(
+        "    {} gates ({} AIG ANDs) to {} LUTs, depth {}; {} registers, {} carry chains, {} M4Ks in {:.1} s",
+        s.lutmap.gates,
+        s.lutmap.and_nodes,
+        s.lutmap.luts,
+        s.lutmap.depth,
+        s.registers,
+        s.chains,
+        s.m4ks,
+        started.elapsed().as_secs_f64()
+    );
+    let file = std::fs::File::create(netlist)
+        .with_context(|| format!("creating {}", netlist.display()))?;
+    chipsmith_netlist::write_json(&out.design, file)
+        .with_context(|| format!("writing {}", netlist.display()))
 }
 
 fn pack(netlist: &Path, packed: &Path) -> Result<()> {
@@ -1332,18 +1230,13 @@ mod tests {
         }
     }
 
-    /// cyclone2.ys' shape: maps before and after the LUT mapping.
-    const CYCLONE2_YS: &str =
-        "read_verilog -lib synth/cells_sim.v\nsimplemap\nabc -lut 4\nopt -fast\n";
-
     /// The DE2 manifest's plan, with `sources` in place of the file's.
     fn cyclone2(sources: Sources) -> Plan {
         let m = manifest_for(DE2, sources);
         let Target::Ep2c35f672c6 { pins, clock } = &m.target else {
             unreachable!()
         };
-        let synth = Cyclone2Synth::parse("/synth".into(), CYCLONE2_YS).unwrap();
-        plan_cyclone2(&m, pins, clock.as_ref(), &layout(&m), &synth)
+        plan_cyclone2(&m, pins, clock.as_ref(), &layout(&m))
     }
 
     fn xc7(sources: Sources) -> Plan {
@@ -1370,61 +1263,30 @@ mod tests {
     }
 
     #[test]
-    fn verilog_goes_straight_to_yosys_and_chipsmith_maps_the_luts() {
+    fn verilog_goes_straight_to_chipsmiths_synthesis() {
         let plan = cyclone2(Sources::Verilog(vec!["/p/src/blinky.v".into()]));
         assert_eq!(
             labels(&plan),
-            [
-                "yosys: synthesis to gates",
-                "LUT mapping",
-                "yosys: LUTs to Cyclone II cells",
-                "pack",
-                "place and route",
-                "bitstream"
-            ]
+            ["synthesis", "pack", "place and route", "bitstream"]
         );
+        assert!(plan.files.is_empty());
         assert_eq!(
-            tool(&plan.steps[0]).cwd.as_deref(),
-            Some(Path::new("/synth"))
-        );
-        assert_eq!(
-            tool(&plan.steps[2]).cwd.as_deref(),
-            Some(Path::new("/synth"))
-        );
-        let (path, script) = &plan.files[0];
-        assert_eq!(path, Path::new("/p/build/synth.ys"));
-        assert_eq!(
-            script,
-            "read_verilog \"/p/src/blinky.v\"\nrename blinky top\n\
-             read_verilog -lib synth/cells_sim.v\nsimplemap\n\
-             write_json \"/p/build/gates.json\"\n"
+            plan.steps[0],
+            Step::Synth {
+                verilog: vec!["/p/src/blinky.v".into()],
+                top: "blinky".into(),
+                netlist: "/p/build/netlist.json".into()
+            }
         );
         assert_eq!(
             plan.steps[1],
-            Step::Lutmap {
-                gates: "/p/build/gates.json".into(),
-                luts: "/p/build/luts.json".into()
-            }
-        );
-        // The second yosys reads the library with its parameters, then the
-        // mapped `top`, and carries on after `abc -lut 4`.
-        let (path, script) = &plan.files[1];
-        assert_eq!(path, Path::new("/p/build/cells.ys"));
-        assert_eq!(
-            script,
-            "read_verilog -lib synth/cells_sim.v\nread_json \"/p/build/luts.json\"\n\
-             hierarchy -top top\nopt -fast\nwrite_json \"/p/build/netlist.json\"\n"
-        );
-        // No nextpnr: chipsmith packs what yosys wrote.
-        assert_eq!(
-            plan.steps[3],
             Step::Pack {
                 netlist: "/p/build/netlist.json".into(),
                 packed: "/p/build/packed.json".into()
             }
         );
         assert_eq!(
-            plan.steps[5],
+            plan.steps[3],
             Step::Bitstream {
                 routed: "/p/build/routed.json".into(),
                 rbf: "/p/build/blinky.rbf".into()
@@ -1433,37 +1295,54 @@ mod tests {
     }
 
     #[test]
-    fn cyclone2_ys_is_cut_at_exactly_one_lut_mapping() {
-        for script in [
-            "simplemap\n",
-            "abc -lut 4\nopt\nabc -lut 4\n",
-            "abc -lut 6\n",
-        ] {
-            let e = Cyclone2Synth::parse("/synth".into(), script).unwrap_err();
-            assert!(e.to_string().contains("expected exactly one"), "{e}");
-        }
-        let s = Cyclone2Synth::parse("/synth".into(), "a\n  abc -lut 4  \nb").unwrap();
-        assert_eq!((s.to_gates.as_str(), s.to_cells.as_str()), ("a\n", "b\n"));
-    }
-
-    #[test]
-    fn vhdl_is_translated_to_verilog_and_yosys_reads_the_translation() {
+    fn vhdl_is_translated_to_verilog_and_synthesis_reads_the_translation() {
         let plan = cyclone2(Sources::Vhdl(vec!["/p/src/blinky.vhd".into()]));
-        assert_eq!(plan.steps[0].label(), "ghdl: VHDL to Verilog");
+        assert_eq!(
+            labels(&plan),
+            [
+                "ghdl: VHDL to Verilog",
+                "synthesis",
+                "pack",
+                "place and route",
+                "bitstream"
+            ]
+        );
         assert_eq!(
             tool(&plan.steps[0]).stdout.as_deref(),
             Some(Path::new("/p/build/vhdl.v"))
         );
-        assert!(plan.files[0]
-            .1
-            .starts_with("read_verilog \"/p/build/vhdl.v\"\n"));
+        let Step::Synth { verilog, .. } = &plan.steps[1] else {
+            panic!("{:?} is not synthesis", plan.steps[1]);
+        };
+        assert_eq!(verilog, &[PathBuf::from("/p/build/vhdl.v")]);
+    }
+
+    /// ADR-0001: no external program between the Verilog and the chip.
+    #[test]
+    fn the_de2_build_runs_no_tool_but_ghdl() {
+        for sources in [
+            Sources::Verilog(vec!["/p/src/blinky.v".into()]),
+            Sources::Vhdl(vec!["/p/src/blinky.vhd".into()]),
+        ] {
+            let plan = cyclone2(sources);
+            let tools: Vec<&OsString> = plan
+                .steps
+                .iter()
+                .filter_map(|s| match s {
+                    Step::Tool(t) => Some(&t.program),
+                    _ => None,
+                })
+                .filter(|p| *p != "ghdl")
+                .collect();
+            assert!(tools.is_empty(), "{tools:?}");
+        }
     }
 
     #[test]
     fn pins_and_the_clock_reach_the_placer() {
         let plan = cyclone2(Sources::Verilog(vec![]));
-        let Step::PlaceRoute { pins, clock, .. } = &plan.steps[4] else {
-            panic!("{:?} is not place and route", plan.steps[4]);
+        let Step::PlaceRoute { pins, clock, .. } = &plan.steps[2] else {
+            panic!("{:?} is not place and route", plan.steps[2]);
         };
         assert_eq!(clock.map(Frequency::hz), Some(50_000_000));
         let pins: Vec<(&str, &str)> = pins.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();

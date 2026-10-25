@@ -5,7 +5,7 @@
 //! ```no_run
 //! # fn main() -> Result<(), chipsmith_verilog::Error> {
 //! let mut fe = chipsmith_verilog::Frontend::new();
-//! fe.read_library("cells_sim.v".as_ref())?; // blackboxes: interfaces only
+//! fe.read_library("cells.v".as_ref())?; // blackboxes: interfaces only
 //! fe.read_file("top.v".as_ref())?;
 //! let design = fe.elaborate("top")?;
 //! # Ok(()) }
@@ -103,6 +103,11 @@ impl Frontend {
     /// attributes show.
     pub fn read_source(&mut self, name: &str, text: &str) -> Result<(), Error> {
         self.read(name, text, Role::Design)
+    }
+
+    /// A cell library from memory, as [`Frontend::read_library`].
+    pub fn read_library_source(&mut self, name: &str, text: &str) -> Result<(), Error> {
+        self.read(name, text, Role::Library)
     }
 
     fn read_path(&mut self, path: &Path, role: Role) -> Result<(), Error> {

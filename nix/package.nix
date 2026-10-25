@@ -9,7 +9,6 @@
   yosys,
   # cyclone2-re's db package: the device and chip databases (ADR-0003).
   cyclone2-db,
-  cyclone2-synth,
   # nix/xc7.nix: the 7-series tools, chip database and prjxray-db
   xc7,
 }:
@@ -51,12 +50,11 @@ let
 
   # The DE2's serial flash loader
   # (crates/chipsmith-cyclone2/src/persist/loader), built by chipsmith itself
-  # once here, so `flash --persist` doesn't synthesise it every time.
+  # once here, so `flash --persist` doesn't synthesise it every time. No
+  # tools: the DE2 build runs none for Verilog.
   de2Loader =
     runCommand "chipsmith-de2-flash-loader"
       {
-        nativeBuildInputs = [ yosys ];
-        CHIPSMITH_CYCLONE2_SYNTH = cyclone2-synth;
         CHIPSMITH_CYCLONE2_GRAPH = routingGraph;
         CHIPSMITH_CYCLONE2_DB = "${cyclone2-db}";
       }
@@ -86,7 +84,9 @@ runCommand "chipsmith-${unwrapped.version}"
     meta.mainProgram = "chipsmith";
   }
   # Every stage chipsmith doesn't do itself yet, pinned here rather than
-  # looked up on the host.
+  # looked up on the host. GHDL translates VHDL for both devices (ADR-0001).
+  # yosys is only for the Zybo (synth_xilinx): the DE2 build runs chipsmith's
+  # own synthesis. It goes once the 7-series has its own synthesis too.
   ''
     makeWrapper ${lib.getExe unwrapped} $out/bin/chipsmith \
       --prefix PATH : ${
@@ -96,7 +96,6 @@ runCommand "chipsmith-${unwrapped.version}"
           xc7.tools
         ]
       } \
-      --set CHIPSMITH_CYCLONE2_SYNTH ${cyclone2-synth} \
       --set CHIPSMITH_CYCLONE2_GRAPH ${routingGraph} \
       --set CHIPSMITH_CYCLONE2_DB ${cyclone2-db} \
       --set CHIPSMITH_DE2_LOADER ${de2Loader}/loader.rbf \

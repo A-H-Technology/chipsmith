@@ -1,5 +1,5 @@
-//! The Cyclone II cells synthesis ends in, as cyclone2-re's
-//! `synth/cells_sim.v` declares them and the packer reads them.
+//! The Cyclone II cells synthesis ends in and the packer reads, with their
+//! Verilog declarations ([`LIBRARY`]) for the front end.
 
 use std::collections::BTreeMap;
 
@@ -11,6 +11,13 @@ pub const IBUF: &str = "CY2_IBUF";
 pub const OBUF: &str = "CY2_OBUF";
 pub const IOBUF: &str = "CY2_IOBUF";
 pub const M4K: &str = "CY2_M4K";
+
+/// Every device cell as a Verilog blackbox module, for the front end to
+/// read as a library (`Frontend::read_library_source`) before a design that
+/// instantiates one.
+pub const LIBRARY: &str = include_str!("cells.v");
+/// The name [`LIBRARY`] is read under, for error positions.
+pub const LIBRARY_NAME: &str = "chipsmith-cyclone2/cells.v";
 
 /// Device cells that are pure functions of their inputs: unused ones go.
 pub const REMOVABLE: &[&str] = &[LCELL_COMB, LCELL_FF];
@@ -131,4 +138,38 @@ pub fn iobuf(dataout: SigBit, oe: SigBit, combout: Option<SigBit>, pad: SigBit) 
     }
     ports.push(port("PAD", Dir::InOut, vec![pad]));
     generic(IOBUF, BTreeMap::new(), ports)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hard::Block;
+
+    /// The library declares the cells this module builds and the hard
+    /// blocks, no more, under the names the packer reads.
+    #[test]
+    fn the_library_declares_every_device_cell() {
+        let mut expected = vec![LCELL_COMB, LCELL_FF, IBUF, OBUF, IOBUF, M4K];
+        expected.extend(Block::ALL.map(Block::cell_type));
+        let instances: String = expected
+            .iter()
+            .enumerate()
+            .map(|(i, ty)| format!("  {ty} c{i} ();\n"))
+            .collect();
+        let mut fe = chipsmith_verilog::Frontend::new();
+        fe.read_library_source(LIBRARY_NAME, LIBRARY).unwrap();
+        fe.read_source("top.v", &format!("module top;\n{instances}endmodule\n"))
+            .unwrap();
+        let design = fe.elaborate("top").unwrap();
+        let mut declared: Vec<&str> = design
+            .modules
+            .iter()
+            .filter(|m| m.is_blackbox())
+            .map(|m| m.name.as_str())
+            .collect();
+        declared.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(declared, expected);
+        assert_eq!(LIBRARY.matches("\nmodule ").count(), expected.len());
+    }
 }
