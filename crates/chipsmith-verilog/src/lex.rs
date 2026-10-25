@@ -33,7 +33,14 @@ macro_rules! keywords {
         pub enum Kw { $($kw),* }
         impl Kw {
             pub fn parse(s: &str) -> Option<Kw> {
-                match s { $($s => Some(Kw::$kw),)* _ => None }
+                // A match on the string compares against every keyword in
+                // turn; identifiers are most of the tokens.
+                static TABLE: std::sync::OnceLock<rustc_hash::FxHashMap<&'static str, Kw>> =
+                    std::sync::OnceLock::new();
+                TABLE
+                    .get_or_init(|| [$(($s, Kw::$kw)),*].into_iter().collect())
+                    .get(s)
+                    .copied()
             }
             pub fn name(self) -> &'static str {
                 match self { $(Kw::$kw => $s),* }
@@ -425,8 +432,9 @@ impl Lexer {
 
     fn punct(&mut self, lo: usize) -> Result<Tok> {
         let rest = &self.bytes()[self.pos..];
+        let first = rest[0];
         for &(s, p) in PUNCTS {
-            if !rest.starts_with(s.as_bytes()) {
+            if s.as_bytes()[0] != first || !rest.starts_with(s.as_bytes()) {
                 continue;
             }
             match p {

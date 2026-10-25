@@ -73,6 +73,10 @@ pub(crate) struct Env {
     pub mem_writes: Vec<MemWrite>,
     /// Loop iterations so far, to stop a runaway loop.
     pub iterations: usize,
+    /// Per variable, which bits the block's assignments always write
+    /// together (a class id per bit): yosys' "snippets", which it builds
+    /// a multiplexer tree for each of.
+    pub snippets: FxHashMap<usize, Vec<u32>>,
 }
 
 const MAX_ITERATIONS: usize = 1 << 20;
@@ -89,6 +93,7 @@ impl Env {
             reads_incoming: FxHashSet::default(),
             mem_writes: Vec::new(),
             iterations: 0,
+            snippets: FxHashMap::default(),
         }
     }
 
@@ -154,11 +159,11 @@ enum Target {
         /// Index delta of the lowest selected index (for `-:`).
         delta: i64,
     },
-    /// A memory word, or bits of one.
+    /// Bits of a memory word: the lowest and how many.
     Mem {
         mem: usize,
         addr: SigSpec,
-        bits: Option<(usize, usize)>,
+        bits: (usize, usize),
     },
     Concat(Vec<Target>),
 }
@@ -168,8 +173,7 @@ impl Target {
         match self {
             Target::Bits { positions, .. } => positions.len(),
             Target::Dynamic { width, .. } => *width,
-            Target::Mem { bits: Some((_, w)), .. } => *w,
-            Target::Mem { .. } => 0,
+            Target::Mem { bits: (_, w), .. } => *w,
             Target::Concat(parts) => parts.iter().map(Target::width).sum(),
         }
     }
@@ -233,11 +237,25 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 self.exec(init, scope, env)?;
                 loop {
                     if !self.loop_cond(cond, scope, env)? {
-                        return Ok(());
+                        break;
                     }
                     self.exec(body, scope, env)?;
                     self.exec(step, scope, env)?;
                 }
+                // The loop variable unrolls away: like yosys, it ends up
+                // a constant (its final value), not a register or an
+                // initial value.
+                if let StmtKind::Assign { lhs, .. } = &init.kind {
+                    if let ExprKind::Ident(id) = &lhs.kind {
+                        if let Some((Sym::Var(v), _)) = self.lookup(scope, &id.name) {
+                            if let Some(c) = env.get(Slot::Var(v)).and_then(|x| as_const(x)) {
+                                env.assigned.remove(&v);
+                                self.loop_finals.insert(v, c);
+                            }
+                        }
+                    }
+                }
+                Ok(())
             }
             StmtKind::While { cond, body } => loop {
                 if !self.loop_cond(cond, scope, env)? {
@@ -458,10 +476,11 @@ impl<'a, 'd> ModElab<'a, 'd> {
             ExprKind::Index { base, index } => {
                 if let Some(mem) = self.mem_of(base, scope)? {
                     let (addr, _) = self.lower_self(index, scope, env)?;
+                    let w = self.mems[mem].width();
                     return Ok(Target::Mem {
                         mem,
                         addr,
-                        bits: None,
+                        bits: (0, w),
                     });
                 }
                 if let ExprKind::Index { base: inner, index: addr_e } = &base.kind {
@@ -477,7 +496,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
                         return Ok(Target::Mem {
                             mem,
                             addr,
-                            bits: Some((p, 1)),
+                            bits: (p, 1),
                         });
                     }
                 }
@@ -517,7 +536,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
                         return Ok(Target::Mem {
                             mem,
                             addr,
-                            bits: Some((a.min(b), a.abs_diff(b) + 1)),
+                            bits: (a.min(b), a.abs_diff(b) + 1),
                         });
                     }
                 }
@@ -835,12 +854,14 @@ impl<'a, 'd> ModElab<'a, 'd> {
             patterns.push(pats);
             bodies.push(&it.body);
         }
-        // `(* full_case *)` without a default: the last item is the
-        // default (yosys' reading of it).
-        if full && default.is_none() && !bodies.is_empty() {
-            default = bodies.pop();
-            patterns.pop();
-        }
+        // `(* full_case *)` changes nothing: yosys 0.70's proc keeps the
+        // value from before the case where no item matches, and doesn't
+        // turn the last item into a default either.
+        let _ = full;
+        // Items covering every value the case expression can take leave
+        // nothing for a missing default: no latch, as yosys' proc_dlatch
+        // finds.
+        let complete = default.is_none() && covers_all(&sel, patterns.iter().flatten());
         let groups = pgroups(&patterns, parallel);
         let mut arms = Vec::new();
         for ((pats, body), group) in patterns.iter().zip(bodies).zip(groups) {
@@ -851,7 +872,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
             let ctrl = self.any(hits, span);
             arms.push(Arm { ctrl, group, body });
         }
-        self.switch(arms, default, scope, env, span)
+        self.switch_full(arms, default, complete, scope, env, span)
     }
 
     /// One case pattern against the case expression.
@@ -890,11 +911,25 @@ impl<'a, 'd> ModElab<'a, 'd> {
         }
     }
 
-    /// Runs the arms and the default, then merges what they assigned.
     fn switch(
         &mut self,
         arms: Vec<Arm<'a>>,
         default: Option<&'a Stmt>,
+        scope: ScopeId,
+        env: &mut Env,
+        span: Span,
+    ) -> Result<()> {
+        self.switch_full(arms, default, false, scope, env, span)
+    }
+
+    /// Runs the arms and the default, then merges what they assigned.
+    /// `complete`: some arm is always taken, so without a default the
+    /// value before the switch is never what comes out.
+    fn switch_full(
+        &mut self,
+        arms: Vec<Arm<'a>>,
+        default: Option<&'a Stmt>,
+        complete: bool,
         scope: ScopeId,
         env: &mut Env,
         span: Span,
@@ -939,53 +974,94 @@ impl<'a, 'd> ModElab<'a, 'd> {
         }
         keys.sort_by_key(slot_order);
         keys.dedup();
+        let unreachable_default = complete && default_body.is_none();
         for key in keys {
             let base = self.current(key, env);
-            let dval = default_frame.get(&key).cloned().unwrap_or_else(|| base.clone());
+            let dval = match default_frame.get(&key) {
+                Some(v) => v.clone(),
+                None if unreachable_default => match key {
+                    Slot::Assigned(_) => vec![SigBit::ONE; base.len()],
+                    Slot::Var(_) if env.mode == Mode::Comb => xs(base.len()),
+                    _ => base.clone(),
+                },
+                None => base.clone(),
+            };
             let vals: Vec<SigSpec> = taken
                 .iter()
                 .map(|(_, _, f)| f.get(&key).cloned().unwrap_or_else(|| base.clone()))
                 .collect();
-            let merged = self.merge(&taken, &vals, dval, span);
+            let classes = match key {
+                Slot::Var(v) => env.snippets.get(&v).cloned(),
+                _ => None,
+            };
+            let merged = self.merge(&taken, &vals, dval, classes.as_deref(), span);
             env.set(key, merged);
         }
         Ok(())
     }
 
-    /// The multiplexer tree for one slot: arms from last to first, each
-    /// group of non-overlapping arms one `$pmux`, each new group a level
-    /// of priority above the previous result. Only the bits some arm
-    /// changes go through it.
+    /// The multiplexer tree for one slot, built the way yosys' proc_mux
+    /// builds it, so that the two agree even in states the design never
+    /// reaches (which induction proofs consider): arms from last to
+    /// first, a group of arms that can't overlap one `$pmux` whose later
+    /// selects win (yosys' `append_pmux` order), each new group a `$mux`
+    /// level above the previous result. An arm leaving the value as the
+    /// `$pmux`'s default is left out of it, and a leading arm that changes
+    /// nothing makes no cell. Those decisions are per snippet (`classes`,
+    /// see [`Env::snippets`]), as yosys makes them.
     fn merge(
         &mut self,
         arms: &[(SigBit, usize, FxHashMap<Slot, SigSpec>)],
         vals: &[SigSpec],
         dval: SigSpec,
+        classes: Option<&[u32]>,
         span: Span,
     ) -> SigSpec {
         let w = dval.len();
-        let varying: Vec<usize> = (0..w)
-            .filter(|&i| vals.iter().any(|v| v[i] != dval[i]))
-            .collect();
-        if varying.is_empty() {
-            return dval;
-        }
-        let pick = |v: &SigSpec| -> SigSpec { varying.iter().map(|&i| v[i]).collect() };
-        let mut result = pick(&dval);
-        let mut i = arms.len();
-        while i > 0 {
-            let group = arms[i - 1].1;
-            let mut j = i;
-            while j > 0 && arms[j - 1].1 == group {
-                j -= 1;
+        let mut groups: Vec<(u32, Vec<usize>)> = Vec::new();
+        for i in 0..w {
+            if vals.iter().all(|v| v[i] == dval[i]) {
+                continue;
             }
-            let cases: Vec<(SigBit, SigSpec)> = (j..i).map(|k| (arms[k].0, pick(&vals[k]))).collect();
-            result = self.b.pmux(result, cases, span);
-            i = j;
+            let class = classes.map_or(0, |c| c[i]);
+            match groups.iter_mut().find(|(c, _)| *c == class) {
+                Some((_, bits)) => bits.push(i),
+                None => groups.push((class, vec![i])),
+            }
         }
-        let mut out = dval;
-        for (k, &i) in varying.iter().enumerate() {
-            out[i] = result[k];
+        let mut out = dval.clone();
+        for (_, bits) in groups {
+            let pick = |v: &SigSpec| -> SigSpec { bits.iter().map(|&i| v[i]).collect() };
+            let base = pick(&dval);
+            let mut result = base.clone();
+            // The open `$pmux`: its default and cases so far.
+            let mut open: Option<(SigSpec, Vec<(SigBit, SigSpec)>)> = None;
+            for k in (0..arms.len()).rev() {
+                let v = pick(&vals[k]);
+                let same_group = k + 1 < arms.len() && arms[k].1 == arms[k + 1].1;
+                match &mut open {
+                    Some((a, cases)) if same_group => {
+                        if v != *a {
+                            cases.push((arms[k].0, v));
+                        }
+                    }
+                    _ => {
+                        if v == result {
+                            continue;
+                        }
+                        if let Some((a, cases)) = open.take() {
+                            result = self.b.pmux(a, cases, span);
+                        }
+                        open = Some((result.clone(), vec![(arms[k].0, v)]));
+                    }
+                }
+            }
+            if let Some((a, cases)) = open {
+                result = self.b.pmux(a, cases, span);
+            }
+            for (k, &i) in bits.iter().enumerate() {
+                out[i] = result[k];
+            }
         }
         out
     }
@@ -996,6 +1072,171 @@ impl<'a, 'd> ModElab<'a, 'd> {
     fn declare_block_vars(&mut self, scope: ScopeId, d: &'a crate::ast::NetDecl, env: &mut Env) -> Result<()> {
         let _ = env;
         self.declare_net(scope, d, None)
+    }
+}
+
+/// Whether constant patterns match every value of `sel` (its bits that
+/// aren't constant: up to 12 of them are enumerated).
+fn covers_all<'p>(sel: &[SigBit], patterns: impl Iterator<Item = &'p Vec<Option<SigBit>>>) -> bool {
+    let free: Vec<usize> = (0..sel.len()).filter(|&i| sel[i].net().is_some()).collect();
+    if free.len() > 12 {
+        return false;
+    }
+    let mut covered = vec![false; 1 << free.len()];
+    for p in patterns {
+        let mut fixed = Vec::new();
+        let mut possible = true;
+        for (i, (&s, &b)) in sel.iter().zip(p).enumerate() {
+            match (s, b) {
+                (_, None) => {}
+                (_, Some(SigBit::Net(_))) => {
+                    possible = false;
+                    break;
+                }
+                (_, Some(SigBit::Const(State::X | State::Z))) => {
+                    possible = false;
+                    break;
+                }
+                (SigBit::Const(c), Some(SigBit::Const(d))) => {
+                    if c != d {
+                        possible = false;
+                        break;
+                    }
+                }
+                (SigBit::Net(_), Some(SigBit::Const(d))) => {
+                    let k = free.iter().position(|&f| f == i).expect("a free bit");
+                    fixed.push((k, d == State::One));
+                }
+            }
+        }
+        if !possible {
+            continue;
+        }
+        for (v, c) in covered.iter_mut().enumerate() {
+            if fixed.iter().all(|&(k, one)| (v >> k & 1 == 1) == one) {
+                *c = true;
+            }
+        }
+    }
+    covered.iter().all(|&c| c)
+}
+
+impl<'a, 'd> ModElab<'a, 'd> {
+    /// Fills [`Env::snippets`] for a block: every assignment's target
+    /// splits its variable's bits, a variable index into single bits (a
+    /// loop over `x[i]` writes them one at a time once unrolled).
+    pub fn prescan_snippets(&mut self, body: &'a Stmt, scope: ScopeId, env: &mut Env) {
+        let mut masks: FxHashMap<usize, Vec<Vec<bool>>> = FxHashMap::default();
+        self.scan_stmt(body, scope, &mut masks);
+        for (v, ms) in masks {
+            let w = self.vars[v].dim.width();
+            let mut sigs: Vec<Vec<bool>> = vec![Vec::new(); w];
+            for m in &ms {
+                for (i, s) in sigs.iter_mut().enumerate() {
+                    s.push(m[i]);
+                }
+            }
+            let mut ids: Vec<Vec<bool>> = Vec::new();
+            let classes = sigs
+                .into_iter()
+                .map(|s| match ids.iter().position(|x| *x == s) {
+                    Some(k) => k as u32,
+                    None => {
+                        ids.push(s);
+                        ids.len() as u32 - 1
+                    }
+                })
+                .collect();
+            env.snippets.insert(v, classes);
+        }
+    }
+
+    fn scan_stmt(&mut self, s: &'a Stmt, scope: ScopeId, out: &mut FxHashMap<usize, Vec<Vec<bool>>>) {
+        match &s.kind {
+            StmtKind::Assign { lhs, .. } => self.scan_lhs(lhs, scope, out),
+            StmtKind::Block { stmts, .. } => stmts.iter().for_each(|x| self.scan_stmt(x, scope, out)),
+            StmtKind::If { then, els, .. } => {
+                self.scan_stmt(then, scope, out);
+                if let Some(e) = els {
+                    self.scan_stmt(e, scope, out);
+                }
+            }
+            StmtKind::Case { items, .. } => items.iter().for_each(|i| self.scan_stmt(&i.body, scope, out)),
+            StmtKind::For { init, step, body, .. } => {
+                self.scan_stmt(init, scope, out);
+                self.scan_stmt(step, scope, out);
+                self.scan_stmt(body, scope, out);
+            }
+            StmtKind::While { body, .. } | StmtKind::Repeat { body, .. } | StmtKind::Event { body, .. } => {
+                self.scan_stmt(body, scope, out)
+            }
+            _ => {}
+        }
+    }
+
+    fn scan_lhs(&mut self, e: &'a Expr, scope: ScopeId, out: &mut FxHashMap<usize, Vec<Vec<bool>>>) {
+        let var = |m: &mut Self, b: &'a Expr| -> Option<usize> {
+            match &b.kind {
+                ExprKind::Ident(id) => match m.lookup(scope, &id.name) {
+                    Some((Sym::Var(v), _)) => Some(v),
+                    _ => None,
+                },
+                _ => None,
+            }
+        };
+        let mut push = |v: usize, mask: Vec<bool>| out.entry(v).or_default().push(mask);
+        match &e.kind {
+            ExprKind::Concat(parts) => {
+                for p in parts {
+                    self.scan_lhs(p, scope, out);
+                }
+            }
+            ExprKind::Ident(_) => {
+                if let Some(v) = var(self, e) {
+                    let w = self.vars[v].dim.width();
+                    push(v, vec![true; w]);
+                }
+            }
+            ExprKind::Index { base, index } => {
+                let Some(v) = var(self, base) else { return };
+                let dim = self.vars[v].dim;
+                match self.eval_i64(index, scope).ok().and_then(|i| dim.pos(i)) {
+                    Some(p) => {
+                        let mut m = vec![false; dim.width()];
+                        m[p] = true;
+                        push(v, m);
+                    }
+                    None => {
+                        for p in 0..dim.width() {
+                            let mut m = vec![false; dim.width()];
+                            m[p] = true;
+                            push(v, m);
+                        }
+                    }
+                }
+            }
+            ExprKind::Slice { base, msb, lsb } => {
+                let Some(v) = var(self, base) else { return };
+                let dim = self.vars[v].dim;
+                if let (Ok(m), Ok(l)) = (self.eval_i64(msb, scope), self.eval_i64(lsb, scope)) {
+                    let (a, b) = (dim.pos_unchecked(l), dim.pos_unchecked(m));
+                    let mask = (0..dim.width() as i64).map(|p| p >= a.min(b) && p <= a.max(b)).collect();
+                    push(v, mask);
+                }
+            }
+            ExprKind::IndexedSlice { base, .. } => {
+                // The start is usually a variable: one bit at a time is as
+                // fine as it gets.
+                let Some(v) = var(self, base) else { return };
+                let w = self.vars[v].dim.width();
+                for p in 0..w {
+                    let mut m = vec![false; w];
+                    m[p] = true;
+                    push(v, m);
+                }
+            }
+            _ => {}
+        }
     }
 }
 

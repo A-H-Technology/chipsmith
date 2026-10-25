@@ -29,6 +29,8 @@ use chipsmith_netlist::{
     State, Word,
 };
 
+use rustc_hash::FxHashMap;
+
 use super::stmt::{Env, MemWrite, Mode, Slot};
 use super::{ModElab, ScopeId, Sym};
 use crate::ast::{BinOp, Edge, Event, Expr, ExprKind, Stmt, StmtKind, UnOp};
@@ -196,6 +198,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
         let mut reset_envs = Vec::new();
         for (ctrl, body) in resets {
             let mut env = Env::new(Mode::Clocked);
+            self.prescan_snippets(body, scope, &mut env);
             self.exec(body, scope, &mut env)?;
             if let Some(w) = env.mem_writes.first() {
                 bail!(w.span, "a memory can't be written by an asynchronous reset");
@@ -203,6 +206,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
             reset_envs.push((ctrl, env));
         }
         let mut env = Env::new(Mode::Clocked);
+        self.prescan_snippets(stmt, scope, &mut env);
         self.exec(stmt, scope, &mut env)?;
         self.finish_mem_writes(&env, clk);
         let mut vars: Vec<usize> = env.assigned.keys().copied().collect();
@@ -271,6 +275,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
 
     fn comb_block(&mut self, body: &'a Stmt, scope: ScopeId, span: Span) -> Result<()> {
         let mut env = Env::new(Mode::Comb);
+        self.prescan_snippets(body, scope, &mut env);
         self.exec(body, scope, &mut env)?;
         if let Some(w) = env.mem_writes.first() {
             return Err(Diag::new(w.span, "internal: memory write port in combinational logic"));
@@ -395,9 +400,16 @@ impl<'a, 'd> ModElab<'a, 'd> {
     /// Turns the recorded block outputs into cells and connections.
     pub fn finish_processes(&mut self) -> Result<()> {
         let outs = std::mem::take(&mut self.outs);
+        for (v, value) in std::mem::take(&mut self.loop_finals) {
+            if outs.iter().all(|o| o.var != v) {
+                let nets = self.vars[v].nets.clone();
+                let span = self.vars[v].span;
+                self.b.join_sig(&nets, &konst(&value), span);
+            }
+        }
         // Which outputs drive each bit: a temporary yields to anything
         // else, several non-temporaries are an error.
-        let mut by_var: rustc_hash::FxHashMap<usize, Vec<usize>> = Default::default();
+        let mut by_var: FxHashMap<usize, Vec<usize>> = Default::default();
         for (i, o) in outs.iter().enumerate() {
             by_var.entry(o.var).or_default().push(i);
         }
@@ -428,6 +440,49 @@ impl<'a, 'd> ModElab<'a, 'd> {
                     }
                 }
             }
+        }
+        // What drives each variable bit, for its initial value: a register
+        // keeps it as `init`, logic drops it, and a variable nothing
+        // drives is that constant (yosys 0.70's proc does the same).
+        let mut by_ff: FxHashMap<usize, Vec<bool>> = FxHashMap::default();
+        let mut driven: FxHashMap<usize, Vec<bool>> = FxHashMap::default();
+        for (o, &skip) in outs.iter().zip(&skip) {
+            if skip {
+                continue;
+            }
+            let w = self.vars[o.var].dim.width();
+            let d = driven.entry(o.var).or_insert_with(|| vec![false; w]);
+            for &b in &o.bits {
+                d[b] = true;
+            }
+            if let OutKind::Ff { .. } = o.kind {
+                let f = by_ff.entry(o.var).or_insert_with(|| vec![false; w]);
+                for &b in &o.bits {
+                    f[b] = true;
+                }
+            }
+        }
+        for v in 0..self.vars.len() {
+            let Some(init) = self.vars[v].init.clone() else {
+                continue;
+            };
+            if self.vars[v].cont_driven || self.vars[v].port == Some(chipsmith_netlist::Dir::In) {
+                continue;
+            }
+            let w = init.len();
+            let ff = by_ff.get(&v).cloned().unwrap_or_else(|| vec![false; w]);
+            let dr = driven.get(&v).cloned().unwrap_or_else(|| vec![false; w]);
+            let mut kept = vec![State::X; w];
+            for i in 0..w {
+                if ff[i] {
+                    kept[i] = init[i];
+                } else if !dr[i] && init[i] != State::X {
+                    let n = self.vars[v].nets[i];
+                    let span = self.vars[v].span;
+                    self.b.join(n, SigBit::Const(init[i]), span);
+                }
+            }
+            self.vars[v].init = kept.iter().any(|&b| b != State::X).then_some(kept);
         }
         for (o, skip) in outs.into_iter().zip(skip) {
             if skip {
@@ -611,7 +666,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 w.priority.resize(n, false);
             }
             let cell = Mem {
-                memid: mem.name.clone(),
+                memid: format!("\\{}", mem.name),
                 size,
                 offset: mem.lo,
                 width: mem.width(),
@@ -710,13 +765,12 @@ pub(crate) fn mem_write(
     mem: usize,
     addr: SigSpec,
     v: SigSpec,
-    bits: Option<(usize, usize)>,
+    (lo_bit, n): (usize, usize),
     blocking: bool,
     env: &mut Env,
     span: Span,
 ) -> Result<()> {
     let width = m.mems[mem].width();
-    let (lo_bit, n) = bits.unwrap_or((0, width));
     match env.mode {
         Mode::Initial => {
             let Some(a) = as_const(&addr).and_then(|c| addr_value(&c)) else {

@@ -46,6 +46,8 @@ pub(crate) struct ModElab<'a, 'd> {
     /// prefix: a named block in a loop declares its variables once.
     block_vars: FxHashMap<(Span, String), usize>,
     pub outs: Vec<ProcOut>,
+    /// `for` loop variables' final values.
+    pub loop_finals: FxHashMap<usize, Vec<State>>,
     pub processes: usize,
     /// Hidden env slots handed out.
     pub hidden: usize,
@@ -75,6 +77,7 @@ pub(crate) fn elaborate_module<'a>(
         defparams: Vec::new(),
         block_vars: FxHashMap::default(),
         outs: Vec::new(),
+        loop_finals: FxHashMap::default(),
         processes: 0,
         hidden: 0,
         depth: 0,
@@ -437,7 +440,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
             attrs,
             init: None,
             span: id.span,
-            driver: None,
+            cont_driven: false,
         });
         let v = self.vars.len() - 1;
         self.define(scope, id, Sym::Var(v))?;
@@ -603,6 +606,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
                         if self.vars[v].variable {
                             self.declare_init(v, init, scope)?;
                         } else {
+                            self.vars[v].cont_driven = true;
                             let lhs = self.vars[v].nets.clone();
                             self.cont_assign_bits(lhs, init, scope, d.span)?;
                         }
@@ -637,7 +641,10 @@ impl<'a, 'd> ModElab<'a, 'd> {
                     _ => unreachable!(),
                 };
                 match sym {
-                    Sym::Var(v) => self.vars[v].nets.clone(),
+                    Sym::Var(v) => {
+                        self.vars[v].cont_driven = true;
+                        self.vars[v].nets.clone()
+                    }
                     _ => bail!(e.span, "not a net"),
                 }
             }
@@ -700,7 +707,10 @@ impl<'a, 'd> ModElab<'a, 'd> {
             _ => bail!(base.span, "only a simple name can be selected from here"),
         };
         match sym {
-            Sym::Var(v) => Ok((self.vars[v].nets.clone(), self.vars[v].dim)),
+            Sym::Var(v) => {
+                self.vars[v].cont_driven = true;
+                Ok((self.vars[v].nets.clone(), self.vars[v].dim))
+            }
             Sym::Mem(_) => bail!(base.span, "a memory can't be driven by a continuous assignment"),
             _ => bail!(base.span, "not a net"),
         }

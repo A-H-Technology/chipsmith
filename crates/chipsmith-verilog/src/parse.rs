@@ -69,6 +69,10 @@ impl<'a> Parser<'a> {
         t
     }
 
+    fn bump_tok(&mut self) -> &'a Tok {
+        &self.bump().tok
+    }
+
     fn is(&self, p: P) -> bool {
         *self.tok() == Tok::P(p)
     }
@@ -531,7 +535,22 @@ impl<'a> Parser<'a> {
             Tok::Kw(Kw::Parameter | Kw::Localparam) => {
                 items.push(Item::Param(self.param_decl(attrs)?))
             }
-            Tok::Kw(Kw::Specparam) => bail!(lo, "specparam is not supported"),
+            // Timing, which synthesis ignores (as yosys does without
+            // `-specify`).
+            Tok::Kw(Kw::Specparam) => {
+                while !self.eat(P::Semi) {
+                    if *self.bump_tok() == Tok::Eof {
+                        bail!(lo, "`specparam` without `;`");
+                    }
+                }
+            }
+            Tok::Kw(Kw::Specify) => {
+                while !self.eat_kw(Kw::Endspecify) {
+                    if *self.bump_tok() == Tok::Eof {
+                        bail!(lo, "`specify` without `endspecify`");
+                    }
+                }
+            }
             Tok::Kw(Kw::Genvar) => {
                 self.bump();
                 let mut names = vec![self.ident()?];
@@ -666,7 +685,7 @@ impl<'a> Parser<'a> {
                 }
                 self.expect(P::Semi)?;
             }
-            Tok::Kw(k @ (Kw::Specify | Kw::Pullup | Kw::Pulldown | Kw::Event | Kw::Nmos | Kw::Pmos | Kw::Cmos | Kw::Tran | Kw::Notif0 | Kw::Notif1)) => {
+            Tok::Kw(k @ (Kw::Pullup | Kw::Pulldown | Kw::Event | Kw::Nmos | Kw::Pmos | Kw::Cmos | Kw::Tran | Kw::Notif0 | Kw::Notif1)) => {
                 bail!(lo, "`{}` is not supported", k.name())
             }
             Tok::Ident(_) => items.push(Item::Instance(self.instance(attrs)?)),

@@ -88,6 +88,7 @@ impl<'a> Preprocessor<'a> {
         file: crate::source::FileId,
     ) -> Result<Tokens> {
         let text = sources.file(file).text.clone();
+        let len = text.len();
         let mut pp = Preprocessor {
             sources,
             defines,
@@ -95,7 +96,7 @@ impl<'a> Preprocessor<'a> {
             lexers: vec![Lexer::new(file, text)],
             conds: Vec::new(),
             out: Tokens {
-                tokens: Vec::new(),
+                tokens: Vec::with_capacity(len / 6),
                 nettype: Vec::new(),
             },
         };

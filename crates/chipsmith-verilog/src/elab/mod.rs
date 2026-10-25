@@ -195,8 +195,8 @@ pub(crate) struct Var {
     /// Power-up value, from a declaration initializer or `initial`.
     pub init: Option<Vec<State>>,
     pub span: Span,
-    /// The process that drives it (by index), to report a second one.
-    pub driver: Option<(usize, Span)>,
+    /// Driven by a continuous assignment or an instance's output.
+    pub cont_driven: bool,
 }
 
 impl Var {

@@ -148,8 +148,31 @@ fn flat_module(
                 }
                 new_wires.push(nw);
             }
+            // A memory's id is its name, prefixed like a wire's (yosys'
+            // `\cpu.regs`), so memory passes name what they make after the
+            // flattened name.
+            let memid = |id: &str| -> String {
+                match id.strip_prefix('\\') {
+                    Some(rest) => format!("\\{}.{rest}", cell.name),
+                    None => format!("$flatten\\{}.{id}", cell.name),
+                }
+            };
+            for mem in &sub.memories {
+                let mut nm = mem.clone();
+                nm.name = memid(&mem.name);
+                m.memories.push(nm);
+            }
             for c in &sub.cells {
                 let mut nc = c.clone();
+                match &mut nc.kind {
+                    CellKind::Mem(mem) => mem.memid = memid(&mem.memid),
+                    CellKind::Other(g) => {
+                        if let Some(ParamValue::Str(id)) = g.params.get_mut("MEMID") {
+                            *id = memid(id);
+                        }
+                    }
+                    _ => {}
+                }
                 nc.kind.for_each_bit_mut(|b| *b = bit(*b, &mut m));
                 // Generic ports with only constants still get mapped
                 // above; the typed visitor skips constant-only pieces,
