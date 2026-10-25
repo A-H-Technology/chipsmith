@@ -549,16 +549,27 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
     let gate_path = dir.join("gate.json");
     write(gate, &gate_path);
 
-    // Memories in blocks are compared at their ports (cut out on both
-    // sides): their contents and configuration are checked against the
-    // yosys flow's cells instead.
-    let in_blocks = block_memories(gate_mod);
+    // Memories in blocks, and memories an earlier stage still has as
+    // memories, are compared at their ports (cut out on both sides): the
+    // blocks' contents and configuration are checked against the yosys
+    // flow's cells instead.
+    let mut sync_cut = block_memories(gate_mod);
+    let mut cut = sync_cut.clone();
+    for c in &gate_mod.cells {
+        if let CellKind::Mem(mem) = &c.kind {
+            let id = mem.memid.trim_start_matches('\\').to_owned();
+            if mem.rd.iter().all(|r| r.sync.is_some()) {
+                sync_cut.push(id.clone());
+            }
+            cut.push(id);
+        }
+    }
     // Synthesis merged the read registers of the memories it put in
     // blocks into them; yosys' `memory_dff` does the same on both sides.
-    let mut gold = prep_memories(dir, "gold_prep", rtl, &to_logic, &in_blocks)?;
-    let mut mid = prep_memories(dir, "mid_prep", &refined_path, &to_logic, &in_blocks)?;
+    let mut gold = prep_memories(dir, "gold_prep", rtl, &to_logic, &sync_cut)?;
+    let mut mid = prep_memories(dir, "mid_prep", &refined_path, &to_logic, &sync_cut)?;
     let mut cut_gate = gate.clone();
-    if !in_blocks.is_empty() {
+    if !cut.is_empty() {
         cut_memories(top_mut(&mut gold))?;
         let shapes = cut_memories(top_mut(&mut mid))?;
         let gt = cut_gate
@@ -566,6 +577,7 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
             .iter_mut()
             .find(|m| !m.is_blackbox())
             .expect("top");
+        cut_memories(gt)?;
         cut_blocks(gt, &shapes)?;
     }
     let gold_path = dir.join("gold.json");

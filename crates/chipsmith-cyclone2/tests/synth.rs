@@ -258,6 +258,37 @@ fn m4k_cells_are_the_yosys_flows() {
     }
 }
 
+/// Every stage of the pipeline, not only the last, is equivalent to the
+/// RTL: the check works on any of them (they keep the wire names).
+#[test]
+fn every_stage_is_equivalent() {
+    #[derive(Default)]
+    struct All(Vec<(String, Design)>);
+    impl Observer for All {
+        fn stage(&mut self, name: &str, m: &Module) {
+            self.0.push((
+                name.to_owned(),
+                Design {
+                    modules: vec![m.clone()],
+                },
+            ));
+        }
+    }
+    for (ex, top) in [("blinky-verilog", "blinky"), ("bidir", "top"), ("ram-leds", "top")] {
+        let files = example(ex);
+        let dir = scratch(&format!("{ex}-stages"));
+        let rtl = support::rtl(&dir, top, &files);
+        let mut all = All::default();
+        synthesize_observed(support::frontend(top, &files), &mut all).unwrap();
+        let refined = all.0.iter().find(|(n, _)| n == "refined").unwrap().1.clone();
+        for (name, stage) in &all.0 {
+            let d = scratch(&format!("{ex}-stage-{name}"));
+            support::check(&d, &rtl, &refined, stage)
+                .unwrap_or_else(|e| panic!("{ex}, stage {name}: {e}"));
+        }
+    }
+}
+
 /// The check isn't vacuous: one bit of one LUT changed, it fails.
 #[test]
 fn a_wrong_lut_bit_is_caught() {
