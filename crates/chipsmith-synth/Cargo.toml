@@ -1,6 +1,6 @@
 [package]
 name = "chipsmith-synth"
-description = "chipsmith's device-independent synthesis: LUT mapping"
+description = "chipsmith's device-independent synthesis: flattening, LUT mapping"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

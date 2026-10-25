@@ -9,7 +9,7 @@ use crate::Frontend;
 
 fn elaborate(src: &str) -> Result<Design, crate::Error> {
     let mut fe = Frontend::new();
-    fe.read_source("t.v", src, false)?;
+    fe.read_source("t.v", src)?;
     fe.elaborate("top")
 }
 
