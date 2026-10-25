@@ -11,6 +11,7 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -222,4 +223,132 @@ fn a_one_bit_miscompile_is_caught() {
     let r = common::equivalent(&dir, &gold, &ours, "top");
     let err = r.expect_err("a flipped bit must not prove equivalent");
     assert!(err.contains("unproven"), "{err}");
+}
+
+/// Cell counts after cyclone2-re's `cyclone2.ys`, run on yosys' front end
+/// and on chipsmith's netlist (read with `read_json`, its blackbox modules
+/// dropped for the script's own library).
+fn cyclone2_counts(case: &Case) -> (BTreeMap<String, usize>, BTreeMap<String, usize>) {
+    let synth = std::env::var("CHIPSMITH_CYCLONE2_SYNTH")
+        .expect("CHIPSMITH_CYCLONE2_SYNTH unset: run in `nix develop`");
+    let dir = scratch(&format!("cyclone2-{}", case.name));
+    let libs = common::lib_files(Lib::Cyclone2);
+    let mut fe = chipsmith_verilog::Frontend::new();
+    for l in &libs {
+        fe.read_library(l).unwrap();
+    }
+    for f in &case.files {
+        fe.read_file(f).unwrap();
+    }
+    let design = fe.elaborate(&case.top).unwrap();
+    let ours = dir.join("ours.json");
+    chipsmith_netlist::write_json(&design, std::fs::File::create(&ours).unwrap()).unwrap();
+    let rename = if case.top == "top" {
+        String::new()
+    } else {
+        format!("rename {} top\n", case.top)
+    };
+    let mut read_gold = String::new();
+    for f in &case.files {
+        read_gold += &format!("read_verilog {}\n", common::quoted(f));
+    }
+    let count = |name: &str, read: &str| -> BTreeMap<String, usize> {
+        let stat = dir.join(format!("{name}.stat"));
+        let script = format!(
+            "{read}{rename}script synth/cyclone2.ys\ntee -q -o {} stat\n",
+            common::quoted(&stat)
+        );
+        let ys = dir.join(format!("{name}.ys"));
+        std::fs::write(&ys, script).unwrap();
+        let out = Command::new("yosys")
+            .args(["-q", "-s"])
+            .arg(&ys)
+            .current_dir(Path::new(&synth))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::read_to_string(&stat)
+            .unwrap()
+            .lines()
+            .filter_map(|l| {
+                let mut w = l.split_whitespace();
+                let n = w.next()?.parse().ok()?;
+                let ty = w.next()?;
+                // Device cells only (`stat` also counts wires, ports, ...).
+                let device = ty.starts_with(|c: char| c.is_ascii_uppercase());
+                (w.next().is_none() && device).then(|| (ty.to_owned(), n))
+            })
+            .collect()
+    };
+    let gold = count("gold", &read_gold);
+    let mine = count(
+        "ours",
+        &format!("read_json {}\ndelete A:blackbox\n", common::quoted(&ours)),
+    );
+    (gold, mine)
+}
+
+/// The rest of the DE2 flow sees the same netlist: the same device cells
+/// as from yosys' front end. picorv32's LUT count differs by a little
+/// (ADR-0006: abc maps a slightly different, equivalent input); its
+/// registers, pins and memories don't.
+#[test]
+fn cyclone2_cell_counts_match_yosys_front_end() {
+    let mut cases: Vec<Case> = [
+        "blinky-verilog",
+        "bidir",
+        "ram",
+        "ram-leds",
+        "ram_widths",
+        "picorv32",
+    ]
+    .iter()
+    .map(|n| {
+        example(
+            n,
+            if *n == "blinky-verilog" {
+                "blinky"
+            } else {
+                "top"
+            },
+            Lib::Cyclone2,
+        )
+    })
+    .collect();
+    cases.push(Case {
+        name: "loader".into(),
+        files: vec![repo().join("crates/chipsmith-cyclone2/src/persist/loader/top.v")],
+        top: "top".into(),
+        lib: Lib::Cyclone2,
+    });
+    cases.push(ghdl(
+        "cyclone2-blinky-vhdl",
+        &[repo().join("examples/blinky-vhdl/src/blinky.vhd")],
+        "blinky",
+    ));
+    let mut report = Vec::new();
+    for case in &cases {
+        let (gold, ours) = cyclone2_counts(case);
+        eprintln!(
+            "{}: yosys {gold:?}\n{}: ours  {ours:?}",
+            case.name, case.name
+        );
+        if case.name == "picorv32" {
+            for (ty, &n) in &gold {
+                let m = ours.get(ty).copied().unwrap_or(0);
+                if ty == "LCELL_COMB" {
+                    assert!(m.abs_diff(n) * 100 <= n, "picorv32 LUTs: {m} vs yosys' {n}");
+                } else {
+                    assert_eq!(m, n, "picorv32 {ty}");
+                }
+            }
+        } else if gold != ours {
+            report.push(format!("{}: yosys {gold:?}, ours {ours:?}", case.name));
+        }
+    }
+    assert!(report.is_empty(), "{}", report.join("\n"));
 }
