@@ -172,7 +172,7 @@ Cyclone II (EP2C35F672C6):
 | stage | today | |
 |---|---|---|
 | VHDL → Verilog | GHDL `--synth --out=verilog` | stays a translator in front of the flow |
-| synthesis | yosys runs cyclone2-re's `cyclone2.ys` in two halves around the LUT mapping | to replace |
+| synthesis | yosys runs cyclone2-re's `cyclone2.ys` in two halves around the LUT mapping | ours, not switched on yet: `chipsmith_cyclone2::synth` (roadmap step 4) replaces both halves |
 | LUT mapping | chipsmith: AIG plus priority cuts, in place of `abc -lut 4` (`crates/chipsmith-synth/src/lutmap.rs`) | ours |
 | packing | chipsmith: cyclone2-re's nextpnr packer, ported (`crates/chipsmith-cyclone2/src/pack`) | ours |
 | placement | chipsmith: simulated annealing over LAB slots, nextpnr's LAB rules (`crates/chipsmith-cyclone2/src/place.rs`) | ours |
@@ -678,9 +678,9 @@ A Cargo workspace, one crate per concern
 | crate | |
 |---|---|
 | `crates/chipsmith` | the binary: manifest, devices, the flow (`Plan`, `Step`), CLI |
-| `crates/chipsmith-synth` | device-independent synthesis: LUT mapping |
+| `crates/chipsmith-synth` | device-independent synthesis: flattening, RTL optimisation, arithmetic, memories, lowering to gates, LUT mapping |
 | `crates/chipsmith-route` | what both back ends share: the routing graph (`ChipDb`), the PathFinder router, the timing graph |
-| `crates/chipsmith-cyclone2` | Cyclone II: packing, placement, routing (nextpnr JSON in and out), M4K, hard blocks, EPCS and its serial flash loader |
+| `crates/chipsmith-cyclone2` | Cyclone II: synthesis to its cells, packing, placement, routing (nextpnr JSON in and out), M4K, hard blocks, EPCS and its serial flash loader |
 | `crates/chipsmith-xc7` | 7-series: prjxray-db import, placement, delays, routing, Zynq `.bin` |
 | `crates/chipsmith-jtag` | cables (USB-Blaster, FT2232), SVF player, 7-series JTAG loader |
 

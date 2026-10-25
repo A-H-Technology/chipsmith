@@ -117,7 +117,10 @@ fn main() -> Result<()> {
     };
     let netlist = dir.join("netlist.json");
     let t = Instant::now();
-    if mode == Mode::Yosys {
+    // A netlist given as it is (placement and routing of a variant).
+    if let Some(given) = std::env::var_os("DE2_NETLIST") {
+        std::fs::copy(given, &netlist)?;
+    } else if mode == Mode::Yosys {
         let script = std::fs::read_to_string(synth_dir()?.join("synth/cyclone2.ys"))?;
         let lines: Vec<&str> = script.lines().collect();
         let cut = lines
