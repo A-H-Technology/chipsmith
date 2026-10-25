@@ -108,7 +108,7 @@ fn blinky_vhdl() {
 #[test]
 fn ghdl_idioms() {
     let src = Path::new(MANIFEST).join("tests/vhdl");
-    for (file, top) in [("fsm.vhd", "fsm"), ("rom.vhd", "rom")] {
+    for (file, top) in [("fsm.vhd", "fsm"), ("rom.vhd", "rom"), ("ops.vhd", "ops")] {
         run(ghdl(&format!("ghdl-{top}"), &[src.join(file)], top));
     }
 }
