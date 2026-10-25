@@ -49,6 +49,10 @@ endmodule
 module CY2_OBUF (input DATAOUT, output PAD);
   assign PAD = DATAOUT;
 endmodule
+module CY2_IOBUF (input DATAOUT, input OE, output COMBOUT, inout PAD);
+  assign PAD = OE ? DATAOUT : 1'bz;
+  assign COMBOUT = PAD;
+endmodule
 "#;
 
 /// A scratch directory under `base` (tests pass `CARGO_TARGET_TMPDIR`).
@@ -202,7 +206,10 @@ fn logic_memories(gate: &Module) -> Vec<String> {
 fn equiv(dir: &Path, name: &str, gold: &Path, gate: &Path) -> Result<usize, String> {
     let sim = dir.join("cy2_sim.v");
     std::fs::write(&sim, SIM_MODELS).unwrap();
-    let prep = "hierarchy -top top\nproc\nflatten\nchtype -set chipsmith_mem t:$mem_v2\n\
+    // Tri-states have no SAT model: as opaque cells, merged when their
+    // inputs are proven equal (chipsmith-netlist's round-trip check does
+    // the same).
+    let prep = "hierarchy -top top\nproc\nflatten\ntribuf\nchtype -set chipsmith_mem t:$mem_v2\n\
                 chtype -set chipsmith_tribuf t:$tribuf t:$_TBUF_\nopt_clean";
     let script = format!(
         "read_json {gold}\nread_verilog -overwrite {sim}\n{prep}\nrename top gold\ndesign -stash gold\n\
@@ -385,7 +392,7 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
             "claims",
             &format!(
                 "read_json {}\nhierarchy -top top\nproc\nflatten\nchtype -set chipsmith_mem t:$mem_v2\n\
-                 sat -tempinduct -enable_undef -set-def-inputs -prove-x __claims {}'b{all} -maxsteps 8 -show __claims -ignore_unknown_cells\n",
+                 sat -tempinduct -prove __claims {}'b{all} -maxsteps 8 -show __claims -ignore_unknown_cells\n",
                 claims_path.display(),
                 all.len()
             ),

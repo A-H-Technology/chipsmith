@@ -15,7 +15,7 @@ mod io;
 use anyhow::{bail, Context, Result};
 use chipsmith_netlist::{attr, is_set, CellKind, Design, Module};
 use chipsmith_synth::rewrite::define_inits;
-use chipsmith_synth::{alumacc, clean, lutmap, memory, opt, techmap, undef, wreduce};
+use chipsmith_synth::{alumacc, clean, lutmap, memory, opt, techmap, tribuf, undef, wreduce};
 
 /// What each stage left, for checking stages one at a time.
 pub trait Observer {
@@ -60,6 +60,7 @@ fn run(m: &mut Module, obs: &mut dyn Observer) -> Result<()> {
     let clean = |m: &mut Module| clean::clean(m, cells::REMOVABLE);
     let removable = cells::REMOVABLE;
     clean(m);
+    tribuf::tribuf(m);
     undef::refine(m)?;
     obs.stage("refined", m);
     memory::collect(m)?;

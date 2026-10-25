@@ -10,5 +10,6 @@ pub mod memory;
 pub mod opt;
 pub mod rewrite;
 pub mod techmap;
+pub mod tribuf;
 pub mod undef;
 pub mod wreduce;
