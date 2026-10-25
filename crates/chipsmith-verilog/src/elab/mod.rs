@@ -72,7 +72,11 @@ impl ConstVal {
 
     /// The value as an integer, if defined and in range.
     pub fn as_i64(&self) -> Option<i64> {
-        if self.bits.iter().any(|b| !matches!(b, State::Zero | State::One)) {
+        if self
+            .bits
+            .iter()
+            .any(|b| !matches!(b, State::Zero | State::One))
+        {
             return None;
         }
         // Bits above 64 must repeat the sign (or be 0 if unsigned).
