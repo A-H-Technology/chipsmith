@@ -48,7 +48,6 @@ pub(crate) struct ModElab<'a, 'd> {
     pub outs: Vec<ProcOut>,
     /// `for` loop variables' final values.
     pub loop_finals: FxHashMap<usize, Vec<State>>,
-    pub processes: usize,
     /// Hidden env slots handed out.
     pub hidden: usize,
     /// Function and task call depth.
@@ -78,13 +77,12 @@ pub(crate) fn elaborate_module<'a>(
         block_vars: FxHashMap::default(),
         outs: Vec::new(),
         loop_finals: FxHashMap::default(),
-        processes: 0,
         hidden: 0,
         depth: 0,
     };
     let root = m.new_scope(None, String::new());
     if !lib {
-        prescan_mem2reg(&ast.items, false, &mut m.mem2reg);
+        prescan_mem2reg(&ast.items, &mut m.mem2reg);
     }
     m.declare_items(root, &ast.items, lib)?;
     for (p, v) in &m.ports {
@@ -111,7 +109,7 @@ pub(crate) fn elaborate_module<'a>(
 }
 
 /// Memories written from logic or with `=` anywhere in these items.
-fn prescan_mem2reg(items: &[Item], _nested: bool, out: &mut FxHashSet<Rc<str>>) {
+fn prescan_mem2reg(items: &[Item], out: &mut FxHashSet<Rc<str>>) {
     fn stmt(s: &Stmt, comb: bool, out: &mut FxHashSet<Rc<str>>) {
         match &s.kind {
             StmtKind::Assign { lhs, blocking, .. } => {
@@ -160,18 +158,16 @@ fn prescan_mem2reg(items: &[Item], _nested: bool, out: &mut FxHashSet<Rc<str>>) 
                 };
                 stmt(body, comb, out);
             }
-            Item::GenFor { body, .. } | Item::GenBlock(body) => {
-                prescan_mem2reg(&body.items, true, out)
-            }
+            Item::GenFor { body, .. } | Item::GenBlock(body) => prescan_mem2reg(&body.items, out),
             Item::GenIf { then, els, .. } => {
-                prescan_mem2reg(&then.items, true, out);
+                prescan_mem2reg(&then.items, out);
                 if let Some(e) = els {
-                    prescan_mem2reg(&e.items, true, out);
+                    prescan_mem2reg(&e.items, out);
                 }
             }
             Item::GenCase { items, .. } => {
                 for i in items {
-                    prescan_mem2reg(&i.body.items, true, out);
+                    prescan_mem2reg(&i.body.items, out);
                 }
             }
             _ => {}
@@ -300,7 +296,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
                         if lib {
                             continue;
                         }
-                        self.declare_net(scope, d, None)?;
+                        self.declare_net(scope, d)?;
                     }
                 }
                 Item::Defparam(list) if !lib => {
@@ -473,8 +469,11 @@ impl<'a, 'd> ModElab<'a, 'd> {
         Ok(v)
     }
 
-    /// `wire`/`reg`/`integer` declarations (not ports). Memories too.
-    pub fn declare_net(&mut self, scope: ScopeId, d: &'a NetDecl, _port: Option<()>) -> Result<()> {
+    /// `wire`/`reg`/`integer` declarations (not ports), and memories. A
+    /// named block's variables are module variables (they are static,
+    /// and reachable as `block.name`), declared once however often the
+    /// block runs; in a function or task they are locals.
+    pub fn declare_net(&mut self, scope: ScopeId, d: &'a NetDecl) -> Result<()> {
         let kind = d.ty.kind.unwrap_or(NetKind::Wire);
         let (dim, signed) = self.decl_dim(&d.ty, scope)?;
         for n in &d.names {

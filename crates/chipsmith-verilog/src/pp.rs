@@ -59,8 +59,9 @@ pub struct Tokens {
     pub nettype: Vec<(usize, DefaultNettype)>,
 }
 
+/// Where an `` `ifdef `` chain is.
 enum Cond {
-    /// Emitting tokens; `done` once a branch of this `ifdef` was taken.
+    /// In the branch being taken.
     Active,
     /// Skipping, and a later `elsif`/`else` may still be taken.
     Waiting,
@@ -117,9 +118,10 @@ impl<'a> Preprocessor<'a> {
             let active = self.active();
             let t = match self.lexer().next_token() {
                 Ok(t) => t,
-                // Text in a skipped region needn't lex.
+                // Text in a skipped region needn't lex: drop the rest of
+                // the line.
                 Err(_) if !active => {
-                    self.skip_char();
+                    self.lexer().rest_of_line();
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -141,13 +143,6 @@ impl<'a> Preprocessor<'a> {
                 _ => {}
             }
         }
-    }
-
-    /// Steps over a character a skipped region can't lex.
-    fn skip_char(&mut self) {
-        let l = self.lexer();
-        let (rest, _) = l.rest_of_line();
-        let _ = rest;
     }
 
     fn directive(&mut self, name: &str, span: Span, active: bool) -> Result<()> {

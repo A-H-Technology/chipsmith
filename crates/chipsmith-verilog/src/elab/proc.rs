@@ -204,7 +204,6 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 Polarity::Neg
             },
         };
-        let proc_id = self.next_process();
         let mut reset_envs = Vec::new();
         for (ctrl, body) in resets {
             let mut env = Env::new(Mode::Clocked);
@@ -258,20 +257,12 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 var: v,
                 bits,
                 temp,
-                span: self.vars[v].span,
+                span,
                 kind: OutKind::Ff { clk, d, resets },
             });
-            self.note_driver(v, proc_id, span);
         }
         Ok(())
     }
-
-    fn next_process(&mut self) -> usize {
-        self.processes += 1;
-        self.processes
-    }
-
-    fn note_driver(&mut self, _v: usize, _proc: usize, _span: Span) {}
 
     /// A clock or reset in an event list: one bit.
     fn lower_edge_signal(&mut self, e: &'a Expr, scope: ScopeId) -> Result<SigBit> {
@@ -293,7 +284,6 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 "internal: memory write port in combinational logic",
             ));
         }
-        let proc_id = self.next_process();
         let mut vars: Vec<usize> = env.assigned.keys().copied().collect();
         vars.sort_unstable();
         for v in vars {
@@ -320,10 +310,9 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 var: v,
                 bits,
                 temp,
-                span: self.vars[v].span,
+                span,
                 kind: OutKind::Comb { value, en },
             });
-            self.note_driver(v, proc_id, span);
         }
         Ok(())
     }

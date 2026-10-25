@@ -207,7 +207,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
                         self.declare_param(inner, p)?;
                     }
                     for d in decls {
-                        self.declare_block_vars(inner, d, env)?;
+                        self.declare_net(inner, d)?;
                     }
                     inner
                 };
@@ -1147,19 +1147,6 @@ impl<'a, 'd> ModElab<'a, 'd> {
             }
         }
         out
-    }
-
-    /// Declares a named block's `reg`s and `integer`s: module variables
-    /// (they are static, and reachable as `block.name`), or locals inside
-    /// a function or task.
-    fn declare_block_vars(
-        &mut self,
-        scope: ScopeId,
-        d: &'a crate::ast::NetDecl,
-        env: &mut Env,
-    ) -> Result<()> {
-        let _ = env;
-        self.declare_net(scope, d, None)
     }
 }
 
