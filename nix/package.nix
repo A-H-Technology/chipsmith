@@ -7,7 +7,8 @@
   libusb1,
   ghdl,
   yosys,
-  cram,
+  # cyclone2-re's db package: the device and chip databases (ADR-0003).
+  cyclone2-db,
   cyclone2-synth,
   # nix/xc7.nix: the 7-series tools, chip database and prjxray-db
   xc7,
@@ -27,6 +28,13 @@ let
       ];
     };
     cargoLock.lockFile = ../Cargo.lock;
+    # Unit tests only. The integration tests (crates/*/tests) check against
+    # yosys as an oracle (ADR-0004): development tooling the package doesn't
+    # ship, run in the devshell.
+    cargoTestFlags = [
+      "--lib"
+      "--bins"
+    ];
 
     nativeBuildInputs = [ pkg-config ];
     # the USB-Blaster driver (crates/chipsmith-jtag/src/usb_blaster.rs)
@@ -38,7 +46,7 @@ let
   # The router's graph, flattened from cyclone2-re's chip database once here
   # instead of on every build (parsing the text takes ~12 s, this ~2 s).
   routingGraph = runCommand "cyclone2-routing-graph" { } ''
-    ${lib.getExe unwrapped} routing-graph ${cram}/db/EP2C35F672C6/chipdb.txt.xz $out
+    ${lib.getExe unwrapped} routing-graph ${cyclone2-db}/EP2C35F672C6/chipdb.txt.xz $out
   '';
 
   # The DE2's serial flash loader
@@ -47,13 +55,10 @@ let
   de2Loader =
     runCommand "chipsmith-de2-flash-loader"
       {
-        nativeBuildInputs = [
-          yosys
-          cram
-        ];
+        nativeBuildInputs = [ yosys ];
         CHIPSMITH_CYCLONE2_SYNTH = cyclone2-synth;
         CHIPSMITH_CYCLONE2_GRAPH = routingGraph;
-        CHIPSMITH_CYCLONE2_DB = "${cram}/db";
+        CHIPSMITH_CYCLONE2_DB = "${cyclone2-db}";
       }
       ''
         cp -r ${../crates/chipsmith-cyclone2/src/persist/loader} loader
@@ -88,13 +93,12 @@ runCommand "chipsmith-${unwrapped.version}"
         lib.makeBinPath [
           ghdl
           yosys
-          cram
           xc7.tools
         ]
       } \
       --set CHIPSMITH_CYCLONE2_SYNTH ${cyclone2-synth} \
       --set CHIPSMITH_CYCLONE2_GRAPH ${routingGraph} \
-      --set CHIPSMITH_CYCLONE2_DB ${cram}/db \
+      --set CHIPSMITH_CYCLONE2_DB ${cyclone2-db} \
       --set CHIPSMITH_DE2_LOADER ${de2Loader}/loader.rbf \
       --set CHIPSMITH_XC7_CHIPDB ${xc7.chipdb} \
       --set CHIPSMITH_XC7_GRAPH ${xc7RoutingGraph} \

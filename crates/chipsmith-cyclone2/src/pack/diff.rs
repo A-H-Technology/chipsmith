@@ -2,7 +2,7 @@
 //! the same cells by name and type, the same parameters, every connected
 //! port on the same net (by net name), and the nets in the same id order
 //! (the order the router routes them in), and the same top-level ports
-//! (direction, each bit's net), which cram reads pin modes from.
+//! (direction, each bit's net), which the bitstream reads pin modes from.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
