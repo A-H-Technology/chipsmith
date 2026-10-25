@@ -1,12 +1,13 @@
-//! End to end on the DE2 with chipsmith's own synthesis: a project's HDL
-//! through `chipsmith_cyclone2::synth`, then the packer, placer, router and
-//! bitstream assembler the build uses, to an .rbf. With `--yosys` the
-//! netlist comes from the yosys flow the build runs today instead (the
-//! same back end after it), for comparing the two.
+//! End to end on the DE2 with chipsmith's own front end and synthesis: a
+//! project's HDL through `chipsmith_verilog` and `chipsmith_cyclone2::synth`,
+//! then the packer, placer, router and bitstream assembler the build uses,
+//! to an .rbf. With `--yosys` the netlist comes from the yosys flow the
+//! build runs today instead (the same back end after it), for comparing
+//! the two; with `--yosys-rtl` yosys elaborates (`proc; flatten`) and
+//! chipsmith synthesizes.
 //!
-//! `de2_synth [--yosys] <project dir> <scratch dir>`. Needs the devshell:
-//! yosys elaborates the Verilog (`proc; flatten`) until chipsmith's front
-//! end does, GHDL translates VHDL.
+//! `de2_synth [--yosys | --yosys-rtl] <project dir> <scratch dir>`. Needs
+//! the devshell (yosys for the comparisons, GHDL for VHDL).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,16 @@ use std::time::Instant;
 use anyhow::{bail, ensure, Context, Result};
 use chipsmith::manifest::{Manifest, Sources, Target};
 use chipsmith_cyclone2::{bitstream, pack, place, route, synth};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// chipsmith's front end and synthesis.
+    Chipsmith,
+    /// yosys elaborates, chipsmith synthesizes.
+    YosysRtl,
+    /// The yosys flow the build runs today.
+    Yosys,
+}
 
 fn run(cmd: &mut Command) -> Result<()> {
     let out = cmd.output().with_context(|| format!("running {cmd:?}"))?;
@@ -75,8 +86,12 @@ fn quoted(files: &[PathBuf]) -> String {
 
 fn main() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let use_yosys = args.first().is_some_and(|a| a == "--yosys");
-    if use_yosys {
+    let mode = match args.first().map(String::as_str) {
+        Some("--yosys") => Mode::Yosys,
+        Some("--yosys-rtl") => Mode::YosysRtl,
+        _ => Mode::Chipsmith,
+    };
+    if mode != Mode::Chipsmith {
         args.remove(0);
     }
     let [project, scratch] = &args[..] else {
@@ -98,7 +113,7 @@ fn main() -> Result<()> {
     };
     let netlist = dir.join("netlist.json");
     let t = Instant::now();
-    if use_yosys {
+    if mode == Mode::Yosys {
         let script =
             std::fs::read_to_string(synth_dir()?.join("synth/cyclone2.ys"))?;
         let lines: Vec<&str> = script.lines().collect();
@@ -131,19 +146,28 @@ fn main() -> Result<()> {
             ),
         )?;
     } else {
-        let rtl = dir.join("rtl.json");
-        yosys(
-            &dir,
-            &dir,
-            "rtl",
-            &format!(
-                "read_verilog -lib {}\nread_verilog {}\n{rename}hierarchy -check -top top\nproc\nflatten\nwrite_json {}\n",
-                synth_dir()?.join("synth/cells_sim.v").display(),
-                quoted(&files),
-                rtl.display()
-            ),
-        )?;
-        let design = chipsmith_netlist::read_json(&std::fs::read(&rtl)?)?;
+        let design = if mode == Mode::YosysRtl {
+            let rtl = dir.join("rtl.json");
+            yosys(
+                &dir,
+                &dir,
+                "rtl",
+                &format!(
+                    "read_verilog -lib {}\nread_verilog {}\n{rename}hierarchy -check -top top\nproc\nflatten\nwrite_json {}\n",
+                    synth_dir()?.join("synth/cells_sim.v").display(),
+                    quoted(&files),
+                    rtl.display()
+                ),
+            )?;
+            chipsmith_netlist::read_json(&std::fs::read(&rtl)?)?
+        } else {
+            let mut fe = chipsmith_verilog::Frontend::new();
+            fe.read_library(&synth_dir()?.join("synth/cells_sim.v"))?;
+            for f in &files {
+                fe.read_file(f)?;
+            }
+            fe.elaborate(&manifest.top)?
+        };
         let out = synth::synthesize(design)?;
         chipsmith_netlist::write_json(&out, std::io::BufWriter::new(std::fs::File::create(&netlist)?))?;
     }
@@ -168,7 +192,11 @@ fn main() -> Result<()> {
     println!(
         "{} ({}): synthesis {:.1} s; {} LUTs, {} registers, {} LEs, {} carry chains, {} M4Ks; critical path {:.2} ns, Fmax {:.1} MHz{}; {}",
         manifest.name,
-        if use_yosys { "yosys" } else { "chipsmith" },
+        match mode {
+            Mode::Yosys => "yosys",
+            Mode::YosysRtl => "yosys RTL, chipsmith",
+            Mode::Chipsmith => "chipsmith",
+        },
         synth_s,
         p.luts,
         p.ffs,

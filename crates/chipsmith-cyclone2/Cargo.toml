@@ -17,3 +17,6 @@ postcard.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+chipsmith-verilog.workspace = true

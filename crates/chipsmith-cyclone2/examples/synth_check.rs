@@ -39,10 +39,18 @@ fn main() {
         .iter()
         .map(|f| std::fs::canonicalize(f).unwrap_or_else(|e| panic!("{f}: {e}")))
         .collect();
+    // The netlist to synthesize: chipsmith's front end's, or with
+    // `YOSYS_RTL` set yosys'. The equivalence check's reference is yosys'
+    // either way.
     let rtl = support::rtl(&dir, top, &files);
+    let input = if std::env::var_os("YOSYS_RTL").is_some() {
+        support::read(&rtl)
+    } else {
+        support::frontend(top, &files)
+    };
     let t = Instant::now();
     let mut keep = Keep::default();
-    let out = synthesize_observed(support::read(&rtl), &mut keep).unwrap();
+    let out = synthesize_observed(input, &mut keep).unwrap();
     eprintln!("chipsmith synthesis: {:.2} s", t.elapsed().as_secs_f64());
     let ours = dir.join("chipsmith.json");
     support::write(&out, &ours);

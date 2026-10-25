@@ -162,6 +162,24 @@ pub fn yosys_flow(dir: &Path, top: &str, files: &[PathBuf]) -> PathBuf {
     json
 }
 
+/// chipsmith's own front end's netlist of the design (what the flow will
+/// synthesize), the top renamed `top` as the yosys netlists have it.
+pub fn frontend(top: &str, files: &[PathBuf]) -> Design {
+    let mut fe = chipsmith_verilog::Frontend::new();
+    fe.read_library(&synth_dir().join("synth/cells_sim.v"))
+        .unwrap_or_else(|e| panic!("{e}"));
+    for f in files {
+        fe.read_file(f).unwrap_or_else(|e| panic!("{e}"));
+    }
+    let mut d = fe.elaborate(top).unwrap_or_else(|e| panic!("{e}"));
+    for m in &mut d.modules {
+        if m.name == top {
+            m.name = "top".into();
+        }
+    }
+    d
+}
+
 pub fn write(design: &Design, path: &Path) {
     write_json(design, std::io::BufWriter::new(std::fs::File::create(path).unwrap())).unwrap();
 }
@@ -221,9 +239,10 @@ fn block_memories(gate: &Module) -> Vec<String> {
     ids
 }
 
-/// A port for a cut. An output gets nets of its own, through buffers:
-/// were the port to name the logic's nets, yosys could take its name for
-/// them and `equiv_make` would join them with the other side's port.
+/// A port for a cut. An output gets nets of its own, through a gate
+/// (`b & b`: `opt_clean` would dissolve a buffer): were the port to name
+/// the logic's nets, yosys could take its name for them and `equiv_make`
+/// would join them with the other side's port.
 fn add_port(m: &mut Module, name: String, dir: chipsmith_netlist::Dir, bits: Vec<SigBit>) {
     let bits = if dir == chipsmith_netlist::Dir::Out {
         bits.into_iter()
@@ -232,7 +251,7 @@ fn add_port(m: &mut Module, name: String, dir: chipsmith_netlist::Dir, bits: Vec
                 let y = SigBit::Net(m.new_net());
                 m.add_cell(
                     format!("$cut${name}${i}"),
-                    CellKind::Gate(Gate::new(GateOp::Buf, &[b], y).unwrap()),
+                    CellKind::Gate(Gate::new(GateOp::And, &[b, b], y).unwrap()),
                 );
                 y
             })
@@ -392,7 +411,7 @@ fn equiv(dir: &Path, name: &str, gold: &Path, gate: &Path) -> Result<usize, Stri
     // Tri-states have no SAT model: as opaque cells, merged when their
     // inputs are proven equal (chipsmith-netlist's round-trip check does
     // the same).
-    let prep = "hierarchy -top top\nproc\nflatten\ntribuf\nchtype -set chipsmith_mem t:$mem_v2\n\
+    let prep = "hierarchy -top top\nproc -noopt\nflatten\ntribuf\nchtype -set chipsmith_mem t:$mem_v2\n\
                 chtype -set chipsmith_tribuf t:$tribuf t:$_TBUF_\nopt_clean";
     let script = format!(
         "read_json {gold}\nread_verilog -overwrite {sim}\n{prep}\nrename top gold\ndesign -stash gold\n\
@@ -444,14 +463,9 @@ fn prep_memories(
     for id in to_logic {
         map += &format!("memory_map t:$mem_v2 r:MEMID=\\{id} %i\n");
     }
-    // Power-up values first, as synthesis decides them before anything
-    // else: merged read registers carry theirs into the memory.
-    let mut d = read(design);
-    for m in &mut d.modules {
-        chipsmith_synth::rewrite::define_inits(m);
-    }
-    let with_inits = dir.join(format!("{name}_in.json"));
-    write(&d, &with_inits);
+    // Power-up values after merging, as synthesis decides them: an address
+    // register with one can't go into a block.
+    let with_inits = design.to_path_buf();
     let out = dir.join(format!("{name}.json"));
     yosys(
         dir,
@@ -489,27 +503,23 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
     // sides): their contents and configuration are checked against the
     // yosys flow's cells instead.
     let in_blocks = block_memories(gate_mod);
-    let mut gold = prep_memories(dir, "gold_prep", rtl, &to_logic, &[])?;
-    let mut early = prep_memories(dir, "refined_prep", &refined_path, &to_logic, &[])?;
-    if !in_blocks.is_empty() {
-        cut_memories(top_mut(&mut gold))?;
-        cut_memories(top_mut(&mut early))?;
-    }
-    let gold_path = dir.join("gold.json");
-    write(&gold, &gold_path);
-    let early_path = dir.join("early.json");
-    write(&early, &early_path);
-    let first = equiv(dir, "equiv_refine", &gold_path, &early_path)?;
-
-    // Against the blocks, which read synchronously, the memories with
-    // their read registers merged in, as yosys' `memory_dff` does.
+    // Synthesis merged the read registers of the memories it put in
+    // blocks into them; yosys' `memory_dff` does the same on both sides.
+    let mut gold = prep_memories(dir, "gold_prep", rtl, &to_logic, &in_blocks)?;
     let mut mid = prep_memories(dir, "mid_prep", &refined_path, &to_logic, &in_blocks)?;
     let mut cut_gate = gate.clone();
     if !in_blocks.is_empty() {
+        cut_memories(top_mut(&mut gold))?;
         let shapes = cut_memories(top_mut(&mut mid))?;
         let gt = cut_gate.modules.iter_mut().find(|m| !m.is_blackbox()).expect("top");
         cut_blocks(gt, &shapes)?;
     }
+    let gold_path = dir.join("gold.json");
+    write(&gold, &gold_path);
+    let mid_path = dir.join("mid.json");
+    write(&mid, &mid_path);
+    let first = equiv(dir, "equiv_refine", &gold_path, &mid_path)?;
+
     let gm = mid.modules.iter_mut().find(|m| m.name == "top").expect("top");
     // Claims: a gate wire bit that is constant where `refined` has a
     // register.

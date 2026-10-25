@@ -27,13 +27,15 @@ impl Observer for () {
     fn stage(&mut self, _: &str, _: &Module) {}
 }
 
-/// Synthesizes the design's top module. The result holds that module
-/// alone, in Cyclone II cells.
+/// Synthesizes the design's top module (flattened first: instances of the
+/// design's own modules are inlined, device cells stay). The result holds
+/// that module alone, in Cyclone II cells.
 pub fn synthesize(design: Design) -> Result<Design> {
     synthesize_observed(design, &mut ())
 }
 
-pub fn synthesize_observed(design: Design, obs: &mut dyn Observer) -> Result<Design> {
+pub fn synthesize_observed(mut design: Design, obs: &mut dyn Observer) -> Result<Design> {
+    chipsmith_synth::flatten::flatten(&mut design)?;
     let mut tops: Vec<Module> = design
         .modules
         .into_iter()
@@ -65,6 +67,10 @@ fn run(m: &mut Module, obs: &mut dyn Observer) -> Result<()> {
     // Read registers go into memories before power-up values are decided:
     // a block's address register can't hold one.
     memory::collect(m)?;
+    // proc's `we ? 1 : 0` per enable bit folded, so a memory written a
+    // word at a time has one enable.
+    opt::opt_word(m);
+    opt::opt_merge(m);
     memory::merge_registers(m, m4k::mappable)?;
     undef::refine(m)?;
     obs.stage("refined", m);
