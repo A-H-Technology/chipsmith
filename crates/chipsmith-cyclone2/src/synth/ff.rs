@@ -12,7 +12,7 @@ use anyhow::{bail, Result};
 use chipsmith_netlist::{
     Bit, CellKind, Ctrl, DffControl, Ff, FfKind, Module, Net, Polarity, SigBit, State, SyncEnable,
 };
-use chipsmith_synth::rewrite::{inits, set_inits, Gates, Subst};
+use chipsmith_synth::rewrite::{define_inits, inits, set_inits, Gates, Subst};
 use rustc_hash::FxHashMap;
 
 use super::cells::Reg;
@@ -25,30 +25,10 @@ fn active_high(g: &mut Gates, c: Ctrl) -> SigBit {
     }
 }
 
-/// Registers without a power-up value get the one that needs no
-/// inversion, which is any value's right to choose (`setundef -init`, but
-/// picking per register what the hardware can do).
-fn choose_inits(m: &Module, init: &mut FxHashMap<Net, State>) {
-    for c in &m.cells {
-        let CellKind::FfGate(ff) = &c.kind else {
-            continue;
-        };
-        let SigBit::Net(q) = ff.q else { continue };
-        init.entry(q).or_insert(match &ff.kind {
-            FfKind::Dff {
-                control:
-                    DffControl::Async { value: true, .. } | DffControl::Sync { value: true, .. },
-                ..
-            } => State::One,
-            _ => State::Zero,
-        });
-    }
-}
-
 /// Maps every gate-level register to `LCELL_FF`. Returns how many.
 pub fn map(m: &mut Module) -> Result<usize> {
+    define_inits(m);
     let mut init = inits(m);
-    choose_inits(m, &mut init);
     let mut g = Gates::new(m, "ff");
     let cells = std::mem::take(&mut g.m.cells);
     let mut subst = Subst::new(g.m);

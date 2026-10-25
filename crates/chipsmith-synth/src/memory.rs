@@ -319,7 +319,7 @@ fn clocking(ff: &Ff<Word>) -> Option<Clocking> {
 }
 
 /// Removes bits `drop` from a word-level register.
-fn drop_bits(ff: &mut Ff<Word>, drop: &[bool]) {
+pub(crate) fn drop_bits(ff: &mut Ff<Word>, drop: &[bool]) {
     let keep = |s: &mut SigSpec| {
         let mut it = drop.iter();
         s.retain(|_| !*it.next().expect("one flag per bit"));

@@ -14,7 +14,8 @@ mod io;
 
 use anyhow::{bail, Context, Result};
 use chipsmith_netlist::{attr, is_set, CellKind, Design, Module};
-use chipsmith_synth::{alumacc, clean, lutmap, memory, techmap};
+use chipsmith_synth::rewrite::define_inits;
+use chipsmith_synth::{alumacc, clean, lutmap, memory, opt, techmap, undef, wreduce};
 
 /// What each stage left, for checking stages one at a time.
 pub trait Observer {
@@ -57,18 +58,30 @@ fn run(m: &mut Module, obs: &mut dyn Observer) -> Result<()> {
         );
     }
     let clean = |m: &mut Module| clean::clean(m, cells::REMOVABLE);
+    let removable = cells::REMOVABLE;
     clean(m);
+    undef::refine(m)?;
+    obs.stage("refined", m);
     memory::collect(m)?;
+    opt::lower_bitwise(m)?;
+    opt::opt_seq(m, removable)?;
+    obs.stage("opt", m);
+    while wreduce::wreduce(m) {
+        opt::opt(m, removable);
+    }
+    alumacc::alumacc(m);
+    opt::opt(m, removable);
+    obs.stage("alumacc", m);
     memory::merge_registers(m)?;
     memory::map_to_logic(m, |_| true)?;
-    clean(m);
-    alumacc::alumacc(m);
-    clean(m);
+    define_inits(m);
+    opt::lower_bitwise(m)?;
+    opt::opt_seq(m, removable)?;
     obs.stage("coarse", m);
 
     arith::map(m);
     techmap::lower(m, |k| techmap::is_lowerable(k) || matches!(k, CellKind::Ff(_)))?;
-    clean(m);
+    opt::opt_seq(m, removable)?;
     obs.stage("gates", m);
 
     ff::map(m)?;

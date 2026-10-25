@@ -60,6 +60,21 @@ impl Subst {
             return;
         }
         m.map_bits(|b| self.resolve(b));
+        // A power-up value on a bit that is now a constant means nothing
+        // (and yosys rejects one that disagrees with the constant).
+        for w in &mut m.wires {
+            let Some(ParamValue::Bits(c)) = w.attributes.get_mut(attr::INIT) else {
+                continue;
+            };
+            for (b, s) in w.bits.iter().zip(c.0.iter_mut()) {
+                if matches!(b, SigBit::Const(_)) {
+                    *s = State::X;
+                }
+            }
+            if c.0.iter().all(|s| *s == State::X) {
+                w.attributes.remove(attr::INIT);
+            }
+        }
     }
 }
 
@@ -286,5 +301,53 @@ impl<'m> Gates<'m> {
 
     pub fn reduce_and(&mut self, bits: &[SigBit]) -> SigBit {
         self.reduce(GateOp::And, bits, SigBit::ONE)
+    }
+}
+
+/// Gives every register bit without a power-up value one: what its
+/// asynchronous reset sets, else 0. An undefined power-up value may be
+/// anything, so this refines the design; deciding it once, before any pass
+/// reasons about power-up, keeps every later pass (and the LE register,
+/// which powers up 0, inverted where it must hold a 1) agreeing on it.
+pub fn define_inits(m: &mut Module) {
+    let mut init = inits(m);
+    let before = init.len();
+    for c in &m.cells {
+        let mut one = |q: SigBit, value: State| {
+            if let SigBit::Net(n) = q {
+                init.entry(n).or_insert(match value {
+                    State::One => State::One,
+                    _ => State::Zero,
+                });
+            }
+        };
+        match &c.kind {
+            CellKind::Ff(ff) => {
+                let value = |i: usize| match &ff.kind {
+                    chipsmith_netlist::FfKind::Dff {
+                        control: chipsmith_netlist::DffControl::Async { value, .. },
+                        ..
+                    } => value.0[i],
+                    _ => State::Zero,
+                };
+                for (i, q) in ff.q.iter().enumerate() {
+                    one(*q, value(i));
+                }
+            }
+            CellKind::FfGate(ff) => {
+                let value = match &ff.kind {
+                    chipsmith_netlist::FfKind::Dff {
+                        control: chipsmith_netlist::DffControl::Async { value, .. },
+                        ..
+                    } => State::from(*value),
+                    _ => State::Zero,
+                };
+                one(ff.q, value);
+            }
+            _ => {}
+        }
+    }
+    if init.len() != before {
+        set_inits(m, &init);
     }
 }
