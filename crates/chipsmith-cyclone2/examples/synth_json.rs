@@ -41,6 +41,9 @@ fn main() -> Result<()> {
     eprintln!("{:?}", out.stats);
     let out = out.design;
     eprintln!("synthesized in {:.2} s", t.elapsed().as_secs_f64());
-    write_json(&out, std::io::BufWriter::new(std::fs::File::create(output)?))?;
+    write_json(
+        &out,
+        std::io::BufWriter::new(std::fs::File::create(output)?),
+    )?;
     Ok(())
 }

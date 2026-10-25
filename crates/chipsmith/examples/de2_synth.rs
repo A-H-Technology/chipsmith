@@ -69,7 +69,11 @@ fn verilog(m: &Manifest, dir: &Path) -> Result<Vec<PathBuf>> {
                 .args(["-e", &m.top])
                 .current_dir(dir)
                 .output()?;
-            ensure!(o.status.success(), "ghdl: {}", String::from_utf8_lossy(&o.stderr));
+            ensure!(
+                o.status.success(),
+                "ghdl: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
             std::fs::write(&out, o.stdout)?;
             vec![out]
         }
@@ -114,8 +118,7 @@ fn main() -> Result<()> {
     let netlist = dir.join("netlist.json");
     let t = Instant::now();
     if mode == Mode::Yosys {
-        let script =
-            std::fs::read_to_string(synth_dir()?.join("synth/cyclone2.ys"))?;
+        let script = std::fs::read_to_string(synth_dir()?.join("synth/cyclone2.ys"))?;
         let lines: Vec<&str> = script.lines().collect();
         let cut = lines
             .iter()
@@ -170,7 +173,10 @@ fn main() -> Result<()> {
         };
         let out = synth::synthesize(design)?;
         eprintln!("    {:?}", out.stats);
-        chipsmith_netlist::write_json(&out.design, std::io::BufWriter::new(std::fs::File::create(&netlist)?))?;
+        chipsmith_netlist::write_json(
+            &out.design,
+            std::io::BufWriter::new(std::fs::File::create(&netlist)?),
+        )?;
     }
     let synth_s = t.elapsed().as_secs_f64();
 
@@ -189,7 +195,9 @@ fn main() -> Result<()> {
     let rbf = dir.join(format!("{}.rbf", manifest.name));
     bitstream::pack_file(&db, &routed, &rbf)?;
     let fmax = 1e6 / f64::from(r.critical);
-    let slack = clock.as_ref().map(|c| c.frequency.period_ns() - f64::from(r.critical) / 1000.0);
+    let slack = clock
+        .as_ref()
+        .map(|c| c.frequency.period_ns() - f64::from(r.critical) / 1000.0);
     println!(
         "{} ({}): synthesis {:.1} s; {} LUTs, {} registers, {} LEs, {} carry chains, {} M4Ks; critical path {:.2} ns, Fmax {:.1} MHz{}; {}",
         manifest.name,

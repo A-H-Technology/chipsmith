@@ -57,7 +57,11 @@ impl Comb {
         if let Some(c) = self.cout {
             ports.push(port("COUT", Dir::Out, vec![c]));
         }
-        let mask = Const((0..16).map(|i| State::from(self.mask >> i & 1 == 1)).collect());
+        let mask = Const(
+            (0..16)
+                .map(|i| State::from(self.mask >> i & 1 == 1))
+                .collect(),
+        );
         generic(
             LCELL_COMB,
             BTreeMap::from([("LUT_MASK".to_string(), ParamValue::Bits(mask))]),

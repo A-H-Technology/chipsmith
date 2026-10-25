@@ -80,7 +80,9 @@ pub fn pads(m: &mut Module) -> Result<()> {
                     iobuf(data, en, combout, pad)
                 }
                 // Always released.
-                (Dir::Out | Dir::InOut, None) if matches!(b, SigBit::Const(State::Z | State::X)) => {
+                (Dir::Out | Dir::InOut, None)
+                    if matches!(b, SigBit::Const(State::Z | State::X)) =>
+                {
                     iobuf(SigBit::ZERO, SigBit::ZERO, None, pad)
                 }
                 (Dir::Out, None) => obuf(b, pad),

@@ -90,8 +90,18 @@ fn design(name: &str, top: &str, files: &[PathBuf], compare: bool) {
         let theirs = pack(&s.dir, "yosys", &flow);
         eprintln!("{name}: chipsmith {ours:?}\n{name}: yosys flow {theirs:?}");
         let within = |a: usize, b: usize| a as f64 <= b as f64 * 1.05 + 2.0;
-        assert!(within(ours.luts, theirs.luts), "{name}: LUTs {} vs {}", ours.luts, theirs.luts);
-        assert!(within(ours.ffs, theirs.ffs), "{name}: registers {} vs {}", ours.ffs, theirs.ffs);
+        assert!(
+            within(ours.luts, theirs.luts),
+            "{name}: LUTs {} vs {}",
+            ours.luts,
+            theirs.luts
+        );
+        assert!(
+            within(ours.ffs, theirs.ffs),
+            "{name}: registers {} vs {}",
+            ours.ffs,
+            theirs.ffs
+        );
         assert!(ours.chains <= theirs.chains, "{name}: carry chains");
         assert_eq!(ours.m4ks, theirs.m4ks, "{name}: M4Ks");
     }
@@ -129,7 +139,11 @@ fn blinky_vhdl() {
         .current_dir(&dir)
         .output()
         .expect("ghdl on PATH: run in `nix develop`");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v = dir.join("blinky.v");
     std::fs::write(&v, out.stdout).unwrap();
     design("blinky-vhdl", "blinky", &[v], true);
@@ -172,7 +186,13 @@ fn loader() {
 /// Verilog).
 #[test]
 fn specimens() {
-    for s in ["specimen-cnt-c20", "specimen-de2-d1", "specimen-empty", "specimen-io-roles2", "specimen-oe-oe1"] {
+    for s in [
+        "specimen-cnt-c20",
+        "specimen-de2-d1",
+        "specimen-empty",
+        "specimen-io-roles2",
+        "specimen-oe-oe1",
+    ] {
         let f = Path::new(ROOT)
             .join("crates/chipsmith-netlist/tests/corpus")
             .join(s)
@@ -192,7 +212,9 @@ fn m4k_cells_are_the_yosys_flows() {
         let blocks = |path: &Path| {
             let d = support::read(path);
             let m = d.modules.into_iter().find(|m| !m.is_blackbox()).unwrap();
-            let mut v: Vec<(String, Vec<(String, ParamValue)>, Vec<(String, String)>)> = m
+            // Name, parameters, and each port's constant/net pattern.
+            type Block = (String, Vec<(String, ParamValue)>, Vec<(String, String)>);
+            let mut v: Vec<Block> = m
                 .cells
                 .into_iter()
                 .filter_map(|c| match c.kind {

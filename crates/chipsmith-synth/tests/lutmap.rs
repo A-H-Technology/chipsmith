@@ -9,11 +9,13 @@ use chipsmith_netlist::{read_json, CellKind};
 
 /// cyclone2-re's `cyclone2.ys` up to its LUT mapping, on picorv32.
 fn gates(dir: &Path) -> PathBuf {
-    let synth = PathBuf::from(std::env::var("CHIPSMITH_CYCLONE2_SYNTH").expect("run in `nix develop`"));
+    let synth =
+        PathBuf::from(std::env::var("CHIPSMITH_CYCLONE2_SYNTH").expect("run in `nix develop`"));
     let script = std::fs::read_to_string(synth.join("synth/cyclone2.ys")).unwrap();
     let lines: Vec<&str> = script.lines().collect();
     let cut = lines.iter().position(|l| l.trim() == "abc -lut 4").unwrap();
-    let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("../chipsmith-netlist/tests/corpus/picorv32");
+    let corpus =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../chipsmith-netlist/tests/corpus/picorv32");
     let out = dir.join("gates.json");
     let ys = dir.join("gates.ys");
     std::fs::write(
@@ -46,7 +48,11 @@ fn ir_and_json_map_alike() {
     let mut design = read_json(&std::fs::read(&gates).unwrap()).unwrap();
     let top = design.modules.iter_mut().find(|m| m.name == "top").unwrap();
     let ir_stats = chipsmith_synth::lutmap::map_module(top).unwrap();
-    let luts = top.cells.iter().filter(|c| matches!(c.kind, CellKind::Lut(_))).count();
+    let luts = top
+        .cells
+        .iter()
+        .filter(|c| matches!(c.kind, CellKind::Lut(_)))
+        .count();
     eprintln!("JSON {json_stats:?}\nIR   {ir_stats:?}");
     assert_eq!(ir_stats.luts, luts);
     assert_eq!(ir_stats.gates, json_stats.gates);

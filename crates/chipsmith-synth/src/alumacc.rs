@@ -10,7 +10,9 @@
 
 use std::collections::HashMap;
 
-use chipsmith_netlist::{Alu, BinaryOp, CellKind, Module, Operand, SigBit, SigSpec, State, UnaryOp};
+use chipsmith_netlist::{
+    Alu, BinaryOp, CellKind, Module, Operand, SigBit, SigSpec, State, UnaryOp,
+};
 
 use crate::rewrite::{Gates, Subst};
 

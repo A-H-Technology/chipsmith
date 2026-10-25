@@ -255,7 +255,12 @@ fn compare(g: &mut Gates, a: &Operand, b: &Operand) -> (SigBit, SigBit) {
 }
 
 /// A ripple-carry adder: `(A ^ B, A + B + ci, carries out)`.
-pub fn ripple(g: &mut Gates, a: &[SigBit], b: &[SigBit], ci: SigBit) -> (SigSpec, SigSpec, SigSpec) {
+pub fn ripple(
+    g: &mut Gates,
+    a: &[SigBit],
+    b: &[SigBit],
+    ci: SigBit,
+) -> (SigSpec, SigSpec, SigSpec) {
     let mut c = ci;
     let (mut x, mut y, mut co) = (Vec::new(), Vec::new(), Vec::new());
     for (&a, &b) in a.iter().zip(b) {
@@ -285,7 +290,13 @@ fn mul(g: &mut Gates, a: &Operand, b: &Operand, w: usize) -> SigSpec {
     let mut acc: SigSpec = vec![SigBit::ZERO; w];
     for (i, &bi) in b.iter().enumerate() {
         let row: SigSpec = (0..w)
-            .map(|k| if k < i { SigBit::ZERO } else { g.and(a[k - i], bi) })
+            .map(|k| {
+                if k < i {
+                    SigBit::ZERO
+                } else {
+                    g.and(a[k - i], bi)
+                }
+            })
             .collect();
         acc = ripple(g, &acc, &row, SigBit::ZERO).1;
     }
@@ -434,12 +445,11 @@ fn pmux(g: &mut Gates, c: &Pmux) -> SigSpec {
     let any = g.reduce_or(&c.s);
     (0..w)
         .map(|i| {
-            let terms: SigSpec = c
-                .s
-                .iter()
-                .enumerate()
-                .map(|(j, &s)| g.and(c.b[j * w + i], s))
-                .collect();
+            let terms: SigSpec =
+                c.s.iter()
+                    .enumerate()
+                    .map(|(j, &s)| g.and(c.b[j * w + i], s))
+                    .collect();
             let b = g.reduce_or(&terms);
             g.mux(c.a[i], b, any)
         })
@@ -467,12 +477,11 @@ fn demux(g: &mut Gates, c: &Demux) -> SigSpec {
     let n = 1usize << c.s.len();
     let mut out = Vec::with_capacity(w * n);
     for i in 0..n {
-        let terms: SigSpec = c
-            .s
-            .iter()
-            .enumerate()
-            .map(|(k, &s)| if i >> k & 1 == 1 { s } else { g.not(s) })
-            .collect();
+        let terms: SigSpec =
+            c.s.iter()
+                .enumerate()
+                .map(|(k, &s)| if i >> k & 1 == 1 { s } else { g.not(s) })
+                .collect();
         let sel = g.reduce_and(&terms);
         out.extend(c.a.iter().map(|&a| g.and(a, sel)));
     }
@@ -574,7 +583,11 @@ mod tests {
     use chipsmith_netlist::{Binary, BinaryOp, Operand};
 
     fn k(v: i64, w: usize) -> SigSpec {
-        Const::from_int(v, w).0.into_iter().map(SigBit::Const).collect()
+        Const::from_int(v, w)
+            .0
+            .into_iter()
+            .map(SigBit::Const)
+            .collect()
     }
 
     fn value(out: Vec<(Net, State)>) -> i64 {
@@ -588,8 +601,14 @@ mod tests {
         let y = m.new_sig(yw);
         let cell = CellKind::Binary(Binary {
             op,
-            a: Operand { sig: k(a, aw), signed },
-            b: Operand { sig: k(b, bw), signed },
+            a: Operand {
+                sig: k(a, aw),
+                signed,
+            },
+            b: Operand {
+                sig: k(b, bw),
+                signed,
+            },
             y,
         });
         value(eval(&cell).expect("constant"))
@@ -620,8 +639,14 @@ mod tests {
         let y = m.new_sig(4);
         let cell = CellKind::Binary(Binary {
             op: BinaryOp::Shift,
-            a: Operand { sig: k(0b0011, 4), signed: false },
-            b: Operand { sig: k(-1, 3), signed: true },
+            a: Operand {
+                sig: k(0b0011, 4),
+                signed: false,
+            },
+            b: Operand {
+                sig: k(-1, 3),
+                signed: true,
+            },
             y,
         });
         assert_eq!(value(eval(&cell).unwrap()), 0b0110);

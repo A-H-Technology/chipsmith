@@ -111,7 +111,9 @@ fn run(m: &mut Module, obs: &mut dyn Observer) -> Result<Stats> {
     obs.stage("coarse", m);
 
     let chains = arith::map(m);
-    techmap::lower(m, |k| techmap::is_lowerable(k) || matches!(k, CellKind::Ff(_)))?;
+    techmap::lower(m, |k| {
+        techmap::is_lowerable(k) || matches!(k, CellKind::Ff(_))
+    })?;
     opt::opt_seq(m, removable)?;
     obs.stage("gates", m);
 

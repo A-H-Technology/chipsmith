@@ -60,7 +60,9 @@ fn legalize(
     ff: Ff<Bit>,
 ) -> Result<()> {
     let FfKind::Dff { clk, d, control } = ff.kind else {
-        bail!("register {name}: latches and set/reset-only cells are not supported on the Cyclone II");
+        bail!(
+            "register {name}: latches and set/reset-only cells are not supported on the Cyclone II"
+        );
     };
     let SigBit::Net(q) = ff.q else {
         bail!("register {name} drives a constant");

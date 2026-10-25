@@ -65,10 +65,9 @@ pub fn clean(m: &mut Module, removable_types: &[&str]) {
         }
     }
     for (i, c) in m.cells.iter().enumerate() {
-        if is_set(&c.attributes, attr::KEEP) || !removable(&c.kind, removable_types) {
-            if !std::mem::replace(&mut live[i], true) {
-                stack.push(i);
-            }
+        let kept = is_set(&c.attributes, attr::KEEP) || !removable(&c.kind, removable_types);
+        if kept && !std::mem::replace(&mut live[i], true) {
+            stack.push(i);
         }
     }
     while let Some(i) = stack.pop() {

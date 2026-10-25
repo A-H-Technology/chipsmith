@@ -56,7 +56,8 @@ fn main() {
     support::write(&out, &ours);
     let mut summary = format!("RESULT {}", dir.display());
     let flow = support::yosys_flow(&dir, top, &files);
-    let flows: Vec<(&str, Result<PathBuf, String>)> = vec![("yosys", flow), ("chipsmith", Ok(ours))];
+    let flows: Vec<(&str, Result<PathBuf, String>)> =
+        vec![("yosys", flow), ("chipsmith", Ok(ours))];
     for (name, path) in flows {
         let packed = path.and_then(|p| {
             chipsmith_cyclone2::pack::pack_file(&p, &dir.join(format!("{name}.packed.json")))
@@ -71,7 +72,10 @@ fn main() {
                 summary += &format!(" {name}={}/{}/{}/{}", s.luts, s.ffs, s.chains, s.m4ks);
             }
             Err(e) => {
-                let first = e.lines().find(|l| l.contains("ERROR")).unwrap_or(e.lines().next().unwrap_or(""));
+                let first = e
+                    .lines()
+                    .find(|l| l.contains("ERROR"))
+                    .unwrap_or(e.lines().next().unwrap_or(""));
                 eprintln!("{name:>9}: FAILED: {first}");
                 summary += &format!(" {name}=FAILED");
             }

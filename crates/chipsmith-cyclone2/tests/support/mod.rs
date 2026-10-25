@@ -63,9 +63,10 @@ pub fn scratch(base: &Path, name: &str) -> PathBuf {
 }
 
 pub fn synth_dir() -> PathBuf {
-    PathBuf::from(std::env::var("CHIPSMITH_CYCLONE2_SYNTH").expect(
-        "CHIPSMITH_CYCLONE2_SYNTH (cyclone2-re's synth/) unset: run in `nix develop`",
-    ))
+    PathBuf::from(
+        std::env::var("CHIPSMITH_CYCLONE2_SYNTH")
+            .expect("CHIPSMITH_CYCLONE2_SYNTH (cyclone2-re's synth/) unset: run in `nix develop`"),
+    )
 }
 
 /// Runs a yosys script in `cwd`; `Err` with the end of the log if it fails.
@@ -181,7 +182,11 @@ pub fn frontend(top: &str, files: &[PathBuf]) -> Design {
 }
 
 pub fn write(design: &Design, path: &Path) {
-    write_json(design, std::io::BufWriter::new(std::fs::File::create(path).unwrap())).unwrap();
+    write_json(
+        design,
+        std::io::BufWriter::new(std::fs::File::create(path).unwrap()),
+    )
+    .unwrap();
 }
 
 pub fn read(path: &Path) -> Design {
@@ -290,14 +295,20 @@ fn cut_memories(m: &mut Module) -> Result<BTreeMap<String, MemShape>, String> {
             return Err(format!("memory {id}: not one read port"));
         };
         let abits = (usize::BITS - mem.size.saturating_sub(1).leading_zeros()) as usize;
-        let rdata = (0..mem.width).map(|_| SigBit::Net(m.new_net())).collect::<Vec<_>>();
+        let rdata = (0..mem.width)
+            .map(|_| SigBit::Net(m.new_net()))
+            .collect::<Vec<_>>();
         for (q, n) in rd.data.iter().zip(&rdata) {
             if let (SigBit::Net(q), n) = (q, n) {
                 subst.set(*q, *n);
             }
         }
         ports.push((format!("__mem_{id}_rdata"), Dir::In, rdata));
-        ports.push((format!("__mem_{id}_raddr"), Dir::Out, rd.addr[..abits].to_vec()));
+        ports.push((
+            format!("__mem_{id}_raddr"),
+            Dir::Out,
+            rd.addr[..abits].to_vec(),
+        ));
         if let Some(w) = mem.wr.first() {
             // What is written only matters where it is written: masked by
             // the enable, so x in what isn't written can't differ.
@@ -308,7 +319,13 @@ fn cut_memories(m: &mut Module) -> Result<BTreeMap<String, MemShape>, String> {
             masked.push((format!("__mem_{id}_wdata"), data, en.clone()));
             ports.push((format!("__mem_{id}_we"), Dir::Out, vec![en[0]]));
         }
-        shapes.insert(id, MemShape { width: mem.width, abits });
+        shapes.insert(
+            id,
+            MemShape {
+                width: mem.width,
+                abits,
+            },
+        );
     }
     m.cells = keep;
     for (name, dir, bits) in ports {
@@ -426,7 +443,11 @@ fn equiv(dir: &Path, name: &str, gold: &Path, gate: &Path) -> Result<usize, Stri
         sim = sim.display(),
     );
     let log = yosys(dir, name, &script, dir).map_err(|e| {
-        let unproven: Vec<&str> = e.lines().filter(|l| l.contains("Unproven")).take(10).collect();
+        let unproven: Vec<&str> = e
+            .lines()
+            .filter(|l| l.contains("Unproven"))
+            .take(10)
+            .collect();
         format!(
             "{name}: not proven equivalent:\n{}\n(see {})",
             unproven.join("\n"),
@@ -512,7 +533,11 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
     if !in_blocks.is_empty() {
         cut_memories(top_mut(&mut gold))?;
         let shapes = cut_memories(top_mut(&mut mid))?;
-        let gt = cut_gate.modules.iter_mut().find(|m| !m.is_blackbox()).expect("top");
+        let gt = cut_gate
+            .modules
+            .iter_mut()
+            .find(|m| !m.is_blackbox())
+            .expect("top");
         cut_blocks(gt, &shapes)?;
     }
     let gold_path = dir.join("gold.json");
@@ -521,7 +546,11 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
     write(&mid, &mid_path);
     let first = equiv(dir, "equiv_refine", &gold_path, &mid_path)?;
 
-    let gm = mid.modules.iter_mut().find(|m| m.name == "top").expect("top");
+    let gm = mid
+        .modules
+        .iter_mut()
+        .find(|m| m.name == "top")
+        .expect("top");
     // Claims: a gate wire bit that is constant where `refined` has a
     // register.
     let mut ff_q: HashMap<Net, usize> = HashMap::new();
@@ -573,14 +602,19 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
             .wires
             .iter()
             .flat_map(|w| {
-                w.bits.iter().enumerate().filter_map(move |(i, b)| {
-                    b.net().map(|n| (n, format!("{}[{i}]", w.name)))
-                })
+                w.bits
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(i, b)| b.net().map(|n| (n, format!("{}[{i}]", w.name))))
             })
             .collect();
         for (k, (n, v)) in claims.iter().enumerate() {
             let b = SigBit::Net(*n);
-            names += &format!("{k}: {} = {}\n", net_names.get(n).map_or("?", |s| s), u8::from(*v));
+            names += &format!(
+                "{k}: {} = {}\n",
+                net_names.get(n).map_or("?", |s| s),
+                u8::from(*v)
+            );
             holds.push(if *v {
                 b
             } else {
@@ -596,7 +630,9 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
             let y = SigBit::Net(with_claims.new_net());
             with_claims.add_cell(
                 format!("$claim$eq${k}"),
-                CellKind::Gate(Gate::new(GateOp::Xnor, &[SigBit::Net(*a), SigBit::Net(*b)], y).unwrap()),
+                CellKind::Gate(
+                    Gate::new(GateOp::Xnor, &[SigBit::Net(*a), SigBit::Net(*b)], y).unwrap(),
+                ),
             );
             names += &format!(
                 "{}: {} == {}\n",

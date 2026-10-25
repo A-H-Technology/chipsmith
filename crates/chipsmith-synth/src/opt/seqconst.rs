@@ -17,8 +17,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use chipsmith_netlist::{
-    Bit, CellKind, DffControl, Ff, FfKind, GateOp, Module, Net, Polarity, SigBit, State,
-    SyncEnable,
+    Bit, CellKind, DffControl, Ff, FfKind, GateOp, Module, Net, Polarity, SigBit, State, SyncEnable,
 };
 
 use crate::rewrite::{inits, Subst};
@@ -90,7 +89,8 @@ fn next(ff: &Ff<Bit>, val: &dyn Fn(SigBit) -> V) -> V {
     if matches!(clk.sig, SigBit::Const(_)) {
         return q;
     }
-    let active = |c: chipsmith_netlist::Ctrl| val(c.sig).map(|v| v == (c.polarity == Polarity::Pos));
+    let active =
+        |c: chipsmith_netlist::Ctrl| val(c.sig).map(|v| v == (c.polarity == Polarity::Pos));
     let d = val(*d);
     let gated = |en: Option<chipsmith_netlist::Ctrl>, v: V| match en {
         None => v,
@@ -379,7 +379,9 @@ impl Exact<'_> {
             }
         }
         let q = if value { !0u64 } else { 0 };
-        let Some(dv) = get(&sig, *d) else { return false };
+        let Some(dv) = get(&sig, *d) else {
+            return false;
+        };
         let ctl = |c: &chipsmith_netlist::Ctrl| -> Option<Vec<u64>> {
             let v = get(&sig, c.sig)?;
             Some(if c.polarity == Polarity::Pos {
@@ -395,7 +397,11 @@ impl Exact<'_> {
                 let Some(e) = ctl(e) else { return false };
                 (0..words).map(|w| (e[w] & dv[w]) | (!e[w] & q)).collect()
             }
-            DffControl::Async { arst, value: rv, en } => {
+            DffControl::Async {
+                arst,
+                value: rv,
+                en,
+            } => {
                 let Some(a) = ctl(arst) else { return false };
                 let e = match en {
                     Some(e) => match ctl(e) {
@@ -408,7 +414,11 @@ impl Exact<'_> {
                     .map(|w| (a[w] & k(*rv)) | (!a[w] & ((e[w] & dv[w]) | (!e[w] & q))))
                     .collect()
             }
-            DffControl::Sync { srst, value: rv, en } => {
+            DffControl::Sync {
+                srst,
+                value: rv,
+                en,
+            } => {
                 let Some(r) = ctl(srst) else { return false };
                 let reset = |w: usize, v: u64| (r[w] & k(*rv)) | (!r[w] & v);
                 match en {
@@ -452,11 +462,10 @@ pub fn apply(m: &mut Module, consts: &HashMap<Net, bool>) -> usize {
     for c in &mut m.cells {
         match &mut c.kind {
             CellKind::Ff(ff) => {
-                let drop: Vec<bool> = ff
-                    .q
-                    .iter()
-                    .map(|b| b.net().is_some_and(|n| consts.contains_key(&n)))
-                    .collect();
+                let drop: Vec<bool> =
+                    ff.q.iter()
+                        .map(|b| b.net().is_some_and(|n| consts.contains_key(&n)))
+                        .collect();
                 if !drop.iter().any(|&d| d) {
                     continue;
                 }

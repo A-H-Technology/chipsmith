@@ -77,7 +77,13 @@ pub fn wreduce(m: &mut Module) -> bool {
                 // operand's bits, and the chain can start above them.
                 if b.op != BinaryOp::Mul {
                     while !b.y.is_empty() {
-                        let bit = |o: &Operand| o.sig.first().copied().unwrap_or(if o.signed { SigBit::X } else { SigBit::ZERO });
+                        let bit = |o: &Operand| {
+                            o.sig.first().copied().unwrap_or(if o.signed {
+                                SigBit::X
+                            } else {
+                                SigBit::ZERO
+                            })
+                        };
                         let (a0, b0) = (bit(&b.a), bit(&b.b));
                         let through = if b0 == SigBit::ZERO {
                             a0
@@ -86,7 +92,10 @@ pub fn wreduce(m: &mut Module) -> bool {
                         } else {
                             break;
                         };
-                        if through == SigBit::X || b.a.sig.is_empty() && b.a.signed || b.b.sig.is_empty() && b.b.signed {
+                        if through == SigBit::X
+                            || b.a.sig.is_empty() && b.a.signed
+                            || b.b.sig.is_empty() && b.b.signed
+                        {
                             break;
                         }
                         let y0 = b.y.remove(0);
@@ -120,11 +129,7 @@ pub fn wreduce(m: &mut Module) -> bool {
                 if b.op == BinaryOp::Add {
                     let top = b.a.sig.len().max(b.b.sig.len()) + 1;
                     if b.y.len() > top {
-                        let ext = if signed {
-                            None
-                        } else {
-                            Some(SigBit::ZERO)
-                        };
+                        let ext = if signed { None } else { Some(SigBit::ZERO) };
                         if let Some(z) = ext {
                             for y in b.y.drain(top..) {
                                 if let SigBit::Net(n) = y {

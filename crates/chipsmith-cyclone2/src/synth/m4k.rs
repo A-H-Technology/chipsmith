@@ -21,7 +21,14 @@ const SDP_COST: f64 = 65.0;
 const LOGIC_COST_PER_BIT: f64 = 0.025;
 
 /// The block's widths and how deep each makes it.
-const CONFIGS: [(usize, usize); 6] = [(1, 4096), (2, 2048), (4, 1024), (9, 512), (18, 256), (36, 128)];
+const CONFIGS: [(usize, usize); 6] = [
+    (1, 4096),
+    (2, 2048),
+    (4, 1024),
+    (9, 512),
+    (18, 256),
+    (36, 128),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -178,7 +185,12 @@ pub fn map(m: &mut Module) -> usize {
             continue;
         };
         let rd = &mem.rd[0];
-        let clk = rd.sync.as_ref().expect("planned ports are synchronous").clk.sig;
+        let clk = rd
+            .sync
+            .as_ref()
+            .expect("planned ports are synchronous")
+            .clk
+            .sig;
         let wr = mem.wr.first();
         let name = mem.memid.trim_start_matches('\\');
         for b in 0..p.blocks {
@@ -200,10 +212,22 @@ pub fn map(m: &mut Module) -> usize {
                 read_data.push((rd.data[col], dout[k]));
             }
             let (a_addr, b_addr, we) = match (p.mode, wr) {
-                (Mode::Single, Some(w)) => (pins(&rd.addr, p.depth), vec![SigBit::ZERO; 12], w.en[0]),
-                (Mode::Single, None) => (pins(&rd.addr, p.depth), vec![SigBit::ZERO; 12], SigBit::ZERO),
-                (Mode::SimpleDual, Some(w)) => (pins(&w.addr, p.depth), pins(&rd.addr, p.depth), w.en[0]),
-                (Mode::SimpleDual, None) => (vec![SigBit::ZERO; 12], pins(&rd.addr, p.depth), SigBit::ZERO),
+                (Mode::Single, Some(w)) => {
+                    (pins(&rd.addr, p.depth), vec![SigBit::ZERO; 12], w.en[0])
+                }
+                (Mode::Single, None) => (
+                    pins(&rd.addr, p.depth),
+                    vec![SigBit::ZERO; 12],
+                    SigBit::ZERO,
+                ),
+                (Mode::SimpleDual, Some(w)) => {
+                    (pins(&w.addr, p.depth), pins(&rd.addr, p.depth), w.en[0])
+                }
+                (Mode::SimpleDual, None) => (
+                    vec![SigBit::ZERO; 12],
+                    pins(&rd.addr, p.depth),
+                    SigBit::ZERO,
+                ),
             };
             let params = [
                 ("MODE".to_string(), ParamValue::Str(p.mode.name().into())),

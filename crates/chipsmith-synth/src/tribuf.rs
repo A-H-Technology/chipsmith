@@ -52,7 +52,10 @@ fn merge(g: &mut Gates) {
     }
     // Every tri-state with a bit on a shared net goes; its other bits are
     // kept as one-bit tri-states.
-    let shared = |t: &Tribuf| t.y.iter().any(|b| b.net().is_some_and(|n| drivers.contains_key(&n)));
+    let shared = |t: &Tribuf| {
+        t.y.iter()
+            .any(|b| b.net().is_some_and(|n| drivers.contains_key(&n)))
+    };
     let mut keep = Vec::new();
     for c in std::mem::take(&mut g.m.cells) {
         match &c.kind {

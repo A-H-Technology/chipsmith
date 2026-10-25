@@ -130,6 +130,12 @@ fn bit_key(b: SigBit) -> (u8, usize) {
 /// A feedback path through a multiplexer tree: the select values on it.
 type Pattern = BTreeMap<(u8, usize), (SigBit, bool)>;
 
+/// A condition as a map key: the signal's order key and the value.
+type CondKeyItem = ((u8, usize), bool);
+
+/// A set of conditions as a map key.
+type CondKey = Vec<CondKeyItem>;
+
 struct Ctx {
     /// The multiplexer (cell, bit) driving each net.
     mux_of: HashMap<Net, (usize, usize)>,
@@ -300,6 +306,7 @@ pub fn opt_dff(m: &mut Module) -> bool {
     let mut out_regs: Vec<Reg> = Vec::new();
     let n = g.m.cells.len();
     let mut remove = vec![false; n];
+    #[allow(clippy::needless_range_loop)] // cells get added while it runs
     for ci in 0..n {
         let CellKind::Ff(ff) = &g.m.cells[ci].kind else {
             continue;
@@ -307,7 +314,12 @@ pub fn opt_dff(m: &mut Module) -> bool {
         let Some(mut r) = Reg::from_ff(ff) else {
             continue;
         };
-        let init_of = |q: SigBit| q.net().and_then(|n| init.get(&n)).copied().unwrap_or(State::X);
+        let init_of = |q: SigBit| {
+            q.net()
+                .and_then(|n| init.get(&n))
+                .copied()
+                .unwrap_or(State::X)
+        };
         let before = r.to_ff();
         // Constant controls.
         if let Some((arst, value)) = &r.arst {
@@ -415,7 +427,8 @@ pub fn opt_dff(m: &mut Module) -> bool {
         }
         // Multiplexers in front become a sync reset, then an enable.
         let mut regs = vec![r];
-        let can_srst = |r: &Reg| r.arst.is_none() && (r.srst.is_none() || r.en.is_none() || r.ce_over_srst);
+        let can_srst =
+            |r: &Reg| r.arst.is_none() && (r.srst.is_none() || r.en.is_none() || r.ce_over_srst);
         if can_srst(&regs[0]) && regs[0].d != regs[0].q {
             regs = merge_srst(&ctx, &mut g, regs.pop().expect("one"));
         }
@@ -454,8 +467,9 @@ fn active_high(g: &mut Gates, c: Ctrl) -> SigBit {
 /// yosys' `try_merge_srst`: multiplexers with a constant input in front of
 /// D are a synchronous reset, grouped by the resets each bit has.
 fn merge_srst(ctx: &Ctx, g: &mut Gates, mut r: Reg) -> Vec<Reg> {
-    let mut groups: BTreeMap<BTreeSet<((u8, usize), bool)>, (Vec<Cond>, Vec<usize>)> =
-        BTreeMap::new();
+    // Bits by the resets they have: the conditions, and those bits.
+    type Group = (Vec<Cond>, Vec<usize>);
+    let mut groups: BTreeMap<BTreeSet<CondKeyItem>, Group> = BTreeMap::new();
     let mut rest = Vec::new();
     let mut vals = Vec::with_capacity(r.q.len());
     for i in 0..r.q.len() {
@@ -468,10 +482,7 @@ fn merge_srst(ctx: &Ctx, g: &mut Gates, mut r: Reg) -> Vec<Reg> {
             if is_const01(a) && is_const01(b) {
                 break;
             }
-            let ok = |k: SigBit| {
-                is_const01(k)
-                    && (val == State::X || SigBit::Const(val) == k)
-            };
+            let ok = |k: SigBit| is_const01(k) && (val == State::X || SigBit::Const(val) == k);
             if ok(b) && a != r.q[i] {
                 val = match b {
                     SigBit::Const(s) => s,
@@ -498,7 +509,11 @@ fn merge_srst(ctx: &Ctx, g: &mut Gates, mut r: Reg) -> Vec<Reg> {
                 resets.push((srst.sig, srst.polarity.is_pos()));
             }
             let key = resets.iter().map(|&(s, p)| (bit_key(s), p)).collect();
-            groups.entry(key).or_insert_with(|| (resets, Vec::new())).1.push(i);
+            groups
+                .entry(key)
+                .or_insert_with(|| (resets, Vec::new()))
+                .1
+                .push(i);
         }
     }
     let mut out = Vec::new();
@@ -549,8 +564,9 @@ fn combine_resets(g: &mut Gates, ctrls: &[Cond]) -> Ctrl {
 
 /// yosys' `try_merge_ce`: multiplexers that feed Q back are an enable.
 fn merge_ce(ctx: &Ctx, g: &mut Gates, mut r: Reg) -> Vec<Reg> {
-    type Key = (Vec<Vec<((u8, usize), bool)>>, Vec<((u8, usize), bool)>);
-    let mut groups: BTreeMap<Key, (Vec<Pattern>, Vec<Cond>, Vec<usize>)> = BTreeMap::new();
+    // Bits by their feedback paths and enables.
+    type Group = (Vec<Pattern>, Vec<Cond>, Vec<usize>);
+    let mut groups: BTreeMap<(Vec<CondKey>, CondKey), Group> = BTreeMap::new();
     let mut rest = Vec::new();
     for i in 0..r.q.len() {
         let mut enables: Vec<Cond> = Vec::new();
@@ -579,8 +595,7 @@ fn merge_ce(ctx: &Ctx, g: &mut Gates, mut r: Reg) -> Vec<Reg> {
         let pkey = |p: &Pattern| p.iter().map(|(k, v)| (*k, v.1)).collect::<Vec<_>>();
         patterns.sort_by_key(pkey);
         patterns.dedup_by(|a, b| pkey(a) == pkey(b));
-        let mut ekeys: Vec<((u8, usize), bool)> =
-            enables.iter().map(|&(s, p)| (bit_key(s), p)).collect();
+        let mut ekeys: CondKey = enables.iter().map(|&(s, p)| (bit_key(s), p)).collect();
         ekeys.sort();
         ekeys.dedup();
         let pkeys = patterns.iter().map(pkey).collect();

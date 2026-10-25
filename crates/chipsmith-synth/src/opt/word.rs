@@ -4,9 +4,7 @@
 
 use std::collections::HashMap;
 
-use chipsmith_netlist::{
-    BinaryOp, Bmux, Cell, CellKind, Mux, Pmux, SigBit, SigSpec, State,
-};
+use chipsmith_netlist::{BinaryOp, Bmux, Cell, CellKind, Mux, Pmux, SigBit, SigSpec, State};
 
 use crate::rewrite::{inits, Gates, Subst};
 use crate::techmap::{eval, lower_comb};
@@ -209,7 +207,14 @@ pub fn opt_word(m: &mut Module) -> bool {
     let mut out = Vec::with_capacity(cells.len());
     let mut changed = false;
     for c in cells {
-        if matches!(c.kind, CellKind::Gate(_) | CellKind::Other(_) | CellKind::Ff(_) | CellKind::FfGate(_) | CellKind::Mem(_)) {
+        if matches!(
+            c.kind,
+            CellKind::Gate(_)
+                | CellKind::Other(_)
+                | CellKind::Ff(_)
+                | CellKind::FfGate(_)
+                | CellKind::Mem(_)
+        ) {
             out.push(c);
             continue;
         }
@@ -271,7 +276,12 @@ pub fn opt_merge(m: &mut Module) -> bool {
                 let iv: Vec<State> = p
                     .sig
                     .iter()
-                    .map(|b| b.net().and_then(|n| init.get(&n)).copied().unwrap_or(State::X))
+                    .map(|b| {
+                        b.net()
+                            .and_then(|n| init.get(&n))
+                            .copied()
+                            .unwrap_or(State::X)
+                    })
                     .collect();
                 key += &format!("|init={iv:?}");
             }

@@ -1084,13 +1084,23 @@ pub fn map_module(module: &mut Module) -> Result<Stats> {
         }
         c.kind.for_each_port(|p| {
             if p.dir != Some(chipsmith_netlist::Dir::Out) {
-                read.extend(p.bits.iter().filter_map(|b| b.net()).map(|n| n.index() as u64));
+                read.extend(
+                    p.bits
+                        .iter()
+                        .filter_map(|b| b.net())
+                        .map(|n| n.index() as u64),
+                );
             }
         });
     }
     for (_, w, dir) in module.ports() {
         if dir.drives() {
-            read.extend(w.bits.iter().filter_map(|b| b.net()).map(|n| n.index() as u64));
+            read.extend(
+                w.bits
+                    .iter()
+                    .filter_map(|b| b.net())
+                    .map(|n| n.index() as u64),
+            );
         }
     }
     let max_bit = module.net_count() as u64;
@@ -1101,7 +1111,10 @@ pub fn map_module(module: &mut Module) -> Result<Stats> {
             nets[n.index()] = Some(*n);
         }
     };
-    module.wires.iter().for_each(|w| w.bits.iter().for_each(&mut see));
+    module
+        .wires
+        .iter()
+        .for_each(|w| w.bits.iter().for_each(&mut see));
     for c in &module.cells {
         c.kind.for_each_port(|p| p.bits.iter().for_each(&mut see));
     }
@@ -1110,7 +1123,9 @@ pub fn map_module(module: &mut Module) -> Result<Stats> {
     let mapping = compute(&net);
 
     let mut keep = is_gate.into_iter();
-    module.cells.retain(|_| !keep.next().expect("one flag per cell"));
+    module
+        .cells
+        .retain(|_| !keep.next().expect("one flag per cell"));
     // Fresh bits past the module's nets become new nets, in order.
     let mut fresh: HashMap<u64, Net> = HashMap::new();
     let mut sig_of = |module: &mut Module, b: u64| -> SigBit {
@@ -1133,7 +1148,11 @@ pub fn map_module(module: &mut Module) -> Result<Stats> {
                 .collect()
         };
         let width = a.len();
-        let table = Const((0..1usize << width).map(|i| State::from(l.tt >> i & 1 == 1)).collect());
+        let table = Const(
+            (0..1usize << width)
+                .map(|i| State::from(l.tt >> i & 1 == 1))
+                .collect(),
+        );
         let y = sig_of(module, l.y);
         module.add_cell(namer.fresh(), CellKind::Lut(Lut { a, y, table }));
     }

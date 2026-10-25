@@ -100,7 +100,11 @@ pub fn collect(m: &mut Module) -> Result<()> {
             match g.ty.as_str() {
                 "$memrd" | "$memrd_v2" => rd.push((m.cells[i].name.clone(), g.clone())),
                 "$memwr" | "$memwr_v2" => {
-                    let key = if g.ty == "$memwr" { "PRIORITY" } else { "PORTID" };
+                    let key = if g.ty == "$memwr" {
+                        "PRIORITY"
+                    } else {
+                        "PORTID"
+                    };
                     wr.push((int(g, key)?, g.clone()));
                 }
                 "$meminit" | "$meminit_v2" => init.push((int(g, "PRIORITY")?, g.clone())),
@@ -152,18 +156,12 @@ pub fn collect(m: &mut Module) -> Result<()> {
                     // Old-style: a later port wins over earlier ones on the
                     // same clock.
                     (0..nw)
-                        .map(|j| {
-                            j < i
-                                && clock(&wr[j].1).ok().flatten() == clk
-                                && clk.is_some()
-                        })
+                        .map(|j| j < i && clock(&wr[j].1).ok().flatten() == clk && clk.is_some())
                         .collect()
                 } else {
                     let mask = konst(g, "PRIORITY_MASK")?;
                     wr.iter()
-                        .map(|(portid, _)| {
-                            mask.0.get(*portid as usize) == Some(&State::One)
-                        })
+                        .map(|(portid, _)| mask.0.get(*portid as usize) == Some(&State::One))
                         .collect()
                 };
                 ensure!(
@@ -399,7 +397,8 @@ pub fn merge_registers(m: &mut Module, accept: impl Fn(&Mem) -> bool) -> Result<
             drop_bits(ff, &drop);
         }
     }
-    m.cells.retain(|c| !matches!(&c.kind, CellKind::Ff(ff) if ff.width() == 0));
+    m.cells
+        .retain(|c| !matches!(&c.kind, CellKind::Ff(ff) if ff.width() == 0));
     Ok(())
 }
 
@@ -446,7 +445,12 @@ fn output_register(
         };
         let q = ff.q[bit];
         data.push(q);
-        init_value.push(q.net().and_then(|n| init.get(&n)).copied().unwrap_or(State::X));
+        init_value.push(
+            q.net()
+                .and_then(|n| init.get(&n))
+                .copied()
+                .unwrap_or(State::X),
+        );
         srst_value.push(match &ff.kind {
             FfKind::Dff {
                 control: DffControl::Sync { value, .. },
@@ -485,7 +489,11 @@ fn address_register(
     rd: &MemRd,
 ) -> Option<MemRd> {
     // A power-up address would be lost (yosys' `memory_dff` refuses too).
-    if rd.addr.iter().any(|b| b.net().is_some_and(|n| init.contains_key(&n))) {
+    if rd
+        .addr
+        .iter()
+        .any(|b| b.net().is_some_and(|n| init.contains_key(&n)))
+    {
         return None;
     }
     let mut clk: Option<Ctrl> = None;
@@ -589,10 +597,16 @@ fn map_mem(
     wires: &mut Vec<Wire>,
     subst: &mut Subst,
 ) -> Result<()> {
-    ensure!(mem.offset == 0, "a memory starting at a nonzero address is not supported");
+    ensure!(
+        mem.offset == 0,
+        "a memory starting at a nonzero address is not supported"
+    );
     let w = mem.width;
     let clk = match mem.wr.first() {
-        Some(p) => Some(p.clk.context("asynchronous write ports are not supported")?),
+        Some(p) => Some(
+            p.clk
+                .context("asynchronous write ports are not supported")?,
+        ),
         None => None,
     };
     ensure!(
@@ -780,10 +794,8 @@ fn map_mem(
                                 format!("$chipsmith$memrd${}", wires.len()),
                                 data_out.clone(),
                             );
-                            wire.attributes.insert(
-                                attr::INIT.into(),
-                                ParamValue::Bits(s.init_value.clone()),
-                            );
+                            wire.attributes
+                                .insert(attr::INIT.into(), ParamValue::Bits(s.init_value.clone()));
                             wire
                         });
                     }
