@@ -864,10 +864,19 @@ impl<'a, 'd> ModElab<'a, 'd> {
             patterns.push(pats);
             bodies.push(&it.body);
         }
-        // `(* full_case *)` changes nothing: yosys 0.70's proc keeps the
-        // value from before the case where no item matches, and doesn't
-        // turn the last item into a default either.
-        let _ = full;
+        // `(* full_case *)` without a default: where no item matches, the
+        // variables the case assigns with `=` are x (so no latch), the
+        // ones assigned with `<=` keep their value. That is yosys' reading
+        // (its front end adds that default case).
+        let full_x = if full && default.is_none() {
+            let mut lv = Vec::new();
+            for it in items {
+                self.blocking_lvalues(&it.body, scope, &mut lv);
+            }
+            Some(lv)
+        } else {
+            None
+        };
         // Items covering every value the case expression can take leave
         // nothing for a missing default: no latch, as yosys' proc_dlatch
         // finds.
@@ -882,7 +891,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
             let ctrl = self.any(hits, span);
             arms.push(Arm { ctrl, group, body });
         }
-        self.switch_full(arms, default, complete, scope, env, span)
+        self.switch_full(arms, default, full_x, complete, scope, env, span)
     }
 
     /// One case pattern against the case expression.
@@ -929,16 +938,18 @@ impl<'a, 'd> ModElab<'a, 'd> {
         env: &mut Env,
         span: Span,
     ) -> Result<()> {
-        self.switch_full(arms, default, false, scope, env, span)
+        self.switch_full(arms, default, None, false, scope, env, span)
     }
 
     /// Runs the arms and the default, then merges what they assigned.
     /// `complete`: some arm is always taken, so without a default the
     /// value before the switch is never what comes out.
+    #[allow(clippy::too_many_arguments)]
     fn switch_full(
         &mut self,
         arms: Vec<Arm<'a>>,
         default: Option<&'a Stmt>,
+        full_x: Option<Vec<(Slot, Vec<Option<usize>>)>>,
         complete: bool,
         scope: ScopeId,
         env: &mut Env,
@@ -964,15 +975,27 @@ impl<'a, 'd> ModElab<'a, 'd> {
             r?;
             taken.push((arm.ctrl, arm.group, frame));
         }
-        let default_frame = match default_body {
-            Some(body) => {
+        let default_frame = match (default_body, full_x) {
+            (Some(body), _) => {
                 env.push();
                 let r = self.exec(body, scope, env);
                 let f = env.pop();
                 r?;
                 f
             }
-            None => FxHashMap::default(),
+            (None, Some(lvalues)) => {
+                env.push();
+                for (slot, positions) in lvalues {
+                    let n = positions.len();
+                    let r = self.write_target(Target::Bits { slot, positions }, xs(n), true, env, span);
+                    if let Err(e) = r {
+                        env.pop();
+                        return Err(e);
+                    }
+                }
+                env.pop()
+            }
+            (None, None) => FxHashMap::default(),
         };
         if taken.is_empty() {
             env.absorb(default_frame);
@@ -1132,6 +1155,76 @@ fn covers_all<'p>(sel: &[SigBit], patterns: impl Iterator<Item = &'p Vec<Option<
 }
 
 impl<'a, 'd> ModElab<'a, 'd> {
+    /// The variable bits a statement assigns with `=` (yosys'
+    /// `collect_lvalues`), by constant selects; a variable select takes
+    /// the whole variable.
+    fn blocking_lvalues(&mut self, s: &'a Stmt, scope: ScopeId, out: &mut Vec<(Slot, Vec<Option<usize>>)>) {
+        match &s.kind {
+            StmtKind::Assign { lhs, blocking: true, .. } => self.lvalue_bits(lhs, scope, out),
+            StmtKind::Block { stmts, .. } => stmts.iter().for_each(|x| self.blocking_lvalues(x, scope, out)),
+            StmtKind::If { then, els, .. } => {
+                self.blocking_lvalues(then, scope, out);
+                if let Some(e) = els {
+                    self.blocking_lvalues(e, scope, out);
+                }
+            }
+            StmtKind::Case { items, .. } => items.iter().for_each(|i| self.blocking_lvalues(&i.body, scope, out)),
+            StmtKind::For { body, .. } | StmtKind::While { body, .. } | StmtKind::Repeat { body, .. } => {
+                self.blocking_lvalues(body, scope, out)
+            }
+            _ => {}
+        }
+    }
+
+    fn lvalue_bits(&mut self, e: &'a Expr, scope: ScopeId, out: &mut Vec<(Slot, Vec<Option<usize>>)>) {
+        let slot_dim = |m: &Self, b: &'a Expr| -> Option<(Slot, Dim)> {
+            let ExprKind::Ident(id) = &b.kind else { return None };
+            match m.lookup(scope, &id.name)? {
+                (Sym::Var(v), _) => Some((Slot::Var(v), m.vars[v].dim)),
+                (Sym::Local(l), _) => Some((Slot::Local(l), m.locals[l].dim)),
+                _ => None,
+            }
+        };
+        let all = |d: Dim| (0..d.width()).map(Some).collect::<Vec<_>>();
+        match &e.kind {
+            ExprKind::Concat(parts) => parts.iter().for_each(|p| self.lvalue_bits(p, scope, out)),
+            ExprKind::Ident(_) => {
+                if let Some((slot, d)) = slot_dim(self, e) {
+                    out.push((slot, all(d)));
+                }
+            }
+            ExprKind::Index { base, index } => {
+                if let Some((slot, d)) = slot_dim(self, base) {
+                    match self.eval_i64(index, scope).ok().and_then(|i| d.pos(i)) {
+                        Some(p) => out.push((slot, vec![Some(p)])),
+                        None => out.push((slot, all(d))),
+                    }
+                }
+            }
+            ExprKind::Slice { base, msb, lsb } => {
+                if let Some((slot, d)) = slot_dim(self, base) {
+                    match (self.eval_i64(msb, scope), self.eval_i64(lsb, scope)) {
+                        (Ok(m), Ok(l)) => {
+                            let (a, b) = (d.pos_unchecked(l), d.pos_unchecked(m));
+                            let ps = (a.min(b)..=a.max(b))
+                                .filter(|&p| (0..d.width() as i64).contains(&p))
+                                .map(|p| Some(p as usize))
+                                .collect();
+                            out.push((slot, ps));
+                        }
+                        _ => out.push((slot, all(d))),
+                    }
+                }
+            }
+            ExprKind::IndexedSlice { base, .. } => {
+                if let Some((slot, d)) = slot_dim(self, base) {
+                    out.push((slot, all(d)));
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Fills [`Env::snippets`] for a block: every assignment's target
     /// splits its variable's bits, a variable index into single bits (a
     /// loop over `x[i]` writes them one at a time once unrolled).

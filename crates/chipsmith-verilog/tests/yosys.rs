@@ -173,3 +173,53 @@ fn cyclone2_re_specimens() {
     eprintln!("{} of {n} specimens equivalent", n - failures.len());
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
+
+/// The check has teeth: one constant bit flipped in chipsmith's netlist
+/// (the counter's increment in bidir, `c + 1'b1` becoming `c + 0`) and
+/// the proof fails.
+#[test]
+fn a_one_bit_miscompile_is_caught() {
+    use chipsmith_netlist::{BinaryOp, CellKind, SigBit};
+    let case = example("bidir", "top", Lib::Cyclone2);
+    let dir = scratch("mutation");
+    let libs = common::lib_files(case.lib);
+    let mut fe = chipsmith_verilog::Frontend::new();
+    for l in &libs {
+        fe.read_library(l).unwrap();
+    }
+    for f in &case.files {
+        fe.read_file(f).unwrap();
+    }
+    let mut design = fe.elaborate(&case.top).unwrap();
+    chipsmith_synth::flatten::flatten(&mut design).unwrap();
+    let top = &mut design.modules[0];
+    let add = top
+        .cells
+        .iter_mut()
+        .find_map(|c| match &mut c.kind {
+            CellKind::Binary(b) if b.op == BinaryOp::Add => Some(b),
+            _ => None,
+        })
+        .expect("bidir's counter has an adder");
+    assert_eq!(add.b.sig[0], SigBit::ONE);
+    add.b.sig[0] = SigBit::ZERO;
+    let ours = dir.join("ours.json");
+    chipsmith_netlist::write_json(&design, std::fs::File::create(&ours).unwrap()).unwrap();
+    // Gold as check() makes it.
+    let gold = dir.join("gold.json");
+    let mut script = String::new();
+    for l in &libs {
+        script += &format!("read_verilog -lib {}\n", common::quoted(l));
+    }
+    for f in &case.files {
+        script += &format!("read_verilog {}\n", common::quoted(f));
+    }
+    script += &format!(
+        "hierarchy -check -top top\nproc\nflatten\nopt_clean\nwrite_json {}\n",
+        common::quoted(&gold)
+    );
+    common::yosys(&dir, "gold", &script).unwrap();
+    let r = common::equivalent(&dir, &gold, &ours, "top");
+    let err = r.expect_err("a flipped bit must not prove equivalent");
+    assert!(err.contains("unproven"), "{err}");
+}
