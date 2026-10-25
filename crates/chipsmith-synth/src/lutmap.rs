@@ -11,8 +11,11 @@
 //! cut per node, then area-flow and exact-area passes pick cheaper cuts
 //! wherever that keeps every output at its required depth.
 //!
-//! Input and output are yosys JSON: `$_AND_`, `$_OR_`, `$_XOR_`, `$_MUX_`
-//! and friends become `$lut` cells; every other cell stays as it is.
+//! `$_AND_`, `$_OR_`, `$_XOR_`, `$_MUX_` and friends become `$lut` cells;
+//! every other cell stays as it is. [`map_module`] maps an IR module,
+//! [`map`] and [`map_file`] yosys JSON (what the build runs between its two
+//! yosys halves today); both read the gates into the same network and map
+//! it the same way.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
