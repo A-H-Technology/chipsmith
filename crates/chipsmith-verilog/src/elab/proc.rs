@@ -278,12 +278,9 @@ impl<'a, 'd> ModElab<'a, 'd> {
         let mut env = Env::new(Mode::Comb);
         self.prescan_snippets(body, scope, &mut env);
         self.exec(body, scope, &mut env)?;
-        if let Some(w) = env.mem_writes.first() {
-            return Err(Diag::new(
-                w.span,
-                "internal: memory write port in combinational logic",
-            ));
-        }
+        // mem_write turns these into register writes before they get
+        // here; a write port can only come from a clocked block.
+        debug_assert!(env.mem_writes.is_empty());
         let mut vars: Vec<usize> = env.assigned.keys().copied().collect();
         vars.sort_unstable();
         for v in vars {
@@ -833,14 +830,15 @@ pub(crate) fn mem_write(
             Ok(())
         }
         MemStorage::Ram { .. } => {
+            // Memories written like this are found by name before
+            // elaboration and kept as registers; a write the scan can't
+            // see (from inside a task) isn't supported.
             if env.mode == Mode::Comb || blocking {
-                return Err(Diag::new(
+                bail!(
                     span,
-                    format!(
-                        "internal: memory `{}` written from logic or with `=` was not split into registers",
-                        m.mems[mem].name
-                    ),
-                ));
+                    "memory `{}` is written from combinational logic or with `=` where that can't be seen before elaboration (inside a task?); mark it (* mem2reg *)",
+                    m.mems[mem].name
+                );
             }
             let id = m.hidden;
             m.hidden += 3;
