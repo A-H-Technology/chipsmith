@@ -16,7 +16,7 @@ mod m4k;
 use anyhow::{bail, Context, Result};
 use chipsmith_netlist::{attr, is_set, CellKind, Design, Module};
 use chipsmith_synth::rewrite::define_inits;
-use chipsmith_synth::{alumacc, clean, lutmap, memory, opt, techmap, tribuf, undef, wreduce};
+use chipsmith_synth::{alumacc, clean, fsm, lutmap, memory, opt, techmap, tribuf, undef, wreduce};
 
 /// What each stage left, for checking stages one at a time.
 pub trait Observer {
@@ -93,6 +93,7 @@ fn run(m: &mut Module, obs: &mut dyn Observer) -> Result<Stats> {
     memory::merge_registers(m, m4k::mappable)?;
     undef::refine(m)?;
     obs.stage("refined", m);
+    fsm::compare_states(m);
     opt::lower_bitwise(m)?;
     opt::opt_seq(m, removable)?;
     obs.stage("opt", m);

@@ -20,7 +20,7 @@ use chipsmith_netlist::{BinaryOp, CellKind, Module, UnaryOp};
 pub use dff::opt_dff;
 pub use gates::opt_gates;
 pub use muxtree::opt_muxtree;
-pub use word::{opt_merge, opt_word};
+pub use word::{merge_ff_bits, opt_merge, opt_word};
 
 use crate::{clean, techmap};
 
@@ -53,6 +53,7 @@ pub fn opt(m: &mut Module, removable: &[&str]) {
         let mut changed = opt_gates(m);
         changed |= opt_word(m);
         changed |= opt_merge(m);
+        changed |= merge_ff_bits(m);
         changed |= opt_muxtree(m);
         changed |= opt_dff(m);
         let before = m.cells.len();

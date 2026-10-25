@@ -45,6 +45,12 @@ fn main() {
                 wreduce::wreduce(m);
             }
             "alumacc" => alumacc::alumacc(m),
+            "fsm" => {
+                for r in chipsmith_synth::fsm::state_registers(m) {
+                    eprintln!("state register {:?}: {} values", &r.q[..2], r.values.len());
+                }
+                eprintln!("fsm: {}", chipsmith_synth::fsm::compare_states(m));
+            }
             other => panic!("unknown pass {other}"),
         }
     }

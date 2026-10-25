@@ -6,6 +6,7 @@
 pub mod alumacc;
 pub mod clean;
 pub mod flatten;
+pub mod fsm;
 pub mod lutmap;
 pub mod memory;
 pub mod opt;

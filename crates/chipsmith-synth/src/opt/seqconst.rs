@@ -270,7 +270,31 @@ impl Exact<'_> {
         }
     }
 
+    /// Whether the register keeps `value`: first whether D alone always is
+    /// `value` (then enables don't matter, only that resets agree), which
+    /// needs fewer free inputs; then with the controls.
     fn holds(&self, ff: &Ff<Bit>, value: bool) -> bool {
+        let FfKind::Dff { clk, d, control } = &ff.kind else {
+            return false;
+        };
+        let resets_agree = match control {
+            DffControl::Async { value: v, .. } | DffControl::Sync { value: v, .. } => *v == value,
+            DffControl::Plain { .. } => true,
+            DffControl::Load { .. } | DffControl::SetClr { .. } => false,
+        };
+        let d_alone = Ff {
+            q: ff.q,
+            kind: FfKind::Dff {
+                clk: *clk,
+                d: *d,
+                control: DffControl::Plain { en: None },
+            },
+        };
+        (resets_agree && self.holds_with_controls(&d_alone, value))
+            || self.holds_with_controls(ff, value)
+    }
+
+    fn holds_with_controls(&self, ff: &Ff<Bit>, value: bool) -> bool {
         let FfKind::Dff { d, control, .. } = &ff.kind else {
             return false;
         };

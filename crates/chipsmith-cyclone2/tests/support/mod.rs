@@ -419,6 +419,34 @@ fn cut_blocks(m: &mut Module, shapes: &BTreeMap<String, MemShape>) -> Result<(),
     Ok(())
 }
 
+/// A bit that is 1 when `q` holds one of `values`, as gates added to `m`.
+fn in_set(m: &mut Module, q: &[SigBit], values: &[chipsmith_netlist::Const], tag: &str) -> SigBit {
+    let mut n = 0;
+    let mut gate = |m: &mut Module, op: GateOp, ins: &[SigBit]| {
+        let y = SigBit::Net(m.new_net());
+        n += 1;
+        m.add_cell(
+            format!("$claim${tag}${n}"),
+            CellKind::Gate(Gate::new(op, ins, y).unwrap()),
+        );
+        y
+    };
+    let mut any = SigBit::ZERO;
+    for v in values {
+        let mut all = SigBit::ONE;
+        for (b, s) in q.iter().zip(&v.0) {
+            let lit = if *s == State::One {
+                *b
+            } else {
+                gate(m, GateOp::Not, &[*b])
+            };
+            all = gate(m, GateOp::And, &[all, lit]);
+        }
+        any = gate(m, GateOp::Or, &[any, all]);
+    }
+    any
+}
+
 /// yosys proves `gate` equivalent to `gold` (both JSON files, the
 /// memories already as they should be compared), with x in `gold` read as
 /// "any value". Returns how many `$equiv` it proved.
@@ -436,7 +464,7 @@ fn equiv(dir: &Path, name: &str, gold: &Path, gate: &Path) -> Result<usize, Stri
          read_json {gate}\nread_verilog -overwrite {sim}\n{prep}\nrename top gate\ndesign -stash gate\n\
          design -copy-from gold -as gold gold\ndesign -copy-from gate -as gate gate\n\
          equiv_make gold gate equiv\nhierarchy -top equiv\nasync2sync\n\
-         equiv_struct -fwd\nequiv_simple -undef\nequiv_induct -undef -ignore-unknown-cells\n\
+         equiv_struct -fwd\nequiv_simple -undef -set-assumes\nequiv_induct -undef -set-assumes -ignore-unknown-cells\n\
          equiv_status -assert\n",
         gold = gold.display(),
         gate = gate.display(),
@@ -593,7 +621,10 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
         .values()
         .flat_map(|v| v.iter().skip(1).map(move |n| (v[0], *n)))
         .collect();
-    if !claims.is_empty() {
+    // Registers synthesis treats as state registers: one of their values
+    // at all times.
+    let states = chipsmith_synth::fsm::state_registers(gm);
+    if !claims.is_empty() || !states.is_empty() {
         // One output bit per claim, each "this register holds its value".
         let mut with_claims = gm.clone();
         let mut holds = Vec::new();
@@ -642,6 +673,23 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
             );
             holds.push(y);
         }
+        for (k, r) in states.iter().enumerate() {
+            names += &format!(
+                "{}: {} in {} values\n",
+                holds.len(),
+                r.q.first()
+                    .and_then(|b| b.net())
+                    .and_then(|n| net_names.get(&n))
+                    .map_or("?", |s| s),
+                r.values.len()
+            );
+            holds.push(in_set(
+                &mut with_claims,
+                &r.q,
+                &r.values,
+                &format!("state{k}"),
+            ));
+        }
         std::fs::write(dir.join("claims.txt"), names).unwrap();
         let all = "1".repeat(holds.len());
         let mut port = Wire::new("__claims", holds);
@@ -674,6 +722,39 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
         }
         let consts: HashMap<Net, bool> = claims.iter().map(|(n, v)| (*n, *v)).collect();
         chipsmith_synth::opt::seqconst::apply(gm, &consts);
+        // The state registers' invariants, proven, as assumptions for the
+        // comparison: synthesis compares states by the bits that tell them
+        // apart, which only agrees with the RTL in states the RTL reaches.
+        for (k, r) in states.iter().enumerate() {
+            let q: Vec<SigBit> = r
+                .q
+                .iter()
+                .map(|b| match b {
+                    SigBit::Net(n) => consts.get(n).map_or(*b, |v| SigBit::Const(State::from(*v))),
+                    c => *c,
+                })
+                .collect();
+            let a = in_set(gm, &q, &r.values, &format!("assume{k}"));
+            gm.add_cell(
+                format!("$state_assume${k}"),
+                CellKind::Other(chipsmith_netlist::Generic {
+                    ty: "$assume".into(),
+                    params: Default::default(),
+                    ports: vec![
+                        chipsmith_netlist::GenericPort {
+                            name: "A".into(),
+                            dir: Some(chipsmith_netlist::Dir::In),
+                            sig: vec![a],
+                        },
+                        chipsmith_netlist::GenericPort {
+                            name: "EN".into(),
+                            dir: Some(chipsmith_netlist::Dir::In),
+                            sig: vec![SigBit::ONE],
+                        },
+                    ],
+                }),
+            );
+        }
     }
     let cut_gate_path = dir.join("gate_cut.json");
     write(&cut_gate, &cut_gate_path);

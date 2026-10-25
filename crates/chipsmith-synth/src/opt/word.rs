@@ -318,3 +318,61 @@ pub fn opt_merge(m: &mut Module) -> bool {
     subst.apply(m);
     changed
 }
+
+/// Register bits with the same input, controls, reset value and power-up
+/// value are the same register, wherever they sit in their words (`opt_merge`
+/// compares whole cells; yosys finds these in `opt_dff -sat`). A word's
+/// bits that a ROM or decoder computes alike become one.
+pub fn merge_ff_bits(m: &mut Module) -> bool {
+    use chipsmith_netlist::{DffControl, FfKind};
+    let init = inits(m);
+    let mut seen: HashMap<String, SigBit> = HashMap::new();
+    let mut subst = Subst::new(m);
+    let mut changed = false;
+    for c in &mut m.cells {
+        let CellKind::Ff(ff) = &mut c.kind else {
+            continue;
+        };
+        let FfKind::Dff { clk, d, control } = &ff.kind else {
+            continue;
+        };
+        // The controls as text, the per-bit parts added below.
+        let ctrl = match control {
+            DffControl::Plain { en } => format!("plain {en:?}"),
+            DffControl::Async { arst, en, .. } => format!("async {arst:?} {en:?}"),
+            DffControl::Sync { srst, en, .. } => format!("sync {srst:?} {en:?}"),
+            DffControl::Load { .. } | DffControl::SetClr { .. } => continue,
+        };
+        let value = |i: usize| match control {
+            DffControl::Async { value, .. } | DffControl::Sync { value, .. } => value.0[i],
+            _ => State::X,
+        };
+        let mut drop = vec![false; ff.q.len()];
+        for i in 0..ff.q.len() {
+            let SigBit::Net(q) = ff.q[i] else { continue };
+            let key = format!(
+                "{clk:?} {ctrl} d={:?} v={:?} init={:?}",
+                d[i],
+                value(i),
+                init.get(&q)
+            );
+            match seen.get(&key) {
+                Some(&first) => {
+                    subst.set(q, first);
+                    drop[i] = true;
+                    changed = true;
+                }
+                None => {
+                    seen.insert(key, ff.q[i]);
+                }
+            }
+        }
+        if drop.iter().any(|&d| d) {
+            crate::memory::drop_bits(ff, &drop);
+        }
+    }
+    m.cells
+        .retain(|c| !matches!(&c.kind, CellKind::Ff(ff) if ff.width() == 0));
+    subst.apply(m);
+    changed
+}
