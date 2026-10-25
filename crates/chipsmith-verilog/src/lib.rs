@@ -59,14 +59,9 @@ use std::rc::Rc;
 
 pub use source::{Error, Location};
 
+use ast::Role;
 use pp::{Defines, Preprocessor};
 use source::SourceMap;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Role {
-    Design,
-    Library,
-}
 
 /// Source files read so far, and the macros they defined.
 #[derive(Default)]
@@ -120,7 +115,6 @@ impl Frontend {
     }
 
     fn read(&mut self, name: &str, text: &str, role: Role) -> Result<(), Error> {
-        let lib = role == Role::Library;
         let file = self.sources.add_file(name.to_owned(), Rc::from(text));
         let result = Preprocessor::run(
             &mut self.sources,
@@ -128,7 +122,7 @@ impl Frontend {
             &self.include_dirs,
             file,
         )
-        .and_then(|toks| parse::parse(&toks, lib));
+        .and_then(|toks| parse::parse(&toks, role));
         match result {
             Ok(mods) => {
                 self.modules.extend(mods);

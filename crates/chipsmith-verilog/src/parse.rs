@@ -18,15 +18,15 @@ pub struct Parser<'a> {
     toks: &'a [Token],
     nettype: &'a [(usize, DefaultNettype)],
     pos: usize,
-    lib: bool,
+    role: Role,
 }
 
-pub fn parse(tokens: &Tokens, lib: bool) -> Result<Vec<Module>> {
+pub fn parse(tokens: &Tokens, role: Role) -> Result<Vec<Module>> {
     let mut p = Parser {
         toks: &tokens.tokens,
         nettype: &tokens.nettype,
         pos: 0,
-        lib,
+        role,
     };
     let mut modules = Vec::new();
     loop {
@@ -264,7 +264,7 @@ impl<'a> Parser<'a> {
             ports,
             items,
             nettype,
-            lib: self.lib,
+            role: self.role,
             span: start.to(end),
         })
     }
@@ -1809,7 +1809,7 @@ mod tests {
         let mut sm = SourceMap::default();
         let f = sm.add_file("t.v".into(), text.into());
         let toks = Preprocessor::run(&mut sm, &mut Defines::default(), &[], f)?;
-        parse(&toks, false)
+        parse(&toks, Role::Design)
     }
 
     #[test]

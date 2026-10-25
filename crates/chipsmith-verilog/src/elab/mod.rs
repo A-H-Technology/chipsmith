@@ -19,7 +19,7 @@ use std::rc::Rc;
 use chipsmith_netlist::{Attributes, Design, Dir, State};
 use rustc_hash::FxHashMap;
 
-use crate::ast;
+use crate::ast::{self, Role};
 use crate::source::{Diag, Result, SourceMap, Span};
 
 pub(crate) use items::ModElab;
@@ -309,8 +309,8 @@ pub(crate) fn elaborate(sources: &SourceMap, modules: &[ast::Module], top: &str)
         // A later definition replaces an earlier one, except that a design
         // module wins over a library's interface of the same name.
         match asts.get(&*m.name.name) {
-            Some(prev) if !prev.lib && m.lib => {}
-            Some(prev) if !prev.lib && !m.lib => {
+            Some(prev) if prev.role == Role::Design && m.role == Role::Library => {}
+            Some(prev) if prev.role == Role::Design => {
                 return Err(Diag::new(
                     m.name.span,
                     format!(
@@ -328,7 +328,7 @@ pub(crate) fn elaborate(sources: &SourceMap, modules: &[ast::Module], top: &str)
     let Some(top_ast) = asts.get(top).copied() else {
         return Err(Diag::global(format!("top module {top} not found")));
     };
-    if top_ast.lib {
+    if top_ast.is_blackbox() {
         return Err(Diag::new(
             top_ast.name.span,
             format!("top module {top} is a blackbox"),
@@ -372,7 +372,7 @@ impl<'a> DesignCtx<'a> {
             ));
         }
         self.stack.push(key.0.clone());
-        let name = if key.1.is_empty() || ast.lib {
+        let name = if key.1.is_empty() || ast.is_blackbox() {
             key.0.clone()
         } else {
             paramod_name(&key.0, &key.1)
@@ -386,7 +386,7 @@ impl<'a> DesignCtx<'a> {
         };
         // A blackbox is kept once, as yosys keeps a `-lib` module: its
         // instances carry their parameters.
-        if !(ast.lib && self.out.iter().any(|m| m.name == name)) {
+        if !(ast.is_blackbox() && self.out.iter().any(|m| m.name == name)) {
             self.out.push(module);
         }
         self.done.insert(key, e.clone());

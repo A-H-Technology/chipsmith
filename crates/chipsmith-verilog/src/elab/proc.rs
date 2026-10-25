@@ -245,7 +245,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
             };
             let d = final_value(&env);
             let nets = &self.vars[v].nets;
-            let temp = env.blocking.contains(&v)
+            let temp = env.is_blocking(v)
                 && !env.reads_incoming.contains(&v)
                 && !d.iter().any(|b| nets.contains(b))
                 && reset_envs.is_empty();
@@ -302,7 +302,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
             let value: SigSpec = bits.iter().map(|&i| full[i]).collect();
             let en: SigSpec = bits.iter().map(|&i| en_full[i]).collect();
             let nets = &self.vars[v].nets;
-            let temp = env.blocking.contains(&v)
+            let temp = env.is_blocking(v)
                 && !env.reads_incoming.contains(&v)
                 && en.iter().all(|&b| b == SigBit::ONE)
                 && !value.iter().any(|b| nets.contains(b));

@@ -61,7 +61,7 @@ pub(crate) fn elaborate_module<'a>(
     overrides: &[(String, ConstVal)],
 ) -> Result<(Module, Vec<PortInfo>)> {
     let sources = d.sources;
-    let lib = ast.lib || ast.attrs.iter().any(|a| &*a.name.name == "blackbox");
+    let lib = ast.is_blackbox();
     let mut m = ModElab {
         d,
         ast,
@@ -967,7 +967,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
                         given.push((f.name.to_string(), self.eval_const(e, scope)?));
                     }
                     ParamOverride::Named(n, Some(e)) => {
-                        if !formal.iter().any(|f| f.name == n.name) && !child.lib {
+                        if !formal.iter().any(|f| f.name == n.name) && !child.is_blackbox() {
                             bail!(n.span, "module {mname} has no parameter {}", n.name);
                         }
                         given.push((n.name.to_string(), self.eval_const(e, scope)?));
@@ -999,7 +999,15 @@ impl<'a, 'd> ModElab<'a, 'd> {
             });
             let cell_params: Vec<(String, ConstVal)> = given.clone();
             let e = self.d.module(child, given, inst.span)?;
-            self.connect_instance(item, inst, &e, child.lib, cell_params, scope, &path)?;
+            self.connect_instance(
+                item,
+                inst,
+                &e,
+                child.is_blackbox(),
+                cell_params,
+                scope,
+                &path,
+            )?;
         }
         Ok(())
     }

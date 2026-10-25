@@ -675,7 +675,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 ),
             }),
             Mode::Comb | Mode::Clocked => {
-                let val = if env.blocking.contains(&v) {
+                let val = if env.is_blocking(v) {
                     env.get(Slot::Var(v))
                         .cloned()
                         .unwrap_or_else(|| self.vars[v].nets.clone())

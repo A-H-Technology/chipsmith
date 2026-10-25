@@ -48,6 +48,14 @@ pub(crate) enum Mode {
     Initial,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssignKind {
+    /// `=`: later reads see the new value.
+    Blocking,
+    /// `<=`: reads see the value from before the block.
+    Nonblocking,
+}
+
 /// One memory write a clocked block made, its signals in hidden slots.
 #[derive(Debug, Clone)]
 pub(crate) struct MemWrite {
@@ -63,8 +71,8 @@ pub(crate) struct Env {
     frames: Vec<FxHashMap<Slot, SigSpec>>,
     /// Default values of hidden slots not yet assigned on a path.
     hidden_init: FxHashMap<usize, SigSpec>,
-    pub blocking: FxHashSet<usize>,
-    pub nonblocking: FxHashSet<usize>,
+    /// How the block assigns each variable: one way only.
+    pub assign_kind: FxHashMap<usize, AssignKind>,
     /// Bits of each variable the block assigns somewhere.
     pub assigned: FxHashMap<usize, Vec<bool>>,
     /// Variables whose value from before the block was read: not
@@ -82,13 +90,16 @@ pub(crate) struct Env {
 const MAX_ITERATIONS: usize = 1 << 20;
 
 impl Env {
+    pub fn is_blocking(&self, v: usize) -> bool {
+        self.assign_kind.get(&v) == Some(&AssignKind::Blocking)
+    }
+
     pub fn new(mode: Mode) -> Env {
         Env {
             mode,
             frames: vec![FxHashMap::default()],
             hidden_init: FxHashMap::default(),
-            blocking: FxHashSet::default(),
-            nonblocking: FxHashSet::default(),
+            assign_kind: FxHashMap::default(),
             assigned: FxHashMap::default(),
             reads_incoming: FxHashSet::default(),
             mem_writes: Vec::new(),
@@ -819,19 +830,18 @@ impl<'a, 'd> ModElab<'a, 'd> {
         if env.mode == Mode::Initial {
             return Ok(());
         }
-        let (mine, other) = if blocking {
-            (&mut env.blocking, &env.nonblocking)
+        let kind = if blocking {
+            AssignKind::Blocking
         } else {
-            (&mut env.nonblocking, &env.blocking)
+            AssignKind::Nonblocking
         };
-        if other.contains(&v) {
+        if *env.assign_kind.entry(v).or_insert(kind) != kind {
             bail!(
                 span,
                 "`{}` is assigned with both `=` and `<=` in one always block",
                 self.vars[v].name
             );
         }
-        mine.insert(v);
         Ok(())
     }
 

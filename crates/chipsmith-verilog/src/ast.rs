@@ -32,10 +32,25 @@ pub struct Module {
     pub ports: Vec<Ident>,
     pub items: Vec<Item>,
     pub nettype: DefaultNettype,
-    /// From a blackbox library (`read_verilog -lib`): only the interface
-    /// counts.
-    pub lib: bool,
+    pub role: Role,
     pub span: Span,
+}
+
+/// Where a module came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// The design's own source.
+    Design,
+    /// A cell library (`read_verilog -lib`): only the interface counts.
+    Library,
+}
+
+impl Module {
+    /// A library module, or one marked `(* blackbox *)`: its instances
+    /// stay cells.
+    pub fn is_blackbox(&self) -> bool {
+        self.role == Role::Library || self.attrs.iter().any(|a| &*a.name.name == "blackbox")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
