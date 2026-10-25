@@ -75,10 +75,18 @@ pub fn map(m: &mut Module) -> usize {
 
 fn chain(g: &mut Gates, subst: &mut Subst, alu: &Alu) {
     let w = alu.y.len();
-    let a = extend(&alu.a.sig, w, alu.a.signed);
-    let b = extend(&alu.b.sig, w, alu.b.signed);
+    let mut a = extend(&alu.a.sig, w, alu.a.signed);
+    let mut b = extend(&alu.b.sig, w, alu.b.signed);
     // A constant BI folds into the masks; a signal one inverts B in front.
     let bi = const_bit(alu.bi);
+    // In a sum the operands can trade places: the one with more constant
+    // bits goes on DATAA, which is where the yosys flow ends up putting
+    // it (its `opt_expr` orders commutative operands) and leaves the
+    // signal on DATAB, the LE's faster input to the carry.
+    let consts = |s: &[SigBit]| s.iter().filter(|b| const_bit(**b).is_some()).count();
+    if bi == Some(false) && consts(&b) > consts(&a) {
+        std::mem::swap(&mut a, &mut b);
+    }
     let invert_b = bi == Some(true);
     let bb: SigSpec = match bi {
         Some(_) => b.clone(),

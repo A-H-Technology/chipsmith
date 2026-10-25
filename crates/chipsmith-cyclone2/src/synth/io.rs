@@ -4,8 +4,8 @@
 //! A port wire keeps its name but now names the pad side, a fresh net
 //! only the buffer touches; the nets the logic uses stay as they were.
 
-use anyhow::{bail, Result};
-use chipsmith_netlist::{CellKind, Dir, Module, SigBit, Tribuf};
+use anyhow::Result;
+use chipsmith_netlist::{CellKind, Dir, Module, SigBit, State, Tribuf};
 use chipsmith_synth::rewrite::{Namer, Subst};
 
 use super::cells::{ibuf, iobuf, obuf, Comb};
@@ -20,6 +20,31 @@ pub fn pads(m: &mut Module) -> Result<()> {
             for (k, y) in t.y.iter().enumerate() {
                 if let SigBit::Net(n) = y {
                     tribuf_of[n.index()] = Some((i, k));
+                }
+            }
+        }
+    }
+    // Nets something other than a tri-state drives.
+    let mut driven = vec![false; m.net_count()];
+    for c in &m.cells {
+        if matches!(c.kind, CellKind::Tribuf(_)) {
+            continue;
+        }
+        c.kind.for_each_port(|p| {
+            if p.dir.is_none_or(|d| d.drives()) {
+                for b in p.bits {
+                    if let SigBit::Net(n) = b {
+                        driven[n.index()] = true;
+                    }
+                }
+            }
+        });
+    }
+    for (_, w, d) in m.ports() {
+        if d == Dir::In {
+            for b in &w.bits {
+                if let SigBit::Net(n) = b {
+                    driven[n.index()] = true;
                 }
             }
         }
@@ -54,11 +79,21 @@ pub fn pads(m: &mut Module) -> Result<()> {
                     });
                     iobuf(data, en, combout, pad)
                 }
+                // Always released.
+                (Dir::Out | Dir::InOut, None) if matches!(b, SigBit::Const(State::Z | State::X)) => {
+                    iobuf(SigBit::ZERO, SigBit::ZERO, None, pad)
+                }
                 (Dir::Out, None) => obuf(b, pad),
-                (Dir::InOut, None) => bail!(
-                    "inout port {} has no tri-state driver (only `assign p = oe ? d : 1'bz` is supported)",
-                    m.wires[wi].name
-                ),
+                // Never driven: an input, the output buffer off.
+                (Dir::InOut, None) if b.net().is_some_and(|n| !driven[n.index()]) => {
+                    let read = SigBit::Net(m.new_net());
+                    if let SigBit::Net(n) = b {
+                        subst.set(n, read);
+                    }
+                    iobuf(SigBit::ZERO, SigBit::ZERO, Some(read), pad)
+                }
+                // Always driven: an output.
+                (Dir::InOut, None) => iobuf(b, SigBit::ONE, None, pad),
             };
             m.wires[wi].bits[bi] = pad;
             new_cells.push(cell);

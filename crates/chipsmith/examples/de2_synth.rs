@@ -169,7 +169,8 @@ fn main() -> Result<()> {
             fe.elaborate(&manifest.top)?
         };
         let out = synth::synthesize(design)?;
-        chipsmith_netlist::write_json(&out, std::io::BufWriter::new(std::fs::File::create(&netlist)?))?;
+        eprintln!("    {:?}", out.stats);
+        chipsmith_netlist::write_json(&out.design, std::io::BufWriter::new(std::fs::File::create(&netlist)?))?;
     }
     let synth_s = t.elapsed().as_secs_f64();
 

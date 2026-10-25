@@ -27,14 +27,30 @@ impl Observer for () {
     fn stage(&mut self, _: &str, _: &Module) {}
 }
 
+/// What synthesis made, for the build's log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stats {
+    /// The LUT mapping: gates in, LUTs out, their depth.
+    pub lutmap: lutmap::Stats,
+    pub registers: usize,
+    /// Carry chains (adders, subtractors, comparisons).
+    pub chains: usize,
+    pub m4ks: usize,
+}
+
+/// A synthesized design: its top module alone, in Cyclone II cells.
+pub struct Synthesis {
+    pub design: Design,
+    pub stats: Stats,
+}
+
 /// Synthesizes the design's top module (flattened first: instances of the
-/// design's own modules are inlined, device cells stay). The result holds
-/// that module alone, in Cyclone II cells.
-pub fn synthesize(design: Design) -> Result<Design> {
+/// design's own modules are inlined, device cells stay).
+pub fn synthesize(design: Design) -> Result<Synthesis> {
     synthesize_observed(design, &mut ())
 }
 
-pub fn synthesize_observed(mut design: Design, obs: &mut dyn Observer) -> Result<Design> {
+pub fn synthesize_observed(mut design: Design, obs: &mut dyn Observer) -> Result<Synthesis> {
     chipsmith_synth::flatten::flatten(&mut design)?;
     let mut tops: Vec<Module> = design
         .modules
@@ -45,11 +61,14 @@ pub fn synthesize_observed(mut design: Design, obs: &mut dyn Observer) -> Result
         1 => tops.pop().expect("one"),
         n => bail!("expected one top module, found {n}"),
     };
-    run(&mut m, obs).with_context(|| format!("synthesizing {}", m.name))?;
-    Ok(Design { modules: vec![m] })
+    let stats = run(&mut m, obs).with_context(|| format!("synthesizing {}", m.name))?;
+    Ok(Synthesis {
+        design: Design { modules: vec![m] },
+        stats,
+    })
 }
 
-fn run(m: &mut Module, obs: &mut dyn Observer) -> Result<()> {
+fn run(m: &mut Module, obs: &mut dyn Observer) -> Result<Stats> {
     if let Some(c) = m.cells.iter().find(|c| match &c.kind {
         CellKind::Other(g) => !g.ty.starts_with('$') && !is_device_cell(&g.ty),
         _ => false,
@@ -83,7 +102,7 @@ fn run(m: &mut Module, obs: &mut dyn Observer) -> Result<()> {
     alumacc::alumacc(m);
     opt::opt(m, removable);
     obs.stage("alumacc", m);
-    m4k::map(m);
+    let m4ks = m4k::map(m);
     obs.stage("m4k", m);
     memory::map_to_logic(m, |_| true)?;
     define_inits(m);
@@ -91,13 +110,13 @@ fn run(m: &mut Module, obs: &mut dyn Observer) -> Result<()> {
     opt::opt_seq(m, removable)?;
     obs.stage("coarse", m);
 
-    arith::map(m);
+    let chains = arith::map(m);
     techmap::lower(m, |k| techmap::is_lowerable(k) || matches!(k, CellKind::Ff(_)))?;
     opt::opt_seq(m, removable)?;
     obs.stage("gates", m);
 
-    ff::map(m)?;
-    lutmap::map_module(m)?;
+    let registers = ff::map(m)?;
+    let lutmap = lutmap::map_module(m)?;
     io::luts(m);
     clean(m);
     obs.stage("luts", m);
@@ -106,7 +125,12 @@ fn run(m: &mut Module, obs: &mut dyn Observer) -> Result<()> {
     clean(m);
     obs.stage("cells", m);
     clean::purge_wires(m);
-    Ok(())
+    Ok(Stats {
+        lutmap,
+        registers,
+        chains,
+        m4ks,
+    })
 }
 
 /// Cells of cyclone2-re's library a design may instantiate itself.

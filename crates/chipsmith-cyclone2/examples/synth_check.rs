@@ -50,30 +50,48 @@ fn main() {
     };
     let t = Instant::now();
     let mut keep = Keep::default();
-    let out = synthesize_observed(input, &mut keep).unwrap();
+    let out = synthesize_observed(input, &mut keep).unwrap().design;
     eprintln!("chipsmith synthesis: {:.2} s", t.elapsed().as_secs_f64());
     let ours = dir.join("chipsmith.json");
     support::write(&out, &ours);
+    let mut summary = format!("RESULT {}", dir.display());
     let flow = support::yosys_flow(&dir, top, &files);
-    for (name, path) in [("yosys", &flow), ("chipsmith", &ours)] {
-        let s = chipsmith_cyclone2::pack::pack_file(path, &dir.join(format!("{name}.packed.json")))
-            .unwrap_or_else(|e| panic!("packing {name}: {e:#}"));
-        eprintln!(
-            "{name:>9}: {} LUTs, {} registers, {} carry chains, {} M4Ks",
-            s.luts, s.ffs, s.chains, s.m4ks
-        );
+    let flows: Vec<(&str, Result<PathBuf, String>)> = vec![("yosys", flow), ("chipsmith", Ok(ours))];
+    for (name, path) in flows {
+        let packed = path.and_then(|p| {
+            chipsmith_cyclone2::pack::pack_file(&p, &dir.join(format!("{name}.packed.json")))
+                .map_err(|e| format!("packing: {e:#}"))
+        });
+        match packed {
+            Ok(s) => {
+                eprintln!(
+                    "{name:>9}: {} LUTs, {} registers, {} carry chains, {} M4Ks",
+                    s.luts, s.ffs, s.chains, s.m4ks
+                );
+                summary += &format!(" {name}={}/{}/{}/{}", s.luts, s.ffs, s.chains, s.m4ks);
+            }
+            Err(e) => {
+                let first = e.lines().find(|l| l.contains("ERROR")).unwrap_or(e.lines().next().unwrap_or(""));
+                eprintln!("{name:>9}: FAILED: {first}");
+                summary += &format!(" {name}=FAILED");
+            }
+        }
     }
     if std::env::var_os("NO_EQUIV").is_none() {
         let t = Instant::now();
         match support::check(&dir, &rtl, &keep.refined.unwrap(), &keep.cells.unwrap()) {
-            Ok(p) => eprintln!(
-                "equivalent: {} $equiv proven, {} registers proven constant ({:.1} s)",
-                p.equivalences,
-                p.constant_registers,
-                t.elapsed().as_secs_f64()
-            ),
+            Ok(p) => {
+                eprintln!(
+                    "equivalent: {} $equiv proven, {} registers proven constant ({:.1} s)",
+                    p.equivalences,
+                    p.constant_registers,
+                    t.elapsed().as_secs_f64()
+                );
+                println!("{summary} equiv=ok");
+            }
             Err(e) => {
                 eprintln!("NOT EQUIVALENT: {e}");
+                println!("{summary} equiv=FAILED");
                 std::process::exit(1);
             }
         }

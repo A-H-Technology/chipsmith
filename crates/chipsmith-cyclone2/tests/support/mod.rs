@@ -127,7 +127,7 @@ pub fn rtl(dir: &Path, top: &str, files: &[PathBuf]) -> PathBuf {
 /// What the yosys flow makes of the design, as chipsmith's build runs it
 /// today: cyclone2-re's `cyclone2.ys` cut at `abc -lut 4`, chipsmith's
 /// LUT mapper in between.
-pub fn yosys_flow(dir: &Path, top: &str, files: &[PathBuf]) -> PathBuf {
+pub fn yosys_flow(dir: &Path, top: &str, files: &[PathBuf]) -> Result<PathBuf, String> {
     let script = std::fs::read_to_string(synth_dir().join("synth/cyclone2.ys")).unwrap();
     let lines: Vec<&str> = script.lines().collect();
     let cut = lines
@@ -150,16 +150,16 @@ pub fn yosys_flow(dir: &Path, top: &str, files: &[PathBuf]) -> PathBuf {
         lines[..cut].join("\n"),
         gates.display()
     );
-    yosys(dir, "flow_gates", &to_gates, &synth_dir()).unwrap_or_else(|e| panic!("{e}"));
-    chipsmith_synth::lutmap::map_file(&gates, &luts).unwrap();
+    yosys(dir, "flow_gates", &to_gates, &synth_dir())?;
+    chipsmith_synth::lutmap::map_file(&gates, &luts).map_err(|e| format!("{e:#}"))?;
     let to_cells = format!(
         "read_verilog -lib synth/cells_sim.v\nread_json {}\nhierarchy -top top\n{}\nwrite_json {}\n",
         luts.display(),
         lines[cut + 1..].join("\n"),
         json.display()
     );
-    yosys(dir, "flow_cells", &to_cells, &synth_dir()).unwrap_or_else(|e| panic!("{e}"));
-    json
+    yosys(dir, "flow_cells", &to_cells, &synth_dir())?;
+    Ok(json)
 }
 
 /// chipsmith's own front end's netlist of the design (what the flow will
@@ -410,8 +410,9 @@ fn equiv(dir: &Path, name: &str, gold: &Path, gate: &Path) -> Result<usize, Stri
     std::fs::write(&sim, SIM_MODELS).unwrap();
     // Tri-states have no SAT model: as opaque cells, merged when their
     // inputs are proven equal (chipsmith-netlist's round-trip check does
-    // the same).
-    let prep = "hierarchy -top top\nproc -noopt\nflatten\ntribuf\nchtype -set chipsmith_mem t:$mem_v2\n\
+    // the same). A pin buffer always on or always off is no tri-state:
+    // its multiplexer with a constant select folds first.
+    let prep = "hierarchy -top top\nproc -noopt\nflatten\nopt_expr t:$mux\ntribuf\nchtype -set chipsmith_mem t:$mem_v2\n\
                 chtype -set chipsmith_tribuf t:$tribuf t:$_TBUF_\nopt_clean";
     let script = format!(
         "read_json {gold}\nread_verilog -overwrite {sim}\n{prep}\nrename top gold\ndesign -stash gold\n\
