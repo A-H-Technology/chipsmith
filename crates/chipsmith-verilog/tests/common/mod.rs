@@ -166,4 +166,3 @@ pub fn equivalent(dir: &Path, gold: &Path, ours: &Path, top: &str) -> Result<(),
     );
     yosys(dir, "equiv", &script)
 }
-

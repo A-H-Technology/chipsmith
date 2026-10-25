@@ -8,10 +8,9 @@
 //! constant becomes that constant.
 
 use chipsmith_netlist::{
-    attr, Binary, BinaryOp, Cell, CellKind, Const, Module, Mux, Net, Operand, ParamValue, Pmux,
-    SigBit, SigSpec, State, Tribuf, Unary, UnaryOp,
+    attr, Binary, BinaryOp, Cell, CellKind, Module, Mux, Net, Operand, ParamValue, Pmux, SigBit,
+    SigSpec, State, Tribuf, Unary, UnaryOp,
 };
-use rustc_hash::FxHashMap;
 
 use crate::fold;
 use crate::source::{SourceMap, Span};
@@ -50,10 +49,6 @@ pub fn as_const(sig: &[SigBit]) -> Option<Vec<State>> {
             SigBit::Net(_) => None,
         })
         .collect()
-}
-
-pub fn zeros(width: usize) -> SigSpec {
-    vec![SigBit::ZERO; width]
 }
 
 pub fn xs(width: usize) -> SigSpec {
@@ -119,7 +114,14 @@ impl<'s> Builder<'s> {
         c
     }
 
-    pub fn unary(&mut self, op: UnaryOp, a: SigSpec, signed: bool, width: usize, span: Span) -> SigSpec {
+    pub fn unary(
+        &mut self,
+        op: UnaryOp,
+        a: SigSpec,
+        signed: bool,
+        width: usize,
+        span: Span,
+    ) -> SigSpec {
         if let Some(c) = as_const(&a) {
             return konst(&fold::unary(op, &c, signed, width));
         }
@@ -359,18 +361,6 @@ impl<'s> Builder<'s> {
         }
     }
 
-    /// The bit a net stands for now (its representative, or a constant).
-    pub fn resolve(&mut self, b: SigBit) -> SigBit {
-        match b {
-            SigBit::Const(_) => b,
-            SigBit::Net(n) => match self.find(n.index() as u32) {
-                Link::Const(s) => SigBit::Const(s),
-                Link::Parent(r) => SigBit::Net(self.nets[r as usize]),
-                Link::Root => unreachable!(),
-            },
-        }
-    }
-
     /// The module with every bit rewritten to its representative. Errors
     /// name a net joined to two different constants.
     pub fn finish(mut self) -> Result<Module, Vec<(Net, Span)>> {
@@ -392,10 +382,4 @@ impl<'s> Builder<'s> {
         });
         Ok(self.module)
     }
-}
-
-pub type Params = FxHashMap<String, ParamValue>;
-
-pub fn const_param(bits: &[State]) -> ParamValue {
-    ParamValue::Bits(Const(bits.to_vec()))
 }

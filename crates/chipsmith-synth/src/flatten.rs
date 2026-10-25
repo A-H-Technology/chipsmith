@@ -127,16 +127,17 @@ fn flat_module(
                     None => format!("{}.{}", cell.name, name),
                 }
             };
-            let hdlname = |name: &str, attrs: &chipsmith_netlist::Attributes| -> Option<ParamValue> {
-                if name.starts_with('$') {
-                    return None;
-                }
-                let inner = match attrs.get("hdlname") {
-                    Some(ParamValue::Str(h)) => h.clone(),
-                    _ => name.to_owned(),
+            let hdlname =
+                |name: &str, attrs: &chipsmith_netlist::Attributes| -> Option<ParamValue> {
+                    if name.starts_with('$') {
+                        return None;
+                    }
+                    let inner = match attrs.get("hdlname") {
+                        Some(ParamValue::Str(h)) => h.clone(),
+                        _ => name.to_owned(),
+                    };
+                    Some(ParamValue::Str(format!("{} {inner}", cell.name)))
                 };
-                Some(ParamValue::Str(format!("{} {inner}", cell.name)))
-            };
             for w in &sub.wires {
                 let bits: SigSpec = w.bits.iter().map(|&b| bit(b, &mut m)).collect();
                 let mut nw = w.clone();

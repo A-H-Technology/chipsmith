@@ -40,10 +40,7 @@ use crate::source::{bail, Diag, Result, Span};
 #[derive(Debug)]
 pub(crate) enum MemStorage {
     /// A `$mem_v2` and its ports so far.
-    Ram {
-        rd: Vec<MemRd>,
-        wr: Vec<MemWr>,
-    },
+    Ram { rd: Vec<MemRd>, wr: Vec<MemWr> },
     /// A variable per word, lowest index first.
     Regs(Vec<usize>),
 }
@@ -89,7 +86,9 @@ fn reset_test(cond: &Expr) -> Option<(&Expr, bool)> {
             op: UnOp::LogicNot | UnOp::BitNot,
             arg,
         } => reset_test(arg).map(|(e, l)| (e, !l)),
-        ExprKind::Binary { op, lhs, rhs } if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::CaseEq | BinOp::CaseNe) => {
+        ExprKind::Binary { op, lhs, rhs }
+            if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::CaseEq | BinOp::CaseNe) =>
+        {
             let eq = matches!(op, BinOp::Eq | BinOp::CaseEq);
             let (sig, level) = if is_bit(rhs, 1) {
                 (lhs, true)
@@ -159,7 +158,10 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 );
             };
             let Some((sig_e, level)) = reset_test(cond) else {
-                bail!(cond.span, "expected a test of an asynchronous reset signal here");
+                bail!(
+                    cond.span,
+                    "expected a test of an asynchronous reset signal here"
+                );
             };
             let sig = self.lower_edge_signal(sig_e, scope)?;
             let Some(k) = edges.iter().position(|(s, _, _)| *s == sig) else {
@@ -170,12 +172,19 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 bail!(
                     cond.span,
                     "a {} reset must be tested {} (the test doesn't match the edge)",
-                    if edge == Edge::Pos { "posedge" } else { "negedge" },
+                    if edge == Edge::Pos {
+                        "posedge"
+                    } else {
+                        "negedge"
+                    },
                     if edge == Edge::Pos { "high" } else { "low" }
                 );
             }
             let Some(els) = els else {
-                bail!(stmt.span, "the reset test needs an `else` with the clocked logic");
+                bail!(
+                    stmt.span,
+                    "the reset test needs an `else` with the clocked logic"
+                );
             };
             resets.push((
                 Ctrl {
@@ -279,7 +288,10 @@ impl<'a, 'd> ModElab<'a, 'd> {
         self.prescan_snippets(body, scope, &mut env);
         self.exec(body, scope, &mut env)?;
         if let Some(w) = env.mem_writes.first() {
-            return Err(Diag::new(w.span, "internal: memory write port in combinational logic"));
+            return Err(Diag::new(
+                w.span,
+                "internal: memory write port in combinational logic",
+            ));
         }
         let proc_id = self.next_process();
         let mut vars: Vec<usize> = env.assigned.keys().copied().collect();
@@ -340,7 +352,10 @@ impl<'a, 'd> ModElab<'a, 'd> {
         let c = self.eval_const(init, scope).map_err(|d| {
             Diag::new(
                 d.span.unwrap_or(init.span),
-                format!("the initial value of `{}`: {}", self.vars[v].name, d.message),
+                format!(
+                    "the initial value of `{}`: {}",
+                    self.vars[v].name, d.message
+                ),
             )
         })?;
         let w = self.vars[v].dim.width();
@@ -390,10 +405,11 @@ impl<'a, 'd> ModElab<'a, 'd> {
     fn mem_port_base(&self, env: &Env) -> rustc_hash::FxHashMap<usize, usize> {
         let mut m = rustc_hash::FxHashMap::default();
         for w in &env.mem_writes {
-            m.entry(w.mem).or_insert_with(|| match &self.mems[w.mem].storage {
-                MemStorage::Ram { wr, .. } => wr.len(),
-                MemStorage::Regs(_) => 0,
-            });
+            m.entry(w.mem)
+                .or_insert_with(|| match &self.mems[w.mem].storage {
+                    MemStorage::Ram { wr, .. } => wr.len(),
+                    MemStorage::Regs(_) => 0,
+                });
         }
         m
     }
@@ -538,7 +554,11 @@ impl<'a, 'd> ModElab<'a, 'd> {
             b.add(name, chipsmith_netlist::CellKind::Ff(f), span);
         };
         match resets.len() {
-            0 => cell(&mut self.b, "$dff", ff(q, d, DffControl::Plain { en: None })),
+            0 => cell(
+                &mut self.b,
+                "$dff",
+                ff(q, d, DffControl::Plain { en: None }),
+            ),
             1 => {
                 let (arst, value) = &resets[0];
                 // Constant reset bits in an $adff, the rest loaded
@@ -699,7 +719,10 @@ pub(crate) fn mem_read(
         Mode::Const => bail!(span, "memory `{}` is not a constant", m.mems[mem].name),
         Mode::Initial => {
             let Some(a) = as_const(&addr).and_then(|c| addr_value(&c)) else {
-                bail!(span, "a memory read in an initial block needs a constant address");
+                bail!(
+                    span,
+                    "a memory read in an initial block needs a constant address"
+                );
             };
             let mv = &m.mems[mem];
             if a < mv.lo || a > mv.hi {
@@ -754,7 +777,9 @@ fn addr_value(c: &[State]) -> Option<i64> {
 }
 
 fn word_hit(m: &mut ModElab<'_, '_>, addr: &SigSpec, index: i64, span: Span) -> SigBit {
-    let w = addr.len().max(64 - index.unsigned_abs().leading_zeros() as usize + 1);
+    let w = addr
+        .len()
+        .max(64 - index.unsigned_abs().leading_zeros() as usize + 1);
     let a = crate::build::extend(addr, w, false);
     let k = konst(&chipsmith_netlist::Const::from_int(index, w).0);
     m.b.binary(chipsmith_netlist::BinaryOp::Eq, a, false, k, false, 1, span)[0]
@@ -775,7 +800,10 @@ pub(crate) fn mem_write(
     match env.mode {
         Mode::Initial => {
             let Some(a) = as_const(&addr).and_then(|c| addr_value(&c)) else {
-                bail!(span, "a memory write in an initial block needs a constant address");
+                bail!(
+                    span,
+                    "a memory write in an initial block needs a constant address"
+                );
             };
             let Some(vals) = as_const(&v) else {
                 bail!(span, "initial memory contents must be constants");
@@ -788,7 +816,9 @@ pub(crate) fn mem_write(
             mv.init[i * width + lo_bit..i * width + lo_bit + n].copy_from_slice(&vals);
             return Ok(());
         }
-        Mode::Const | Mode::Cont => bail!(span, "memory `{}` can't be written here", m.mems[mem].name),
+        Mode::Const | Mode::Cont => {
+            bail!(span, "memory `{}` can't be written here", m.mems[mem].name)
+        }
         Mode::Comb | Mode::Clocked => {}
     }
     match &m.mems[mem].storage {
@@ -873,14 +903,21 @@ pub(crate) fn readmem<'a>(
     // Relative to the working directory, else to the source file (yosys
     // tries both).
     let src = m.b.sources.path(span).to_owned();
-    let path = [std::path::PathBuf::from(&name), crate::source::sibling(&src, &name)]
-        .into_iter()
-        .find(|p| p.is_file());
+    let path = [
+        std::path::PathBuf::from(&name),
+        crate::source::sibling(&src, &name),
+    ]
+    .into_iter()
+    .find(|p| p.is_file());
     let Some(path) = path else {
         bail!(file.span, "$readmem: file {name} not found");
     };
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| Diag::new(file.span, format!("$readmem: reading {}: {e}", path.display())))?;
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        Diag::new(
+            file.span,
+            format!("$readmem: reading {}: {e}", path.display()),
+        )
+    })?;
     let (lo, hi) = (m.mems[mem].lo, m.mems[mem].hi);
     let start = match args.get(2) {
         Some(e) => m.eval_i64(e, scope)?,
@@ -932,9 +969,9 @@ pub(crate) fn readmem<'a>(
                 'x' => vec![State::X; n],
                 'z' => vec![State::Z; n],
                 c => {
-                    let d = c
-                        .to_digit(if hex { 16 } else { 2 })
-                        .ok_or_else(|| Diag::new(file.span, format!("$readmem: bad digit in {tok}")))?;
+                    let d = c.to_digit(if hex { 16 } else { 2 }).ok_or_else(|| {
+                        Diag::new(file.span, format!("$readmem: bad digit in {tok}"))
+                    })?;
                     (0..n).map(|i| State::from(d >> i & 1 == 1)).collect()
                 }
             };

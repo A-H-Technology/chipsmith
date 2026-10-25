@@ -77,11 +77,7 @@ impl SourceMap {
     }
 
     pub(crate) fn add_expansion(&mut self, macro_name: &str, text: Rc<str>, site: Span) -> FileId {
-        self.add(
-            format!("`{macro_name}"),
-            text,
-            Origin::Expansion { site },
-        )
+        self.add(format!("`{macro_name}"), text, Origin::Expansion { site })
     }
 
     fn add(&mut self, name: String, text: Rc<str>, origin: Origin) -> FileId {

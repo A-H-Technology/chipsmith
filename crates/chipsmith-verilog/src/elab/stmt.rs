@@ -148,7 +148,10 @@ struct Arm<'a> {
 enum Target {
     /// Bits of a variable or local, by position; `None` drops a bit that's
     /// out of range.
-    Bits { slot: Slot, positions: Vec<Option<usize>> },
+    Bits {
+        slot: Slot,
+        positions: Vec<Option<usize>>,
+    },
     /// A variable bit-select with a variable index.
     Dynamic {
         slot: Slot,
@@ -213,7 +216,9 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 }
                 Ok(())
             }
-            StmtKind::Assign { lhs, rhs, blocking } => self.assign(lhs, rhs, *blocking, scope, env, s.span),
+            StmtKind::Assign { lhs, rhs, blocking } => {
+                self.assign(lhs, rhs, *blocking, scope, env, s.span)
+            }
             StmtKind::If { cond, then, els } => {
                 let c = self.lower_bool(cond, scope, env)?;
                 let arms = vec![Arm {
@@ -483,12 +488,19 @@ impl<'a, 'd> ModElab<'a, 'd> {
                         bits: (0, w),
                     });
                 }
-                if let ExprKind::Index { base: inner, index: addr_e } = &base.kind {
+                if let ExprKind::Index {
+                    base: inner,
+                    index: addr_e,
+                } = &base.kind
+                {
                     if let Some(mem) = self.mem_of(inner, scope)? {
                         // mem[a][b] = ...
                         let (addr, _) = self.lower_self(addr_e, scope, env)?;
                         let i = self.eval_i64(index, scope).map_err(|_| {
-                            Diag::new(index.span, "a memory word's bit-select must be constant when written")
+                            Diag::new(
+                                index.span,
+                                "a memory word's bit-select must be constant when written",
+                            )
                         })?;
                         let Some(p) = self.mems[mem].word.pos(i) else {
                             bail!(index.span, "bit {i} is outside the memory word");
@@ -526,7 +538,11 @@ impl<'a, 'd> ModElab<'a, 'd> {
             ExprKind::Slice { base, msb, lsb } => {
                 let m = self.eval_i64(msb, scope)?;
                 let l = self.eval_i64(lsb, scope)?;
-                if let ExprKind::Index { base: inner, index: addr_e } = &base.kind {
+                if let ExprKind::Index {
+                    base: inner,
+                    index: addr_e,
+                } = &base.kind
+                {
                     if let Some(mem) = self.mem_of(inner, scope)? {
                         let (addr, _) = self.lower_self(addr_e, scope, env)?;
                         let word = self.mems[mem].word;
@@ -555,13 +571,20 @@ impl<'a, 'd> ModElab<'a, 'd> {
             } => {
                 let w = self.eval_i64(width, scope)?;
                 if w <= 0 {
-                    bail!(width.span, "an indexed part-select must be at least one bit wide");
+                    bail!(
+                        width.span,
+                        "an indexed part-select must be at least one bit wide"
+                    );
                 }
                 let w = w as usize;
                 let (slot, dim) = self.base_slot(base, scope)?;
                 let (idx, t) = self.lower_self(start, scope, env)?;
                 let lo_delta = if *up { 0 } else { -(w as i64 - 1) };
-                let lsb_delta = if dim.upto() { lo_delta + w as i64 - 1 } else { lo_delta };
+                let lsb_delta = if dim.upto() {
+                    lo_delta + w as i64 - 1
+                } else {
+                    lo_delta
+                };
                 if let Some(c) = as_const(&idx) {
                     let Some(i) = (ConstVal {
                         bits: c,
@@ -614,7 +637,10 @@ impl<'a, 'd> ModElab<'a, 'd> {
         let sym = match &base.kind {
             ExprKind::Ident(id) => self.resolve(scope, id)?,
             ExprKind::Hier(p) => self.resolve_hier(scope, p, base.span)?,
-            _ => bail!(base.span, "only a simple name can be selected from on the left of an assignment"),
+            _ => bail!(
+                base.span,
+                "only a simple name can be selected from on the left of an assignment"
+            ),
         };
         self.slot_of(&sym, base.span)
     }
@@ -651,7 +677,14 @@ impl<'a, 'd> ModElab<'a, 'd> {
         }
     }
 
-    fn write_target(&mut self, t: Target, v: SigSpec, blocking: bool, env: &mut Env, span: Span) -> Result<()> {
+    fn write_target(
+        &mut self,
+        t: Target,
+        v: SigSpec,
+        blocking: bool,
+        env: &mut Env,
+        span: Span,
+    ) -> Result<()> {
         debug_assert_eq!(t.width(), v.len());
         match t {
             Target::Concat(parts) => {
@@ -703,7 +736,9 @@ impl<'a, 'd> ModElab<'a, 'd> {
                     if lo >= hi {
                         continue;
                     }
-                    let pw = pos.len().max(64 - p0.unsigned_abs().leading_zeros() as usize + 1);
+                    let pw = pos
+                        .len()
+                        .max(64 - p0.unsigned_abs().leading_zeros() as usize + 1);
                     let pc = konst(&chipsmith_netlist::Const::from_int(p0, pw).0);
                     let pos_w = crate::build::extend(&pos, pw, signed);
                     let hit = self.b.binary(
@@ -755,12 +790,22 @@ impl<'a, 'd> ModElab<'a, 'd> {
         )
     }
 
-    fn check_assignable(&mut self, slot: Slot, blocking: bool, env: &mut Env, span: Span) -> Result<()> {
+    fn check_assignable(
+        &mut self,
+        slot: Slot,
+        blocking: bool,
+        env: &mut Env,
+        span: Span,
+    ) -> Result<()> {
         let Slot::Var(v) = slot else {
             return Ok(());
         };
         match env.mode {
-            Mode::Const => bail!(span, "`{}` can't be assigned in a constant function", self.vars[v].name),
+            Mode::Const => bail!(
+                span,
+                "`{}` can't be assigned in a constant function",
+                self.vars[v].name
+            ),
             Mode::Cont => bail!(span, "`{}` can't be assigned here", self.vars[v].name),
             Mode::Initial => return Ok(()),
             Mode::Comb | Mode::Clocked => {}
@@ -920,13 +965,9 @@ impl<'a, 'd> ModElab<'a, 'd> {
         match bits.len() {
             0 => SigBit::ZERO,
             1 => bits[0],
-            _ => self.b.unary(
-                chipsmith_netlist::UnaryOp::ReduceOr,
-                bits,
-                false,
-                1,
-                span,
-            )[0],
+            _ => self
+                .b
+                .unary(chipsmith_netlist::UnaryOp::ReduceOr, bits, false, 1, span)[0],
         }
     }
 
@@ -987,7 +1028,8 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 env.push();
                 for (slot, positions) in lvalues {
                     let n = positions.len();
-                    let r = self.write_target(Target::Bits { slot, positions }, xs(n), true, env, span);
+                    let r =
+                        self.write_target(Target::Bits { slot, positions }, xs(n), true, env, span);
                     if let Err(e) = r {
                         env.pop();
                         return Err(e);
@@ -1102,7 +1144,12 @@ impl<'a, 'd> ModElab<'a, 'd> {
     /// Declares a named block's `reg`s and `integer`s: module variables
     /// (they are static, and reachable as `block.name`), or locals inside
     /// a function or task.
-    fn declare_block_vars(&mut self, scope: ScopeId, d: &'a crate::ast::NetDecl, env: &mut Env) -> Result<()> {
+    fn declare_block_vars(
+        &mut self,
+        scope: ScopeId,
+        d: &'a crate::ast::NetDecl,
+        env: &mut Env,
+    ) -> Result<()> {
         let _ = env;
         self.declare_net(scope, d, None)
     }
@@ -1158,27 +1205,47 @@ impl<'a, 'd> ModElab<'a, 'd> {
     /// The variable bits a statement assigns with `=` (yosys'
     /// `collect_lvalues`), by constant selects; a variable select takes
     /// the whole variable.
-    fn blocking_lvalues(&mut self, s: &'a Stmt, scope: ScopeId, out: &mut Vec<(Slot, Vec<Option<usize>>)>) {
+    fn blocking_lvalues(
+        &mut self,
+        s: &'a Stmt,
+        scope: ScopeId,
+        out: &mut Vec<(Slot, Vec<Option<usize>>)>,
+    ) {
         match &s.kind {
-            StmtKind::Assign { lhs, blocking: true, .. } => self.lvalue_bits(lhs, scope, out),
-            StmtKind::Block { stmts, .. } => stmts.iter().for_each(|x| self.blocking_lvalues(x, scope, out)),
+            StmtKind::Assign {
+                lhs,
+                blocking: true,
+                ..
+            } => self.lvalue_bits(lhs, scope, out),
+            StmtKind::Block { stmts, .. } => stmts
+                .iter()
+                .for_each(|x| self.blocking_lvalues(x, scope, out)),
             StmtKind::If { then, els, .. } => {
                 self.blocking_lvalues(then, scope, out);
                 if let Some(e) = els {
                     self.blocking_lvalues(e, scope, out);
                 }
             }
-            StmtKind::Case { items, .. } => items.iter().for_each(|i| self.blocking_lvalues(&i.body, scope, out)),
-            StmtKind::For { body, .. } | StmtKind::While { body, .. } | StmtKind::Repeat { body, .. } => {
-                self.blocking_lvalues(body, scope, out)
-            }
+            StmtKind::Case { items, .. } => items
+                .iter()
+                .for_each(|i| self.blocking_lvalues(&i.body, scope, out)),
+            StmtKind::For { body, .. }
+            | StmtKind::While { body, .. }
+            | StmtKind::Repeat { body, .. } => self.blocking_lvalues(body, scope, out),
             _ => {}
         }
     }
 
-    fn lvalue_bits(&mut self, e: &'a Expr, scope: ScopeId, out: &mut Vec<(Slot, Vec<Option<usize>>)>) {
+    fn lvalue_bits(
+        &mut self,
+        e: &'a Expr,
+        scope: ScopeId,
+        out: &mut Vec<(Slot, Vec<Option<usize>>)>,
+    ) {
         let slot_dim = |m: &Self, b: &'a Expr| -> Option<(Slot, Dim)> {
-            let ExprKind::Ident(id) = &b.kind else { return None };
+            let ExprKind::Ident(id) = &b.kind else {
+                return None;
+            };
             match m.lookup(scope, &id.name)? {
                 (Sym::Var(v), _) => Some((Slot::Var(v), m.vars[v].dim)),
                 (Sym::Local(l), _) => Some((Slot::Local(l), m.locals[l].dim)),
@@ -1254,30 +1321,46 @@ impl<'a, 'd> ModElab<'a, 'd> {
         }
     }
 
-    fn scan_stmt(&mut self, s: &'a Stmt, scope: ScopeId, out: &mut FxHashMap<usize, Vec<Vec<bool>>>) {
+    fn scan_stmt(
+        &mut self,
+        s: &'a Stmt,
+        scope: ScopeId,
+        out: &mut FxHashMap<usize, Vec<Vec<bool>>>,
+    ) {
         match &s.kind {
             StmtKind::Assign { lhs, .. } => self.scan_lhs(lhs, scope, out),
-            StmtKind::Block { stmts, .. } => stmts.iter().for_each(|x| self.scan_stmt(x, scope, out)),
+            StmtKind::Block { stmts, .. } => {
+                stmts.iter().for_each(|x| self.scan_stmt(x, scope, out))
+            }
             StmtKind::If { then, els, .. } => {
                 self.scan_stmt(then, scope, out);
                 if let Some(e) = els {
                     self.scan_stmt(e, scope, out);
                 }
             }
-            StmtKind::Case { items, .. } => items.iter().for_each(|i| self.scan_stmt(&i.body, scope, out)),
-            StmtKind::For { init, step, body, .. } => {
+            StmtKind::Case { items, .. } => items
+                .iter()
+                .for_each(|i| self.scan_stmt(&i.body, scope, out)),
+            StmtKind::For {
+                init, step, body, ..
+            } => {
                 self.scan_stmt(init, scope, out);
                 self.scan_stmt(step, scope, out);
                 self.scan_stmt(body, scope, out);
             }
-            StmtKind::While { body, .. } | StmtKind::Repeat { body, .. } | StmtKind::Event { body, .. } => {
-                self.scan_stmt(body, scope, out)
-            }
+            StmtKind::While { body, .. }
+            | StmtKind::Repeat { body, .. }
+            | StmtKind::Event { body, .. } => self.scan_stmt(body, scope, out),
             _ => {}
         }
     }
 
-    fn scan_lhs(&mut self, e: &'a Expr, scope: ScopeId, out: &mut FxHashMap<usize, Vec<Vec<bool>>>) {
+    fn scan_lhs(
+        &mut self,
+        e: &'a Expr,
+        scope: ScopeId,
+        out: &mut FxHashMap<usize, Vec<Vec<bool>>>,
+    ) {
         let var = |m: &mut Self, b: &'a Expr| -> Option<usize> {
             match &b.kind {
                 ExprKind::Ident(id) => match m.lookup(scope, &id.name) {
@@ -1323,7 +1406,9 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 let dim = self.vars[v].dim;
                 if let (Ok(m), Ok(l)) = (self.eval_i64(msb, scope), self.eval_i64(lsb, scope)) {
                     let (a, b) = (dim.pos_unchecked(l), dim.pos_unchecked(m));
-                    let mask = (0..dim.width() as i64).map(|p| p >= a.min(b) && p <= a.max(b)).collect();
+                    let mask = (0..dim.width() as i64)
+                        .map(|p| p >= a.min(b) && p <= a.max(b))
+                        .collect();
                     push(v, mask);
                 }
             }
@@ -1364,7 +1449,8 @@ fn has_attr(attrs: &[crate::ast::Attr], name: &str) -> bool {
 /// does.
 fn pgroups(patterns: &[Vec<Vec<Option<SigBit>>>], parallel: bool) -> Vec<usize> {
     let n = patterns.len();
-    let is_const = |p: &Vec<Option<SigBit>>| p.iter().all(|b| matches!(b, None | Some(SigBit::Const(_))));
+    let is_const =
+        |p: &Vec<Option<SigBit>>| p.iter().all(|b| matches!(b, None | Some(SigBit::Const(_))));
     let is_defined = |p: &Vec<Option<SigBit>>| {
         p.iter()
             .all(|b| matches!(b, Some(SigBit::Const(State::Zero | State::One))))
@@ -1385,7 +1471,9 @@ fn pgroups(patterns: &[Vec<Vec<Option<SigBit>>>], parallel: bool) -> Vec<usize> 
     let overlap = |a: &Vec<Option<SigBit>>, b: &Vec<Option<SigBit>>| {
         !a.iter().zip(b).any(|(x, y)| match (x, y) {
             (Some(SigBit::Const(s)), Some(SigBit::Const(t))) => {
-                matches!(s, State::Zero | State::One) && matches!(t, State::Zero | State::One) && s != t
+                matches!(s, State::Zero | State::One)
+                    && matches!(t, State::Zero | State::One)
+                    && s != t
             }
             _ => false,
         })

@@ -10,7 +10,7 @@ use std::rc::Rc;
 use chipsmith_netlist::State;
 
 use crate::ast::*;
-use crate::lex::{Base, Kw, Tok, Token, P};
+use crate::lex::{Kw, Tok, Token, P};
 use crate::pp::{DefaultNettype, Tokens};
 use crate::source::{bail, Diag, Result, Span};
 
@@ -114,14 +114,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect_kw(&mut self, k: Kw) -> Result<Span> {
-        if self.is_kw(k) {
-            Ok(self.bump().span)
-        } else {
-            Err(self.expected(&format!("`{}`", k.name())))
-        }
-    }
-
     fn ident(&mut self) -> Result<Ident> {
         match self.tok() {
             Tok::Ident(name) => {
@@ -198,8 +190,8 @@ impl<'a> Parser<'a> {
                     let id = self.ident()?;
                     self.expect(P::Eq)?;
                     let value = self.expr()?;
+                    let _ = attrs;
                     items.push(Item::Param(ParamDecl {
-                        attrs,
                         local,
                         header: true,
                         kind: k,
@@ -236,11 +228,17 @@ impl<'a> Parser<'a> {
             } else if !self.is(P::RParen) {
                 loop {
                     if self.is(P::Dot) || self.is(P::LBrace) {
-                        bail!(self.span(), "port expressions in a module header are not supported");
+                        bail!(
+                            self.span(),
+                            "port expressions in a module header are not supported"
+                        );
                     }
                     ports.push(self.ident()?);
                     if self.is(P::LBrack) {
-                        bail!(self.span(), "port expressions in a module header are not supported");
+                        bail!(
+                            self.span(),
+                            "port expressions in a module header are not supported"
+                        );
                     }
                     if !self.eat(P::Comma) {
                         break;
@@ -306,7 +304,10 @@ impl<'a> Parser<'a> {
                 let ty = self.data_type(true)?;
                 current = Some((dir, ty));
             } else if self.is(P::Dot) {
-                bail!(self.span(), "port expressions in a module header are not supported");
+                bail!(
+                    self.span(),
+                    "port expressions in a module header are not supported"
+                );
             }
             let Some((dir, ty)) = current.clone() else {
                 return Err(self.expected("a port direction"));
@@ -346,7 +347,10 @@ impl<'a> Parser<'a> {
             Tok::Kw(Kw::Time) => Some(NetKind::Time),
             Tok::Kw(Kw::Supply0) => Some(NetKind::Supply0),
             Tok::Kw(Kw::Supply1) => Some(NetKind::Supply1),
-            Tok::Kw(k @ (Kw::Wand | Kw::Wor | Kw::Triand | Kw::Trior | Kw::Tri0 | Kw::Tri1 | Kw::Trireg)) => {
+            Tok::Kw(
+                k
+                @ (Kw::Wand | Kw::Wor | Kw::Triand | Kw::Trior | Kw::Tri0 | Kw::Tri1 | Kw::Trireg),
+            ) => {
                 bail!(self.span(), "`{}` nets are not supported", k.name())
             }
             Tok::Kw(Kw::Real | Kw::Realtime) => {
@@ -365,7 +369,8 @@ impl<'a> Parser<'a> {
         if self.is_kw(Kw::Unsigned) {
             self.bump();
         }
-        let range = if self.is(P::LBrack) && !matches!(kind, Some(NetKind::Integer | NetKind::Time)) {
+        let range = if self.is(P::LBrack) && !matches!(kind, Some(NetKind::Integer | NetKind::Time))
+        {
             Some(self.range()?)
         } else {
             None
@@ -486,8 +491,8 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(P::Semi)?;
+        let _ = attrs;
         Ok(ParamDecl {
-            attrs,
             local,
             header: false,
             kind,
@@ -558,7 +563,8 @@ impl<'a> Parser<'a> {
                     names.push(self.ident()?);
                 }
                 self.expect(P::Semi)?;
-                items.push(Item::Genvar(names));
+                let _ = names;
+                items.push(Item::Genvar);
             }
             Tok::Kw(Kw::Defparam) => {
                 self.bump();
@@ -586,7 +592,6 @@ impl<'a> Parser<'a> {
                     self.expect(P::Eq)?;
                     let rhs = self.expr()?;
                     items.push(Item::Assign {
-                        attrs: attrs.clone(),
                         lhs,
                         rhs,
                         span: alo.to(self.prev_span()),
@@ -601,7 +606,6 @@ impl<'a> Parser<'a> {
                 self.bump();
                 let body = self.stmt()?;
                 items.push(Item::Always {
-                    attrs,
                     body,
                     span: lo.to(self.prev_span()),
                 });
@@ -609,13 +613,11 @@ impl<'a> Parser<'a> {
             Tok::Kw(Kw::Initial) => {
                 self.bump();
                 let body = self.stmt()?;
-                items.push(Item::Initial {
-                    attrs,
-                    body,
-                    span: lo.to(self.prev_span()),
-                });
+                items.push(Item::Initial { body });
             }
-            Tok::Kw(Kw::Function) => items.push(Item::Function(Rc::new(self.subroutine(attrs, true)?))),
+            Tok::Kw(Kw::Function) => {
+                items.push(Item::Function(Rc::new(self.subroutine(attrs, true)?)))
+            }
             Tok::Kw(Kw::Task) => items.push(Item::Task(Rc::new(self.subroutine(attrs, false)?))),
             Tok::Kw(Kw::Generate) => {
                 self.bump();
@@ -658,11 +660,10 @@ impl<'a> Parser<'a> {
                 self.skip_delay_and_strength()?;
                 loop {
                     let glo = self.span();
-                    let name = if let Tok::Ident(_) = self.tok() {
-                        Some(self.ident()?)
-                    } else {
-                        None
-                    };
+                    // An instance name, which nothing refers to.
+                    if let Tok::Ident(_) = self.tok() {
+                        self.ident()?;
+                    }
                     if self.is(P::LBrack) {
                         bail!(self.span(), "arrays of gate instances are not supported");
                     }
@@ -673,9 +674,7 @@ impl<'a> Parser<'a> {
                     }
                     self.expect(P::RParen)?;
                     items.push(Item::Gate(GateInst {
-                        attrs: attrs.clone(),
                         kind,
-                        name,
                         terminals,
                         span: glo.to(self.prev_span()),
                     }));
@@ -685,7 +684,17 @@ impl<'a> Parser<'a> {
                 }
                 self.expect(P::Semi)?;
             }
-            Tok::Kw(k @ (Kw::Pullup | Kw::Pulldown | Kw::Event | Kw::Nmos | Kw::Pmos | Kw::Cmos | Kw::Tran | Kw::Notif0 | Kw::Notif1)) => {
+            Tok::Kw(
+                k @ (Kw::Pullup
+                | Kw::Pulldown
+                | Kw::Event
+                | Kw::Nmos
+                | Kw::Pmos
+                | Kw::Cmos
+                | Kw::Tran
+                | Kw::Notif0
+                | Kw::Notif1),
+            ) => {
                 bail!(lo, "`{}` is not supported", k.name())
             }
             Tok::Ident(_) => items.push(Item::Instance(self.instance(attrs)?)),
@@ -695,7 +704,6 @@ impl<'a> Parser<'a> {
     }
 
     fn instance(&mut self, attrs: Attrs) -> Result<InstanceItem> {
-        let lo = self.span();
         let module = self.ident()?;
         let mut params = Vec::new();
         if self.eat(P::Hash) {
@@ -752,7 +760,11 @@ impl<'a> Parser<'a> {
                             self.expect(P::RParen)?;
                             e
                         } else {
-                            bail!(port.span, "implicit `.{}` connections are not supported", port.name);
+                            bail!(
+                                port.span,
+                                "implicit `.{}` connections are not supported",
+                                port.name
+                            );
                         };
                         conns.push(Connection {
                             port: Some(port),
@@ -792,7 +804,6 @@ impl<'a> Parser<'a> {
             module,
             params,
             instances,
-            span: lo.to(self.prev_span()),
         })
     }
 
@@ -868,7 +879,11 @@ impl<'a> Parser<'a> {
         // Declarations, then one statement (several are accepted, as most
         // tools do, and become a block).
         let mut stmts = Vec::new();
-        let end = if function { Kw::Endfunction } else { Kw::Endtask };
+        let end = if function {
+            Kw::Endfunction
+        } else {
+            Kw::Endtask
+        };
         loop {
             let a = self.attrs()?;
             match self.tok() {
@@ -894,7 +909,12 @@ impl<'a> Parser<'a> {
                     self.bump();
                     break;
                 }
-                Tok::Eof => bail!(lo, "`{}` without `{}`", if function { "function" } else { "task" }, end.name()),
+                Tok::Eof => bail!(
+                    lo,
+                    "`{}` without `{}`",
+                    if function { "function" } else { "task" },
+                    end.name()
+                ),
                 _ => {
                     let mut s = self.stmt()?;
                     s.attrs.extend(a);
@@ -919,14 +939,13 @@ impl<'a> Parser<'a> {
                 span,
             },
         };
+        let _ = attrs;
         Ok(Subroutine {
             name,
-            attrs,
             ret,
             decls,
             params,
             body,
-            span,
         })
     }
 
@@ -952,19 +971,11 @@ impl<'a> Parser<'a> {
             if self.eat(P::Colon) {
                 self.ident()?;
             }
-            Ok(GenBlock {
-                name,
-                items,
-                span: lo.to(self.prev_span()),
-            })
+            Ok(GenBlock { name, items })
         } else {
             let mut items = Vec::new();
             self.module_item(&mut items)?;
-            Ok(GenBlock {
-                name: None,
-                items,
-                span: lo.to(self.prev_span()),
-            })
+            Ok(GenBlock { name: None, items })
         }
     }
 
@@ -1005,12 +1016,8 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        Ok(Item::GenIf {
-            cond,
-            then,
-            els,
-            span: lo.to(self.prev_span()),
-        })
+        let _ = lo;
+        Ok(Item::GenIf { cond, then, els })
     }
 
     fn gen_case(&mut self) -> Result<Item> {
@@ -1034,11 +1041,8 @@ impl<'a> Parser<'a> {
             let body = self.gen_block()?;
             items.push(GenCaseItem { exprs, body });
         }
-        Ok(Item::GenCase {
-            expr,
-            items,
-            span: lo.to(self.prev_span()),
-        })
+        let _ = lo;
+        Ok(Item::GenCase { expr, items })
     }
 
     // ---------------------------------------------------------------
@@ -1075,9 +1079,7 @@ impl<'a> Parser<'a> {
                         Tok::Kw(Kw::Reg | Kw::Integer | Kw::Time | Kw::Real | Kw::Realtime) => {
                             decls.push(self.net_decl(a, None)?)
                         }
-                        Tok::Kw(Kw::Parameter | Kw::Localparam) => {
-                            params.push(self.param_decl(a)?)
-                        }
+                        Tok::Kw(Kw::Parameter | Kw::Localparam) => params.push(self.param_decl(a)?),
                         _ => {
                             self.pos = save;
                             stmts.push(self.stmt()?);
@@ -1259,10 +1261,7 @@ impl<'a> Parser<'a> {
             _ => {
                 let s = self.simple_assign()?;
                 self.expect(P::Semi)?;
-                return Ok(Stmt {
-                    attrs,
-                    ..s
-                });
+                return Ok(Stmt { attrs, ..s });
             }
         };
         Ok(Stmt {
@@ -1286,7 +1285,10 @@ impl<'a> Parser<'a> {
         };
         self.skip_delay()?;
         if self.is(P::At) {
-            bail!(self.span(), "intra-assignment event controls are not supported");
+            bail!(
+                self.span(),
+                "intra-assignment event controls are not supported"
+            );
         }
         let rhs = self.expr()?;
         Ok(Stmt {
@@ -1467,8 +1469,7 @@ impl<'a> Parser<'a> {
     /// Binary operators by precedence climbing; IEEE 1364-2005 Table 5-4.
     fn binary(&mut self, min_prec: u8) -> Result<Expr> {
         let mut lhs = self.unary()?;
-        loop {
-            let Tok::P(p) = self.tok() else { break };
+        while let Tok::P(p) = self.tok() {
             let Some((op, prec)) = binop(*p) else { break };
             if prec < min_prec {
                 break;
@@ -1540,13 +1541,10 @@ impl<'a> Parser<'a> {
                     span: lo,
                 }
             }
-            Tok::Real(r) => {
+            Tok::Real(_) => {
                 self.bump();
-                let v: f64 = r
-                    .parse()
-                    .map_err(|_| Diag::new(lo, format!("bad real number {r}")))?;
                 Expr {
-                    kind: ExprKind::Real(v),
+                    kind: ExprKind::Real,
                     span: lo,
                 }
             }
@@ -1816,8 +1814,12 @@ mod tests {
 
     #[test]
     fn numbers() {
-        let m = parse_text("module m; localparam A = 4'b1x0z, B = 'hx, C = 8'sd200, D = 12; endmodule").unwrap();
-        let Item::Param(p) = &m[0].items[0] else { panic!() };
+        let m =
+            parse_text("module m; localparam A = 4'b1x0z, B = 'hx, C = 8'sd200, D = 12; endmodule")
+                .unwrap();
+        let Item::Param(p) = &m[0].items[0] else {
+            panic!()
+        };
         let n = |i: usize| match &p.assigns[i].1.kind {
             ExprKind::Number(n) => n.clone(),
             other => panic!("{other:?}"),
@@ -1832,10 +1834,22 @@ mod tests {
 
     #[test]
     fn precedence() {
-        let m = parse_text("module m; assign x = a + b * c << 1 == d & e | f && g || h ? i : j; endmodule").unwrap();
-        let Item::Assign { rhs, .. } = &m[0].items[0] else { panic!() };
-        let ExprKind::Cond { cond, .. } = &rhs.kind else { panic!() };
-        let ExprKind::Binary { op: BinOp::LogicOr, .. } = &cond.kind else { panic!() };
+        let m = parse_text(
+            "module m; assign x = a + b * c << 1 == d & e | f && g || h ? i : j; endmodule",
+        )
+        .unwrap();
+        let Item::Assign { rhs, .. } = &m[0].items[0] else {
+            panic!()
+        };
+        let ExprKind::Cond { cond, .. } = &rhs.kind else {
+            panic!()
+        };
+        let ExprKind::Binary {
+            op: BinOp::LogicOr, ..
+        } = &cond.kind
+        else {
+            panic!()
+        };
     }
 
     #[test]

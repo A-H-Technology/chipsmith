@@ -108,7 +108,6 @@ pub enum ParamKind {
 
 #[derive(Debug, Clone)]
 pub struct ParamDecl {
-    pub attrs: Attrs,
     pub local: bool,
     /// In the module's `#(...)` list: with one, only those can be
     /// overridden (IEEE 1364-2005 §12.2).
@@ -148,7 +147,6 @@ pub struct InstanceItem {
     pub module: Ident,
     pub params: Vec<ParamOverride>,
     pub instances: Vec<Instance>,
-    pub span: Span,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,9 +165,7 @@ pub enum GateKind {
 
 #[derive(Debug, Clone)]
 pub struct GateInst {
-    pub attrs: Attrs,
     pub kind: GateKind,
-    pub name: Option<Ident>,
     pub terminals: Vec<Expr>,
     pub span: Span,
 }
@@ -179,13 +175,11 @@ pub struct GateInst {
 #[derive(Debug)]
 pub struct Subroutine {
     pub name: Ident,
-    pub attrs: Attrs,
     /// A function's return type (`None` for a task).
     pub ret: Option<DataType>,
     pub decls: Vec<NetDecl>,
     pub params: Vec<ParamDecl>,
     pub body: Stmt,
-    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -194,7 +188,6 @@ pub struct GenBlock {
     /// §12.4.3.
     pub name: Option<Ident>,
     pub items: Vec<Item>,
-    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -208,22 +201,18 @@ pub struct GenCaseItem {
 pub enum Item {
     Net(NetDecl),
     Param(ParamDecl),
-    Genvar(Vec<Ident>),
+    Genvar,
     Assign {
-        attrs: Attrs,
         lhs: Expr,
         rhs: Expr,
         span: Span,
     },
     Always {
-        attrs: Attrs,
         body: Stmt,
         span: Span,
     },
     Initial {
-        attrs: Attrs,
         body: Stmt,
-        span: Span,
     },
     Instance(InstanceItem),
     Gate(GateInst),
@@ -243,12 +232,10 @@ pub enum Item {
         cond: Expr,
         then: GenBlock,
         els: Option<GenBlock>,
-        span: Span,
     },
     GenCase {
         expr: Expr,
         items: Vec<GenCaseItem>,
-        span: Span,
     },
     /// A bare `begin ... end` in a generate region.
     GenBlock(GenBlock),
@@ -416,7 +403,7 @@ pub enum ExprKind {
     Number(Number),
     /// `'0`, `'1`, `'x`, `'z`
     Fill(State),
-    Real(f64),
+    Real,
     Str(Rc<[u8]>),
     Index {
         base: Box<Expr>,

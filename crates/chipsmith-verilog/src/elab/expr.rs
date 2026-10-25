@@ -19,7 +19,7 @@ use super::stmt::{Mode, Slot};
 use super::{ConstVal, Dim, Env, ModElab, ScopeId, Sym, Ty};
 use crate::ast::{BinOp, Expr, ExprKind, Ident, UnOp};
 use crate::build::{as_const, extend, konst, xs};
-use crate::source::{bail, Diag, Result, Span};
+use crate::source::{bail, Result, Span};
 
 /// Extends a value of type `from` into context `ctx`: sign extension only
 /// if the context is signed (and so the value is).
@@ -113,7 +113,11 @@ impl<'a, 'd> ModElab<'a, 'd> {
         }
         match self.scopes[s].names.get(&*last.0.name) {
             Some((sym, _)) => Ok(sym.clone()),
-            None => bail!(last.0.span, "`{}` is not declared in that block", last.0.name),
+            None => bail!(
+                last.0.span,
+                "`{}` is not declared in that block",
+                last.0.name
+            ),
         }
     }
 
@@ -174,7 +178,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 signed: n.signed,
             },
             ExprKind::Fill(_) => Ty::BIT,
-            ExprKind::Real(_) => bail!(e.span, "real numbers are not supported"),
+            ExprKind::Real => bail!(e.span, "real numbers are not supported"),
             ExprKind::Str(s) => Ty {
                 width: 8 * s.len().max(1),
                 signed: false,
@@ -211,7 +215,10 @@ impl<'a, 'd> ModElab<'a, 'd> {
             ExprKind::IndexedSlice { width, .. } => {
                 let w = self.eval_i64(width, scope)?;
                 if w <= 0 {
-                    bail!(width.span, "an indexed part-select must be at least one bit wide");
+                    bail!(
+                        width.span,
+                        "an indexed part-select must be at least one bit wide"
+                    );
                 }
                 Ty {
                     width: w as usize,
@@ -335,7 +342,13 @@ impl<'a, 'd> ModElab<'a, 'd> {
     }
 
     /// `e` evaluated in a context of type `ctx`: exactly `ctx.width` bits.
-    pub fn lower(&mut self, e: &'a Expr, ctx: Ty, scope: ScopeId, env: &mut Env) -> Result<SigSpec> {
+    pub fn lower(
+        &mut self,
+        e: &'a Expr,
+        ctx: Ty,
+        scope: ScopeId,
+        env: &mut Env,
+    ) -> Result<SigSpec> {
         let span = e.span;
         Ok(match &e.kind {
             ExprKind::Number(n) => {
@@ -352,7 +365,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 }
             }
             ExprKind::Fill(s) => konst(&vec![*s; ctx.width]),
-            ExprKind::Real(_) => bail!(span, "real numbers are not supported"),
+            ExprKind::Real => bail!(span, "real numbers are not supported"),
             ExprKind::Str(s) => {
                 let mut bits = Vec::with_capacity(8 * s.len());
                 for &byte in s.iter().rev() {
@@ -439,7 +452,9 @@ impl<'a, 'd> ModElab<'a, 'd> {
                     into_ctx(r, ctx)
                 }
             },
-            ExprKind::Binary { op, lhs, rhs } => self.lower_binary(*op, lhs, rhs, ctx, scope, env, span)?,
+            ExprKind::Binary { op, lhs, rhs } => {
+                self.lower_binary(*op, lhs, rhs, ctx, scope, env, span)?
+            }
             ExprKind::Cond { cond, then, els } => {
                 let c = self.lower_bool(cond, scope, env)?;
                 match c {
@@ -479,7 +494,10 @@ impl<'a, 'd> ModElab<'a, 'd> {
                         bail!(span, "$clog2 takes one argument");
                     };
                     let v = self.eval_const(a, scope)?;
-                    if v.bits.iter().any(|b| !matches!(b, State::Zero | State::One)) {
+                    if v.bits
+                        .iter()
+                        .any(|b| !matches!(b, State::Zero | State::One))
+                    {
                         bail!(a.span, "$clog2 of an undefined value");
                     }
                     // ceil(log2(v)): the bits of v - 1.
@@ -530,13 +548,17 @@ impl<'a, 'd> ModElab<'a, 'd> {
         if let Some(cell) = arith(op) {
             let a = self.lower(lhs, ctx, scope, env)?;
             let b = self.lower(rhs, ctx, scope, env)?;
-            return Ok(self.b.binary(cell, a, ctx.signed, b, ctx.signed, ctx.width, span));
+            return Ok(self
+                .b
+                .binary(cell, a, ctx.signed, b, ctx.signed, ctx.width, span));
         }
         match op {
             BinOp::Pow => {
                 let a = self.lower(lhs, ctx, scope, env)?;
                 let (b, bt) = self.lower_self(rhs, scope, env)?;
-                Ok(self.b.binary(BinaryOp::Pow, a, ctx.signed, b, bt.signed, ctx.width, span))
+                Ok(self
+                    .b
+                    .binary(BinaryOp::Pow, a, ctx.signed, b, bt.signed, ctx.width, span))
             }
             BinOp::Shl | BinOp::AShl | BinOp::Shr | BinOp::AShr => {
                 // The shifted operand is context-determined, the amount
@@ -548,7 +570,9 @@ impl<'a, 'd> ModElab<'a, 'd> {
                     BinOp::AShr if ctx.signed => BinaryOp::Sshr,
                     _ => BinaryOp::Shr,
                 };
-                Ok(self.b.binary(cell, a, ctx.signed, b, false, ctx.width, span))
+                Ok(self
+                    .b
+                    .binary(cell, a, ctx.signed, b, false, ctx.width, span))
             }
             BinOp::Lt
             | BinOp::Le
@@ -587,8 +611,12 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 if let Some(c) = as_const(&a) {
                     let t = crate::fold::unary(UnaryOp::ReduceBool, &c, false, 1)[0];
                     match (op, t) {
-                        (BinOp::LogicAnd, State::Zero) => return Ok(into_ctx(vec![SigBit::ZERO], ctx)),
-                        (BinOp::LogicOr, State::One) => return Ok(into_ctx(vec![SigBit::ONE], ctx)),
+                        (BinOp::LogicAnd, State::Zero) => {
+                            return Ok(into_ctx(vec![SigBit::ZERO], ctx))
+                        }
+                        (BinOp::LogicOr, State::One) => {
+                            return Ok(into_ctx(vec![SigBit::ONE], ctx))
+                        }
                         _ => {}
                     }
                 }
@@ -757,7 +785,14 @@ impl<'a, 'd> ModElab<'a, 'd> {
 
     /// The bit position of index `idx + delta` in a vector declared `dim`,
     /// as a signal and whether it's signed.
-    pub fn position(&mut self, idx: SigSpec, t: Ty, dim: Dim, delta: i64, span: Span) -> (SigSpec, bool) {
+    pub fn position(
+        &mut self,
+        idx: SigSpec,
+        t: Ty,
+        dim: Dim,
+        delta: i64,
+        span: Span,
+    ) -> (SigSpec, bool) {
         // pos = idx - lsb (descending) or lsb - idx (ascending).
         let k = if dim.upto() {
             dim.lsb - delta
@@ -796,7 +831,11 @@ impl<'a, 'd> ModElab<'a, 'd> {
         // The index range is [lo, lo + w - 1]; the result's LSB is the bit
         // at the lower position.
         let lo_delta = if up { 0 } else { -(w as i64 - 1) };
-        let lsb_delta = if dim.upto() { lo_delta + w as i64 - 1 } else { lo_delta };
+        let lsb_delta = if dim.upto() {
+            lo_delta + w as i64 - 1
+        } else {
+            lo_delta
+        };
         if let Some(c) = as_const(&idx) {
             let cv = ConstVal {
                 bits: c,
@@ -819,11 +858,25 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 .collect());
         }
         let (amount, signed) = self.position(idx, t, dim, lsb_delta, span);
-        Ok(self.b.binary(BinaryOp::Shiftx, bits.clone(), false, amount, signed, w, span))
+        Ok(self.b.binary(
+            BinaryOp::Shiftx,
+            bits.clone(),
+            false,
+            amount,
+            signed,
+            w,
+            span,
+        ))
     }
 
     /// Reads a memory word.
-    pub fn mem_read(&mut self, m: usize, addr: SigSpec, env: &mut Env, span: Span) -> Result<SigSpec> {
+    pub fn mem_read(
+        &mut self,
+        m: usize,
+        addr: SigSpec,
+        env: &mut Env,
+        span: Span,
+    ) -> Result<SigSpec> {
         super::proc::mem_read(self, m, addr, env, span)
     }
 
@@ -914,12 +967,15 @@ impl<'a, 'd> ModElab<'a, 'd> {
             .unwrap_or_else(|| xs(ret_ty.width)))
     }
 
-    pub fn new_local(&mut self, scope: ScopeId, name: &Rc<str>, dim: Dim, signed: bool, span: Span) -> usize {
-        self.locals.push(super::Local {
-            name: name.clone(),
-            dim,
-            signed,
-        });
+    pub fn new_local(
+        &mut self,
+        scope: ScopeId,
+        name: &Rc<str>,
+        dim: Dim,
+        signed: bool,
+        span: Span,
+    ) -> usize {
+        self.locals.push(super::Local { dim, signed });
         let id = self.locals.len() - 1;
         self.scopes[scope]
             .names

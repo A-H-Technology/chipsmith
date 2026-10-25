@@ -8,6 +8,8 @@ mod lex;
 mod parse;
 mod pp;
 mod source;
+#[cfg(test)]
+mod tests;
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -48,7 +50,11 @@ impl Frontend {
 
     fn read_path(&mut self, path: &Path, lib: bool) -> Result<(), Error> {
         let text = std::fs::read(path).map_err(|e| Error::io(path, e))?;
-        self.read_source(&path.display().to_string(), &String::from_utf8_lossy(&text), lib)
+        self.read_source(
+            &path.display().to_string(),
+            &String::from_utf8_lossy(&text),
+            lib,
+        )
     }
 
     pub fn read_source(&mut self, name: &str, text: &str, lib: bool) -> Result<(), Error> {

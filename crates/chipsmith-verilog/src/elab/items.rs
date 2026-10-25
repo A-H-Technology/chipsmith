@@ -10,8 +10,8 @@
 use std::rc::Rc;
 
 use chipsmith_netlist::{
-    attr, Attributes, CellKind, Const, Dir, Generic, GenericPort, Module, ParamValue, SigBit, SigSpec,
-    State, Wire,
+    attr, Attributes, CellKind, Const, Dir, Generic, GenericPort, Module, ParamValue, SigBit,
+    SigSpec, State, Wire,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -22,7 +22,7 @@ use crate::ast::{
     self, DataType, Expr, ExprKind, GateKind, Ident, InstanceItem, Item, NetDecl, NetKind,
     ParamDecl, ParamKind, ParamOverride, PortDir, Stmt, StmtKind,
 };
-use crate::build::{as_const, konst, Builder};
+use crate::build::Builder;
 use crate::pp::DefaultNettype;
 use crate::source::{bail, Diag, Result, Span};
 
@@ -127,23 +127,23 @@ fn prescan_mem2reg(items: &[Item], _nested: bool, out: &mut FxHashSet<Rc<str>>) 
                 }
             }
             StmtKind::Case { items, .. } => items.iter().for_each(|i| stmt(&i.body, comb, out)),
-            StmtKind::For { body, .. } | StmtKind::While { body, .. } | StmtKind::Repeat { body, .. } => {
-                stmt(body, comb, out)
-            }
+            StmtKind::For { body, .. }
+            | StmtKind::While { body, .. }
+            | StmtKind::Repeat { body, .. } => stmt(body, comb, out),
             StmtKind::Event { body, .. } => stmt(body, comb, out),
             _ => {}
         }
     }
     fn lhs_mems(e: &Expr, out: &mut FxHashSet<Rc<str>>) {
         match &e.kind {
-            ExprKind::Index { base, .. } | ExprKind::Slice { base, .. } | ExprKind::IndexedSlice { base, .. } => {
-                match &base.kind {
-                    ExprKind::Ident(id) => {
-                        out.insert(id.name.clone());
-                    }
-                    _ => lhs_mems(base, out),
+            ExprKind::Index { base, .. }
+            | ExprKind::Slice { base, .. }
+            | ExprKind::IndexedSlice { base, .. } => match &base.kind {
+                ExprKind::Ident(id) => {
+                    out.insert(id.name.clone());
                 }
-            }
+                _ => lhs_mems(base, out),
+            },
             ExprKind::Concat(parts) => parts.iter().for_each(|p| lhs_mems(p, out)),
             _ => {}
         }
@@ -160,7 +160,9 @@ fn prescan_mem2reg(items: &[Item], _nested: bool, out: &mut FxHashSet<Rc<str>>) 
                 };
                 stmt(body, comb, out);
             }
-            Item::GenFor { body, .. } | Item::GenBlock(body) => prescan_mem2reg(&body.items, true, out),
+            Item::GenFor { body, .. } | Item::GenBlock(body) => {
+                prescan_mem2reg(&body.items, true, out)
+            }
             Item::GenIf { then, els, .. } => {
                 prescan_mem2reg(&then.items, true, out);
                 if let Some(e) = els {
@@ -287,9 +289,14 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 }
                 Item::Net(d) => {
                     if let Some(dir) = d.dir {
-                        let merged = d.names.iter().find_map(|n| port_nets.get(&n.name.name).copied());
+                        let merged = d
+                            .names
+                            .iter()
+                            .find_map(|n| port_nets.get(&n.name.name).copied());
                         self.declare_port(scope, d, dir, merged)?;
-                    } else if !(scope == 0 && d.names.iter().all(|n| port_nets.contains_key(&n.name.name))) {
+                    } else if !(scope == 0
+                        && d.names.iter().all(|n| port_nets.contains_key(&n.name.name)))
+                    {
                         if lib {
                             continue;
                         }
@@ -320,7 +327,12 @@ impl<'a, 'd> ModElab<'a, 'd> {
         self.declare_param_with(scope, p, false)
     }
 
-    fn declare_param_with(&mut self, scope: ScopeId, p: &'a ParamDecl, overridable: bool) -> Result<()> {
+    fn declare_param_with(
+        &mut self,
+        scope: ScopeId,
+        p: &'a ParamDecl,
+        overridable: bool,
+    ) -> Result<()> {
         if p.kind == ParamKind::Real {
             bail!(p.span, "real parameters are not supported");
         }
@@ -373,8 +385,14 @@ impl<'a, 'd> ModElab<'a, 'd> {
     ) -> Result<()> {
         // The type comes from the port declaration or the net declaration,
         // whichever says.
-        let kind = d.ty.kind.or(net.and_then(|n| n.ty.kind)).unwrap_or(NetKind::Wire);
-        let range = d.ty.range.as_ref().or(net.and_then(|n| n.ty.range.as_ref()));
+        let kind =
+            d.ty.kind
+                .or(net.and_then(|n| n.ty.kind))
+                .unwrap_or(NetKind::Wire);
+        let range =
+            d.ty.range
+                .as_ref()
+                .or(net.and_then(|n| n.ty.range.as_ref()));
         let ty = DataType {
             kind: Some(kind),
             signed: d.ty.signed || net.is_some_and(|n| n.ty.signed),
@@ -395,7 +413,11 @@ impl<'a, 'd> ModElab<'a, 'd> {
         };
         for n in &d.names {
             let Some(pi) = self.ports.iter().position(|(p, _)| p.name == n.name.name) else {
-                bail!(n.name.span, "`{}` is declared as a port but isn't in the port list", n.name.name);
+                bail!(
+                    n.name.span,
+                    "`{}` is declared as a port but isn't in the port list",
+                    n.name.name
+                );
             };
             if !n.dims.is_empty() {
                 bail!(n.name.span, "array ports are not supported");
@@ -403,7 +425,10 @@ impl<'a, 'd> ModElab<'a, 'd> {
             let mut attrs = self.attrs(&d.attrs, scope, d.span)?;
             if let Some(net) = net {
                 attrs.extend(self.attrs(&net.attrs, scope, net.span)?);
-                attrs.insert(attr::SRC.into(), ParamValue::Str(self.b.sources.src(d.span)));
+                attrs.insert(
+                    attr::SRC.into(),
+                    ParamValue::Str(self.b.sources.src(d.span)),
+                );
             }
             let v = self.new_var(
                 scope,
@@ -419,6 +444,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_var(
         &mut self,
         scope: ScopeId,
@@ -455,7 +481,10 @@ impl<'a, 'd> ModElab<'a, 'd> {
             // In a function or task, a block's variables are locals.
             if self.depth > 0 {
                 if !n.dims.is_empty() {
-                    bail!(n.name.span, "arrays in functions and tasks are not supported");
+                    bail!(
+                        n.name.span,
+                        "arrays in functions and tasks are not supported"
+                    );
                 }
                 self.new_local(scope, &n.name.name, dim, signed, n.name.span);
                 continue;
@@ -508,7 +537,10 @@ impl<'a, 'd> ModElab<'a, 'd> {
             bail!(n.name.span, "multi-dimensional arrays are not supported");
         }
         if n.init.is_some() {
-            bail!(n.name.span, "a memory can't have an initializer; use an initial block");
+            bail!(
+                n.name.span,
+                "a memory can't have an initializer; use an initial block"
+            );
         }
         let words = self.eval_dim(&n.dims[0], scope)?;
         let (lo, hi) = (words.msb.min(words.lsb), words.msb.max(words.lsb));
@@ -583,7 +615,11 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 continue;
             }
             if self.ast.nettype == DefaultNettype::None {
-                bail!(id.span, "`{}` is not declared (`default_nettype none)", id.name);
+                bail!(
+                    id.span,
+                    "`{}` is not declared (`default_nettype none)",
+                    id.name
+                );
             }
             let attrs = self.attrs(&[], scope, id.span)?;
             self.new_var(scope, id, Dim::of_width(1), false, false, None, attrs)?;
@@ -617,11 +653,12 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 Item::Initial { body, .. } => self.initial(body, scope)?,
                 Item::Instance(i) => self.instance(i, scope)?,
                 Item::Gate(g) => self.gate(g, scope)?,
-                Item::GenFor { .. } | Item::GenIf { .. } | Item::GenCase { .. } | Item::GenBlock(_) => {
-                    self.generate(it, scope, None)?
-                }
+                Item::GenFor { .. }
+                | Item::GenIf { .. }
+                | Item::GenCase { .. }
+                | Item::GenBlock(_) => self.generate(it, scope, None)?,
                 Item::Param(_)
-                | Item::Genvar(_)
+                | Item::Genvar
                 | Item::Function(_)
                 | Item::Task(_)
                 | Item::Defparam(_) => {}
@@ -658,7 +695,10 @@ impl<'a, 'd> ModElab<'a, 'd> {
             ExprKind::Index { base, index } => {
                 let (nets, dim) = self.lvalue_base(base, scope)?;
                 let i = self.eval_i64(index, scope).map_err(|_| {
-                    Diag::new(index.span, "a variable index isn't supported on the left of a continuous assignment")
+                    Diag::new(
+                        index.span,
+                        "a variable index isn't supported on the left of a continuous assignment",
+                    )
                 })?;
                 match dim.pos(i) {
                     Some(p) => vec![nets[p]],
@@ -671,7 +711,12 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 let l = self.eval_i64(lsb, scope)?;
                 let v = super::expr::const_part(&nets, dim, m, l);
                 if v.contains(&SigBit::X) {
-                    bail!(e.span, "part-select [{m}:{l}] is outside [{}:{}]", dim.msb, dim.lsb);
+                    bail!(
+                        e.span,
+                        "part-select [{m}:{l}] is outside [{}:{}]",
+                        dim.msb,
+                        dim.lsb
+                    );
                 }
                 v
             }
@@ -711,17 +756,32 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 self.vars[v].cont_driven = true;
                 Ok((self.vars[v].nets.clone(), self.vars[v].dim))
             }
-            Sym::Mem(_) => bail!(base.span, "a memory can't be driven by a continuous assignment"),
+            Sym::Mem(_) => bail!(
+                base.span,
+                "a memory can't be driven by a continuous assignment"
+            ),
             _ => bail!(base.span, "not a net"),
         }
     }
 
-    fn cont_assign(&mut self, lhs: &'a Expr, rhs: &'a Expr, scope: ScopeId, span: Span) -> Result<()> {
+    fn cont_assign(
+        &mut self,
+        lhs: &'a Expr,
+        rhs: &'a Expr,
+        scope: ScopeId,
+        span: Span,
+    ) -> Result<()> {
         let nets = self.net_lvalue(lhs, scope)?;
         self.cont_assign_bits(nets, rhs, scope, span)
     }
 
-    fn cont_assign_bits(&mut self, lhs: SigSpec, rhs: &'a Expr, scope: ScopeId, span: Span) -> Result<()> {
+    fn cont_assign_bits(
+        &mut self,
+        lhs: SigSpec,
+        rhs: &'a Expr,
+        scope: ScopeId,
+        span: Span,
+    ) -> Result<()> {
         let rt = self.self_ty(rhs, scope)?;
         let mut env = Env::new(Mode::Cont);
         let mut v = self.lower(
@@ -750,10 +810,15 @@ impl<'a, 'd> ModElab<'a, 'd> {
             }
         };
         match it {
-            Item::GenIf { cond, then, els, .. } => {
+            Item::GenIf {
+                cond, then, els, ..
+            } => {
                 let c = self.eval_const(cond, scope)?;
                 let Some(t) = c.is_true() else {
-                    bail!(cond.span, "a generate condition must be defined (0 or 1), not x");
+                    bail!(
+                        cond.span,
+                        "a generate condition must be defined (0 or 1), not x"
+                    );
                 };
                 let chosen = if t { Some(then) } else { els.as_ref() };
                 if let Some(b) = chosen {
@@ -774,7 +839,9 @@ impl<'a, 'd> ModElab<'a, 'd> {
                         let p = self.eval_const(e, scope)?;
                         let w = v.bits.len().max(p.bits.len());
                         let signed = v.signed && p.signed;
-                        if crate::fold::extend(&v.bits, w, signed) == crate::fold::extend(&p.bits, w, signed) {
+                        if crate::fold::extend(&v.bits, w, signed)
+                            == crate::fold::extend(&p.bits, w, signed)
+                        {
                             chosen = Some(&gi.body);
                             break 'items;
                         }
@@ -797,7 +864,11 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 span,
             } => {
                 if step_var.name != genvar.name {
-                    bail!(step_var.span, "the loop must step its own genvar `{}`", genvar.name);
+                    bail!(
+                        step_var.span,
+                        "the loop must step its own genvar `{}`",
+                        genvar.name
+                    );
                 }
                 let loop_scope = self.new_scope(Some(scope), self.scopes[scope].prefix.clone());
                 let mut i = self.eval_const(init, scope)?;
@@ -837,7 +908,13 @@ impl<'a, 'd> ModElab<'a, 'd> {
         Ok(())
     }
 
-    fn gen_block(&mut self, b: &'a ast::GenBlock, scope: ScopeId, n: u32, index: Option<i64>) -> Result<()> {
+    fn gen_block(
+        &mut self,
+        b: &'a ast::GenBlock,
+        scope: ScopeId,
+        n: u32,
+        index: Option<i64>,
+    ) -> Result<()> {
         let base = match &b.name {
             Some(id) => id.name.to_string(),
             None => format!("genblk{n}"),
@@ -865,7 +942,10 @@ impl<'a, 'd> ModElab<'a, 'd> {
     fn instance(&mut self, item: &'a InstanceItem, scope: ScopeId) -> Result<()> {
         let mname = &item.module.name;
         let Some(&child) = self.d.asts.get(&**mname) else {
-            bail!(item.module.span, "module {mname} is not defined (and isn't in a cell library)");
+            bail!(
+                item.module.span,
+                "module {mname} is not defined (and isn't in a cell library)"
+            );
         };
         // The child's overridable parameters, in order.
         let formal: Vec<&'a Ident> = overridable_params(child);
@@ -876,7 +956,11 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 match p {
                     ParamOverride::Positional(e) => {
                         let Some(f) = formal.get(positional) else {
-                            bail!(e.span, "module {mname} has only {} parameters", formal.len());
+                            bail!(
+                                e.span,
+                                "module {mname} has only {} parameters",
+                                formal.len()
+                            );
                         };
                         positional += 1;
                         given.push((f.name.to_string(), self.eval_const(e, scope)?));
@@ -899,11 +983,19 @@ impl<'a, 'd> ModElab<'a, 'd> {
                     given.retain(|(n, _)| *n != p[1]);
                     given.push((p[1].clone(), v.clone()));
                 } else if p.len() > 2 && p[0] == path {
-                    bail!(*span, "defparam into a sub-instance's instances is not supported");
+                    bail!(
+                        *span,
+                        "defparam into a sub-instance's instances is not supported"
+                    );
                 }
             }
             // Order by the child's declaration, for a stable module name.
-            given.sort_by_key(|(n, _)| formal.iter().position(|f| *f.name == **n).unwrap_or(usize::MAX));
+            given.sort_by_key(|(n, _)| {
+                formal
+                    .iter()
+                    .position(|f| *f.name == **n)
+                    .unwrap_or(usize::MAX)
+            });
             let cell_params: Vec<(String, ConstVal)> = given.clone();
             let e = self.d.module(child, given, inst.span)?;
             self.connect_instance(item, inst, &e, child.lib, cell_params, scope, &path)?;
@@ -933,7 +1025,12 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 None if named => bail!(c.span, "can't mix named and positional connections"),
                 None => {
                     if k >= e.ports.len() {
-                        bail!(c.span, "module {} has only {} ports", item.module.name, e.ports.len());
+                        bail!(
+                            c.span,
+                            "module {} has only {} ports",
+                            item.module.name,
+                            e.ports.len()
+                        );
                     }
                     k
                 }
@@ -1102,7 +1199,9 @@ impl<'a, 'd> ModElab<'a, 'd> {
             }
         }
         let port_vars: Vec<usize> = self.ports.iter().filter_map(|(_, v)| *v).collect();
-        let others: Vec<usize> = (0..self.vars.len()).filter(|v| !port_vars.contains(v)).collect();
+        let others: Vec<usize> = (0..self.vars.len())
+            .filter(|v| !port_vars.contains(v))
+            .collect();
         let mut wires = Vec::new();
         for &v in port_vars.iter().chain(&others) {
             let var = &self.vars[v];
@@ -1127,11 +1226,13 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 name: self.vars[v].name.clone(),
                 dir: self.vars[v].port.expect("a port"),
                 width: self.vars[v].dim.width(),
-                signed: self.vars[v].signed,
             })
             .collect();
         let mut attributes = Attributes::new();
-        attributes.insert(attr::SRC.into(), ParamValue::Str(self.b.sources.src(self.ast.span)));
+        attributes.insert(
+            attr::SRC.into(),
+            ParamValue::Str(self.b.sources.src(self.ast.span)),
+        );
         for a in &self.ast.attrs {
             attributes.insert(a.name.name.to_string(), ParamValue::int(1));
         }
@@ -1176,57 +1277,79 @@ fn overridable_params(m: &ast::Module) -> Vec<&Ident> {
 }
 
 /// Every net has at most one driver: a cell output, an input port or a
-/// constant, except that tri-state buffers may share one.
+/// constant, except that tri-state buffers may share one. The error names
+/// the net (a name that isn't an input, if it has one) and its drivers.
 fn check_drivers(m: &Module) -> std::result::Result<(), String> {
-    let mut drivers = vec![(0u32, 0u32); m.net_count()];
+    let mut drivers: Vec<Vec<String>> = vec![Vec::new(); m.net_count()];
+    let mut tri = vec![0u32; m.net_count()];
     for (_, w, dir) in m.ports() {
         if dir == Dir::In {
             for b in w.bits.iter().filter_map(|b| b.net()) {
-                drivers[b.index()].0 += 1;
+                drivers[b.index()].push(format!("input port `{}`", w.name));
             }
         }
     }
-    let mut bad: Option<String> = None;
+    let src = |c: &chipsmith_netlist::Cell| match c.attributes.get(attr::SRC) {
+        Some(ParamValue::Str(s)) => format!(" at {s}"),
+        _ => String::new(),
+    };
     for c in &m.cells {
-        let tri = matches!(c.kind, CellKind::Tribuf(_));
+        let is_tri = matches!(c.kind, CellKind::Tribuf(_));
+        let mut bad = None;
         c.kind.for_each_port(|p| {
             if !p.dir.is_some_and(|d| d.drives()) {
                 return;
             }
             for b in p.bits {
                 match b {
-                    SigBit::Net(n) => {
-                        let d = &mut drivers[n.index()];
-                        if tri {
-                            d.1 += 1;
-                        } else {
-                            d.0 += 1;
-                        }
-                    }
-                    SigBit::Const(_) if bad.is_none() && p.dir == Some(Dir::Out) => {
+                    SigBit::Net(n) if is_tri => tri[n.index()] += 1,
+                    SigBit::Net(n) => drivers[n.index()].push(format!(
+                        "{} {}{}",
+                        c.kind.type_name(),
+                        c.name,
+                        src(c)
+                    )),
+                    SigBit::Const(_) if p.dir == Some(Dir::Out) => {
                         bad = Some(format!(
-                            "cell {} drives a net that is also assigned a constant",
-                            c.name
-                        ));
+                            "{} {}{} drives a net that is also assigned a constant",
+                            c.kind.type_name(),
+                            c.name,
+                            src(c)
+                        ))
                     }
                     SigBit::Const(_) => {}
                 }
             }
         });
+        if let Some(b) = bad {
+            return Err(b);
+        }
     }
-    if let Some(b) = bad {
-        return Err(b);
-    }
-    for (i, &(plain, tri)) in drivers.iter().enumerate() {
-        if plain > 1 || (plain == 1 && tri > 0) {
-            let name = m
+    for (i, d) in drivers.iter().enumerate() {
+        if d.len() > 1 || (d.len() == 1 && tri[i] > 0) {
+            let names: Vec<&Wire> = m
                 .wires
                 .iter()
-                .find(|w| w.bits.iter().any(|b| b.net().is_some_and(|n| n.index() == i)))
+                .filter(|w| {
+                    w.bits
+                        .iter()
+                        .any(|b| b.net().is_some_and(|n| n.index() == i))
+                })
+                .collect();
+            let name = names
+                .iter()
+                .find(|w| w.port != Some(Dir::In))
+                .or(names.first())
                 .map_or_else(|| format!("net {i}"), |w| w.name.clone());
-            return Err(format!("`{name}` has more than one driver"));
+            let mut list = d.clone();
+            if tri[i] > 0 {
+                list.push(format!("{} tri-state buffer(s)", tri[i]));
+            }
+            return Err(format!(
+                "`{name}` has more than one driver: {}",
+                list.join(", ")
+            ));
         }
     }
     Ok(())
 }
-

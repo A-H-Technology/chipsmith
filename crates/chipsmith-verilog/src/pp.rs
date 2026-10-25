@@ -214,7 +214,10 @@ impl<'a> Preprocessor<'a> {
                 let kind = match ident.as_str() {
                     "none" => DefaultNettype::None,
                     "wire" | "tri" => DefaultNettype::Wire,
-                    other => bail!(span, "`default_nettype {other} is not supported (only wire and none)"),
+                    other => bail!(
+                        span,
+                        "`default_nettype {other} is not supported (only wire and none)"
+                    ),
                 };
                 let at = self.out.tokens.len();
                 self.out.nettype.push((at, kind));
@@ -259,7 +262,10 @@ impl<'a> Preprocessor<'a> {
                 if formal.is_empty() && params.is_empty() && default.is_none() {
                     continue; // `define M() ...
                 }
-                if !formal.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                if !formal
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                {
                     bail!(span, "bad macro parameter `{formal}` in `define {name}");
                 }
                 params.push((formal, default));

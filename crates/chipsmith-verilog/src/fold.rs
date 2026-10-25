@@ -286,7 +286,11 @@ pub fn binary(
                     r
                 }
             };
-            let r = if matches!(op, B::Ne | B::Nex) { not(r) } else { r };
+            let r = if matches!(op, B::Ne | B::Nex) {
+                not(r)
+            } else {
+                r
+            };
             result_bit(r, width)
         }
         B::Lt | B::Le | B::Gt | B::Ge => {
@@ -389,7 +393,10 @@ pub fn binary(
             (0..width)
                 .map(|i| {
                     let pos = if left {
-                        (i as u64).checked_sub(amount).map(|p| p as i128).unwrap_or(-1)
+                        (i as u64)
+                            .checked_sub(amount)
+                            .map(|p| p as i128)
+                            .unwrap_or(-1)
                     } else {
                         i as i128 + amount as i128
                     };
@@ -408,7 +415,11 @@ pub fn binary(
                 return all_x(width);
             }
             let off = signed_value(b, b_signed);
-            let other = if op == B::Shift { State::Zero } else { State::X };
+            let other = if op == B::Shift {
+                State::Zero
+            } else {
+                State::X
+            };
             (0..width)
                 .map(|i| {
                     let pos = i as i128 + off;
@@ -536,17 +547,44 @@ mod tests {
     #[test]
     fn x_rules() {
         let a = [State::X, State::Zero];
-        assert_eq!(binary(BinaryOp::And, &a, false, &c(0, 2), false, 2), c(0, 2));
-        assert_eq!(binary(BinaryOp::Add, &a, false, &c(1, 2), false, 2), all_x(2));
+        assert_eq!(
+            binary(BinaryOp::And, &a, false, &c(0, 2), false, 2),
+            c(0, 2)
+        );
+        assert_eq!(
+            binary(BinaryOp::Add, &a, false, &c(1, 2), false, 2),
+            all_x(2)
+        );
         // 2'b0x == 2'b10 is false: a defined bit differs.
         assert_eq!(binary(BinaryOp::Eq, &a, false, &c(2, 2), false, 1), c(0, 1));
-        assert_eq!(binary(BinaryOp::Eq, &a, false, &c(0, 2), false, 1), vec![State::X]);
+        assert_eq!(
+            binary(BinaryOp::Eq, &a, false, &c(0, 2), false, 1),
+            vec![State::X]
+        );
     }
 
     #[test]
     fn power() {
-        assert_eq!(val(&binary(BinaryOp::Pow, &c(3, 32), true, &c(4, 32), true, 32), true), 81);
-        assert_eq!(val(&binary(BinaryOp::Pow, &c(2, 32), true, &c(-1, 32), true, 32), true), 0);
-        assert_eq!(val(&binary(BinaryOp::Pow, &c(-1, 32), true, &c(-3, 32), true, 32), true), -1);
+        assert_eq!(
+            val(
+                &binary(BinaryOp::Pow, &c(3, 32), true, &c(4, 32), true, 32),
+                true
+            ),
+            81
+        );
+        assert_eq!(
+            val(
+                &binary(BinaryOp::Pow, &c(2, 32), true, &c(-1, 32), true, 32),
+                true
+            ),
+            0
+        );
+        assert_eq!(
+            val(
+                &binary(BinaryOp::Pow, &c(-1, 32), true, &c(-3, 32), true, 32),
+                true
+            ),
+            -1
+        );
     }
 }

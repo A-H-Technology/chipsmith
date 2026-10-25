@@ -6,7 +6,7 @@
 
 use std::rc::Rc;
 
-use crate::source::{bail, Diag, FileId, Result, Span};
+use crate::source::{bail, FileId, Result, Span};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Base {
@@ -224,10 +224,6 @@ impl Lexer {
         }
     }
 
-    pub fn here(&self) -> Span {
-        self.span(self.pos)
-    }
-
     /// Whitespace and comments.
     fn skip_trivia(&mut self) -> Result<()> {
         loop {
@@ -373,7 +369,9 @@ impl Lexer {
             self.pos += 1;
         }
         let start = self.pos;
-        while self.peek(0).is_ascii_hexdigit() || matches!(self.peek(0), b'_' | b'x' | b'X' | b'z' | b'Z' | b'?') {
+        while self.peek(0).is_ascii_hexdigit()
+            || matches!(self.peek(0), b'_' | b'x' | b'X' | b'z' | b'Z' | b'?')
+        {
             self.pos += 1;
         }
         if self.pos == start {
@@ -618,7 +616,12 @@ mod tests {
         assert_eq!(toks[5], Tok::Real("3.5".into()));
         assert_eq!(
             &toks[6..10],
-            &[Tok::P(P::At), Tok::P(P::LParen), Tok::P(P::Star), Tok::P(P::RParen)]
+            &[
+                Tok::P(P::At),
+                Tok::P(P::LParen),
+                Tok::P(P::Star),
+                Tok::P(P::RParen)
+            ]
         );
         assert_eq!(toks[10], Tok::P(P::AttrOpen));
         assert_eq!(toks[11], Tok::Ident("keep".into()));
@@ -631,6 +634,5 @@ mod tests {
     fn errors_have_positions() {
         let e = lex_all("a /* never closed").unwrap_err();
         assert!(e.message.contains("unterminated"));
-        let _: Diag = e;
     }
 }

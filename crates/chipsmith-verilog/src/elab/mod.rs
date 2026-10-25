@@ -72,7 +72,11 @@ impl ConstVal {
 
     /// The value as an integer, if defined and in range.
     pub fn as_i64(&self) -> Option<i64> {
-        if self.bits.iter().any(|b| !matches!(b, State::Zero | State::One)) {
+        if self
+            .bits
+            .iter()
+            .any(|b| !matches!(b, State::Zero | State::One))
+        {
             return None;
         }
         let neg = self.signed && self.bits.last() == Some(&State::One);
@@ -212,7 +216,6 @@ impl Var {
 /// result: lives in the [`Env`], not in the netlist.
 #[derive(Debug, Clone)]
 pub(crate) struct Local {
-    pub name: Rc<str>,
     pub dim: Dim,
     pub signed: bool,
 }
@@ -283,7 +286,6 @@ pub(crate) struct PortInfo {
     pub name: String,
     pub dir: Dir,
     pub width: usize,
-    pub signed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -305,11 +307,7 @@ pub(crate) struct DesignCtx<'a> {
     pub stack: Vec<String>,
 }
 
-pub(crate) fn elaborate(
-    sources: &SourceMap,
-    modules: &[ast::Module],
-    top: &str,
-) -> Result<Design> {
+pub(crate) fn elaborate(sources: &SourceMap, modules: &[ast::Module], top: &str) -> Result<Design> {
     let mut asts: FxHashMap<&str, &ast::Module> = FxHashMap::default();
     for m in modules {
         // A later definition replaces an earlier one, except that a design
@@ -350,8 +348,10 @@ pub(crate) fn elaborate(
     let e = ctx.module(top_ast, Vec::new(), top_ast.name.span)?;
     let mut design = Design { modules: ctx.out };
     if let Some(m) = design.module_mut(&e.name) {
-        m.attributes
-            .insert(chipsmith_netlist::attr::TOP.into(), chipsmith_netlist::ParamValue::int(1));
+        m.attributes.insert(
+            chipsmith_netlist::attr::TOP.into(),
+            chipsmith_netlist::ParamValue::int(1),
+        );
     }
     Ok(design)
 }
