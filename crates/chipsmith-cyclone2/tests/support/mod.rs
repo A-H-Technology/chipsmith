@@ -537,6 +537,143 @@ fn prep_memories(
     Ok(d)
 }
 
+/// A latch is a LUT feeding its own output back (synthesis' `ff.rs`),
+/// which SAT can't take. Each feedback is cut through a `$ff`, so the LUT
+/// computes the latch's next value from what it held one step before:
+/// `async2sync`'s model of the RTL's latch.
+fn cut_loops(m: &mut Module) -> usize {
+    let mut cuts = Vec::new();
+    for (i, c) in m.cells.iter().enumerate() {
+        let CellKind::Other(g) = &c.kind else {
+            continue;
+        };
+        if g.ty != cells::LCELL_COMB {
+            continue;
+        }
+        let Some(y) = g.port("COMBOUT").map(|p| p.sig[0]) else {
+            continue;
+        };
+        if g.ports
+            .iter()
+            .any(|p| p.name != "COMBOUT" && p.sig.contains(&y))
+        {
+            cuts.push((i, y));
+        }
+    }
+    for &(i, y) in &cuts {
+        let held = SigBit::Net(m.new_net());
+        let CellKind::Other(g) = &mut m.cells[i].kind else {
+            unreachable!()
+        };
+        for p in g.ports.iter_mut().filter(|p| p.name != "COMBOUT") {
+            for b in &mut p.sig {
+                if *b == y {
+                    *b = held;
+                }
+            }
+        }
+        m.add_cell(
+            format!("$latch_cut${i}"),
+            CellKind::Ff(chipsmith_netlist::Ff {
+                q: vec![held],
+                kind: chipsmith_netlist::FfKind::Global { d: vec![y] },
+            }),
+        );
+    }
+    cuts.len()
+}
+
+/// yosys' `async2sync` models a latch's asynchronous reset (`$adlatch`,
+/// `$dlatchsr`, `$sr`) as overriding Q without being held: released, the
+/// latch shows what it held before the reset, which no hardware does. So
+/// the reference's latches get their resets through the enable and data
+/// first (`EN | rst`, `rst ? value : D`), which it models right.
+fn latch_resets_to_logic(m: &mut Module) {
+    use chipsmith_netlist::{Ctrl, Ff, FfKind, LatchReset, Polarity, SetClr, Word};
+    let mut g = chipsmith_synth::rewrite::Gates::new(m, "latch_reset");
+    let high = |g: &mut chipsmith_synth::rewrite::Gates, s: SigBit, p: Polarity| match p {
+        Polarity::Pos => s,
+        Polarity::Neg => g.not(s),
+    };
+    let cells = std::mem::take(&mut g.m.cells);
+    for mut c in cells {
+        let CellKind::Ff(ff) = &c.kind else {
+            g.m.cells.push(c);
+            continue;
+        };
+        // Per bit: (Q, EN, D), all active high.
+        let set_clr = |g: &mut chipsmith_synth::rewrite::Gates,
+                       sr: &SetClr<Word>,
+                       i: usize,
+                       en: SigBit,
+                       d: SigBit| {
+            let set = high(g, sr.set[i], sr.set_polarity);
+            let clr = high(g, sr.clr[i], sr.clr_polarity);
+            let any = g.or(set, clr);
+            let en = g.or(en, any);
+            let d = g.or(d, set);
+            let not_clr = g.not(clr);
+            (en, g.and(d, not_clr))
+        };
+        let bits: Vec<(SigBit, SigBit, SigBit)> = match &ff.kind {
+            FfKind::Dlatch {
+                en,
+                d,
+                reset: LatchReset::Async { arst, value },
+            } => {
+                let r = high(&mut g, arst.sig, arst.polarity);
+                let e = high(&mut g, en.sig, en.polarity);
+                let e = g.or(e, r);
+                (0..ff.q.len())
+                    .map(|i| {
+                        let v = SigBit::Const(value.0[i]);
+                        (ff.q[i], e, g.mux(d[i], v, r))
+                    })
+                    .collect()
+            }
+            FfKind::Dlatch {
+                en,
+                d,
+                reset: LatchReset::SetClr(sr),
+            } => {
+                let e = high(&mut g, en.sig, en.polarity);
+                (0..ff.q.len())
+                    .map(|i| {
+                        let (e, d) = set_clr(&mut g, sr, i, e, d[i]);
+                        (ff.q[i], e, d)
+                    })
+                    .collect()
+            }
+            FfKind::Sr(sr) => (0..ff.q.len())
+                .map(|i| {
+                    let (e, d) = set_clr(&mut g, sr, i, SigBit::ZERO, SigBit::ZERO);
+                    (ff.q[i], e, d)
+                })
+                .collect(),
+            _ => {
+                g.m.cells.push(c);
+                continue;
+            }
+        };
+        for (i, (q, en, d)) in bits.into_iter().enumerate() {
+            c.kind = CellKind::Ff(Ff::<Word> {
+                q: vec![q],
+                kind: FfKind::Dlatch {
+                    en: Ctrl {
+                        sig: en,
+                        polarity: Polarity::Pos,
+                    },
+                    d: vec![d],
+                    reset: LatchReset::None,
+                },
+            });
+            let mut bit = c.clone();
+            bit.name = format!("{}$bit{i}", c.name);
+            g.m.cells.push(bit);
+        }
+    }
+}
+
 /// Proves synthesis correct in two steps. `refined` is the RTL with every
 /// x resolved (synthesis' first stage), `gate` its final netlist before
 /// wire names are purged. First the RTL against `refined`, x in the RTL
@@ -570,7 +707,13 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
     // blocks into them; yosys' `memory_dff` does the same on both sides.
     let mut gold = prep_memories(dir, "gold_prep", rtl, &to_logic, &sync_cut)?;
     let mut mid = prep_memories(dir, "mid_prep", &refined_path, &to_logic, &sync_cut)?;
+    for m in gold.modules.iter_mut().chain(&mut mid.modules) {
+        latch_resets_to_logic(m);
+    }
     let mut cut_gate = gate.clone();
+    for m in cut_gate.modules.iter_mut().filter(|m| !m.is_blackbox()) {
+        cut_loops(m);
+    }
     if !cut.is_empty() {
         cut_memories(top_mut(&mut gold))?;
         let shapes = cut_memories(top_mut(&mut mid))?;

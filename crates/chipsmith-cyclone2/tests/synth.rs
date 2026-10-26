@@ -201,6 +201,84 @@ fn specimens() {
     }
 }
 
+/// Small designs for what the yosys flow can't synthesize for the LE
+/// (latches, asynchronous loads: `dfflegalize` fails), so there is only
+/// the proof.
+fn feature(name: &str) {
+    let f = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/designs")
+        .join(format!("{name}.v"));
+    design(name, "top", &[f], false);
+}
+
+#[test]
+fn latches() {
+    feature("latches");
+}
+
+#[test]
+fn async_load() {
+    feature("async_load");
+}
+
+#[test]
+fn divmod() {
+    feature("divmod");
+}
+
+#[test]
+fn sums() {
+    feature("sums");
+}
+
+/// The check catches a wrong latch (the one inside an emulated register
+/// too) and a wrong divider: the first LUT `pick` takes, complemented.
+#[test]
+fn a_complemented_lut_is_caught() {
+    let is_loop = |g: &chipsmith_netlist::Generic| {
+        let y = g.port("COMBOUT").map(|p| p.sig[0]);
+        g.ports
+            .iter()
+            .any(|p| p.name != "COMBOUT" && Some(p.sig[0]) == y)
+    };
+    let any = |_: &chipsmith_netlist::Generic| true;
+    for (name, pick) in [
+        (
+            "latches",
+            &is_loop as &dyn Fn(&chipsmith_netlist::Generic) -> bool,
+        ),
+        ("async_load", &is_loop),
+        ("divmod", &any),
+    ] {
+        let f = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/designs")
+            .join(format!("{name}.v"));
+        let s = synthesize(&format!("{name}-broken"), "top", &[f]);
+        let mut gate = s.stages.cells.clone().unwrap();
+        let g = gate.modules[0]
+            .cells
+            .iter_mut()
+            .find_map(|c| match &mut c.kind {
+                CellKind::Other(g) if g.ty == "LCELL_COMB" && pick(g) => Some(g),
+                _ => None,
+            })
+            .expect("a LUT to break");
+        let Some(ParamValue::Bits(mask)) = g.params.get_mut("LUT_MASK") else {
+            panic!("LCELL_COMB without LUT_MASK")
+        };
+        for b in &mut mask.0 {
+            *b = match b {
+                chipsmith_netlist::State::One => chipsmith_netlist::State::Zero,
+                _ => chipsmith_netlist::State::One,
+            };
+        }
+        let dir = scratch(&format!("{name}-broken-check"));
+        let err = support::check(&dir, &s.rtl, s.stages.refined.as_ref().unwrap(), &gate)
+            .expect_err("a complemented LUT");
+        assert!(err.contains("not proven equivalent"), "{name}: {err}");
+    }
+}
+
 /// The M4K cells, parameters and contents included, are the yosys flow's:
 /// cyclone2-re validated those bit for bit against Quartus.
 #[test]

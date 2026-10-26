@@ -826,6 +826,21 @@ fn synth(verilog: &[PathBuf], top: &str, netlist: &Path) -> Result<()> {
         s.m4ks,
         started.elapsed().as_secs_f64()
     );
+    // Quartus warns the same (10240, 13004): the LE has neither, so both
+    // are LUT loops whose power-up value the hardware doesn't define.
+    if s.latches > 0 {
+        eprintln!(
+            "    warning: {} latches, each a LUT feeding itself; their power-up value is undefined",
+            s.latches
+        );
+    }
+    if s.emulated > 0 {
+        eprintln!(
+            "    warning: {} registers with an asynchronous load or set emulated with a latch; \
+             their power-up value is undefined",
+            s.emulated
+        );
+    }
     let file = std::fs::File::create(netlist)
         .with_context(|| format!("creating {}", netlist.display()))?;
     chipsmith_netlist::write_json(&out.design, file)
