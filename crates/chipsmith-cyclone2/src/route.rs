@@ -232,12 +232,14 @@ fn clocks(json: &Value) -> Result<Vec<(u64, Clock)>> {
             Some((dn, d, p))
         });
         let source = match driver {
-            Some((_, d, _)) if d["type"] == "CY2_IBUF" || d["type"] == "CY2_IOBUF" => ClockSource::Pin(
-                d["attributes"]["PORT"]
-                    .as_str()
-                    .context("pin buffer without PORT")?
-                    .to_string(),
-            ),
+            Some((_, d, _)) if d["type"] == "CY2_IBUF" || d["type"] == "CY2_IOBUF" => {
+                ClockSource::Pin(
+                    d["attributes"]["PORT"]
+                        .as_str()
+                        .context("pin buffer without PORT")?
+                        .to_string(),
+                )
+            }
             _ => ClockSource::Core,
         };
         out.push((

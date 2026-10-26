@@ -257,11 +257,10 @@ impl Graph {
             }
             let mut to: Vec<(u32, Ps)> = worst.into_iter().collect();
             to.sort_by_key(|&(c, _)| c);
-            out.extend(to.into_iter().map(|(to, critical)| ClockPair {
-                from,
-                to,
-                critical,
-            }));
+            out.extend(
+                to.into_iter()
+                    .map(|(to, critical)| ClockPair { from, to, critical }),
+            );
         }
         out
     }

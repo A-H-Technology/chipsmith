@@ -173,7 +173,10 @@ impl Logic {
             // the first CLKBUF_ENABLE_AND_INVERT bit is 0 when the enable
             // comes from the core (k3, k4), its mux then taking the line.
             out.push((db.clkctrl_enable[c.g as usize] as u32, !c.enable_registered));
-            out.push((db.clkctrl_and_invert[c.g as usize] as u32, c.enable.is_none()));
+            out.push((
+                db.clkctrl_and_invert[c.g as usize] as u32,
+                c.enable.is_none(),
+            ));
             if let Some(line) = c.enable {
                 for b in db.clkctrl_enout[c.g as usize].source_bits(0, line as usize)? {
                     out.push((b as u32, true));

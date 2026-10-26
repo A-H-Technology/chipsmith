@@ -166,6 +166,32 @@ pub struct Config {
     pub r#loop: Loop,
 }
 
+/// A PLL input from the core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Control {
+    Areset,
+    Pfdena,
+}
+
+impl Control {
+    pub const ALL: [Control; 2] = [Control::Areset, Control::Pfdena];
+
+    fn arch(self) -> i32 {
+        match self {
+            Control::Areset => arch::ARESET_INPUT,
+            Control::Pfdena => arch::PFD_ENA_INPUT,
+        }
+    }
+
+    /// The bel pin (`hard::Pin`'s name).
+    pub fn pin(self) -> &'static str {
+        match self {
+            Control::Areset => "ARESET",
+            Control::Pfdena => "PFDENA",
+        }
+    }
+}
+
 /// A PLL in use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pll {
@@ -237,7 +263,12 @@ impl PllDb {
         let bi = db
             .block_info(BLOCK_PLL)
             .context("asmdb has no PLL block info")?;
-        let bases: Vec<u32> = bi.block_lists.values().flatten().map(|&p| p & 0xffff).collect();
+        let bases: Vec<u32> = bi
+            .block_lists
+            .values()
+            .flatten()
+            .map(|&p| p & 0xffff)
+            .collect();
         ensure!(bases.len() == 4, "{} PLL instances", bases.len());
         let mut cff = HashMap::new();
         let mut core = HashMap::new();
@@ -256,7 +287,13 @@ impl PllDb {
     }
 
     /// `code`, LSB first, onto the CFF feature `key` of `site`.
-    fn put(&self, site: Site, key: (i32, i32), code: u32, out: &mut Vec<(PllBit, bool)>) -> Result<()> {
+    fn put(
+        &self,
+        site: Site,
+        key: (i32, i32),
+        code: u32,
+        out: &mut Vec<(PllBit, bool)>,
+    ) -> Result<()> {
         let bits = self
             .cff
             .get(&key)
@@ -268,7 +305,10 @@ impl PllDb {
         );
         let base = self.bases[site.instance()];
         for (i, &b) in bits.iter().enumerate() {
-            ensure!(b as u32 >> 24 == 0xa0, "PLL feature {key:?}: bit {b:#x} is not CFF");
+            ensure!(
+                b as u32 >> 24 == 0xa0,
+                "PLL feature {key:?}: bit {b:#x} is not CFF"
+            );
             let k = base + (b as u32 & 0xff_ffff);
             out.push((PllBit::Rep(cff_bit(k)?), code >> i & 1 == 1));
         }
@@ -276,17 +316,37 @@ impl PllDb {
     }
 
     /// One-hot `index` of the instance's path of core feature `key`.
-    fn put_core(&self, site: Site, key: (i32, i32), code: u32, out: &mut Vec<(PllBit, bool)>) -> Result<()> {
+    fn put_core(
+        &self,
+        site: Site,
+        key: (i32, i32),
+        code: u32,
+        out: &mut Vec<(PllBit, bool)>,
+    ) -> Result<()> {
         let f = self
             .core
             .get(&key)
             .with_context(|| format!("asmdb has no PLL feature {key:?}"))?;
-        let bits = f.paths[site.instance()].first().context("PLL core feature without a mux")?;
+        let bits = f.paths[site.instance()]
+            .first()
+            .context("PLL core feature without a mux")?;
         for (i, &b) in bits.iter().enumerate() {
             ensure!(b >= 0, "PLL feature {key:?}: no core bit");
             out.push((PllBit::Core(b as u32), code >> i & 1 == 1));
         }
         Ok(())
+    }
+
+    /// The LAB lines of the PLL tile a control input's source mux takes.
+    pub fn control_sources(&self, site: Site, input: Control) -> Result<Vec<usize>> {
+        let f = &self.core[&(input.arch(), -1)];
+        let aux = f
+            .aux
+            .as_ref()
+            .context("PLL control input without a source map")?;
+        Ok((0..aux.len())
+            .filter(|&l| aux[l] >= 0 && f.source_bits(site.instance(), l).is_ok())
+            .collect())
     }
 
     pub fn bits(&self, p: &Pll) -> Result<Vec<(PllBit, bool)>> {
@@ -295,7 +355,12 @@ impl PllDb {
         let s = p.site;
         let mut out = Vec::new();
         let count = |x: u8| u32::from(x) % 16;
-        for f in [ENABLE_PLL, USE_ENABLE_PIN, GLOCK_COUNTER_ENABLE, LOCK_SEL_GATE_CONF_DONE] {
+        for f in [
+            ENABLE_PLL,
+            USE_ENABLE_PIN,
+            GLOCK_COUNTER_ENABLE,
+            LOCK_SEL_GATE_CONF_DONE,
+        ] {
             self.put(s, (f, -1), 1, &mut out)?;
         }
         self.put(s, (M_HIGH, -1), count(c.m.high), &mut out)?;
@@ -350,7 +415,12 @@ impl PllDb {
         self.put(s, (LOCK_WINDOW, -1), lock, &mut out)?;
         self.put(s, (LOCK_WINDOW_FB, -1), lock, &mut out)?;
         self.put(s, (LOCK_MODE, -1), 3, &mut out)?;
-        self.put(s, (CHARGE_PUMP, -1), charge_pump_code(l.charge_pump)?, &mut out)?;
+        self.put(
+            s,
+            (CHARGE_PUMP, -1),
+            charge_pump_code(l.charge_pump)?,
+            &mut out,
+        )?;
         self.put(s, (LOOP_R, -1), loop_r_code(l.filter_r_tenths)?, &mut out)?;
         self.put(s, (LOOP_C, -1), loop_c_code(l.filter_c)?, &mut out)?;
         self.put(s, (VCO_DIV2, -1), u32::from(c.vco_div2), &mut out)?;
@@ -358,16 +428,21 @@ impl PllDb {
         self.put(s, (USAGE_MODE, -1), u32::from(normal), &mut out)?;
         // The feedback path's compensation delay: 44 in normal mode (the
         // atom's pll_compensation_delay 5370 ps), none without.
-        self.put(s, (FB_COMP_DELAY, -1), if normal { 44 } else { 0 }, &mut out)?;
+        self.put(
+            s,
+            (FB_COMP_DELAY, -1),
+            if normal { 44 } else { 0 },
+            &mut out,
+        )?;
         self.put_core(s, (FEEDBACK_SELECT, -1), u32::from(normal), &mut out)?;
         ensure!(p.inclk_pin < 4, "PLL clock pin index {}", p.inclk_pin);
         self.put_core(s, (CLOCK_SELECT, 0), 1 << p.inclk_pin, &mut out)?;
         // Control inputs from the core: a LAB line through a two-level
         // source mux, source = line (p2: areset on line 6, p13: pfdena on
         // line 35).
-        for (key, line) in [(ARESET_INPUT, p.areset), (PFD_ENA_INPUT, p.pfdena)] {
+        for (c, line) in [(Control::Areset, p.areset), (Control::Pfdena, p.pfdena)] {
             if let Some(line) = line {
-                let f = &self.core[&(key, -1)];
+                let f = &self.core[&(c.arch(), -1)];
                 for b in f.source_bits(s.instance(), line as usize)? {
                     out.push((PllBit::Core(b as u32), true));
                 }
@@ -391,7 +466,11 @@ fn loop_r_code(tenths: u16) -> Result<u32> {
     Ok(match tenths {
         10 => 0,
         25 => 3,
-        _ => bail!("PLL loop filter R {}.{} kΩ: code not known", tenths / 10, tenths % 10),
+        _ => bail!(
+            "PLL loop filter R {}.{} kΩ: code not known",
+            tenths / 10,
+            tenths % 10
+        ),
     })
 }
 

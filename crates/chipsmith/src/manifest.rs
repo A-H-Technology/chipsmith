@@ -748,7 +748,8 @@ mod tests {
         );
 
         let two = format!("{DE2}\n[clocks]\nCLOCK_50 = \"50 MHz\"\n\"LEDR[0]\" = \"1 MHz\"\n");
-        let Target::Ep2c35f672c6 { clocks, .. } = Manifest::parse(&two, &dir).unwrap().target else {
+        let Target::Ep2c35f672c6 { clocks, .. } = Manifest::parse(&two, &dir).unwrap().target
+        else {
             unreachable!()
         };
         assert_eq!(clocks.len(), 2);

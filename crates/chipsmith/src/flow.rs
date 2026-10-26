@@ -1436,10 +1436,7 @@ mod tests {
         let Step::PlaceRoute { pins, clocks, .. } = &plan.steps[2] else {
             panic!("{:?} is not place and route", plan.steps[2]);
         };
-        assert_eq!(
-            clocks.get("CLOCK_50").map(|f| f.hz()),
-            Some(50_000_000)
-        );
+        assert_eq!(clocks.get("CLOCK_50").map(|f| f.hz()), Some(50_000_000));
         let pins: Vec<(&str, &str)> = pins
             .iter()
             .map(|(a, b)| (a.as_str(), b.pin.as_str()))

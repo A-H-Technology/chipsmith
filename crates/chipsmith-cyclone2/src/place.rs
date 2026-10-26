@@ -585,9 +585,11 @@ fn fixed_cells(
             Kind::Ibuf => false,
             Kind::Obuf | Kind::Iobuf => true,
             Kind::Lut | Kind::Ff | Kind::ClkCtrl | Kind::M4k => continue,
-            // One of each per device, at a fixed bel.
+            // One of each per device, at a fixed bel; PLLs come below.
             Kind::Hard(b) => {
-                let ((x, y), bel) = b.bel();
+                let Some(((x, y), bel)) = b.bel() else {
+                    continue;
+                };
                 let tile = db.tile_index(x, y).context("hard block off chip")?;
                 ensure!(
                     db.tile_type(tile).bels.contains_key(bel),
@@ -645,16 +647,87 @@ fn fixed_cells(
         out.insert(i, (tile, bel.to_string()));
     }
 
-    // INCLK node of every clock control.
+    // INCLK node of every clock control, and of every PLL.
     let mut inclk: HashMap<NodeId, (u32, String)> = HashMap::default();
+    let mut pll_inclk: HashMap<NodeId, (u32, String)> = HashMap::default();
     for tile in 0..db.width * db.height {
         for (name, bel) in &db.tile_type(tile).bels {
-            if bel.ty == "CLKCTRL" {
-                if let Some(&w) = bel.pins.get("INCLK") {
-                    inclk.insert(db.node(tile, w), (tile, name.clone()));
+            let to = match bel.ty.as_str() {
+                "CLKCTRL" => &mut inclk,
+                "PLL" => &mut pll_inclk,
+                _ => continue,
+            };
+            if let Some(&w) = bel.pins.get("INCLK") {
+                to.insert(db.node(tile, w), (tile, name.clone()));
+            }
+        }
+    }
+    // The output node of a fixed cell's port.
+    let out_node =
+        |out: &HashMap<usize, (u32, String)>, cell: usize, port: Port| -> Result<NodeId> {
+            let (tile, bel) = &out[&cell];
+            let pin = match port {
+                Port::Hard(p) => p.name(),
+                _ => "COMBOUT",
+            };
+            let w = *db.tile_type(*tile).bels[bel]
+                .pins
+                .get(pin)
+                .with_context(|| format!("bel {bel} has no pin {pin}"))?;
+            Ok(db.node(*tile, w))
+        };
+    // The nearest free bel among `targets` that `start` reaches through
+    // dedicated wiring (a few hops), as nextpnr's packer picks a clock
+    // control for a clock pin.
+    let nearest = |out: &HashMap<usize, (u32, String)>,
+                   targets: &HashMap<NodeId, (u32, String)>,
+                   start: NodeId|
+     -> Option<(u32, String)> {
+        let mut seen = HashSet::from_iter([start]);
+        let mut queue = VecDeque::from([(start, 0)]);
+        while let Some((n, depth)) = queue.pop_front() {
+            if let Some(cc) = targets.get(&n) {
+                if !out.values().any(|v| v == cc) {
+                    return Some(cc.clone());
+                }
+            }
+            if depth > 8 {
+                continue;
+            }
+            for e in db.downhill(n) {
+                if seen.insert(e.dst) {
+                    queue.push_back((e.dst, depth + 1));
                 }
             }
         }
+        None
+    };
+    // PLLs: the one whose input the clock pin reaches (each PLL takes the
+    // dedicated clock pins of one side of the chip).
+    for (i, c) in design
+        .cells
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.kind == Kind::Hard(hard::Block::Pll))
+    {
+        let net = c
+            .net(Port::Hard(hard::Pin::Inclk))
+            .with_context(|| format!("{}: PLL INCLK unconnected", c.name))?;
+        let pin = design.driver[net as usize]
+            .filter(|&d| design.cells[d].kind == Kind::Ibuf)
+            .with_context(|| {
+                format!(
+                    "{}: a PLL's INCLK must come straight from a clock pin",
+                    c.name
+                )
+            })?;
+        let site = nearest(&out, &pll_inclk, out_node(&out, pin, Port::Combout)?).with_context(|| {
+            format!(
+                "{}: no free PLL reachable from {}: a PLL takes a dedicated clock pin of its side (CLOCK_50, PIN_N2, feeds PLL_1)",
+                c.name, design.cells[pin].name
+            )
+        })?;
+        out.insert(i, site);
     }
     // Clocks from pins first: each takes the nearest free clock control
     // its pin reaches, as nextpnr's packer picks it. Clocks from the core
@@ -675,38 +748,28 @@ fn fixed_cells(
             Ok((i, d))
         })
         .collect::<Result<_>>()?;
-    let (from_pins, from_core): (Vec<_>, Vec<_>) = clkctrls
-        .into_iter()
-        .partition(|&(_, d)| design.cells[d].kind == Kind::Ibuf);
-    for (i, pin) in from_pins {
-        let (tile, bel) = &out[&pin];
-        let w = db.tile_type(*tile).bels[bel].pins["COMBOUT"];
-        let start = db.node(*tile, w);
-        let mut seen = HashSet::from_iter([start]);
-        let mut queue = VecDeque::from([(start, 0)]);
-        let mut found = None;
-        while let Some((n, depth)) = queue.pop_front() {
-            if let Some(cc) = inclk.get(&n) {
-                if !out.values().any(|v| v == cc) {
-                    found = Some(cc.clone());
-                    break;
-                }
-            }
-            if depth > 8 {
-                continue;
-            }
-            for e in db.downhill(n) {
-                if seen.insert(e.dst) {
-                    queue.push_back((e.dst, depth + 1));
-                }
-            }
-        }
+    let dedicated = |d: usize| {
+        matches!(
+            design.cells[d].kind,
+            Kind::Ibuf | Kind::Hard(hard::Block::Pll)
+        )
+    };
+    let (from_pins, from_core): (Vec<_>, Vec<_>) =
+        clkctrls.into_iter().partition(|&(_, d)| dedicated(d));
+    for (i, d) in from_pins {
+        let net = design.cells[i].net(Port::Inclk).unwrap();
+        let port = design.cells[d]
+            .connections()
+            .find(|&(_, n)| n == net)
+            .map(|(p, _)| p)
+            .context("clock control input")?;
+        let found = nearest(&out, &inclk, out_node(&out, d, port)?);
         out.insert(
             i,
             found.with_context(|| {
                 format!(
                     "no free clock control reachable from {}",
-                    design.cells[pin].name
+                    design.cells[d].name
                 )
             })?,
         );
@@ -729,12 +792,7 @@ fn fixed_cells(
                 (x as i64 - target.0).abs() + (y as i64 - target.1).abs()
             })
             .cloned()
-            .with_context(|| {
-                format!(
-                    "{}: all 16 global clocks are taken",
-                    design.cells[i].name
-                )
-            })?;
+            .with_context(|| format!("{}: all 16 global clocks are taken", design.cells[i].name))?;
         out.insert(i, free);
     }
     Ok(out)

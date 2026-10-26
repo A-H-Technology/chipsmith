@@ -8,6 +8,9 @@
 //! Their bels sit at fixed places in cyclone2-re's chip database (its
 //! `hard.rs`): the packer passes them through, the placer pins them there,
 //! the router reaches their pins like any other bel's.
+//!
+//! The PLLs (`CY2_PLL`, `crate::pll`) are hard blocks too, but four of them:
+//! the placer picks the one the input clock's pin feeds.
 
 use std::fmt;
 
@@ -15,15 +18,17 @@ use std::fmt;
 pub enum Block {
     Jtag,
     Asmi,
+    Pll,
 }
 
 impl Block {
-    pub const ALL: [Block; 2] = [Block::Jtag, Block::Asmi];
+    pub const ALL: [Block; 3] = [Block::Jtag, Block::Asmi, Block::Pll];
 
     pub fn cell_type(self) -> &'static str {
         match self {
             Block::Jtag => "CY2_JTAG",
             Block::Asmi => "CY2_ASMI",
+            Block::Pll => "CY2_PLL",
         }
     }
 
@@ -31,11 +36,13 @@ impl Block {
         Block::ALL.into_iter().find(|b| b.cell_type() == ty)
     }
 
-    /// The chip database's tile (logic tile X = 2 * Quartus X + 1) and bel.
-    pub fn bel(self) -> ((u32, u32), &'static str) {
+    /// The chip database's tile (logic tile X = 2 * Quartus X + 1) and bel
+    /// of a block there is one of; none for the PLLs.
+    pub fn bel(self) -> Option<((u32, u32), &'static str)> {
         match self {
-            Block::Jtag => ((13, 22), "JTAG"),
-            Block::Asmi => ((13, 20), "ASMI"),
+            Block::Jtag => Some(((13, 22), "JTAG")),
+            Block::Asmi => Some(((13, 20), "ASMI")),
+            Block::Pll => None,
         }
     }
 
@@ -54,6 +61,7 @@ impl Block {
                 Usr1user,
             ],
             Block::Asmi => &[Dclkin, Scein, Sdoin, Data0out],
+            Block::Pll => &[Inclk, Areset, Pfdena, Clk0, Clk1, Clk2, Locked],
         }
     }
 }
@@ -75,6 +83,13 @@ pub enum Pin {
     Scein,
     Sdoin,
     Data0out,
+    Inclk,
+    Areset,
+    Pfdena,
+    Clk0,
+    Clk1,
+    Clk2,
+    Locked,
 }
 
 impl Pin {
@@ -94,6 +109,13 @@ impl Pin {
             Scein => "SCEIN",
             Sdoin => "SDOIN",
             Data0out => "DATA0OUT",
+            Inclk => "INCLK",
+            Areset => "ARESET",
+            Pfdena => "PFDENA",
+            Clk0 => "CLK0",
+            Clk1 => "CLK1",
+            Clk2 => "CLK2",
+            Locked => "LOCKED",
         }
     }
 
@@ -106,7 +128,16 @@ impl Pin {
     }
 
     pub fn is_output(self) -> bool {
-        !matches!(self, Pin::Tdouser | Pin::Dclkin | Pin::Scein | Pin::Sdoin)
+        !matches!(
+            self,
+            Pin::Tdouser
+                | Pin::Dclkin
+                | Pin::Scein
+                | Pin::Sdoin
+                | Pin::Inclk
+                | Pin::Areset
+                | Pin::Pfdena
+        )
     }
 }
 
