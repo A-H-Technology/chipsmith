@@ -240,6 +240,27 @@ fn clocks(json: &Value) -> Result<Vec<(u64, Clock)>> {
                         .to_string(),
                 )
             }
+            Some((dn, d, p)) if d["type"] == "CY2_PLL" => {
+                let params: HashMap<String, String> = d["parameters"]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                    .collect();
+                let used = [0, 1, 2].map(|k| net_of(d, &format!("CLK{k}")).is_some());
+                let output: u8 = p
+                    .strip_prefix("CLK")
+                    .and_then(|k| k.parse().ok())
+                    .with_context(|| format!("{dn}.{p} clocks {name}"))?;
+                let solved = crate::pll::Request::from_params(&params, used)
+                    .and_then(|r| r.solve())
+                    .with_context(|| dn.clone())?;
+                ClockSource::Pll {
+                    cell: dn.clone(),
+                    output,
+                    hz: solved.hz[output as usize].context("PLL output without a counter")?,
+                }
+            }
             _ => ClockSource::Core,
         };
         out.push((

@@ -275,8 +275,15 @@ fn read_design(json: &Value) -> Result<Design> {
                 .and_then(|a| a.first())
                 .and_then(Value::as_u64)
             {
-                let p =
-                    Port::parse(port).with_context(|| format!("{name}: unknown port {port}"))?;
+                // A hard block's pins first: a PLL's CLK0 is no M4K's.
+                let hard_pin = match kind {
+                    Kind::Hard(b) => hard::Pin::parse(port).filter(|p| b.pins().contains(p)),
+                    _ => None,
+                };
+                let p = hard_pin
+                    .map(Port::Hard)
+                    .or_else(|| Port::parse(port))
+                    .with_context(|| format!("{name}: unknown port {port}"))?;
                 let next = net_ids.len() as NetId;
                 let id = *net_ids.entry(net).or_insert(next);
                 match (p.index(), p) {
@@ -711,7 +718,7 @@ fn fixed_cells(
         .filter(|(_, c)| c.kind == Kind::Hard(hard::Block::Pll))
     {
         let net = c
-            .net(Port::Hard(hard::Pin::Inclk))
+            .net(Port::Inclk)
             .with_context(|| format!("{}: PLL INCLK unconnected", c.name))?;
         let pin = design.driver[net as usize]
             .filter(|&d| design.cells[d].kind == Kind::Ibuf)

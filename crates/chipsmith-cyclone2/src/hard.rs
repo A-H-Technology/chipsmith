@@ -61,7 +61,8 @@ impl Block {
                 Usr1user,
             ],
             Block::Asmi => &[Dclkin, Scein, Sdoin, Data0out],
-            Block::Pll => &[Inclk, Areset, Pfdena, Clk0, Clk1, Clk2, Locked],
+            // INCLK is the netlist's clock-input port, as on a clock control.
+            Block::Pll => &[Areset, Pfdena, Clk0, Clk1, Clk2, Locked],
         }
     }
 }
@@ -83,7 +84,6 @@ pub enum Pin {
     Scein,
     Sdoin,
     Data0out,
-    Inclk,
     Areset,
     Pfdena,
     Clk0,
@@ -109,7 +109,6 @@ impl Pin {
             Scein => "SCEIN",
             Sdoin => "SDOIN",
             Data0out => "DATA0OUT",
-            Inclk => "INCLK",
             Areset => "ARESET",
             Pfdena => "PFDENA",
             Clk0 => "CLK0",
@@ -130,13 +129,7 @@ impl Pin {
     pub fn is_output(self) -> bool {
         !matches!(
             self,
-            Pin::Tdouser
-                | Pin::Dclkin
-                | Pin::Scein
-                | Pin::Sdoin
-                | Pin::Inclk
-                | Pin::Areset
-                | Pin::Pfdena
+            Pin::Tdouser | Pin::Dclkin | Pin::Scein | Pin::Sdoin | Pin::Areset | Pin::Pfdena
         )
     }
 }
