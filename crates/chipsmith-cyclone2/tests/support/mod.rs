@@ -489,6 +489,9 @@ fn model_blocks(m: &mut Module, mems: &BTreeMap<String, MemInfo>) -> Result<(), 
                 }
             }
         }
+        let rom = [(Side::A, "A_WE"), (Side::B, "B_WE")]
+            .iter()
+            .all(|&(side, we)| !shape.writable(side) || bit(we, SigBit::ZERO) == SigBit::ZERO);
         let mut content: BTreeMap<usize, SigBit> = BTreeMap::new();
         for (&l, &(word, k)) in &held {
             let want = info.init.0[word * w + k];
@@ -503,8 +506,14 @@ fn model_blocks(m: &mut Module, mems: &BTreeMap<String, MemInfo>) -> Result<(), 
                     c.name
                 ));
             }
-            let q = SigBit::Net(g.m.new_net());
-            inits.push((q, have));
+            // A block that never writes holds constants.
+            let q = if rom {
+                SigBit::Const(have)
+            } else {
+                let q = SigBit::Net(g.m.new_net());
+                inits.push((q, have));
+                q
+            };
             content.insert(l, q);
             words
                 .entry(id.to_owned())
@@ -588,7 +597,7 @@ fn model_blocks(m: &mut Module, mems: &BTreeMap<String, MemInfo>) -> Result<(), 
             .iter()
             .find(|(_, p)| p.we != SigBit::ZERO)
             .map_or(0, |(_, p)| p.clock);
-        for (&l, &q) in &content {
+        for (&l, &q) in content.iter().filter(|_| !rom) {
             let mut d = q;
             let mut hits = Vec::new();
             for (i, (_, p)) in ports.iter().enumerate() {
