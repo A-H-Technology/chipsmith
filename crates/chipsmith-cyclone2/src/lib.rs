@@ -9,5 +9,6 @@ pub mod pack;
 pub mod persist;
 pub mod pin;
 pub mod place;
+pub mod pll;
 pub mod route;
 pub mod synth;

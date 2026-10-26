@@ -215,7 +215,7 @@ impl<'a> Router<'a> {
 
     /// Net arcs of the current routing, for timing analysis: every routed
     /// sink in net and sink order, then the unrouted direct ones.
-    fn net_arcs(nets: &[NetReq], trees: &[Tree]) -> Vec<Arc> {
+    pub fn net_arcs(nets: &[NetReq], trees: &[Tree]) -> Vec<Arc> {
         let direct = nets.iter().flat_map(|net| {
             net.direct_ports.iter().map(|&to| Arc {
                 from: net.driver,

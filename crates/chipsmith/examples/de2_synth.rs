@@ -112,7 +112,7 @@ fn main() -> Result<()> {
     let manifest = Manifest::load(&project)?;
     let Target::Ep2c35f672c6 {
         pins,
-        clock,
+        clocks,
         unused_pins,
     } = &manifest.target
     else {
@@ -220,8 +220,8 @@ fn main() -> Result<()> {
     let rbf = dir.join(format!("{}.rbf", manifest.name));
     bitstream::pack_file(&db, &routed, &rbf)?;
     let fmax = 1e6 / f64::from(r.critical);
-    let slack = clock
-        .as_ref()
+    let slack = clocks
+        .first()
         .map(|c| c.frequency.period_ns() - f64::from(r.critical) / 1000.0);
     println!(
         "{} ({}): synthesis {:.1} s; {} LUTs, {} registers, {} LEs, {} carry chains, {} M4Ks; critical path {:.2} ns, Fmax {:.1} MHz{}; {}",
