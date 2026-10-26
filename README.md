@@ -18,7 +18,7 @@ no nextpnr, no cram. GHDL translates VHDL in front of it.
 
 | device | board | build | on hardware |
 |---|---|---|---|
-| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis): LUT/carry/register logic, M4K RAM blocks (below), global clocks from pins, 3.3-V LVTTL pins: input, output, tri-state, bidirectional, open drain | yes (2026-10-25, chipsmith's own synthesis end to end, checked over JTAG: examples/de2-jtag-counter reads back `"DE2!"` at 50.00 MHz after a JTAG load and after `flash --persist` (loader synthesized by chipsmith too, EPCS written, verified and reloaded from); picorv32 with the same readback added runs its loop at 3.33 MHz. 2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
+| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis): LUT/carry/register logic, M4K RAM blocks (below), global clocks from pins, 3.3-V LVTTL pins: input, output, tri-state, bidirectional, open drain | yes (2026-10-25, chipsmith's own synthesis end to end, checked over JTAG: examples/de2-jtag-counter reads back `"DE2!"` at 50.00 MHz after a JTAG load and after `flash --persist` (loader synthesized by chipsmith too, EPCS written, verified and reloaded from; 2026-10-26 also after a power cycle); picorv32 with the same readback added runs its loop at 3.33 MHz. 2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
 | xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes: what yosys `synth_xilinx` and openXC7's nextpnr's packer handle, LVCMOS33 pins; chipsmith places LUT/register/carry logic, RAM32Ms, pins, BUFGs, BSCANs and the PS7 and routes the interconnect (below) | yes (2026-10-24: zybo-jtag-counter placed and routed by chipsmith, read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga) |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
@@ -489,7 +489,9 @@ share chipsmith's own netlist IR, not Verilog.
      was saved before anything was erased. Writing it back
      (`chipsmith flash-restore`, hidden) brought the factory design up
      again from flash (USERCODE 0x0042b391), so the factory image is
-     restorable. A real power cycle is still to be watched.
+     restorable. After a real power cycle (2026-10-26) the board came up
+     from the EPCS by itself: examples/de2-jtag-counter read back `"DE2!"`
+     counting at 50.00 MHz over JTAG.
    - Zybo (done, 2026-10-24, through Linux). With NixOS on the board,
      nixos-fpga's `hardware.fpga.bitstream` loads the build's `.bin` at
      every boot ("Loading a Zybo from its own Linux", above), so
