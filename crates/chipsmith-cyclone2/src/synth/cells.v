@@ -20,17 +20,28 @@ endmodule
 module LCELL_FF (input DATAIN, input CLK, input ENA, input ACLR, input SCLR, output REGOUT);
 endmodule
 
+// Pin buffers. Each has its I/O cell's registers, rising-edge, no enable
+// or clear: INPUT_REGISTER samples the pad on INCLK into REGOUT;
+// OUTPUT_REGISTER samples DATAOUT and OE_REGISTER samples OE on OUTCLK, and
+// the pad takes what they hold. A register is used when its parameter is
+// "low" or "high", its power-up value; "none" (the default) bypasses it.
 (* blackbox *)
-module CY2_IBUF (input PAD, output COMBOUT);
+module CY2_IBUF (input PAD, input INCLK, output COMBOUT, output REGOUT);
+  parameter INPUT_REGISTER = "none";
 endmodule
 
 (* blackbox *)
-module CY2_OBUF (input DATAOUT, output PAD);
+module CY2_OBUF (input DATAOUT, input OUTCLK, output PAD);
+  parameter OUTPUT_REGISTER = "none";
 endmodule
 
 // Tri-state output or bidir: PAD = OE ? DATAOUT : 1'bz, COMBOUT = PAD.
 (* blackbox *)
-module CY2_IOBUF (input DATAOUT, input OE, output COMBOUT, inout PAD);
+module CY2_IOBUF (input DATAOUT, input OE, input INCLK, input OUTCLK,
+                  output COMBOUT, output REGOUT, inout PAD);
+  parameter INPUT_REGISTER = "none";
+  parameter OUTPUT_REGISTER = "none";
+  parameter OE_REGISTER = "none";
 endmodule
 
 // M4K RAM block (m4k.rs builds it from a memory). MODE "SINGLE": port A

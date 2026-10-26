@@ -13,12 +13,16 @@ mod ff;
 mod io;
 mod m4k;
 
+use std::collections::BTreeMap;
+
 use anyhow::{bail, Context, Result};
 use chipsmith_netlist::{attr, is_set, CellKind, Design, Module};
 use chipsmith_synth::rewrite::define_inits;
 use chipsmith_synth::{
     alumacc, clean, divmod, fsm, lutmap, memory, opt, techmap, tribuf, undef, wreduce,
 };
+
+use crate::pin::IoRegisters;
 
 /// What each stage left, for checking stages one at a time.
 pub trait Observer {
@@ -41,6 +45,9 @@ pub struct Stats {
     /// Registers with an asynchronous load or set, emulated with a latch
     /// (counted in `registers` too).
     pub emulated: usize,
+    /// Registers moved into pins' I/O cells (copied, for an output or OE
+    /// register whose original something else reads).
+    pub io_registers: usize,
     /// Carry chains (adders, subtractors, comparisons).
     pub chains: usize,
     pub m4ks: usize,
@@ -53,12 +60,20 @@ pub struct Synthesis {
 }
 
 /// Synthesizes the design's top module (flattened first: instances of the
-/// design's own modules are inlined, device cells stay).
-pub fn synthesize(design: Design) -> Result<Synthesis> {
-    synthesize_observed(design, &mut ())
+/// design's own modules are inlined, device cells stay). `io_registers`
+/// names, per port bit (`LEDR[0]`), the I/O-cell registers to fill.
+pub fn synthesize(
+    design: Design,
+    io_registers: &BTreeMap<String, IoRegisters>,
+) -> Result<Synthesis> {
+    synthesize_observed(design, io_registers, &mut ())
 }
 
-pub fn synthesize_observed(mut design: Design, obs: &mut dyn Observer) -> Result<Synthesis> {
+pub fn synthesize_observed(
+    mut design: Design,
+    io_registers: &BTreeMap<String, IoRegisters>,
+    obs: &mut dyn Observer,
+) -> Result<Synthesis> {
     chipsmith_synth::flatten::flatten(&mut design)?;
     let mut tops: Vec<Module> = design
         .modules
@@ -69,14 +84,19 @@ pub fn synthesize_observed(mut design: Design, obs: &mut dyn Observer) -> Result
         1 => tops.pop().expect("one"),
         n => bail!("expected one top module, found {n}"),
     };
-    let stats = run(&mut m, obs).with_context(|| format!("synthesizing {}", m.name))?;
+    let stats =
+        run(&mut m, io_registers, obs).with_context(|| format!("synthesizing {}", m.name))?;
     Ok(Synthesis {
         design: Design { modules: vec![m] },
         stats,
     })
 }
 
-fn run(m: &mut Module, obs: &mut dyn Observer) -> Result<Stats> {
+fn run(
+    m: &mut Module,
+    io_registers: &BTreeMap<String, IoRegisters>,
+    obs: &mut dyn Observer,
+) -> Result<Stats> {
     if let Some(c) = m.cells.iter().find(|c| match &c.kind {
         CellKind::Other(g) => !g.ty.starts_with('$') && !is_device_cell(&g.ty),
         _ => false,
@@ -131,6 +151,7 @@ fn run(m: &mut Module, obs: &mut dyn Observer) -> Result<Stats> {
     opt::opt_seq(m, removable)?;
     obs.stage("gates", m);
 
+    let io_registers = io::registers(m, io_registers)?;
     let ff::Counts {
         registers,
         latches,
@@ -150,6 +171,7 @@ fn run(m: &mut Module, obs: &mut dyn Observer) -> Result<Stats> {
         registers,
         latches,
         emulated,
+        io_registers,
         chains,
         m4ks,
     })

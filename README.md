@@ -18,7 +18,7 @@ no nextpnr, no cram. GHDL translates VHDL in front of it.
 
 | device | board | build | on hardware |
 |---|---|---|---|
-| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis): LUT/carry/register logic, M4K RAM blocks (below), global clocks from pins, 3.3-V LVTTL pins: input, output, tri-state, bidirectional, open drain | yes (2026-10-25, chipsmith's own synthesis end to end, checked over JTAG: examples/de2-jtag-counter reads back `"DE2!"` at 50.00 MHz after a JTAG load and after `flash --persist` (loader synthesized by chipsmith too, EPCS written, verified and reloaded from); picorv32 with the same readback added runs its loop at 3.33 MHz. 2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
+| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis): LUT/carry/register logic, M4K RAM blocks (below), global clocks from pins; pins input, output, tri-state, bidirectional, open drain, at 3.3-V LVTTL (any current) or LVCMOS or 2.5-V inputs, with pull-up or bus hold and I/O-cell registers (Manifest, below) | yes (2026-10-25, chipsmith's own synthesis end to end, checked over JTAG: examples/de2-jtag-counter reads back `"DE2!"` at 50.00 MHz after a JTAG load and after `flash --persist` (loader synthesized by chipsmith too, EPCS written, verified and reloaded from; 2026-10-26 also after a power cycle); picorv32 with the same readback added runs its loop at 3.33 MHz. 2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
 | xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes: what yosys `synth_xilinx` and openXC7's nextpnr's packer handle, LVCMOS33 pins; chipsmith places LUT/register/carry logic, RAM32Ms, pins, BUFGs, BSCANs and the PS7 and routes the interconnect (below) | yes (2026-10-24: zybo-jtag-counter placed and routed by chipsmith, read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga) |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
@@ -53,6 +53,28 @@ driving pin on a dedicated clock input. With every switch down on the DE2
 LEDR[4] and LEDG[1] follow the open drain, the released pins read 1 and
 LEDG[0] stays off. Don't load it with SW[4] up and the SRAM driving: the
 FPGA then drives SRAM_DQ too.
+
+`examples/de2-io` sets its pins up from the manifest (Manifest, below):
+the high switches through input registers onto five red LEDs through
+output registers, green LEDs at 4 mA through output registers (one
+powering up lit, behind an inverter), weak pull-ups and bus hold on
+expansion-header inputs shown on the LEDs, HEX0 at 3.3-V LVCMOS, the keys
+read as 2.5-V inputs, and GPIO_0[4] driven through its output and OE
+registers while KEY[0] is held, read back through its input register.
+Safe to load with nothing plugged into the GPIO_0 header: everything else
+it drives is an LED or the 7-segment digit. Not yet tried on the board.
+
+Pin settings are checked against Quartus the same way
+(`bench/quartus-validate.sh`, `bench/io-fuzz.py`), 2026-10-26: examples/de2-io
+and 12 random projects (`io-fuzz.py` seeds 1-12: 1,377 pins on all four
+sides, 777 I/O registers, 445 non-default LVTTL currents, 204 LVCMOS and 70
+2.5-V pins, 280 pull-ups, 233 bus holds, all three unused-pin modes), none
+of which any rule was fit on, assemble to the same RBF as Quartus: 13 of
+13. The DE2 examples that existed before (blinky-verilog, bidir, ram,
+ram_widths, ram-leds, de2-jtag-counter, picorv32) build to the same RBFs
+as before. The I/O registers' timing (`chipsmith-route`'s `timing.rs`) is
+quartus_sta's on de2-io, where the critical path now ends at GPIO_0[4]'s
+OE register: 16.29 ns of slack estimated, 15.67 ns in Quartus.
 
 M4K RAM blocks (4,608 bits each, 105 on the EP2C35) come from chipsmith's
 synthesis (`crates/chipsmith-cyclone2/src/synth/m4k.rs`, the rules and costs
@@ -100,7 +122,8 @@ designs itself, the RBFs no longer match the
 nextpnr's placement.
 
 The Cyclone II limits come from cyclone2-re's open flow: M4K RAM only in
-the shapes above, no multipliers or PLLs, no registered I/O, LVTTL only.
+the shapes above, no multipliers or PLLs, I/O registers without clock
+enables or clears, 3.3-V LVCMOS at its default current only.
 The timing model covers LE and register delays exactly and routing by
 per-element-type averages. M4K clock-to-output (3.33 ns) and setup are
 from one quartus_sta path each, and so is the M4K buffer's routing delay.
@@ -489,7 +512,9 @@ share chipsmith's own netlist IR, not Verilog.
      was saved before anything was erased. Writing it back
      (`chipsmith flash-restore`, hidden) brought the factory design up
      again from flash (USERCODE 0x0042b391), so the factory image is
-     restorable. A real power cycle is still to be watched.
+     restorable. After a real power cycle (2026-10-26) the board came up
+     from the EPCS by itself: examples/de2-jtag-counter read back `"DE2!"`
+     counting at 50.00 MHz over JTAG.
    - Zybo (done, 2026-10-24, through Linux). With NixOS on the board,
      nixos-fpga's `hardware.fpga.bitstream` loads the build's `.bin` at
      every boot ("Loading a Zybo from its own Linux", above), so
@@ -739,6 +764,54 @@ slack after routing and doesn't fail on it: the estimate is not sign-off (yosys-
 placer and router stay timing-driven against the critical path itself,
 whatever the clock. Without `[clocks]`, nextpnr times against its default
 12 MHz and Cyclone II reports no slack.
+
+A DE2 pin, or a whole bus, can be a table with its I/O settings
+(`crates/chipsmith-cyclone2/src/pin.rs`):
+
+```toml
+[target]
+device = "EP2C35F672C6"
+unused_pins = "pull-up"    # "tri-stated" (default), "pull-up" or "bus-hold"
+
+[pins]
+LEDG = { pins = ["PIN_AE22", "PIN_AF22"], drive = "4 mA", registers = ["output"] }
+GPIO_IO = { pin = "PIN_F24", pull = "up", registers = ["input", "output", "output-enable"] }
+HEX0 = { pins = ["PIN_AF10", "PIN_AB12"], standard = "3.3-V LVCMOS" }
+KEY = { pins = ["PIN_G26", "PIN_N23"], standard = "2.5 V" }
+```
+
+- `standard`: `"3.3-V LVTTL"` (the default), `"3.3-V LVCMOS"`, or `"2.5 V"`
+  for inputs. The DE2 powers all eight banks at 3.3 V, and Quartus takes
+  a 2.5-V input in a 3.3-V bank but nothing at 1.8 or 1.5 V (error
+  169029), so `"1.8 V"` and `"1.5 V"` are errors that name the VCCIO they
+  would need, and a 2.5-V port that drives is an error once synthesis
+  knows its direction.
+- `drive`: 3.3-V LVTTL's current, `"4 mA"` to `"24 mA"` (default) in 4 mA
+  steps. 3.3-V LVCMOS has its default current only (12 mA on row IOEs,
+  24 on column IOEs): cyclone2-re hasn't decoded its other drive codes.
+- `pull`: `"up"` (the weak pull-up) or `"bus-hold"`; one key, so a pin
+  can't ask for both. Dedicated clock inputs have neither.
+- `registers`: the I/O-cell registers synthesis moves the design's
+  registers into, any of `"input"`, `"output"`, `"output-enable"`.
+  Quartus' `FAST_INPUT_REGISTER` and friends.
+- `unused_pins`: what pins the design doesn't use do. Quartus' "as output
+  driving ground" isn't offered: on the DE2 it would short every chip
+  output wired to an unused FPGA pin.
+
+I/O registers are opt-in, not automatic. Quartus moves registers into
+I/O cells on its own only when that helps the timing it is given for the
+pins (`OPTIMIZE_IOC_REGISTER_PLACEMENT_FOR_TIMING`); chipsmith has no pin
+timing constraints, so it can't tell. A register in the I/O cell fixes the
+pin's clock-to-output or setup time but moves the register to the chip's
+edge, which lengthens the path from the logic that feeds it; only the
+designer knows which side matters. A register moves when it is a plain
+rising-edge register (no enable, no reset): an input register is the one
+sampling the pin, moved; an output or OE register is a copy of the one
+driving the pin's data or enable, so a register several pins share (a
+bus's enable) gets one copy per pin, and the original stays if logic reads
+it. Its power-up value goes with it. A request synthesis can't satisfy is
+an error that says why. The timing report then times the paths into and
+out of those registers; a pin without them stays untimed.
 
 Unknown keys are errors, so a misspelt table can't be silently ignored.
 

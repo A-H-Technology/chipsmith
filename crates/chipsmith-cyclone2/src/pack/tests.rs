@@ -188,7 +188,10 @@ fn an_inverter_folds_into_lut_masks_and_the_pin() {
         cell(&nl, "led_buf").kind,
         Kind::Obuf {
             port: Some("LEDR".into()),
-            data: IoeIn::Signal { invert: true }
+            data: IoeIn::Signal {
+                invert: true,
+                reg: None
+            }
         }
     );
 }
@@ -378,7 +381,11 @@ fn tri_state_and_bidir_pins_fold_constants_and_inverters_into_the_ioe() {
         Kind::Iobuf {
             port: Some("IO".into()),
             data: IoeIn::Const(false),
-            oe: IoeIn::Signal { invert: true },
+            oe: IoeIn::Signal {
+                invert: true,
+                reg: None
+            },
+            in_reg: None,
         }
     );
     assert_eq!(net_name(&nl, "io_buf", Port::Oe).as_deref(), Some("sw"));
@@ -391,8 +398,12 @@ fn tri_state_and_bidir_pins_fold_constants_and_inverters_into_the_ioe() {
         cell(&nl, "t_buf").kind,
         Kind::Iobuf {
             port: Some("T".into()),
-            data: IoeIn::Signal { invert: false },
+            data: IoeIn::Signal {
+                invert: false,
+                reg: None
+            },
             oe: IoeIn::Const(true),
+            in_reg: None,
         }
     );
     assert_eq!(cell(&nl, "t_buf").net(Port::Combout), None);
