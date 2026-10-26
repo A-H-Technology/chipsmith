@@ -99,18 +99,49 @@ quartus_sta's on de2-io, where the critical path now ends at GPIO_0[4]'s
 OE register: 16.29 ns of slack estimated, 15.67 ns in Quartus.
 
 M4K RAM blocks (4,608 bits each, 105 on the EP2C35) come from chipsmith's
-synthesis (`crates/chipsmith-cyclone2/src/synth/m4k.rs`, the rules and costs
-of cyclone2-re's `synth/m4k.txt` for yosys' `memory_libmap`): memories with
-synchronous reads on one clock, single port x1 to x18 (read-during-write
-returns the new data), simple dual port x1 to x36 (one write port, one
-read port, old data), ROMs, initial contents. A memory has to fill its
-block at its width (e.g. 512 x 9, 256 x 18): shallower ones stay in logic,
-and so do asynchronous reads. Not yet: byte enables, clock enables, output
-registers, two clocks, true dual port, mixed widths, a single-port x36.
+synthesis (`crates/chipsmith-cyclone2/src/synth/m4k.rs`, yosys'
+`memory_libmap` as the reference for what a block takes;
+`crates/chipsmith-cyclone2/src/m4k.rs` is the block's configuration as one
+type the synthesis, packer, bitstream and Quartus export share). Every
+memory with synchronous reads that a block can hold goes into blocks, as
+Quartus does, unless its declaration says `ramstyle`/`ram_style` "logic":
+
+- single port x1 to x18 (a read of the word being written returns the new
+  data), simple dual port x1 to x36 (old data), true dual port up to x18
+  (each port sees its own write, the other's old data; written as Quartus'
+  template, `q <= we ? d : mem[a]`), ROMs, initial contents;
+- mixed widths: a port reading or writing several words at once (Verilog's
+  `{mem[{a, 2'd1}], mem[{a, 2'd0}]}`), any pair of widths;
+- byte enables (`mem[a][15:8] <= d` under its own condition), packed eight
+  bits per nine columns as Quartus packs them;
+- clock enables: a read enable the block's clock enable can carry (the
+  write under it too, or the read on clock 1 of the same clock); one it
+  can't (a write outside it) holds the read data in LE registers;
+- a second register on the read data, with an asynchronous clear and an
+  enable of its own: the block's output register (clock 0 or 1, clear 0
+  or 1);
+- two clocks: written on one, read on another, as Quartus builds it (a
+  true dual port reading on port A, writing on port B; Quartus 13.0 has no
+  simple dual port on two clocks, so up to x18 a block, wider ones split);
+- memories deeper than a block (blocks in rows, the write enable decoded
+  and the read data multiplexed by the registered top address bits) and
+  wider (blocks side by side), and shallower: their top address bit is
+  repeated on the block's unused address pins, so every word has an
+  address of its own;
+- a synchronous reset on the read data (LE logic after the block), two
+  write ports colliding (the one yosys gives priority wins, as
+  `memory_map` has it).
+
+Not taken: asynchronous reads (logic), a read register that powers up to
+anything but 0, a write enable tied high (an unconnected write enable reads
+as no write), Quartus' packed single port x32/x36 (two x18 blocks
+instead), a same-port read of the old data in a true dual port, more
+than two ports per block (no duplication of a memory per read port).
 The packer moves a `CY2_M4K` onto the block's physical pins (some address
 bits enter on data pins), the placer swaps blocks between M4K sites, and
-the router reaches their inputs through the block's LAB lines, the clock
-through a row clock and the read data from the M4K buffers.
+the router reaches their inputs through the block's LAB lines, the clocks
+through row clocks, clock enables and clears through the block's control
+inputs, and the read data from the M4K buffers.
 
 - `examples/ram`: one memory of each shape (7 blocks), written from a
   counter and the switches, read data folded onto the LEDs.
@@ -121,6 +152,29 @@ through a row clock and the read data from the M4K buffers.
   KEY[0] writes SW[8:0] at the address shown, KEY[1] holds the step so the
   value can be seen coming back. Runs on the DE2, from JTAG and from the
   EPCS.
+
+- `examples/m4k-bytes`, `m4k-enables`, `m4k-outreg`, `m4k-tdp`,
+  `m4k-mixed`, `m4k-dualclock`, `m4k-deep`, `m4k-shallow`: one mode each
+  (the file heads say which memory is which block shape), written from a
+  counter and the switches, read data folded onto the LEDs. Not run on the
+  board yet.
+
+M4K mapping, checked 2026-10-27 (`crates/chipsmith-cyclone2/tests/synth.rs`
+`m4k_*`; Quartus: `cram quartus-export` of chipsmith's placement and
+routing, assembled by Quartus 13.0sp1, compared with chipsmith's RBF):
+
+QTABLE
+
+The random designs are `crates/chipsmith-cyclone2/tests/support/m4k_random.rs`,
+seeds 1-16 (`cargo run --release -p chipsmith-cyclone2 --example
+m4k_random -- <dir> 1 16` writes them as projects): one memory each, its
+kind, widths, depth, byte enables, read enable, output register, reset,
+clocks and contents drawn from the seed. The proof compares the memory's
+words: the RTL's memory as yosys' `memory_map` registers against a model
+of each block (`tests/support/mod.rs`, `model_blocks`) whose contents are
+registers named after the words they hold, with the blocks' INIT checked
+against the memory's contents. Every existing DE2 example builds to the
+same RBF as on `open`.
 
 Quartus assembles chipsmith's placement and routing into the same RBF bit
 for bit (`bench/quartus-timing.sh`): checked 2026-10-24 on blinky-verilog
@@ -143,8 +197,8 @@ designs itself, the RBFs no longer match the
 [cyclone2-re](https://github.com/cramt/cyclone2-re) examples built with
 nextpnr's placement.
 
-The Cyclone II limits come from cyclone2-re's open flow: M4K RAM only in
-the shapes above, no multipliers, PLLs without their external clock
+The Cyclone II limits come from cyclone2-re's open flow: M4K RAM as
+above, no multipliers, PLLs without their external clock
 output, clock switchover or reconfiguration, I/O registers without clock
 enables or clears, 3.3-V LVCMOS at its default current only.
 The timing model covers LE and register delays exactly and routing by
@@ -454,7 +508,7 @@ share chipsmith's own netlist IR, not Verilog.
      loop (constants and merging on gates, `$mux`/`$pmux` folding,
      `opt_muxtree`, `opt_dff`), registers stuck at their power-up value
      found as a fixed point (`opt::seqconst`), `wreduce`, `alumacc`, M4Ks
-     (`m4k.txt`'s rules and costs, `m4k_map.v`), the other memories to
+     (`synth/m4k.rs`, above), the other memories to
      registers, carry chains (`arith_map.v`), lowering to gates, the LE
      register (`dfflegalize` to the six types, `cells_map.v`), the LUT
      mapper on the IR (same LUTs and depth as on yosys' JSON), pin buffers
@@ -472,8 +526,8 @@ share chipsmith's own netlist IR, not Verilog.
      | blinky-verilog, blinky-vhdl | 26 (26) | 26 (26) | 26 (26) | 1 (1) | 0 | 296.5 MHz (296.5) |
      | persist loader | 3 (3) | 0 (0) | 3 (3) | 0 | 0 | no clock |
 
-     The M4K cells (mode, width, contents, which pins are tied) are the
-     yosys flow's, cell for cell. picorv32 synthesizes in 1 s (yosys 14 s).
+     The M4K cells of ram, ram_widths and ram-leds (mode, width, contents,
+     which pins are tied) are the yosys flow's, cell for cell. picorv32 synthesizes in 1 s (yosys 14 s).
      `crates/chipsmith-cyclone2/tests/synth.rs` proves every example, the
      loader and five specimens sequentially equivalent to yosys' RTL of the
      same Verilog, every stage on three of them, and that a flipped LUT
@@ -481,8 +535,9 @@ share chipsmith's own netlist IR, not Verilog.
      script in two steps (ADR-0007): the RTL against the netlist with x
      resolved, then that against the result, with the registers synthesis
      made constant (989 on picorv32) and its state registers' value sets
-     first proven invariant by `sat -tempinduct`, and M4Ks compared at
-     their ports. All 174 plain-Verilog cyclone2-re specimens pass it and
+     first proven invariant by `sat -tempinduct`; memories in M4Ks are
+     compared at their ports in the first step and word by word in the
+     second (the blocks through a model of the block). All 174 plain-Verilog cyclone2-re specimens pass it and
      the packer.
    - In the build (2026-10-25): one `synthesis` step (front end, the cell
      library `crates/chipsmith-cyclone2/src/synth/cells.v`, synthesis,

@@ -377,6 +377,23 @@ fn mask(m: &mut Module, name: &str, bits: &[SigBit], en: &[SigBit]) -> Vec<SigBi
         .collect()
 }
 
+/// Drops the names of nets nothing drives any more (a register synthesis
+/// or a claim removed): yosys would read them as x and clash with the
+/// power-up value the name still carries.
+fn drop_undriven(m: &mut Module) {
+    let mut driven = std::collections::HashSet::new();
+    for c in &m.cells {
+        c.kind.for_each_port(|p| {
+            if p.dir != Some(chipsmith_netlist::Dir::In) {
+                driven.extend(p.bits.iter().filter_map(|b| b.net()));
+            }
+        });
+    }
+    m.wires.retain(|w| {
+        w.port.is_some() || w.bits.iter().any(|b| b.net().is_none_or(|n| driven.contains(&n)))
+    });
+}
+
 /// A memory as synthesis saw it, for the blocks' model.
 #[derive(Debug, Clone)]
 pub struct MemInfo {
@@ -829,6 +846,23 @@ fn prep_memories(
     d.modules.retain(|m| !m.is_blackbox());
     for m in &mut d.modules {
         chipsmith_synth::rewrite::define_inits(m);
+        // A register yosys made a constant (one nothing reads) keeps its
+        // wire's power-up value, which `async2sync` then calls a conflict.
+        for w in &mut m.wires {
+            let Some(chipsmith_netlist::ParamValue::Bits(c)) =
+                w.attributes.get_mut(chipsmith_netlist::attr::INIT)
+            else {
+                continue;
+            };
+            for (b, s) in w.bits.iter().zip(c.0.iter_mut()) {
+                if matches!(b, SigBit::Const(_)) {
+                    *s = State::X;
+                }
+            }
+            if c.0.iter().all(|s| *s == State::X) {
+                w.attributes.remove(chipsmith_netlist::attr::INIT);
+            }
+        }
     }
     Ok(d)
 }
@@ -867,13 +901,13 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
     mapped.extend(in_blocks.iter().cloned());
     // Synthesis merged the read registers of the memories it put in
     // blocks into them; yosys' `memory_dff` does the same on both sides.
-    // The RTL against the netlist with x resolved: memories are memories
-    // on both sides, compared at their ports.
-    let mut all_cut = cut.clone();
-    all_cut.extend(in_blocks.iter().cloned());
-    let mut gold = prep_memories(dir, "gold_prep", rtl, &to_logic, &sync_cut)?;
-    let mut mid_cut = prep_memories(dir, "mid_cut_prep", &refined_path, &to_logic, &sync_cut)?;
-    if !all_cut.is_empty() {
+    // The RTL against the netlist with x resolved, and that against the
+    // result: the memories in blocks as words on every side. (At their
+    // ports the RTL's and synthesis' memories can differ: synthesis reads
+    // a register's enable, reset and bypass multiplexers into the port.)
+    let mut gold = prep_memories(dir, "gold_prep", rtl, &mapped, &sync_cut)?;
+    let mut mid_cut = prep_memories(dir, "mid_cut_prep", &refined_path, &mapped, &sync_cut)?;
+    if !cut.is_empty() {
         cut_memories(top_mut(&mut gold))?;
         cut_memories(top_mut(&mut mid_cut))?;
     }
@@ -890,6 +924,7 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
         if !cut.is_empty() {
             cut_memories(gt)?;
         }
+        drop_undriven(gt);
     }
     if !cut.is_empty() {
         cut_memories(top_mut(&mut mid))?;
@@ -1084,6 +1119,7 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
     }
     let cut_gate_path = dir.join("gate_cut.json");
     write(&cut_gate, &cut_gate_path);
+    drop_undriven(top_mut(&mut mid));
     let sub_path = dir.join("mid_constants.json");
     write(&mid, &sub_path);
     let second = equiv(dir, "equiv_synth", &sub_path, &cut_gate_path)?;
