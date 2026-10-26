@@ -17,8 +17,8 @@ use super::device::{Device, Node};
 use super::device::element_name;
 use super::hard::{self, Asmi, Hard, HardInput, Jtag};
 use super::io::{
-    Dir, Input, IoDb, OutData, Output, OutputEnable, PinUse, Standard, UnusedPins, BLOCK_CLK_N,
-    BLOCK_CLK_P,
+    Dir, InReg, Input, IoDb, IoReg, OutData, Output, OutputEnable, PinUse, Standard, Vccio,
+    BLOCK_CLK_N, BLOCK_CLK_P,
 };
 use super::logic::{
     clock_slots, Aclr, ClkCtrl, Ctl, Domain, GlobalClock, LabConfig, LeConfig, LeSource, Logic,
@@ -26,6 +26,7 @@ use super::logic::{
 };
 use super::m4k::{self, Content, Controls, CtlSrc, M4k, Mode, ReadPort, Sel, Width};
 use super::phys::{PhysDesign, Pip, RoutedNet};
+use crate::pin::{assignment, register_of, register_param, PinSettings, Pull};
 
 /// A nextpnr wire, by what it is in the device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -102,6 +103,11 @@ pub enum IoePin {
     DataOut,
     Oe,
     CombOut,
+    /// The input register's clock and output.
+    InClk,
+    RegOut,
+    /// The output and OE registers' clock.
+    OutClk,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -142,6 +148,8 @@ pub struct Routed {
     pub nets: BTreeMap<u64, Net>,
     /// Top-level port (bus) name -> direction.
     pub ports: HashMap<String, PortDir>,
+    /// The top module's attributes (the unused-pin mode, `crate::pin`).
+    pub attrs: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,6 +241,9 @@ fn wire(dev: &Device, tx: u32, ty: u32, name: &str) -> Result<Wire> {
                 "DATAOUT" => IoePin::DataOut,
                 "OE" => IoePin::Oe,
                 "COMBOUT" => IoePin::CombOut,
+                "INCLK" => IoePin::InClk,
+                "REGOUT" => IoePin::RegOut,
+                "OUTCLK" => IoePin::OutClk,
                 _ => bail!("wire {name}"),
             };
             return Ok(Wire::Ioe { x, y, z, pin });
@@ -361,7 +372,12 @@ pub fn read(dev: &Device, path: &Path) -> Result<Routed> {
         };
         ports.insert(name.clone(), d);
     }
-    Ok(Routed { cells, nets, ports })
+    Ok(Routed {
+        cells,
+        nets,
+        ports,
+        attrs: strs(&m["attributes"]),
+    })
 }
 
 /// Logical -> physical LUT input of each LE (from the permutation pips).
@@ -545,6 +561,10 @@ impl Routed {
         let mut data_line: HashMap<(u32, u32, u32), u32> = HashMap::new();
         let mut oe_line: HashMap<(u32, u32, u32), u32> = HashMap::new();
         let mut datain: HashMap<(u32, u32, u32), [bool; 2]> = HashMap::new();
+        // The input register's pad-to-core paths, and the row-clock buffer
+        // of each IOE's input and output-side registers.
+        let mut reg_datain: HashMap<(u32, u32, u32), [bool; 2]> = HashMap::new();
+        let mut io_clk: HashMap<(u32, u32, u32, IoePin), u32> = HashMap::new();
         let mut ram_in: HashMap<(u32, u32), BTreeMap<m4k::Input, u8>> = HashMap::new();
         let mut ram_pia: HashMap<(u32, u32), [Option<u8>; 8]> = HashMap::new();
         let mut ram_ctl: HashMap<(u32, u32, u8), CtlSrc> = HashMap::new();
@@ -773,6 +793,44 @@ impl Routed {
                             datain.entry((x, y, z)).or_default()[t.index as usize] = true;
                         }
                     }
+                    (
+                        Wire::Ioe {
+                            x,
+                            y,
+                            z,
+                            pin: IoePin::RegOut,
+                        },
+                        Wire::Node(d),
+                    ) => {
+                        let t = &dev.routing.templates
+                            [dev.routing.elements[d.0 as usize].template as usize];
+                        ensure!(
+                            t.element_enum == 301,
+                            "{}: input register into {}",
+                            n.name,
+                            element_name(t.element_enum)
+                        );
+                        reg_datain.entry((x, y, z)).or_default()[t.index as usize] = true;
+                    }
+                    (
+                        Wire::Node(s),
+                        Wire::Ioe {
+                            x,
+                            y,
+                            z,
+                            pin: pin @ (IoePin::InClk | IoePin::OutClk),
+                        },
+                    ) => {
+                        let t = &dev.routing.templates
+                            [dev.routing.elements[s.0 as usize].template as usize];
+                        ensure!(
+                            t.element_enum == 560,
+                            "{}: I/O register clock from {}",
+                            n.name,
+                            element_name(t.element_enum)
+                        );
+                        io_clk.insert((x, y, z, pin), t.index as u32);
+                    }
                     (s, d) => bail!("{}: unexpected pip {s:?} -> {d:?}", n.name),
                 }
             }
@@ -887,9 +945,30 @@ impl Routed {
                 }
                 ("CY2_IBUF" | "CY2_OBUF" | "CY2_IOBUF", Bel::Ioe { x, y, z }) => {
                     let p = pin_at(io, x, y, z)?;
+                    let settings = PinSettings::from_params(&c.params)
+                        .with_context(|| format!("{name}: I/O settings"))?;
+                    let (standard, drive) = settings.standard.ioe();
+                    // An I/O register, clocked from the row-clock buffer the
+                    // routing reached its clock pin through.
+                    let reg = |param: &str, clk: IoePin| -> Result<Option<IoReg>> {
+                        let Some(power_up) = register_of(&c.params, param)? else {
+                            return Ok(None);
+                        };
+                        let clock = *io_clk
+                            .get(&(x, y, z, clk))
+                            .with_context(|| format!("{name}: {param} clock not routed"))?;
+                        Ok(Some(IoReg {
+                            clock,
+                            powers_up_high: power_up.high(),
+                        }))
+                    };
+                    let in_reg = reg(register_param::INPUT, IoePin::InClk)?;
                     let input = Input {
                         comb: datain.get(&(x, y, z)).copied().unwrap_or_default(),
-                        reg: None,
+                        reg: in_reg.map(|reg| InReg {
+                            reg,
+                            paths: reg_datain.get(&(x, y, z)).copied().unwrap_or_default(),
+                        }),
                     };
                     let data = || -> Result<OutData> {
                         Ok(
@@ -898,7 +977,7 @@ impl Routed {
                                 (None, Some(&line)) => OutData::Line {
                                     line,
                                     inverted: flag(c, "DATA_INVERT"),
-                                    reg: None,
+                                    reg: reg(register_param::OUTPUT, IoePin::OutClk)?,
                                 },
                                 _ => bail!("{name}: output data neither routed nor constant"),
                             },
@@ -916,7 +995,7 @@ impl Routed {
                             // inout, an open drain releasing the pad.
                             (_, Some(_), _) => {
                                 return Ok(Output {
-                                    drive: None,
+                                    drive,
                                     data: OutData::Const(true),
                                     enable: OutputEnable::OpenDrain,
                                 })
@@ -924,14 +1003,14 @@ impl Routed {
                             (_, None, Some(&line)) => OutputEnable::Line {
                                 line,
                                 inverted: flag(c, "OE_INVERT"),
-                                reg: None,
+                                reg: reg(register_param::OE, IoePin::OutClk)?,
                             },
                             (_, None, None) => {
                                 bail!("{name}: output enable neither routed nor constant")
                             }
                         };
                         Ok(Output {
-                            drive: None,
+                            drive,
                             data: data()?,
                             enable,
                         })
@@ -949,12 +1028,17 @@ impl Routed {
                         ("CY2_OBUF" | "CY2_IOBUF", PortDir::InOut) => Dir::Bidir(input, output()?),
                         (t, d) => bail!("{name}: {t} on an {d:?} port"),
                     };
+                    ensure!(
+                        dir.output().is_none() || settings.standard.drives(),
+                        "{name}: a {} pin can't drive",
+                        settings.standard.quartus_name()
+                    );
                     pins.push(PinUse {
                         pin: p.name.clone(),
                         port: port.clone(),
-                        standard: Standard::Lvttl33,
-                        pull_up: false,
-                        bus_hold: false,
+                        standard,
+                        pull_up: settings.pull == Pull::Up,
+                        bus_hold: settings.pull == Pull::BusHold,
                         dir,
                     });
                 }
@@ -1024,7 +1108,14 @@ impl Routed {
                 labs,
             },
             pins,
-            unused_pins: UnusedPins::InputTriStated,
+            unused_pins: match self.attrs.get(assignment::UNUSED_PINS) {
+                None => crate::pin::UnusedPins::default().ioe(),
+                Some(v) => crate::pin::UnusedPins::from_quartus_name(v)
+                    .with_context(|| format!("unused-pin mode {v:?}"))?
+                    .ioe(),
+            },
+            // The DE2's banks, all at 3.3 V (`crate::pin`).
+            vccio: Vccio::Board(Standard::Lvttl33),
             m4ks,
             hard,
             nets,
