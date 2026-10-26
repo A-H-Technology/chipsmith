@@ -106,12 +106,12 @@ impl Divider {
     }
 }
 
-/// A post-scale counter in use: its divider, and when its first edge comes
-/// after the VCO starts, `initial` whole VCO cycles (1-16) plus `phase`
-/// eighths of one (the VCO tap, 0-7).
+/// A post-scale counter in use: its divider (none: bypass, divide by 1),
+/// and when its first edge comes after the VCO starts, `initial` whole VCO
+/// cycles (1-16) plus `phase` eighths of one (the VCO tap, 0-7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Output {
-    pub divider: Divider,
+    pub divider: Option<Divider>,
     pub initial: u8,
     pub phase: u8,
 }
@@ -124,8 +124,7 @@ pub enum Feedback {
     NoCompensation,
 }
 
-/// The loop's analog settings as Quartus' atom parameters name them; the
-/// fitter derives them from the counters (`Loop::for_m`).
+/// The loop's analog settings as Quartus' atom parameters name them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Loop {
     /// `charge_pump_current` (µA).
@@ -134,9 +133,20 @@ pub struct Loop {
     pub filter_r_tenths: u16,
     /// `loop_filter_c` (pF).
     pub filter_c: u16,
-    /// `SELECT_LOCK_WINDOW` code (its asmdb map's values 1-15), which
-    /// depends on the PFD frequency.
-    pub lock_window: u8,
+}
+
+impl Loop {
+    /// What the fitter picks for a feedback count of `m` (m times the VCO
+    /// post-scale), read off the m = 4-32 sweep and the altpll designs
+    /// (VCO 600-800 MHz): 53 µA up to m = 7, then 80 µA; 1 kΩ up to
+    /// m = 12, then 2.5 kΩ; always 3 pF.
+    pub fn for_m(m: u32) -> Loop {
+        Loop {
+            charge_pump: if m <= 7 { 53 } else { 80 },
+            filter_r_tenths: if m <= 12 { 10 } else { 25 },
+            filter_c: 3,
+        }
+    }
 }
 
 /// Everything a PLL is set to.
@@ -293,22 +303,31 @@ impl PllDb {
         self.put(s, (M_MODE, -1), if c.m.odd { 2 } else { 0 }, &mut out)?;
         self.put(s, (M_PRESET, -1), count(c.m_initial), &mut out)?;
         self.put(s, (M_TAB_SELECT, -1), u32::from(c.m_phase), &mut out)?;
-        // n = 1 is bypass, the only n seen so far.
-        match c.n {
-            1 => {
-                self.put(s, (N_MODE, -1), 1, &mut out)?;
-                self.put(s, (N_DIVIDED_BY, -1), 0, &mut out)?;
-            }
-            n => bail!("PLL n = {n}: only n = 1 is modelled"),
-        }
+        // n = 1 is bypass; 2, 3, 4 divide, coded 3, 1, 0 (the asmdb map;
+        // sweep designs n2m10, n2m16, n3m24, n4m32).
+        let (n_mode, n_code) = match c.n {
+            1 => (1, 0),
+            2 => (0, 3),
+            3 => (0, 1),
+            4 => (0, 0),
+            n => bail!("PLL n = {n}: n is 1 to 4"),
+        };
+        self.put(s, (N_MODE, -1), n_mode, &mut out)?;
+        self.put(s, (N_DIVIDED_BY, -1), n_code, &mut out)?;
         let mut taps = 1u32 << c.m_phase;
         for (k, o) in c.outputs.iter().enumerate() {
             let g = k as i32;
             match o {
                 Some(o) => {
-                    self.put(s, (C_MODE, g), if o.divider.odd { 2 } else { 0 }, &mut out)?;
-                    self.put(s, (C_HIGH, g), count(o.divider.high), &mut out)?;
-                    self.put(s, (C_LOW, g), count(o.divider.low), &mut out)?;
+                    // Bypass: mode 1, counts 0 (sweep designs, whose c1 and
+                    // c2 are bypassed outputs).
+                    let (mode, high, low) = match o.divider {
+                        Some(d) => (if d.odd { 2 } else { 0 }, count(d.high), count(d.low)),
+                        None => (1, 0, 0),
+                    };
+                    self.put(s, (C_MODE, g), mode, &mut out)?;
+                    self.put(s, (C_HIGH, g), high, &mut out)?;
+                    self.put(s, (C_LOW, g), low, &mut out)?;
                     self.put(s, (C_PRESET, g), count(o.initial), &mut out)?;
                     self.put(s, (C_PHASE, g), u32::from(o.phase), &mut out)?;
                     taps |= 1 << o.phase;
@@ -326,8 +345,10 @@ impl PllDb {
         // The VCO taps the counters use, one bit each (p16: c1 on tap 6).
         self.put(s, (VCO_PHASE_CONTROL, -1), taps, &mut out)?;
         let l = c.r#loop;
-        self.put(s, (LOCK_WINDOW, -1), u32::from(l.lock_window), &mut out)?;
-        self.put(s, (LOCK_WINDOW_FB, -1), u32::from(l.lock_window), &mut out)?;
+        let m_eff = c.m.count() * if c.vco_div2 { 2 } else { 1 };
+        let lock = lock_window(m_eff);
+        self.put(s, (LOCK_WINDOW, -1), lock, &mut out)?;
+        self.put(s, (LOCK_WINDOW_FB, -1), lock, &mut out)?;
         self.put(s, (LOCK_MODE, -1), 3, &mut out)?;
         self.put(s, (CHARGE_PUMP, -1), charge_pump_code(l.charge_pump)?, &mut out)?;
         self.put(s, (LOOP_R, -1), loop_r_code(l.filter_r_tenths)?, &mut out)?;
@@ -359,6 +380,7 @@ impl PllDb {
 /// `CHARGE_PUMP_CURRENT` code of `charge_pump_current`.
 fn charge_pump_code(ua: u16) -> Result<u32> {
     Ok(match ua {
+        53 => 4,
         80 => 7,
         _ => bail!("PLL charge pump current {ua} µA: code not known"),
     })
@@ -381,12 +403,17 @@ fn loop_c_code(pf: u16) -> Result<u32> {
     })
 }
 
-/// `SELECT_LOCK_WINDOW` code for a PFD period (ps): 11 at 20 ns (50 MHz, p1-p9),
-/// 15 at 37 ns (27 MHz, p10).
-pub fn lock_window(pfd_period_ps: u32) -> u8 {
-    if pfd_period_ps <= 20_000 {
-        11
-    } else {
-        15
+/// `SELECT_LOCK_WINDOW` code (one of its asmdb map's 1, 2, 3, 4, 7, 8, 11,
+/// 15) for a feedback count of `m`: 3 at m = 4, 4 to m = 6, 7 to 8, 8 to
+/// 10, 11 to 16, 15 above (the m = 4-32 sweep; n doesn't change it). Below
+/// m = 4 never seen.
+fn lock_window(m: u32) -> u32 {
+    match m {
+        0..=4 => 3,
+        5..=6 => 4,
+        7..=8 => 7,
+        9..=10 => 8,
+        11..=16 => 11,
+        _ => 15,
     }
 }
