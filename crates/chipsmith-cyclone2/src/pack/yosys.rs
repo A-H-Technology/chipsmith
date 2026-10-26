@@ -12,6 +12,7 @@ use serde_json::{Map, Value};
 
 use super::netlist::{Dir, FfConfig, IoeIn, Kind, NetId, Netlist, Port, TopPort};
 use crate::m4k;
+use crate::pin::{register_param, PowerUp};
 
 /// A bit of a yosys bit vector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +64,7 @@ fn object(v: &Value) -> BTreeMap<String, Value> {
 }
 
 /// nextpnr's `get_bit_name`.
-fn bit_name(base: &str, i: usize, width: usize, offset: i64, upto: bool) -> String {
+pub fn bit_name(base: &str, i: usize, width: usize, offset: i64, upto: bool) -> String {
     if width == 1 && offset == 0 {
         return base.to_string();
     }
@@ -209,6 +210,16 @@ impl Frontend<'_> {
 }
 
 fn kind_of(ty: &str, params: &BTreeMap<String, Value>, name: &str) -> Result<Kind> {
+    // A pin buffer's register: absent or "none" is none (the cell
+    // library's default), else its power-up value.
+    let register = |p: &str| -> Result<Option<PowerUp>> {
+        match params.get(p).and_then(Value::as_str).map(str::trim_end) {
+            None | Some("none") => Ok(None),
+            Some(v) => PowerUp::from_param(v)
+                .map(Some)
+                .with_context(|| format!("{name}: {p} = {v:?}")),
+        }
+    };
     Ok(match ty {
         "LCELL_COMB" => {
             let mask = params
@@ -219,15 +230,19 @@ fn kind_of(ty: &str, params: &BTreeMap<String, Value>, name: &str) -> Result<Kin
             Kind::Lut { mask: mask as u16 }
         }
         "LCELL_FF" => Kind::Ff(FfConfig::default()),
-        "CY2_IBUF" => Kind::Ibuf { port: None },
+        "CY2_IBUF" => Kind::Ibuf {
+            port: None,
+            reg: register(register_param::INPUT)?,
+        },
         "CY2_OBUF" => Kind::Obuf {
             port: None,
-            data: IoeIn::Signal { invert: false },
+            data: IoeIn::signal(register(register_param::OUTPUT)?),
         },
         "CY2_IOBUF" => Kind::Iobuf {
             port: None,
-            data: IoeIn::Signal { invert: false },
-            oe: IoeIn::Signal { invert: false },
+            data: IoeIn::signal(register(register_param::OUTPUT)?),
+            oe: IoeIn::signal(register(register_param::OE)?),
+            in_reg: register(register_param::INPUT)?,
         },
         "CY2_M4K" => {
             // The packer needs no more than the shape's ports: a cell from
@@ -248,7 +263,14 @@ fn kind_of(ty: &str, params: &BTreeMap<String, Value>, name: &str) -> Result<Kin
 }
 
 /// The parameters `Kind` holds; the rest pass through.
-const TYPED_PARAMS: [&str; 3] = ["LUT_MASK", "MODE", "WIDTH"];
+const TYPED_PARAMS: [&str; 6] = [
+    "LUT_MASK",
+    "MODE",
+    "WIDTH",
+    register_param::INPUT,
+    register_param::OUTPUT,
+    register_param::OE,
+];
 
 pub fn import(json: &Value) -> Result<Netlist> {
     let modules = json["modules"].as_object().context("no modules")?;

@@ -98,6 +98,16 @@ const M4K_TCO: Ps = 209.0 + 2993.0 + 124.0;
 /// clock.
 const M4K_TSU: Ps = 142.0 - 35.0 - 124.0;
 
+/// Cyclone II I/O-cell registers, for a register-to-register path that
+/// starts or ends in a pin's I/O cell. quartus_sta on examples/de2-io
+/// (2026-10-26): an input register's uTco 143 ps plus 390 ps out through
+/// `regout`; an output or OE register's 269-279 ps cell delay from
+/// `datain` (column 279, row 269) and its −78 ps uTsu. The I/O register's
+/// clock reached it within 3 ps of an LE register's there (more wire,
+/// faster cell), so no skew is modelled.
+const IOE_TCO: Ps = 143.0 + 390.0;
+const IOE_TSU: Ps = 279.0 - 78.0;
+
 /// A delay from one timing node to another.
 #[derive(Debug, Clone, Copy)]
 pub struct Arc {
@@ -108,7 +118,7 @@ pub struct Arc {
 
 /// Cell ports as timing nodes, and the arcs through cells. Net arcs (the
 /// routing) are supplied to `analyse`, since they change as the router works.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Graph {
     names: Vec<String>,
     index: HashMap<(String, String), u32>,
@@ -117,6 +127,10 @@ pub struct Graph {
     launch: Vec<Option<Ps>>,
     /// Setup time at the nodes where paths end (register data inputs).
     setup: Vec<Option<Ps>>,
+    /// The clock of a path start or end, for designs with several (an
+    /// opaque id the caller hands out, e.g. the clock net). Nodes without
+    /// one belong to clock 0.
+    clocks: HashMap<u32, u32>,
 }
 
 impl Graph {
@@ -173,6 +187,22 @@ impl Graph {
         }
     }
 
+    /// A Cyclone II pin's I/O-cell registers: the input register launches
+    /// at REGOUT, the output and OE registers capture DATAOUT and OE. A pin
+    /// without them neither launches nor captures (pins are unconstrained).
+    pub fn add_ioe_registers(&mut self, cell: &str, input: bool, output: bool, oe: bool) {
+        if input {
+            let n = self.node(cell, "REGOUT");
+            self.launch[n as usize] = Some(IOE_TCO);
+        }
+        for (used, port) in [(output, "DATAOUT"), (oe, "OE")] {
+            if used {
+                let n = self.node(cell, port);
+                self.setup[n as usize] = Some(IOE_TSU);
+            }
+        }
+    }
+
     /// A delay through a cell, for devices whose cells `add_cell` doesn't
     /// know (7-series).
     pub fn add_arc(&mut self, from: u32, to: u32, delay: Ps) {
@@ -187,6 +217,52 @@ impl Graph {
     /// A path end: a register input needing `setup` before the edge.
     pub fn set_setup(&mut self, node: u32, setup: Ps) {
         self.setup[node as usize] = Some(setup);
+    }
+
+    /// Put a path start or end on clock `clock`.
+    pub fn set_clock(&mut self, node: u32, clock: u32) {
+        self.clocks.insert(node, clock);
+    }
+
+    fn clock(&self, node: u32) -> u32 {
+        self.clocks.get(&node).copied().unwrap_or(0)
+    }
+
+    /// The critical path of every pair of launching and capturing clocks
+    /// that has one: each clock's own Fmax is its pair with itself.
+    /// Crossings are listed as found; whether they matter depends on how
+    /// the clocks relate, which the graph doesn't know.
+    pub fn clock_pairs(&self, net_arcs: &[Arc]) -> Vec<ClockPair> {
+        let mut launch_clocks: Vec<u32> = (0..self.len() as u32)
+            .filter(|&v| self.launch[v as usize].is_some())
+            .map(|v| self.clock(v))
+            .collect();
+        launch_clocks.sort();
+        launch_clocks.dedup();
+        let mut out = Vec::new();
+        for &from in &launch_clocks {
+            let mut g = self.clone();
+            for v in 0..g.len() {
+                if g.launch[v].is_some() && self.clock(v as u32) != from {
+                    g.launch[v] = None;
+                }
+            }
+            let a = g.analyse(net_arcs);
+            let mut worst: HashMap<u32, Ps> = HashMap::new();
+            for (v, (arr, s)) in a.arrival.iter().zip(&self.setup).enumerate() {
+                if let (Some(arr), Some(s)) = (arr, s) {
+                    let w = worst.entry(self.clock(v as u32)).or_insert(0.0);
+                    *w = w.max(arr + s);
+                }
+            }
+            let mut to: Vec<(u32, Ps)> = worst.into_iter().collect();
+            to.sort_by_key(|&(c, _)| c);
+            out.extend(
+                to.into_iter()
+                    .map(|(to, critical)| ClockPair { from, to, critical }),
+            );
+        }
+        out
     }
 
     pub fn len(&self) -> usize {
@@ -289,6 +365,15 @@ impl Graph {
     }
 }
 
+/// The longest path from registers on clock `from` to registers on clock
+/// `to`, setup included.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClockPair {
+    pub from: u32,
+    pub to: u32,
+    pub critical: Ps,
+}
+
 #[derive(Debug)]
 pub struct Analysis {
     /// Longest register-to-register path, setup included: the minimum
@@ -344,6 +429,51 @@ mod tests {
         let t = g.analyse(&nets);
         assert_eq!(t.critical, M4K_TCO + 500.0 + 84.0 + TSU);
         assert!(t.criticality(&nets[1]) < 1.0);
+    }
+
+    /// a (clock 1) -> b (clock 1) and a -> c (clock 2): two pairs.
+    #[test]
+    fn clock_pairs_split_by_launch_and_capture() {
+        let mut g = Graph::default();
+        g.add_cell("a", "LCELL_FF", &["REGOUT"], 0);
+        g.add_cell("b", "LCELL_FF", &["DATAIN"], 0);
+        g.add_cell("c", "LCELL_FF", &["DATAIN"], 0);
+        let (aq, bd, cd) = (
+            g.node("a", "REGOUT"),
+            g.node("b", "DATAIN"),
+            g.node("c", "DATAIN"),
+        );
+        g.set_clock(aq, 1);
+        g.set_clock(bd, 1);
+        g.set_clock(cd, 2);
+        let nets = [
+            Arc {
+                from: aq,
+                to: bd,
+                delay: 100.0,
+            },
+            Arc {
+                from: aq,
+                to: cd,
+                delay: 900.0,
+            },
+        ];
+        let p = g.clock_pairs(&nets);
+        assert_eq!(
+            p,
+            vec![
+                ClockPair {
+                    from: 1,
+                    to: 1,
+                    critical: TCO + 100.0 + 84.0 + TSU
+                },
+                ClockPair {
+                    from: 1,
+                    to: 2,
+                    critical: TCO + 900.0 + 84.0 + TSU
+                },
+            ]
+        );
     }
 
     /// reg a -> LUT x (DATAA) -> reg b, and reg a -> reg c directly.

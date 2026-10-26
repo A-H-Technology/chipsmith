@@ -50,7 +50,9 @@ fn main() {
     };
     let t = Instant::now();
     let mut keep = Keep::default();
-    let out = synthesize_observed(input, &mut keep).unwrap().design;
+    let out = synthesize_observed(input, &Default::default(), &mut keep)
+        .unwrap()
+        .design;
     eprintln!("chipsmith synthesis: {:.2} s", t.elapsed().as_secs_f64());
     let ours = dir.join("chipsmith.json");
     support::write(&out, &ours);

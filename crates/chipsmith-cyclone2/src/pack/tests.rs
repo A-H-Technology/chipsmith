@@ -188,7 +188,10 @@ fn an_inverter_folds_into_lut_masks_and_the_pin() {
         cell(&nl, "led_buf").kind,
         Kind::Obuf {
             port: Some("LEDR".into()),
-            data: IoeIn::Signal { invert: true }
+            data: IoeIn::Signal {
+                invert: true,
+                reg: None
+            }
         }
     );
 }
@@ -378,7 +381,11 @@ fn tri_state_and_bidir_pins_fold_constants_and_inverters_into_the_ioe() {
         Kind::Iobuf {
             port: Some("IO".into()),
             data: IoeIn::Const(false),
-            oe: IoeIn::Signal { invert: true },
+            oe: IoeIn::Signal {
+                invert: true,
+                reg: None
+            },
+            in_reg: None,
         }
     );
     assert_eq!(net_name(&nl, "io_buf", Port::Oe).as_deref(), Some("sw"));
@@ -391,8 +398,12 @@ fn tri_state_and_bidir_pins_fold_constants_and_inverters_into_the_ioe() {
         cell(&nl, "t_buf").kind,
         Kind::Iobuf {
             port: Some("T".into()),
-            data: IoeIn::Signal { invert: false },
+            data: IoeIn::Signal {
+                invert: false,
+                reg: None
+            },
             oe: IoeIn::Const(true),
+            in_reg: None,
         }
     );
     assert_eq!(cell(&nl, "t_buf").net(Port::Combout), None);
@@ -525,4 +536,40 @@ fn unsupported_m4k_shapes_are_refused() {
     let mut nl = yosys::import(&shallow).unwrap();
     let e = pack(&mut nl).unwrap_err();
     assert!(e.to_string().contains("A_ADDR[11] is a constant"), "{e}");
+}
+
+/// A register's output clocking another register (a divided clock): it
+/// reaches the clock through a clock control like a pin clock, and still
+/// feeds its own logic directly.
+#[test]
+fn a_clock_from_a_register_gets_a_clock_control() {
+    let (nl, stats) = packed(&[
+        (
+            "div",
+            "LCELL_FF",
+            None,
+            json!({"DATAIN": [12], "CLK": [10], "ENA": ["1"], "ACLR": ["0"], "SCLR": ["0"], "REGOUT": [20]}),
+        ),
+        (
+            "led",
+            "LCELL_FF",
+            None,
+            json!({"DATAIN": [12], "CLK": [20], "ENA": ["1"], "ACLR": ["0"], "SCLR": ["0"], "REGOUT": [11]}),
+        ),
+    ]);
+    assert_eq!(stats.clocks, 2);
+    let div = find(&nl, "div").unwrap();
+    let cc = nl
+        .cells()
+        .into_iter()
+        .find(|&c| {
+            nl.cell(c).kind == Kind::ClkCtrl
+                && nl
+                    .cell(c)
+                    .net(Port::Inclk)
+                    .is_some_and(|n| nl.net(n).driver == Some((div, Port::Regout)))
+        })
+        .expect("a clock control fed by the register");
+    let global = nl.cell(cc).net(Port::Outclk);
+    assert_eq!(cell(&nl, "led").net(Port::Clk), global);
 }

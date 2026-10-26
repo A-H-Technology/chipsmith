@@ -337,7 +337,7 @@ impl Config {
     pub fn manifest(&self, de2_pins: &str) -> String {
         format!(
             "# A random memory ({:?}).\n[project]\nname = \"{}\"\ntop = \"top\"\nsources = [\"src/*.v\"]\n\n\
-             [target]\ndevice = \"EP2C35F672C6\"\n\n{de2_pins}\n[clocks]\nCLOCK_50 = \"50 MHz\"\n",
+             [target]\ndevice = \"EP2C35F672C6\"\n\n{de2_pins}\n[clocks]\nCLOCK_50 = \"50 MHz\"\nCLOCK_27 = \"27 MHz\"\n",
             self.kind,
             self.name()
         )

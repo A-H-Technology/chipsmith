@@ -27,7 +27,7 @@ LEDG = [
     "PIN_AA20", "PIN_Y18", "PIN_Y12",
 ]
 
-# The DE2's 50 MHz oscillator; slack is reported against it (the timing
-# model times one clock domain).
+# The DE2's oscillators; slack is reported against them.
 [clocks]
 CLOCK_50 = "50 MHz"
+CLOCK_27 = "27 MHz"

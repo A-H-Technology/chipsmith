@@ -7,8 +7,10 @@
 
 mod support;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use chipsmith_cyclone2::pin::IoRegisters;
 use chipsmith_cyclone2::synth::{synthesize_observed, Observer};
 use chipsmith_netlist::{CellKind, Design, Module, ParamValue};
 
@@ -47,10 +49,19 @@ struct Synthesized {
 }
 
 fn synthesize(name: &str, top: &str, files: &[PathBuf]) -> Synthesized {
+    synthesize_with(name, top, files, &BTreeMap::new())
+}
+
+fn synthesize_with(
+    name: &str,
+    top: &str,
+    files: &[PathBuf],
+    io_registers: &BTreeMap<String, IoRegisters>,
+) -> Synthesized {
     let dir = scratch(name);
     let rtl = support::rtl(&dir, top, files);
     let mut stages = Stages::default();
-    let out = synthesize_observed(support::frontend(top, files), &mut stages)
+    let out = synthesize_observed(support::frontend(top, files), io_registers, &mut stages)
         .unwrap_or_else(|e| panic!("{name}: {e:#}"))
         .design;
     let netlist = dir.join("chipsmith.json");
@@ -72,7 +83,17 @@ fn pack(dir: &Path, name: &str, netlist: &Path) -> chipsmith_cyclone2::pack::Sta
 /// of the yosys flow (LUTs and registers after packing, carry chains and
 /// M4Ks exactly as many or fewer).
 fn design(name: &str, top: &str, files: &[PathBuf], compare: bool) {
-    let s = synthesize(name, top, files);
+    design_with(name, top, files, compare, &BTreeMap::new());
+}
+
+fn design_with(
+    name: &str,
+    top: &str,
+    files: &[PathBuf],
+    compare: bool,
+    io_registers: &BTreeMap<String, IoRegisters>,
+) {
+    let s = synthesize_with(name, top, files, io_registers);
     let proof = support::check(
         &s.dir,
         &s.rtl,
@@ -152,6 +173,142 @@ fn blinky_vhdl() {
 #[test]
 fn bidir() {
     design("bidir", "top", &example("bidir"), true);
+}
+
+/// I/O-cell registers, as examples/de2-io's manifest asks for them: input
+/// registers moved, output and OE registers copied (one powering up high,
+/// one behind an inverter), proven against the RTL with the registers in
+/// the pin buffers' models.
+#[test]
+fn io_registers() {
+    let mut regs = BTreeMap::new();
+    let bits =
+        |port: &str, n: usize| -> Vec<String> { (0..n).map(|i| format!("{port}[{i}]")).collect() };
+    for p in bits("SW_HI", 5) {
+        regs.insert(
+            p,
+            IoRegisters {
+                input: true,
+                ..Default::default()
+            },
+        );
+    }
+    for p in bits("LEDR", 5).into_iter().chain(bits("LEDG", 5)) {
+        regs.insert(
+            p,
+            IoRegisters {
+                output: true,
+                ..Default::default()
+            },
+        );
+    }
+    regs.insert(
+        "GPIO_IO".into(),
+        IoRegisters {
+            input: true,
+            output: true,
+            output_enable: true,
+        },
+    );
+    design_with("de2-io", "top", &example("de2-io"), false, &regs);
+    let s = synthesize_with("de2-io-cells", "top", &example("de2-io"), &regs);
+    let cells = s.stages.cells.expect("a cells stage");
+    let registered = cells.modules[0]
+        .cells
+        .iter()
+        .filter(|c| match &c.kind {
+            CellKind::Other(g) => {
+                g.ty.starts_with("CY2_") && g.params.keys().any(|k| k.ends_with("_REGISTER"))
+            }
+            _ => false,
+        })
+        .count();
+    // SW_HI[4:0], LEDR[4:0], LEDG[4:0] and GPIO_IO.
+    assert_eq!(registered, 16);
+}
+
+/// What an I/O register can't be is an error, not a register left behind.
+#[test]
+fn io_registers_that_cant_be_are_errors() {
+    let dir = scratch("io-register-errors");
+    let v = dir.join("top.v");
+    std::fs::write(
+        &v,
+        "module top(input clk, input en, input a, output y, output z, output w);\n\
+         reg q; always @(posedge clk) if (en) q <= a;\n\
+         reg n; always @(negedge clk) n <= a;\n\
+         assign y = q; assign z = n; assign w = a;\nendmodule\n",
+    )
+    .unwrap();
+    for (port, want, says) in [
+        (
+            "y",
+            IoRegisters {
+                output: true,
+                ..Default::default()
+            },
+            "clock enable",
+        ),
+        (
+            "z",
+            IoRegisters {
+                output: true,
+                ..Default::default()
+            },
+            "falling edge",
+        ),
+        (
+            "w",
+            IoRegisters {
+                output: true,
+                ..Default::default()
+            },
+            "no register drives",
+        ),
+        (
+            "a",
+            IoRegisters {
+                input: true,
+                ..Default::default()
+            },
+            "samples the pin",
+        ),
+        (
+            "a",
+            IoRegisters {
+                output: true,
+                ..Default::default()
+            },
+            "on an input",
+        ),
+        (
+            "y",
+            IoRegisters {
+                output_enable: true,
+                ..Default::default()
+            },
+            "never tri-stated",
+        ),
+        (
+            "nope",
+            IoRegisters {
+                input: true,
+                ..Default::default()
+            },
+            "doesn't have",
+        ),
+    ] {
+        let regs = BTreeMap::from([(port.to_string(), want)]);
+        let err = match synthesize_observed(
+            support::frontend("top", std::slice::from_ref(&v)),
+            &regs,
+            &mut (),
+        ) {
+            Ok(_) => panic!("{port} {want:?}: synthesized"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains(says), "{port} {want:?}: {err}");
+    }
 }
 
 #[test]
@@ -285,7 +442,12 @@ fn every_stage_is_equivalent() {
         let dir = scratch(&format!("{ex}-stages"));
         let rtl = support::rtl(&dir, top, &files);
         let mut all = All::default();
-        synthesize_observed(support::frontend(top, &files), &mut all).unwrap();
+        synthesize_observed(
+            support::frontend(top, &files),
+            &Default::default(),
+            &mut all,
+        )
+        .unwrap();
         let refined = all
             .0
             .iter()

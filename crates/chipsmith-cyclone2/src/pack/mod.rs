@@ -24,8 +24,10 @@ use serde_json::{json, Map, Value};
 pub use diff::diff_files;
 use mask::{fix, invert_input, normalise_carry, substitute, BUFFERS};
 use netlist::{CellId, IoeIn, Kind, NetId, Netlist, Port, LUT_INPUTS};
+pub use yosys::bit_name;
 
 use crate::m4k::{CellPort, Param, Pin, Ports, Sel, Side};
+use crate::pin::{register_param, PowerUp};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -436,6 +438,14 @@ fn pack_constants(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
                 }
                 _ if nl.cell(c).kind.is_ioe_in(p) => {
                     if let Some(input) = nl.cell_mut(c).kind.ioe_in(p) {
+                        if let IoeIn::Signal { reg: Some(_), .. } = input {
+                            bail!(
+                                "{}: a constant {} through its I/O register; synthesis keeps \
+                                 such registers in LEs",
+                                nl.cell(c).name,
+                                p.name()
+                            );
+                        }
                         *input = IoeIn::Const(value);
                     }
                     nl.disconnect(c, p);
@@ -548,7 +558,7 @@ fn push_inversion_back(nl: &mut Netlist, inverter: CellId, input: NetId) -> bool
         match &mut cell.kind {
             Kind::Lut { mask } => *mask = invert_input(*mask, p.lut_index().unwrap()),
             kind @ (Kind::Obuf { .. } | Kind::Iobuf { .. }) => match kind.ioe_in(p) {
-                Some(IoeIn::Signal { invert }) => *invert = !*invert,
+                Some(IoeIn::Signal { invert, .. }) => *invert = !*invert,
                 _ => unreachable!("a pin buffer load on a constant input"),
             },
             Kind::Ff(cfg) if p == Port::Ena => cfg.ena_inv = !cfg.ena_inv,
@@ -629,8 +639,8 @@ fn pack_lut1(nl: &mut Netlist, stats: &mut Stats) {
                 }
                 (kind, _) if kind.is_ioe_in(p) => {
                     nl.reconnect(u, p, input);
-                    if let Some(i) = nl.cell_mut(u).kind.ioe_in(p) {
-                        *i = IoeIn::Signal { invert: inv };
+                    if let Some(IoeIn::Signal { invert, .. }) = nl.cell_mut(u).kind.ioe_in(p) {
+                        *invert = inv;
                     }
                 }
                 // A plain buffer in front of a register: the register takes
@@ -643,6 +653,9 @@ fn pack_lut1(nl: &mut Netlist, stats: &mut Stats) {
                 // Likewise into the JTAG and serial-flash blocks, which
                 // invert nothing either.
                 (Kind::Hard(_), _) if !inv => nl.reconnect(u, p, input),
+                // A buffer in front of a clock: the clock control takes the
+                // source.
+                (Kind::Ff(_), _) if p == Port::Clk && !inv => nl.reconnect(u, p, input),
                 (Kind::Ff(_), _) if matches!(p, Port::Ena | Port::Sclr) => {
                     nl.reconnect(u, p, input);
                     if let Kind::Ff(cfg) = &mut nl.cell_mut(u).kind {
@@ -751,11 +764,17 @@ fn pack_carry(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
 }
 
 /// A global clock control on every net that clocks a register or an M4K.
-/// Which one is the placer's choice.
+/// Which one is the placer's choice. The clock can come from a pin or from
+/// the core (an LE, the JTAG block's TCK): a clock control takes either,
+/// the core through its tile's LAB lines (cyclone2-re README, "Global clocks
+/// from the core").
 fn pack_clocks(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
     let is_clock = |nl: &Netlist, (u, p): (CellId, Port)| match nl.cell(u).kind {
         Kind::Ff(_) => p == Port::Clk,
         Kind::M4k(_) => matches!(p, Port::M4k(pin) if pin.is_clock()),
+        Kind::Ibuf { .. } | Kind::Obuf { .. } | Kind::Iobuf { .. } => {
+            matches!(p, Port::Inclk | Port::Outclk)
+        }
         _ => false,
     };
     let clocks: Vec<NetId> = nl
@@ -765,9 +784,8 @@ fn pack_clocks(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
         .collect();
     for ni in clocks {
         let name = nl.net(ni).name.clone();
-        match nl.net(ni).driver {
-            Some((d, _)) if matches!(nl.cell(d).kind, Kind::Ibuf { .. }) => {}
-            _ => bail!("clock {name} must come straight from a pin"),
+        if nl.net(ni).driver.is_none() {
+            bail!("clock {name} has no driver");
         }
         let cc = nl.create_cell(format!("{name}$clkctrl"), Kind::ClkCtrl);
         nl.add_port(cc, Port::Inclk);
@@ -818,29 +836,47 @@ fn to_json(nl: &Netlist) -> Result<Value> {
                 }
                 "LCELL_FF"
             }
-            Kind::Ibuf { port } | Kind::Obuf { port, .. } | Kind::Iobuf { port, .. } => {
+            Kind::Ibuf { port, .. } | Kind::Obuf { port, .. } | Kind::Iobuf { port, .. } => {
                 let port = port.as_ref().context("pin buffer without a port")?;
                 attrs.insert("PORT".into(), Value::String(port.clone()));
-                let mut ioe_in = |input: IoeIn, constant: &str, invert: &str| match input {
+                fn register(params: &mut Map<String, Value>, name: &str, reg: Option<PowerUp>) {
+                    if let Some(p) = reg {
+                        params.insert(name.into(), Value::String(p.param().into()));
+                    }
+                }
+                let mut ioe_in = |input: IoeIn, constant: &str, invert: &str, reg: &str| match input
+                {
                     IoeIn::Const(v) => {
                         params.insert(constant.into(), bit(v));
                     }
-                    IoeIn::Signal { invert: true } => {
-                        params.insert(invert.into(), bit(true));
+                    IoeIn::Signal {
+                        invert: inv,
+                        reg: r,
+                    } => {
+                        if inv {
+                            params.insert(invert.into(), bit(true));
+                        }
+                        register(&mut params, reg, r);
                     }
-                    IoeIn::Signal { invert: false } => {}
                 };
                 match cell.kind {
                     Kind::Obuf { data, .. } => {
-                        ioe_in(data, "OUT_CONST", "DATA_INVERT");
+                        ioe_in(data, "OUT_CONST", "DATA_INVERT", register_param::OUTPUT);
                         "CY2_OBUF"
                     }
-                    Kind::Iobuf { data, oe, .. } => {
-                        ioe_in(data, "OUT_CONST", "DATA_INVERT");
-                        ioe_in(oe, "OE_CONST", "OE_INVERT");
+                    Kind::Iobuf {
+                        data, oe, in_reg, ..
+                    } => {
+                        ioe_in(data, "OUT_CONST", "DATA_INVERT", register_param::OUTPUT);
+                        ioe_in(oe, "OE_CONST", "OE_INVERT", register_param::OE);
+                        register(&mut params, register_param::INPUT, in_reg);
                         "CY2_IOBUF"
                     }
-                    _ => "CY2_IBUF",
+                    Kind::Ibuf { reg, .. } => {
+                        register(&mut params, register_param::INPUT, reg);
+                        "CY2_IBUF"
+                    }
+                    _ => unreachable!("pin buffers"),
                 }
             }
             Kind::ClkCtrl => "CLKCTRL",

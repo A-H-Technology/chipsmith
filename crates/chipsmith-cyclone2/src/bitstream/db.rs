@@ -289,6 +289,7 @@ impl Db {
             io: IoDb::new(pins, &asmdb)?,
             m4k: M4kDb::new(&asmdb)?,
             hard: HardDb::new(&asmdb)?,
+            pll: super::pll::PllDb::new(&asmdb)?,
             dev,
             asmdb,
         })

@@ -6,6 +6,9 @@ use std::fmt;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
+use chipsmith_cyclone2::pin::{
+    IoRegisters, LvttlCurrent, PinSettings, Pull, Standard, UnusedPins, Vccio, QUARTUS_STANDARDS,
+};
 use serde::Deserialize;
 
 use crate::device::{Clg400Pin, Device, UnknownDevice};
@@ -28,11 +31,13 @@ pub struct Manifest {
 /// Cyclone II can't be represented.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
+    /// The DE2's FPGA: its pins have I/O settings (`chipsmith_cyclone2::pin`).
     Ep2c35f672c6 {
-        pins: Vec<PinAssignment<QuartusPin>>,
-        /// chipsmith's Cyclone II timing model times one clock domain, so
-        /// there is at most one clock to constrain.
-        clock: Option<Clock>,
+        pins: Vec<PinAssignment<QuartusPin, De2Pin>>,
+        /// Clocks entering at pins. PLL outputs take their frequency from
+        /// the PLL; clocks from logic have none.
+        clocks: Vec<Clock>,
+        unused_pins: UnusedPins,
     },
     Xc7z010clg400_1 {
         pins: Vec<PinAssignment<Clg400Pin>>,
@@ -102,10 +107,20 @@ pub enum Sources {
     Vhdl(Vec<PathBuf>),
 }
 
+/// A port bit's pin and, where the device has them, its I/O settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PinAssignment<P> {
+pub struct PinAssignment<P, S = ()> {
     pub port: PortBit,
     pub pin: P,
+    pub io: S,
+}
+
+/// A DE2 pin's I/O settings: electrical ones for the I/O cell, and the
+/// I/O-cell registers synthesis should fill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct De2Pin {
+    pub settings: PinSettings,
+    pub registers: IoRegisters,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,8 +203,12 @@ pub enum ManifestError {
     BadFrequency { port: String, value: String },
     #[error("[clocks] {0}: a clock enters at a pin, and [pins] assigns none to {0}")]
     ClockWithoutPin(String),
-    #[error("[clocks] has {0} clocks; the {1} timing model times one clock domain")]
-    TooManyClocks(usize, Device),
+    #[error("[pins] {port}: {reason}")]
+    BadPinEntry { port: String, reason: String },
+    #[error("[target] unused_pins = {0:?}: one of \"tri-stated\", \"pull-up\", \"bus-hold\" (driving unused pins to ground would short the DE2's other chips)")]
+    BadUnusedPins(String),
+    #[error("{0} has no I/O settings in the manifest yet; [pins] takes pin names only")]
+    NoIoSettings(Device),
     #[error("pin {pin} is assigned to both {first} and {second}")]
     PinTwice {
         pin: String,
@@ -204,8 +223,10 @@ pub enum ManifestError {
 struct ManifestFile {
     project: ProjectTable,
     target: TargetTable,
+    /// Port to pin(s): a string, a list (index i is bit i), or a table
+    /// with `pin` or `pins` and I/O settings (`PinTable`).
     #[serde(default)]
-    pins: BTreeMap<String, PinsEntry>,
+    pins: BTreeMap<String, toml::Value>,
     /// Port bit (as in error messages: `clk`, `bus[0]`) to frequency.
     #[serde(default)]
     clocks: BTreeMap<String, String>,
@@ -223,14 +244,165 @@ struct ProjectTable {
 #[serde(deny_unknown_fields)]
 struct TargetTable {
     device: String,
+    unused_pins: Option<String>,
 }
 
+/// A `[pins]` entry written as a table: the pin or pins, and settings that
+/// apply to every bit.
 #[derive(Deserialize)]
-#[serde(untagged)]
-enum PinsEntry {
-    Scalar(String),
-    /// Index i of the list is bit i of the port.
-    Bus(Vec<String>),
+#[serde(deny_unknown_fields)]
+struct PinTable {
+    pin: Option<String>,
+    pins: Option<Vec<String>>,
+    standard: Option<String>,
+    drive: Option<String>,
+    pull: Option<String>,
+    registers: Option<Vec<String>>,
+}
+
+impl PinTable {
+    fn has_settings(&self) -> bool {
+        self.standard.is_some()
+            || self.drive.is_some()
+            || self.pull.is_some()
+            || self.registers.is_some()
+    }
+}
+
+/// A `[pins]` entry, its form checked.
+struct PinsEntry {
+    /// One pin (a scalar port) or a list (index i is bit i of the port).
+    pins: Result<String, Vec<String>>,
+    table: Option<PinTable>,
+}
+
+impl PinsEntry {
+    fn parse(port: &str, value: toml::Value) -> Result<Self, ManifestError> {
+        let bad = |reason: String| ManifestError::BadPinEntry {
+            port: port.to_string(),
+            reason,
+        };
+        let list = |a: Vec<toml::Value>| -> Result<Vec<String>, ManifestError> {
+            a.into_iter()
+                .map(|v| match v {
+                    toml::Value::String(s) => Ok(s),
+                    other => Err(bad(format!("{other} is not a pin name"))),
+                })
+                .collect()
+        };
+        match value {
+            toml::Value::String(s) => Ok(PinsEntry {
+                pins: Ok(s),
+                table: None,
+            }),
+            toml::Value::Array(a) => Ok(PinsEntry {
+                pins: Err(list(a)?),
+                table: None,
+            }),
+            v @ toml::Value::Table(_) => {
+                let mut t: PinTable = v
+                    .try_into()
+                    .map_err(|e: toml::de::Error| bad(e.message().to_string()))?;
+                let pins = match (t.pin.take(), t.pins.take()) {
+                    (Some(p), None) => Ok(p),
+                    (None, Some(ps)) => Err(ps),
+                    _ => {
+                        return Err(bad(
+                            "give one of `pin` (a scalar port) or `pins` (a bus)".into()
+                        ))
+                    }
+                };
+                Ok(PinsEntry {
+                    pins,
+                    table: Some(t),
+                })
+            }
+            other => Err(bad(format!(
+                "{other} is not a pin, a list of pins or a table"
+            ))),
+        }
+    }
+}
+
+/// A DE2 entry's settings. Every rule about which settings go together is
+/// checked here, so a `De2Pin` is one the board can take.
+fn de2_pin(port: &str, t: &PinTable) -> Result<De2Pin, ManifestError> {
+    let bad = |reason: String| ManifestError::BadPinEntry {
+        port: port.to_string(),
+        reason,
+    };
+    let current = t
+        .drive
+        .as_deref()
+        .map(|d| {
+            d.strip_suffix("mA")
+                .map(str::trim_end)
+                .and_then(|n| n.parse::<u32>().ok())
+                .ok_or_else(|| bad(format!("drive = {d:?} is not a current like \"8 mA\"")))
+        })
+        .transpose()?;
+    let lvttl_currents = || {
+        LvttlCurrent::ALL
+            .iter()
+            .map(|c| c.ma().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let standard = match t.standard.as_deref().unwrap_or("3.3-V LVTTL") {
+        "3.3-V LVTTL" => Standard::Lvttl(match current {
+            None => LvttlCurrent::Ma24,
+            Some(ma) => LvttlCurrent::from_ma(ma).ok_or_else(|| {
+                bad(format!("3.3-V LVTTL drives {} mA, not {ma} mA", lvttl_currents()))
+            })?,
+        }),
+        "3.3-V LVCMOS" if current.is_none() => Standard::Lvcmos,
+        "3.3-V LVCMOS" => {
+            return Err(bad(
+                "3.3-V LVCMOS takes its default current only (no other drive code is decoded); \
+                 3.3-V LVTTL has every current"
+                    .into(),
+            ))
+        }
+        "2.5 V" if current.is_none() => Standard::V25Input,
+        "2.5 V" => return Err(bad("a 2.5-V pin is an input on the DE2, it has no drive".into())),
+        s => {
+            return Err(bad(match QUARTUS_STANDARDS.iter().find(|(n, _)| *n == s) {
+                Some((_, vccio)) => format!(
+                    "{s} needs a bank at VCCIO {vccio}; the DE2 powers every bank at {}",
+                    Vccio::V33
+                ),
+                None => format!(
+                    "unknown I/O standard {s:?}; the DE2 takes \"3.3-V LVTTL\", \"3.3-V LVCMOS\" or \"2.5 V\" (inputs)"
+                ),
+            }))
+        }
+    };
+    let pull = match t.pull.as_deref() {
+        None => Pull::None,
+        Some("up") => Pull::Up,
+        Some("bus-hold") => Pull::BusHold,
+        Some(p) => return Err(bad(format!("pull = {p:?}: \"up\" or \"bus-hold\""))),
+    };
+    let mut registers = IoRegisters::default();
+    for r in t.registers.iter().flatten() {
+        let flag = match r.as_str() {
+            "input" => &mut registers.input,
+            "output" => &mut registers.output,
+            "output-enable" => &mut registers.output_enable,
+            _ => {
+                return Err(bad(format!(
+                    "registers: {r:?} is not \"input\", \"output\" or \"output-enable\""
+                )))
+            }
+        };
+        if std::mem::replace(flag, true) {
+            return Err(bad(format!("registers lists {r:?} twice")));
+        }
+    }
+    Ok(De2Pin {
+        settings: PinSettings { standard, pull },
+        registers,
+    })
 }
 
 impl Manifest {
@@ -253,26 +425,48 @@ impl Manifest {
             source: Box::new(source),
         })?;
         let device: Device = file.target.device.parse()?;
+        let mut entries = Vec::new();
+        for (port, value) in file.pins {
+            let entry = PinsEntry::parse(&port, value)?;
+            entries.push((port, entry));
+        }
         let target = match device {
             Device::Ep2c35f672c6 => {
-                let pins = flatten_pins(file.pins, QuartusPin::parse)?;
-                let mut clocks = parse_clocks(&file.clocks, &pins)?;
-                if clocks.len() > 1 {
-                    return Err(ManifestError::TooManyClocks(clocks.len(), device));
-                }
+                let pins = flatten_pins(entries, QuartusPin::parse, |port, t| match t {
+                    Some(t) => de2_pin(port, t),
+                    None => Ok(De2Pin::default()),
+                })?;
+                let clocks = parse_clocks(&file.clocks, &pins)?;
+                let unused_pins = match file.target.unused_pins.as_deref() {
+                    None | Some("tri-stated") => UnusedPins::TriStated,
+                    Some("pull-up") => UnusedPins::PullUp,
+                    Some("bus-hold") => UnusedPins::BusHold,
+                    Some(other) => return Err(ManifestError::BadUnusedPins(other.to_string())),
+                };
                 Target::Ep2c35f672c6 {
                     pins,
-                    clock: clocks.pop(),
+                    clocks,
+                    unused_pins,
                 }
             }
             Device::Xc7z010clg400_1 => {
-                let pins = flatten_pins(file.pins, |s| {
-                    Clg400Pin::parse(s).ok_or_else(|| ManifestError::BadPin {
-                        pin: s.to_string(),
-                        device,
-                        expected: "pins are the package's programmable-logic balls, like L16 (PS/MIO pins are not)",
-                    })
-                })?;
+                if file.target.unused_pins.is_some() {
+                    return Err(ManifestError::NoIoSettings(device));
+                }
+                let pins = flatten_pins(
+                    entries,
+                    |s| {
+                        Clg400Pin::parse(s).ok_or_else(|| ManifestError::BadPin {
+                            pin: s.to_string(),
+                            device,
+                            expected: "pins are the package's programmable-logic balls, like L16 (PS/MIO pins are not)",
+                        })
+                    },
+                    |_, t| match t {
+                        Some(t) if t.has_settings() => Err(ManifestError::NoIoSettings(device)),
+                        _ => Ok(()),
+                    },
+                )?;
                 let clocks = parse_clocks(&file.clocks, &pins)?;
                 Target::Xc7z010clg400_1 { pins, clocks }
             }
@@ -322,9 +516,9 @@ fn expand_sources(project_dir: &Path, patterns: &[String]) -> Result<Sources, Ma
     }
 }
 
-fn parse_clocks<P>(
+fn parse_clocks<P, S>(
     table: &BTreeMap<String, String>,
-    pins: &[PinAssignment<P>],
+    pins: &[PinAssignment<P, S>],
 ) -> Result<Vec<Clock>, ManifestError> {
     table
         .iter()
@@ -346,15 +540,19 @@ fn parse_clocks<P>(
         .collect()
 }
 
-fn flatten_pins<P: PartialEq + fmt::Display>(
-    table: BTreeMap<String, PinsEntry>,
+/// One assignment per port bit; `io` turns an entry's table (if it has
+/// one) into the device's settings, which every bit of the entry gets.
+fn flatten_pins<P: PartialEq + fmt::Display, S: Copy>(
+    entries: Vec<(String, PinsEntry)>,
     parse: impl Fn(&str) -> Result<P, ManifestError>,
-) -> Result<Vec<PinAssignment<P>>, ManifestError> {
-    let mut assignments: Vec<PinAssignment<P>> = Vec::new();
-    for (port, entry) in table {
-        let bits: Vec<(PortBit, &String)> = match &entry {
-            PinsEntry::Scalar(pin) => vec![(PortBit::Scalar(port.clone()), pin)],
-            PinsEntry::Bus(pins) => pins
+    io: impl Fn(&str, Option<&PinTable>) -> Result<S, ManifestError>,
+) -> Result<Vec<PinAssignment<P, S>>, ManifestError> {
+    let mut assignments: Vec<PinAssignment<P, S>> = Vec::new();
+    for (port, entry) in entries {
+        let settings = io(&port, entry.table.as_ref())?;
+        let bits: Vec<(PortBit, &String)> = match &entry.pins {
+            Ok(pin) => vec![(PortBit::Scalar(port.clone()), pin)],
+            Err(pins) => pins
                 .iter()
                 .enumerate()
                 .map(|(i, pin)| (PortBit::Bit(port.clone(), i), pin))
@@ -369,7 +567,11 @@ fn flatten_pins<P: PartialEq + fmt::Display>(
                     second: port,
                 });
             }
-            assignments.push(PinAssignment { port, pin });
+            assignments.push(PinAssignment {
+                port,
+                pin,
+                io: settings,
+            });
         }
     }
     Ok(assignments)
@@ -530,25 +732,27 @@ mod tests {
     }
 
     #[test]
-    fn a_clock_names_a_pin_and_cyclone_ii_takes_one() {
+    fn a_clock_names_a_pin() {
         let dir = scratch("clocks", &["src/a.v"]);
         let m =
             Manifest::parse(&format!("{DE2}\n[clocks]\nCLOCK_50 = \"50 MHz\"\n"), &dir).unwrap();
-        let Target::Ep2c35f672c6 { clock, .. } = &m.target else {
+        let Target::Ep2c35f672c6 { clocks, .. } = &m.target else {
             unreachable!()
         };
         assert_eq!(
-            clock
-                .as_ref()
-                .map(|c| (c.port.to_string(), c.frequency.hz())),
-            Some(("CLOCK_50".into(), 50_000_000))
+            clocks
+                .iter()
+                .map(|c| (c.port.to_string(), c.frequency.hz()))
+                .collect::<Vec<_>>(),
+            [("CLOCK_50".to_string(), 50_000_000)]
         );
 
         let two = format!("{DE2}\n[clocks]\nCLOCK_50 = \"50 MHz\"\n\"LEDR[0]\" = \"1 MHz\"\n");
-        assert!(matches!(
-            Manifest::parse(&two, &dir),
-            Err(ManifestError::TooManyClocks(2, Device::Ep2c35f672c6))
-        ));
+        let Target::Ep2c35f672c6 { clocks, .. } = Manifest::parse(&two, &dir).unwrap().target
+        else {
+            unreachable!()
+        };
+        assert_eq!(clocks.len(), 2);
         let m = Manifest::parse(
             &format!("{ZYBO}\n[clocks]\nclk = \"125 MHz\"\n\"led[1]\" = \"10 MHz\"\n"),
             &dir,
@@ -576,5 +780,111 @@ mod tests {
             Manifest::parse(&format!("{DE2}\n[clocks]\nCLOCK_50 = \"fast\"\n"), &dir),
             Err(ManifestError::BadFrequency { .. })
         ));
+    }
+
+    #[test]
+    fn a_table_entry_gives_every_bit_its_settings() {
+        let dir = scratch("settings", &["src/a.v"]);
+        let text = format!(
+            "{DE2}\n{}",
+            r#"GPIO = { pins = ["PIN_D25", "PIN_J22"], pull = "up", drive = "8 mA", registers = ["output", "input"] }
+               KEY = { pin = "PIN_G26", standard = "2.5 V", pull = "bus-hold" }
+               HEX = { pin = "PIN_AF10", standard = "3.3-V LVCMOS" }"#
+        );
+        let text = text.replace("[target]\n", "[target]\nunused_pins = \"pull-up\"\n");
+        let m = Manifest::parse(&text, &dir).unwrap();
+        let Target::Ep2c35f672c6 {
+            pins, unused_pins, ..
+        } = &m.target
+        else {
+            unreachable!()
+        };
+        assert_eq!(*unused_pins, UnusedPins::PullUp);
+        let io = |port: &str| pins.iter().find(|a| a.port.to_string() == port).unwrap().io;
+        let gpio = De2Pin {
+            settings: PinSettings {
+                standard: Standard::Lvttl(LvttlCurrent::Ma8),
+                pull: Pull::Up,
+            },
+            registers: IoRegisters {
+                input: true,
+                output: true,
+                output_enable: false,
+            },
+        };
+        assert_eq!(io("GPIO[0]"), gpio);
+        assert_eq!(io("GPIO[1]"), gpio);
+        assert_eq!(io("KEY").settings.standard, Standard::V25Input);
+        assert_eq!(io("KEY").settings.pull, Pull::BusHold);
+        assert_eq!(io("HEX").settings.standard, Standard::Lvcmos);
+        // A plain entry is 3.3-V LVTTL at 24 mA with nothing else.
+        assert_eq!(io("CLOCK_50"), De2Pin::default());
+    }
+
+    #[test]
+    fn settings_the_de2_cant_take_are_rejected_when_the_manifest_loads() {
+        let dir = scratch("bad-settings", &["src/a.v"]);
+        for (entry, says) in [
+            (r#"{ pin = "PIN_D25", standard = "1.8 V" }"#, "VCCIO 1.8 V"),
+            (r#"{ pin = "PIN_D25", standard = "1.5 V" }"#, "VCCIO 1.5 V"),
+            (
+                r#"{ pin = "PIN_D25", standard = "SSTL-2 Class I" }"#,
+                "unknown I/O standard",
+            ),
+            (
+                r#"{ pin = "PIN_D25", standard = "3.3-V LVCMOS", drive = "8 mA" }"#,
+                "default current",
+            ),
+            (
+                r#"{ pin = "PIN_D25", standard = "2.5 V", drive = "8 mA" }"#,
+                "input",
+            ),
+            (r#"{ pin = "PIN_D25", drive = "2 mA" }"#, "not 2 mA"),
+            (r#"{ pin = "PIN_D25", drive = "fast" }"#, "current like"),
+            (r#"{ pin = "PIN_D25", pull = "down" }"#, "bus-hold"),
+            (
+                r#"{ pin = "PIN_D25", registers = ["input", "input"] }"#,
+                "twice",
+            ),
+            (
+                r#"{ pin = "PIN_D25", registers = ["clock"] }"#,
+                "output-enable",
+            ),
+            (r#"{ pin = "PIN_D25", pins = ["PIN_J22"] }"#, "one of"),
+            (r#"{ pull = "up" }"#, "one of"),
+            (r#"{ pin = "PIN_D25", slew = "fast" }"#, "slew"),
+        ] {
+            let text = format!("{DE2}\nGPIO = {entry}\n");
+            match Manifest::parse(&text, &dir) {
+                Err(e @ ManifestError::BadPinEntry { .. }) => {
+                    assert!(e.to_string().contains(says), "{entry}: {e}")
+                }
+                other => panic!("{entry}: {other:?}"),
+            }
+        }
+        let ground = DE2.replace("[target]\n", "[target]\nunused_pins = \"ground\"\n");
+        assert!(matches!(
+            Manifest::parse(&ground, &dir),
+            Err(ManifestError::BadUnusedPins(_))
+        ));
+    }
+
+    #[test]
+    fn the_zybo_takes_no_io_settings() {
+        let dir = scratch("zybo-settings", &["src/a.v"]);
+        let plain = format!("{ZYBO}\nbtn = {{ pin = \"R18\" }}\n");
+        assert!(Manifest::parse(&plain, &dir).is_ok());
+        for text in [
+            format!("{ZYBO}\nbtn = {{ pin = \"R18\", pull = \"up\" }}\n"),
+            ZYBO.replace("[target]\n", "[target]\nunused_pins = \"pull-up\"\n"),
+        ] {
+            assert!(
+                matches!(
+                    Manifest::parse(&text, &dir),
+                    Err(ManifestError::NoIoSettings(_))
+                ),
+                "{text}"
+            );
+        }
     }
 }

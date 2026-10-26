@@ -44,15 +44,32 @@ module LCELL_FF (input DATAIN, input CLK, input ENA, input ACLR, input SCLR, out
     if (ACLR) REGOUT <= 1'b0;
     else if (ENA) REGOUT <= SCLR ? 1'b0 : DATAIN;
 endmodule
-module CY2_IBUF (input PAD, output COMBOUT);
+module CY2_IBUF (input PAD, input INCLK, output COMBOUT, output REGOUT);
+  parameter INPUT_REGISTER = "none";
+  reg q = INPUT_REGISTER == "high";
+  always @(posedge INCLK) q <= PAD;
   assign COMBOUT = PAD;
+  assign REGOUT = q;
 endmodule
-module CY2_OBUF (input DATAOUT, output PAD);
-  assign PAD = DATAOUT;
+module CY2_OBUF (input DATAOUT, input OUTCLK, output PAD);
+  parameter OUTPUT_REGISTER = "none";
+  reg q = OUTPUT_REGISTER == "high";
+  always @(posedge OUTCLK) q <= DATAOUT;
+  assign PAD = OUTPUT_REGISTER == "none" ? DATAOUT : q;
 endmodule
-module CY2_IOBUF (input DATAOUT, input OE, output COMBOUT, inout PAD);
-  assign PAD = OE ? DATAOUT : 1'bz;
+module CY2_IOBUF (input DATAOUT, input OE, input INCLK, input OUTCLK,
+                  output COMBOUT, output REGOUT, inout PAD);
+  parameter INPUT_REGISTER = "none";
+  parameter OUTPUT_REGISTER = "none";
+  parameter OE_REGISTER = "none";
+  reg qi = INPUT_REGISTER == "high", qd = OUTPUT_REGISTER == "high", qe = OE_REGISTER == "high";
+  always @(posedge INCLK) qi <= PAD;
+  always @(posedge OUTCLK) begin qd <= DATAOUT; qe <= OE; end
+  wire d = OUTPUT_REGISTER == "none" ? DATAOUT : qd;
+  wire e = OE_REGISTER == "none" ? OE : qe;
+  assign PAD = e ? d : 1'bz;
   assign COMBOUT = PAD;
+  assign REGOUT = qi;
 endmodule
 "#;
 
