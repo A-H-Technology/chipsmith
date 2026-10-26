@@ -33,18 +33,35 @@ endmodule
 module CY2_IOBUF (input DATAOUT, input OE, output COMBOUT, inout PAD);
 endmodule
 
-// M4K RAM block (m4k.rs builds it from a memory). MODE "SINGLE": port A
-// reads and writes at A_ADDR (A_WE never driven: a ROM). MODE "SIMPLE_DUAL":
-// port A writes at A_ADDR, port B reads at B_ADDR. Both on the rising edge
-// of CLK; DATAOUT is the word read, captured by the clock (a synchronous
-// read, no output register). WIDTH: 1, 2, 4, 9, 18 or 36 (36 only in simple
-// dual port); an n-bit address uses pins 12 - n ..= 11. INIT: the 4,608
+// M4K RAM block (synth/m4k.rs builds it from a memory; crate::m4k is the
+// reference). MODE "SINGLE": port A reads and writes. "SIMPLE_DUAL": port A
+// writes, port B reads (a read of the word being written returns the old
+// data). "TRUE_DUAL": both read and write. A port whose write enable is
+// never driven doesn't write (a ROM). WIDTH, B_WIDTH: the ports' physical
+// widths, 1, 2, 4, 9, 18 or 36; an n-bit address uses bits 12 - n ..= 11.
+// Port A's input registers are on clock 0 (CLK), port B's on B_CLOCK; each
+// clock k is gated by ENAk. A_OUTREG/B_OUTREG: "NONE", "CLOCK0", "CLOCK1"
+// register the read data, cleared asynchronously by A_OUTCLR/B_OUTCLR
+// ("NONE", "CLEAR0", "CLEAR1"). Data in and out are by physical column
+// (port B's read data from DATAOUT[18] in true dual port); BASE, SLICE and
+// PACKING say which columns hold data (crate::m4k::Shape). INIT: the 4,608
 // content bits in physical order.
 (* blackbox *)
-module CY2_M4K (input CLK, input [11:0] A_ADDR, input [35:0] A_DATAIN, input A_WE, input [11:0] B_ADDR,
+module CY2_M4K (input CLK, input CLK1, input ENA0, input ENA1, input CLR0, input CLR1,
+                input [11:0] A_ADDR, input [35:0] A_DATAIN, input A_WE, input [3:0] A_BYTEENA,
+                input [11:0] B_ADDR, input [17:0] B_DATAIN, input B_WE, input [1:0] B_BYTEENA,
                 output [35:0] DATAOUT);
   parameter MODE = "SINGLE";
   parameter WIDTH = 1;
+  parameter B_WIDTH = 1;
+  parameter B_CLOCK = 0;
+  parameter A_OUTREG = "NONE";
+  parameter A_OUTCLR = "NONE";
+  parameter B_OUTREG = "NONE";
+  parameter B_OUTCLR = "NONE";
+  parameter BASE = 1;
+  parameter SLICE = 1;
+  parameter PACKING = "DENSE";
   parameter [4607:0] INIT = 4608'b0;
 endmodule
 

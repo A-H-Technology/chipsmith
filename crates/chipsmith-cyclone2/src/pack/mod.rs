@@ -25,7 +25,7 @@ pub use diff::diff_files;
 use mask::{fix, invert_input, normalise_carry, substitute, BUFFERS};
 use netlist::{CellId, IoeIn, Kind, NetId, Netlist, Port, LUT_INPUTS};
 
-use crate::m4k::{AddrPort, Mode, Pin, Width};
+use crate::m4k::{CellPort, Param, Pin, Ports, Sel, Side};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -232,12 +232,14 @@ fn pack_io(nl: &mut Netlist) -> Result<()> {
     Ok(())
 }
 
-/// M4K: the logical ports synth/m4k_map.v gives a CY2_M4K become the
-/// block's physical pins (`m4k::Pin`): CLK -> CLK0, A_WE -> WE,
-/// A_DATAIN[c] -> DI<c>, DATAOUT[c] -> DO<c>, address bit p of port A or B
-/// -> `Pin::addr`. An n-bit address uses bits 12 - n ..= 11; libmap ties
-/// the ones below to 0 and they are dropped, as are data bits past the
-/// width and constant data inputs. A_WE never driven is a ROM.
+/// M4K: the cell's logical ports become the block's physical pins
+/// (`CellPort::pin`): CLK -> CLK0, A_WE -> WE, B_WE -> RE, A_DATAIN[c] ->
+/// DI<c>, B_DATAIN[c] -> DI<18+c>, DATAOUT[c] -> DO<c>, address bit p ->
+/// `Pin::addr`. An n-bit address uses bits 12 - n ..= 11; the ones below,
+/// a port's pins when the shape has no such port, constant data inputs,
+/// enables tied active and clears tied inactive are dropped (an unconnected
+/// one reads that way). A port whose write enable is never driven doesn't
+/// write: a ROM.
 fn pack_m4k(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
     // Driven by GND/VCC, or not at all; a net without a driver isn't.
     let constant = |nl: &Netlist, n: Option<NetId>| {
@@ -247,29 +249,39 @@ fn pack_m4k(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
                 .is_some_and(|(d, _)| matches!(nl.cell(d).kind, Kind::Const(_)))
         })
     };
+    let tied = |nl: &Netlist, n: Option<NetId>| -> Option<bool> {
+        let n = n?;
+        match nl.net(n).driver {
+            Some((d, _)) => match nl.cell(d).kind {
+                Kind::Const(v) => Some(v),
+                _ => None,
+            },
+            None => None,
+        }
+    };
     for c in nl.cells() {
         let Kind::M4k(shape) = nl.cell(c).kind else {
             continue;
         };
         stats.m4ks += 1;
         let name = nl.cell(c).name.clone();
-        let width = shape.width();
-        let (bits, low_addr) = (width.bits(), 12 - width.addr_bits());
-        let dual = shape.mode() == Mode::SimpleDual;
-        let we = nl.cell(c).net(Port::RamWe);
-        let writes = !constant(nl, we);
-        if let Some(we) = we.filter(|_| !writes) {
-            if nl
-                .net(we)
-                .driver
-                .is_some_and(|(d, _)| nl.cell(d).kind == Kind::Const(true))
-            {
+        let mut writes = [false; 2];
+        for (i, side) in [Side::A, Side::B].into_iter().enumerate() {
+            let we = nl.cell(c).net(Port::Ram(CellPort::We(side)));
+            if tied(nl, we) == Some(true) {
                 bail!("M4K {name}: write enable tied high is not supported");
             }
+            writes[i] = shape.writable(side) && !constant(nl, we);
         }
-        if dual && !writes && width != Width::X36 {
-            bail!("M4K {name}: a read-only simple dual port narrower than x36 is not supported");
-        }
+        shape
+            .mode(writes[0])
+            .with_context(|| format!("M4K {name}"))?;
+        let low_addr = |side: Side| shape.width(side).map(|w| 12 - w.addr_bits() as u8);
+        let uses_clock1 = shape.input_clock(Side::B) == Sel::One
+            || shape
+                .read_ports()
+                .iter()
+                .any(|(_, r)| r.out_reg.is_some_and(|o| o.clock == Sel::One));
         // nextpnr iterates a cell's ports newest first.
         let old: Vec<(Port, Option<NetId>)> = nl.cell(c).ports().collect();
         let mut pins: Vec<(Pin, NetId)> = Vec::new();
@@ -277,50 +289,73 @@ fn pack_m4k(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
         for &(port, net) in old.iter().rev() {
             nl.disconnect(c, port);
             nl.remove_port(c, port);
-            match port {
-                Port::RamDataOut(k) => {
+            let lp = match port {
+                Port::Clk => CellPort::Clk(Sel::Zero),
+                Port::Ram(p) => p,
+                other => bail!("M4K {name}: unknown port {}", other.name()),
+            };
+            let driven = net.filter(|&n| !constant(nl, Some(n)));
+            let side_writes = |s: Side| writes[s as usize];
+            let keep = match lp {
+                CellPort::DataOut(_) => {
                     // Read bits nothing uses stay off the routing (and out of
                     // the atom width Quartus is given).
-                    if k < bits && nl.has_users(net) {
-                        outs.push((Pin::Do(k), net.unwrap()));
+                    if nl.has_users(net) {
+                        outs.push((lp.pin(), net.unwrap()));
                     }
+                    continue;
                 }
-                Port::Clk => {
-                    let Some(n) = net.filter(|&n| !constant(nl, Some(n))) else {
+                CellPort::Clk(Sel::Zero) => {
+                    if driven.is_none() {
                         bail!("M4K {name}: clock not driven");
-                    };
-                    pins.push((Pin::Clk0, n));
-                }
-                Port::RamWe => {
-                    if let Some(n) = net.filter(|_| writes) {
-                        pins.push((Pin::We, n));
                     }
+                    true
                 }
-                Port::RamDataIn(k) => {
-                    if let Some(n) = net.filter(|&n| writes && k < bits && !constant(nl, Some(n))) {
-                        pins.push((Pin::Di(k), n));
+                CellPort::Clk(Sel::One) => {
+                    if uses_clock1 && driven.is_none() {
+                        bail!("M4K {name}: clock 1 not driven");
                     }
+                    uses_clock1
                 }
-                Port::RamAddr(ab, p) => {
-                    // A read-only x36 simple dual port reads on port B; port
-                    // A then has nothing.
-                    let unused = match ab {
-                        AddrPort::A => dual && !writes,
-                        AddrPort::B => !dual,
-                    };
-                    if unused || p < low_addr {
-                        continue;
+                CellPort::Ena(_) => {
+                    if tied(nl, net) == Some(false) {
+                        bail!("M4K {name}: clock enable tied low");
                     }
-                    let Some(n) = net.filter(|&n| !constant(nl, Some(n))) else {
+                    true
+                }
+                CellPort::Clr(_) => {
+                    if tied(nl, net) == Some(true) {
+                        bail!("M4K {name}: clear tied high");
+                    }
+                    true
+                }
+                CellPort::We(s) => side_writes(s),
+                CellPort::DataIn(s, _) => side_writes(s),
+                CellPort::ByteEna(s, _) => {
+                    if side_writes(s) && tied(nl, net) == Some(false) {
+                        bail!("M4K {name}: byte enable tied low");
+                    }
+                    side_writes(s)
+                }
+                CellPort::Addr(s, p) => {
+                    // A read-only x36 simple dual port reads on port B;
+                    // port A then has nothing.
+                    let idle = s == Side::A
+                        && !writes[0]
+                        && matches!(shape.ports(), Ports::SimpleDual { .. });
+                    let used = !idle && low_addr(s).is_some_and(|low| p >= low);
+                    if used && driven.is_none() {
                         bail!(
-                            "M4K {name}: address pin {} is a constant; memories shallower than \
-                             their M4K configuration are not supported",
+                            "M4K {name}: address pin {} is a constant; synthesis repeats \
+                             another address bit there",
                             port.name()
                         );
-                    };
-                    pins.push((Pin::addr(ab, p), n));
+                    }
+                    used
                 }
-                other => bail!("M4K {name}: unknown port {}", other.name()),
+            };
+            if let Some(n) = driven.filter(|_| keep) {
+                pins.push((lp.pin(), n));
             }
         }
         for (pin, n) in pins.into_iter().chain(outs) {
@@ -720,7 +755,7 @@ fn pack_carry(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
 fn pack_clocks(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
     let is_clock = |nl: &Netlist, (u, p): (CellId, Port)| match nl.cell(u).kind {
         Kind::Ff(_) => p == Port::Clk,
-        Kind::M4k(_) => p == Port::M4k(Pin::Clk0),
+        Kind::M4k(_) => matches!(p, Port::M4k(pin) if pin.is_clock()),
         _ => false,
     };
     let clocks: Vec<NetId> = nl
@@ -812,11 +847,17 @@ fn to_json(nl: &Netlist) -> Result<Value> {
             Kind::Hard(b) => b.cell_type(),
             Kind::M4k(shape) => {
                 // As yosys wrote them: a string and a 32-bit binary number.
-                params.insert("MODE".into(), Value::String(shape.mode_name().into()));
-                params.insert(
-                    "WIDTH".into(),
-                    Value::String(format!("{:032b}", shape.width().bits())),
-                );
+                // The rest of the shape's parameters passed through.
+                for (k, v) in shape.params() {
+                    if !["MODE", "WIDTH"].contains(&k) {
+                        continue;
+                    }
+                    let v = match v {
+                        Param::Str(s) => s.to_string(),
+                        Param::Int(i) => format!("{i:032b}"),
+                    };
+                    params.insert(k.into(), Value::String(v));
+                }
                 "CY2_M4K"
             }
             Kind::Const(_) | Kind::TopIn | Kind::TopOut | Kind::TopInOut => {

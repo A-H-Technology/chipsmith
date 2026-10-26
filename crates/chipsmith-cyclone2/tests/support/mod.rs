@@ -239,7 +239,10 @@ fn block_memories(gate: &Module) -> Vec<String> {
         .cells
         .iter()
         .filter(|c| c.kind.type_name() == "CY2_M4K")
-        .filter_map(|c| c.name.rsplit_once(".0.").map(|(id, _)| id.to_owned()))
+        .filter_map(|c| {
+            let mut parts = c.name.rsplitn(3, '.');
+            parts.nth(2).map(str::to_owned)
+        })
         .collect();
     ids.sort();
     ids.dedup();
@@ -357,65 +360,332 @@ fn mask(m: &mut Module, name: &str, bits: &[SigBit], en: &[SigBit]) -> Vec<SigBi
         .collect()
 }
 
-/// The blocks' side of [`cut_memories`].
-fn cut_blocks(m: &mut Module, shapes: &BTreeMap<String, MemShape>) -> Result<(), String> {
-    use chipsmith_netlist::Dir;
-    let mut blocks: BTreeMap<String, Vec<(usize, chipsmith_netlist::Generic)>> = BTreeMap::new();
-    m.cells.retain(|c| {
-        if let (CellKind::Other(g), Some((id, b))) = (&c.kind, c.name.rsplit_once(".0.")) {
-            if g.ty == "CY2_M4K" {
-                blocks
-                    .entry(id.to_owned())
-                    .or_default()
-                    .push((b.parse().unwrap_or(0), g.clone()));
-                return false;
-            }
+/// A memory as synthesis saw it, for the blocks' model.
+#[derive(Debug, Clone)]
+pub struct MemInfo {
+    width: usize,
+    size: usize,
+    init: chipsmith_netlist::Const,
+}
+
+/// The memories of `d` by name.
+fn mem_infos(d: &Design) -> BTreeMap<String, MemInfo> {
+    let mut out = BTreeMap::new();
+    for c in &top(d).cells {
+        if let CellKind::Mem(mem) = &c.kind {
+            out.insert(
+                mem.memid.trim_start_matches('\\').to_owned(),
+                MemInfo {
+                    width: mem.width,
+                    size: mem.size,
+                    init: mem.init.clone(),
+                },
+            );
         }
-        true
-    });
+    }
+    out
+}
+
+/// Replaces every CY2_M4K by a model of the block (as `cells.v` and the
+/// hardware have it) whose contents are registers named after the words
+/// of the memory it holds part of, `memid[word]`, as yosys' `memory_map`
+/// names the RTL's: the comparison then proves the words equal at every
+/// clock edge, and the read logic around the blocks against the RTL's
+/// reads. Also checks the blocks' INIT against the memory's contents.
+///
+/// Which memory bit a block bit is follows synthesis' layout (block
+/// `memid.<row>.<col>`, the shape's base words and slice, a shallow
+/// memory's repeated top address bit); a wrong guess here can only make
+/// the proof fail.
+fn model_blocks(m: &mut Module, mems: &BTreeMap<String, MemInfo>) -> Result<(), String> {
+    use chipsmith_cyclone2::m4k::{depth, Ports, Sel, Shape, Side, Width};
+    use chipsmith_netlist::{Bmux, Const, Ctrl, Demux, DffControl, Ff, FfKind, ParamValue};
+    use chipsmith_synth::rewrite::Gates;
+
+    let blocks: Vec<chipsmith_netlist::Cell> = {
+        let (b, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut m.cells)
+            .into_iter()
+            .partition(|c| c.kind.type_name() == "CY2_M4K");
+        m.cells = keep;
+        b
+    };
+    // memid -> word -> bit -> content net.
+    let mut words: BTreeMap<String, BTreeMap<usize, BTreeMap<usize, SigBit>>> = BTreeMap::new();
     let mut subst = chipsmith_synth::rewrite::Subst::new(m);
-    for (id, mut bs) in blocks {
-        bs.sort_by_key(|b| b.0);
-        let shape = shapes
-            .get(&id)
-            .ok_or_else(|| format!("M4K for {id}, which isn't a memory"))?;
-        let port = |g: &chipsmith_netlist::Generic, p: &str| g.port(p).unwrap().sig.clone();
-        let g0 = &bs[0].1;
-        let width = g0.params["WIDTH"].bits().and_then(|c| c.as_u64()).unwrap() as usize;
-        let single = g0.params["MODE"].str() == Some("SINGLE");
-        let top = |a: Vec<SigBit>| a[12 - shape.abits..].to_vec();
-        let rdata: Vec<SigBit> = (0..shape.width).map(|_| SigBit::Net(m.new_net())).collect();
-        let mut wdata = Vec::new();
-        for (b, g) in &bs {
-            let dout = port(g, "DATAOUT");
-            let din = port(g, "A_DATAIN");
-            for k in 0..width {
-                let col = b * width + k;
-                if col < shape.width {
-                    if let SigBit::Net(n) = dout[k] {
-                        subst.set(n, rdata[col]);
-                    }
-                    wdata.push(din[k]);
+    let mut inits: Vec<(SigBit, State)> = Vec::new();
+    let mut g = Gates::new(m, "m4k_model");
+    for c in blocks {
+        let CellKind::Other(cell) = &c.kind else {
+            unreachable!()
+        };
+        let mut parts = c.name.rsplitn(3, '.');
+        let (col, row, id) = (parts.next(), parts.next(), parts.next());
+        let (Some(id), Some(row), Some(col)) = (id, row, col) else {
+            return Err(format!("{}: not memid.row.col", c.name));
+        };
+        let (row, col): (usize, usize) = (
+            row.parse().map_err(|_| format!("{}: row", c.name))?,
+            col.parse().map_err(|_| format!("{}: col", c.name))?,
+        );
+        let info = mems
+            .get(id)
+            .ok_or_else(|| format!("{}: no memory {id}", c.name))?;
+        let shape = Shape::parse(
+            |k| cell.params.get(k).and_then(|v| v.str()).map(str::to_owned),
+            |k| {
+                cell.params
+                    .get(k)
+                    .and_then(|v| v.bits())
+                    .and_then(|b| b.as_u64())
+            },
+            |_| unreachable!("synthesis writes SLICE"),
+        )
+        .map_err(|e| format!("{}: {e:#}", c.name))?;
+        let sig = |name: &str| cell.port(name).map(|p| p.sig.clone());
+        let bit = |name: &str, dflt: SigBit| sig(name).map_or(dflt, |s| s[0]);
+        let init = match cell.params.get("INIT") {
+            Some(ParamValue::Bits(c)) => c.clone(),
+            _ => return Err(format!("{}: no INIT", c.name)),
+        };
+
+        // Linear position -> memory (word, bit), and the contents check.
+        let (w, size) = (info.width, info.size);
+        let abits = (usize::BITS - (size - 1).leading_zeros()) as usize;
+        let base = shape.base();
+        let block_bits = depth(base).trailing_zeros() as usize;
+        let mut held: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
+        for bw in 0..depth(base) {
+            let word = if abits >= block_bits {
+                row * depth(base) + bw
+            } else {
+                let top = bw >> (abits - 1) & 1;
+                let all = (1usize << (block_bits - abits)) - 1;
+                if bw >> abits != if top == 1 { all } else { 0 } {
+                    continue;
+                }
+                bw & ((1 << abits) - 1)
+            };
+            for b in 0..shape.slice() as usize {
+                let k = col * shape.slice() as usize + b;
+                if word < size && k < w {
+                    held.insert(shape.linear(base, bw, b), (word, k));
                 }
             }
         }
-        let we = port(g0, "A_WE")[0];
-        let (raddr, waddr) = if single {
-            (top(port(g0, "A_ADDR")), top(port(g0, "A_ADDR")))
-        } else {
-            (top(port(g0, "B_ADDR")), top(port(g0, "A_ADDR")))
-        };
-        add_port(m, format!("__mem_{id}_rdata"), Dir::In, rdata);
-        add_port(m, format!("__mem_{id}_raddr"), Dir::Out, raddr);
-        if we != SigBit::ZERO {
-            let n = format!("__mem_{id}_waddr");
-            let waddr = mask(m, &n, &waddr, &vec![we; waddr.len()]);
-            add_port(m, n, Dir::Out, waddr);
-            let n = format!("__mem_{id}_wdata");
-            let wdata = mask(m, &n, &wdata, &vec![we; wdata.len()]);
-            add_port(m, n, Dir::Out, wdata);
-            add_port(m, format!("__mem_{id}_we"), Dir::Out, vec![we]);
+        let mut content: BTreeMap<usize, SigBit> = BTreeMap::new();
+        for (&l, &(word, k)) in &held {
+            let want = info.init.0[word * w + k];
+            let have = if init.0[l] == State::One {
+                State::One
+            } else {
+                State::Zero
+            };
+            if matches!(want, State::Zero | State::One) && want != have {
+                return Err(format!(
+                    "{}: INIT bit {l} is {have:?}, {id}[{word}][{k}] is {want:?}",
+                    c.name
+                ));
+            }
+            let q = SigBit::Net(g.m.new_net());
+            inits.push((q, have));
+            content.insert(l, q);
+            words
+                .entry(id.to_owned())
+                .or_default()
+                .entry(word)
+                .or_default()
+                .insert(k, q);
         }
+
+        // The block's ports.
+        let clocks = [bit("CLK", SigBit::X), bit("CLK1", SigBit::X)];
+        let enas = [bit("ENA0", SigBit::ONE), bit("ENA1", SigBit::ONE)];
+        let clrs = [bit("CLR0", SigBit::ZERO), bit("CLR1", SigBit::ZERO)];
+        let sel = |s: Sel| s as usize;
+        let tdp = matches!(shape.ports(), Ports::TrueDual { .. });
+        struct PortSigs {
+            width: Width,
+            clock: usize,
+            addr: Vec<SigBit>,
+            we: SigBit,
+            din: Vec<SigBit>,
+            be: Vec<SigBit>,
+        }
+        let port = |side: Side| -> Option<PortSigs> {
+            let width = shape.width(side)?;
+            let n = width.addr_bits() as usize;
+            let (p, a_or_b) = match side {
+                Side::A => ("A", 36),
+                Side::B => ("B", 18),
+            };
+            let writes = shape.writable(side);
+            Some(PortSigs {
+                width,
+                clock: sel(shape.input_clock(side)),
+                addr: sig(&format!("{p}_ADDR")).unwrap_or(vec![SigBit::ZERO; 12])[12 - n..]
+                    .to_vec(),
+                we: if writes {
+                    bit(&format!("{p}_WE"), SigBit::ZERO)
+                } else {
+                    SigBit::ZERO
+                },
+                din: sig(&format!("{p}_DATAIN")).unwrap_or(vec![SigBit::ZERO; a_or_b]),
+                be: sig(&format!("{p}_BYTEENA"))
+                    .unwrap_or(vec![SigBit::ONE; if side == Side::A { 4 } else { 2 }]),
+            })
+        };
+        let ports: Vec<(Side, PortSigs)> = [Side::A, Side::B]
+            .into_iter()
+            .filter_map(|s| port(s).map(|p| (s, p)))
+            .collect();
+        // Where each linear position is in a port's words.
+        let place = |width: Width| -> HashMap<usize, (usize, usize)> {
+            let mut v = HashMap::new();
+            for word in 0..depth(width) {
+                for col in 0..width.bits() {
+                    v.insert(width.linear(word, col), (word, col));
+                }
+            }
+            v
+        };
+        // Writes: per port, per word, a strobe.
+        let mut strobes = Vec::new();
+        for (_, p) in &ports {
+            if p.we == SigBit::ZERO {
+                strobes.push(None);
+                continue;
+            }
+            let go = g.and(p.we, enas[p.clock]);
+            let y = g.m.new_sig(depth(p.width));
+            g.add(CellKind::Demux(Demux {
+                a: vec![go],
+                s: p.addr.clone(),
+                y: y.clone(),
+            }));
+            strobes.push(Some(y));
+        }
+        let places: Vec<_> = ports.iter().map(|(_, p)| place(p.width)).collect();
+        // The contents change on the writing ports' clock (a block on two
+        // clocks writes on one port only).
+        let write_clock = ports
+            .iter()
+            .find(|(_, p)| p.we != SigBit::ZERO)
+            .map_or(0, |(_, p)| p.clock);
+        for (&l, &q) in &content {
+            let mut d = q;
+            let mut hits = Vec::new();
+            for (i, (_, p)) in ports.iter().enumerate() {
+                let Some(st) = &strobes[i] else { continue };
+                let Some(&(word, col)) = places[i].get(&l) else {
+                    continue;
+                };
+                let hit = g.and(st[word], p.be[col / 9]);
+                d = g.mux(d, p.din[col], hit);
+                hits.push(hit);
+            }
+            if let [a, b] = hits[..] {
+                let both = g.and(a, b);
+                d = g.mux(d, SigBit::X, both);
+            }
+            g.add(CellKind::Ff(Ff {
+                q: vec![q],
+                kind: FfKind::Dff {
+                    clk: Ctrl::pos(clocks[write_clock]),
+                    d: vec![d],
+                    control: DffControl::Plain { en: None },
+                },
+            }));
+        }
+        // Reads: the word at the registered address, the new data of a
+        // write through the same port (a masked byte: undefined), then the
+        // output register.
+        let dout = sig("DATAOUT").unwrap_or_default();
+        for (side, r) in shape.read_ports() {
+            let i = ports
+                .iter()
+                .position(|(s, _)| *s == side)
+                .expect("a read port");
+            let p = &ports[i].1;
+            let flow = !matches!(shape.ports(), Ports::SimpleDual { .. }) && p.we != SigBit::ZERO;
+            let offset = if tdp && side == Side::B { 18 } else { 0 };
+            for col in 0..p.width.bits() {
+                let a: Vec<SigBit> = (0..depth(p.width))
+                    .map(|word| {
+                        content
+                            .get(&p.width.linear(word, col))
+                            .copied()
+                            .unwrap_or(SigBit::X)
+                    })
+                    .collect();
+                let y = g.m.new_sig(1);
+                g.add(CellKind::Bmux(Bmux {
+                    a,
+                    s: p.addr.clone(),
+                    y: y.clone(),
+                }));
+                let mut v = y[0];
+                if flow {
+                    let new = g.mux(SigBit::X, p.din[col], p.be[col / 9]);
+                    v = g.mux(v, new, p.we);
+                }
+                let reg = |g: &mut Gates, clk: usize, d: SigBit, clr: Option<SigBit>| {
+                    let q = SigBit::Net(g.m.new_net());
+                    let en = Some(Ctrl::pos(enas[clk]));
+                    let control = match clr {
+                        None => DffControl::Plain { en },
+                        Some(c) => DffControl::Async {
+                            arst: Ctrl::pos(c),
+                            value: Const(vec![State::Zero]),
+                            en,
+                        },
+                    };
+                    g.add(CellKind::Ff(Ff {
+                        q: vec![q],
+                        kind: FfKind::Dff {
+                            clk: Ctrl::pos(clocks[clk]),
+                            d: vec![d],
+                            control,
+                        },
+                    }));
+                    q
+                };
+                let mut out = reg(&mut g, p.clock, v, None);
+                inits.push((out, State::Zero));
+                if let Some(o) = r.out_reg {
+                    let clr = o.clear.map(|c| clrs[sel(c)]);
+                    out = reg(&mut g, sel(o.clock), out, clr);
+                    inits.push((out, State::Zero));
+                }
+                if let Some(SigBit::Net(n)) = dout.get(offset + col) {
+                    subst.set(*n, out);
+                }
+            }
+        }
+    }
+    let m = g.m;
+    for (id, ws) in words {
+        let info = &mems[&id];
+        for (word, bits) in ws {
+            if bits.len() != info.width {
+                return Err(format!(
+                    "{id}[{word}]: {} of {} bits in blocks",
+                    bits.len(),
+                    info.width
+                ));
+            }
+            m.wires.push(Wire::new(
+                format!("{id}[{word}]"),
+                bits.into_values().collect(),
+            ));
+        }
+    }
+    for (i, (q, v)) in inits.into_iter().enumerate() {
+        let mut w = Wire::new(format!("$m4k_model_init${i}"), vec![q]);
+        w.attributes.insert(
+            chipsmith_netlist::attr::INIT.into(),
+            ParamValue::Bits(chipsmith_netlist::Const(vec![v])),
+        );
+        m.wires.push(w);
     }
     subst.apply(m);
     Ok(())
@@ -551,12 +821,13 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
     let gate_path = dir.join("gate.json");
     write(gate, &gate_path);
 
-    // Memories in blocks, and memories an earlier stage still has as
-    // memories, are compared at their ports (cut out on both sides): the
-    // blocks' contents and configuration are checked against the yosys
-    // flow's cells instead.
-    let mut sync_cut = block_memories(gate_mod);
-    let mut cut = sync_cut.clone();
+    // Memories in blocks become registers on both sides, the blocks
+    // through their model (`model_blocks`), and are compared word by word.
+    // Memories an earlier stage still has as memories are compared at
+    // their ports (cut out on both sides).
+    let in_blocks = block_memories(gate_mod);
+    let mut sync_cut = in_blocks.clone();
+    let mut cut = Vec::new();
     for c in &gate_mod.cells {
         if let CellKind::Mem(mem) = &c.kind {
             let id = mem.memid.trim_start_matches('\\').to_owned();
@@ -566,26 +837,41 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
             cut.push(id);
         }
     }
+    let mut mapped = to_logic.clone();
+    mapped.extend(in_blocks.iter().cloned());
     // Synthesis merged the read registers of the memories it put in
     // blocks into them; yosys' `memory_dff` does the same on both sides.
+    // The RTL against the netlist with x resolved: memories are memories
+    // on both sides, compared at their ports.
+    let mut all_cut = cut.clone();
+    all_cut.extend(in_blocks.iter().cloned());
     let mut gold = prep_memories(dir, "gold_prep", rtl, &to_logic, &sync_cut)?;
-    let mut mid = prep_memories(dir, "mid_prep", &refined_path, &to_logic, &sync_cut)?;
-    let mut cut_gate = gate.clone();
-    if !cut.is_empty() {
+    let mut mid_cut = prep_memories(dir, "mid_cut_prep", &refined_path, &to_logic, &sync_cut)?;
+    if !all_cut.is_empty() {
         cut_memories(top_mut(&mut gold))?;
-        let shapes = cut_memories(top_mut(&mut mid))?;
+        cut_memories(top_mut(&mut mid_cut))?;
+    }
+    // That against the result: the memories in blocks as words.
+    let mut mid = prep_memories(dir, "mid_prep", &refined_path, &mapped, &sync_cut)?;
+    let mut cut_gate = gate.clone();
+    {
         let gt = cut_gate
             .modules
             .iter_mut()
             .find(|m| !m.is_blackbox())
             .expect("top");
-        cut_memories(gt)?;
-        cut_blocks(gt, &shapes)?;
+        model_blocks(gt, &mem_infos(refined))?;
+        if !cut.is_empty() {
+            cut_memories(gt)?;
+        }
+    }
+    if !cut.is_empty() {
+        cut_memories(top_mut(&mut mid))?;
     }
     let gold_path = dir.join("gold.json");
     write(&gold, &gold_path);
-    let mid_path = dir.join("mid.json");
-    write(&mid, &mid_path);
+    let mid_path = dir.join("mid_cut.json");
+    write(&mid_cut, &mid_path);
     let first = equiv(dir, "equiv_refine", &gold_path, &mid_path)?;
 
     let gm = mid

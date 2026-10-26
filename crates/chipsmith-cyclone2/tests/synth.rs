@@ -219,7 +219,9 @@ fn m4k_cells_are_the_yosys_flows() {
                 .into_iter()
                 .filter_map(|c| match c.kind {
                     CellKind::Other(g) if g.ty == "CY2_M4K" => {
-                        let params = g.params.into_iter().collect();
+                        // SLICE says what the yosys flow's cells leave to
+                        // their pins.
+                        let params = g.params.into_iter().filter(|(k, _)| k != "SLICE").collect();
                         // Which pins are constant, and which they are.
                         let shape = g
                             .ports
@@ -335,3 +337,91 @@ fn a_wrong_lut_bit_is_caught() {
     let err = support::check(&dir, &s.rtl, refined, &gate).expect_err("a changed LUT bit");
     assert!(err.contains("not proven equivalent"), "{err}");
 }
+
+/// An M4K example or a held-out random memory: in blocks, proven
+/// equivalent to the RTL with the blocks' contents compared word by word
+/// (`support::check`), packed.
+fn m4k_design(name: &str, files: &[PathBuf]) {
+    let s = synthesize(name, "top", files);
+    let blocks = support::read(&s.netlist)
+        .modules
+        .iter()
+        .find(|m| !m.is_blackbox())
+        .unwrap()
+        .cells
+        .iter()
+        .filter(|c| c.kind.type_name() == "CY2_M4K")
+        .count();
+    assert!(blocks > 0, "{name}: no M4K");
+    support::check(
+        &s.dir,
+        &s.rtl,
+        s.stages.refined.as_ref().unwrap(),
+        s.stages.cells.as_ref().unwrap(),
+    )
+    .unwrap_or_else(|e| panic!("{name}: {e}"));
+    pack(&s.dir, name, &s.netlist);
+    eprintln!("{name}: {blocks} M4Ks, proven");
+}
+
+macro_rules! m4k_examples {
+    ($($f:ident = $ex:literal),*) => {$(
+        #[test]
+        fn $f() {
+            m4k_design($ex, &example($ex));
+        }
+    )*};
+}
+
+m4k_examples!(
+    m4k_bytes = "m4k-bytes",
+    m4k_enables = "m4k-enables",
+    m4k_outreg = "m4k-outreg",
+    m4k_tdp = "m4k-tdp",
+    m4k_mixed = "m4k-mixed",
+    m4k_dualclock = "m4k-dualclock",
+    m4k_deep = "m4k-deep",
+    m4k_shallow = "m4k-shallow"
+);
+
+#[path = "support/m4k_random.rs"]
+mod m4k_random;
+
+/// Held-out random memories (`support/m4k_random.rs`).
+fn m4k_random(seed: u64) {
+    let cfg = m4k_random::Config::new(seed);
+    let name = cfg.name();
+    let dir = scratch(&format!("{name}-src"));
+    let v = dir.join("top.v");
+    std::fs::write(&v, cfg.verilog()).unwrap();
+    eprintln!("{name}: {cfg:?}");
+    m4k_design(&name, &[v]);
+}
+
+macro_rules! m4k_random_tests {
+    ($($f:ident = $seed:literal),*) => {$(
+        #[test]
+        fn $f() {
+            m4k_random($seed);
+        }
+    )*};
+}
+
+m4k_random_tests!(
+    m4k_random_1 = 1,
+    m4k_random_2 = 2,
+    m4k_random_3 = 3,
+    m4k_random_4 = 4,
+    m4k_random_5 = 5,
+    m4k_random_6 = 6,
+    m4k_random_7 = 7,
+    m4k_random_8 = 8,
+    m4k_random_9 = 9,
+    m4k_random_10 = 10,
+    m4k_random_11 = 11,
+    m4k_random_12 = 12,
+    m4k_random_13 = 13,
+    m4k_random_14 = 14,
+    m4k_random_15 = 15,
+    m4k_random_16 = 16
+);
