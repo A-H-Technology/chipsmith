@@ -17,7 +17,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::proc::{MemStorage, ProcOut};
 use super::stmt::Mode;
-use super::{ConstVal, DesignCtx, Dim, Env, Local, MemVar, PortInfo, Scope, ScopeId, Sym, Ty, Var};
+use super::{
+    ConstVal, DesignCtx, Dim, Env, Local, MemShape, MemVar, PortInfo, Scope, ScopeId, Sym, Ty, Var,
+};
 use crate::ast::{
     self, DataType, Expr, ExprKind, GateKind, Ident, InstanceItem, Item, NetDecl, NetKind,
     ParamDecl, ParamKind, ParamOverride, PortDir, Stmt, StmtKind,
@@ -534,17 +536,32 @@ impl<'a, 'd> ModElab<'a, 'd> {
         if !matches!(d.ty.kind, Some(NetKind::Reg | NetKind::Integer)) {
             bail!(n.name.span, "only `reg` arrays (memories) are supported");
         }
-        if n.dims.len() > 1 {
-            bail!(n.name.span, "multi-dimensional arrays are not supported");
-        }
         if n.init.is_some() {
             bail!(
                 n.name.span,
                 "a memory can't have an initializer; use an initial block"
             );
         }
-        let words = self.eval_dim(&n.dims[0], scope)?;
-        let (lo, hi) = (words.msb.min(words.lsb), words.msb.max(words.lsb));
+        let mut dims = Vec::with_capacity(n.dims.len());
+        for r in &n.dims {
+            dims.push(self.eval_dim(r, scope)?);
+        }
+        let (shape, lo, hi) = if let [words] = dims[..] {
+            (
+                MemShape::Flat,
+                words.msb.min(words.lsb),
+                words.msb.max(words.lsb),
+            )
+        } else {
+            let size = dims
+                .iter()
+                .try_fold(1usize, |s, d| s.checked_mul(d.width()))
+                .filter(|&s| s < 1 << 24);
+            let Some(size) = size else {
+                bail!(n.name.span, "array `{}` is too large", n.name.name);
+            };
+            (MemShape::Multi(dims), 0, size as i64 - 1)
+        };
         let size = (hi - lo + 1) as usize;
         let name = format!("{}{}", self.scopes[scope].prefix, n.name.name);
         let force = attrs.contains_key("mem2reg");
@@ -572,6 +589,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
             name,
             word,
             signed,
+            shape,
             lo,
             hi,
             attrs,

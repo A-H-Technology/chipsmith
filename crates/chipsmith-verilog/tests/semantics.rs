@@ -275,7 +275,8 @@ fn memory_to_registers() {
     equiv(
         "mem2reg",
         r#"
-module top(input clk, input [1:0] a, b, input [3:0] d, output reg [3:0] y, output [3:0] z);
+module top(input clk, input [1:0] a, b, input [2:0] wa, ra, input [3:0] d, output reg [3:0] y,
+           output [3:0] z, output reg [3:0] v);
   reg [3:0] m [0:3];
   always @(posedge clk) begin
     m[a] = d;
@@ -287,6 +288,72 @@ module top(input clk, input [1:0] a, b, input [3:0] d, output reg [3:0] y, outpu
     for (k = 0; k < 4; k = k + 1) c[k] = d + k;
   end
   assign z = c[b];
+  // An address wider than the words need wraps: yosys compares its low
+  // clog2(3) bits.
+  reg [3:0] w [0:2];
+  always @(posedge clk) begin
+    w[wa] = d;
+    v <= w[ra];
+  end
+endmodule
+"#,
+    );
+}
+
+/// Multi-dimensional arrays: one memory, the indices flattened as yosys
+/// flattens them (each dimension from its left bound), as a RAM and as
+/// registers.
+#[test]
+fn multi_dimensional_arrays() {
+    equiv(
+        "multidim",
+        r#"
+module top(input clk, input we, input [1:0] i, ri, input [2:0] j, rj, input [7:0] d,
+           input signed [1:0] si, input [3:0] k, output reg [7:0] q, output [7:0] a,
+           output [3:0] nib, output bit, output reg [7:0] r, output [3:0] c, output reg [3:0] s,
+           output reg [7:0] o);
+  // A RAM: written in a clocked block, read asynchronously and registered.
+  reg [7:0] m [0:3][0:7];
+  always @(posedge clk) begin
+    if (we) m[i][j] <= d;
+    if (we) m[ri][rj][7:4] <= ~d[3:0];
+    q <= m[ri][rj];
+  end
+  assign a = m[i][rj];
+  assign nib = m[ri][j][5:2];
+  assign bit = m[i][j][k[2:0]];
+
+  // Odd and descending bounds, signed indices that can leave the range.
+  reg [7:0] n [4:1][9:2];
+  always @(posedge clk) begin
+    if (we) n[si][k] <= d;
+    r <= n[ri][k];
+  end
+
+  // mem2reg: written with `=` and from combinational logic.
+  reg [3:0] g [1:2][3:0];
+  always @(posedge clk) begin
+    g[si][i] = d[3:0];
+    s <= g[i][si];
+  end
+  reg [3:0] t [0:1][0:2][0:1];
+  integer x, y, z;
+  always @* begin
+    for (x = 0; x < 2; x = x + 1)
+      for (y = 0; y < 3; y = y + 1)
+        for (z = 0; z < 2; z = z + 1)
+          t[x][y][z] = d[3:0] + x * 6 + y * 2 + z;
+  end
+  assign c = t[i[0]][j[1:0]][k[0]];
+
+  // Initial contents, by index and from a file.
+  reg [7:0] rom [1:0][0:2];
+  integer u;
+  initial for (u = 0; u < 3; u = u + 1) begin
+    rom[0][u] = u + 8'h10;
+    rom[1][u] = u + 8'h20;
+  end
+  always @(posedge clk) o <= rom[i[1]][j[1:0]];
 endmodule
 "#,
     );

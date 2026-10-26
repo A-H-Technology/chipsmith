@@ -225,13 +225,14 @@ impl Local {
     }
 }
 
-/// A memory (`reg [w-1:0] m [0:n-1]`).
+/// A memory (`reg [w-1:0] m [0:n-1]`, or `m [0:3][0:7]`).
 #[derive(Debug)]
 pub(crate) struct MemVar {
     pub name: String,
     pub word: Dim,
     pub signed: bool,
-    /// Lowest and highest word index.
+    pub shape: MemShape,
+    /// Lowest and highest word address.
     pub lo: i64,
     pub hi: i64,
     pub attrs: Attributes,
@@ -239,6 +240,27 @@ pub(crate) struct MemVar {
     /// `size * width`, word `lo` first; x where not initialised.
     pub init: Vec<State>,
     pub storage: proc::MemStorage,
+}
+
+/// How a memory's indices make a word address.
+#[derive(Debug, Clone)]
+pub(crate) enum MemShape {
+    /// One unpacked dimension: the index is the address.
+    Flat,
+    /// Two or more, outermost first: as yosys flattens them, one memory
+    /// from address 0, each dimension counted from its left bound, the
+    /// last varying fastest.
+    Multi(Vec<Dim>),
+}
+
+impl MemShape {
+    /// How many indices select a word.
+    pub fn indices(&self) -> usize {
+        match self {
+            MemShape::Flat => 1,
+            MemShape::Multi(dims) => dims.len(),
+        }
+    }
 }
 
 impl MemVar {
