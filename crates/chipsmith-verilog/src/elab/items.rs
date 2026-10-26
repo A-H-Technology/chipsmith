@@ -112,7 +112,8 @@ pub(crate) fn elaborate_module<'a>(
     m.finish(lib)
 }
 
-/// Memories written from logic or with `=` anywhere in these items.
+/// Memories written from logic, with `=`, or in a block with an
+/// asynchronous reset (yosys' `MEM2REG_FL_ASYNC`) anywhere in these items.
 fn prescan_mem2reg(items: &[Item], out: &mut FxHashSet<Rc<str>>) {
     fn stmt(s: &Stmt, comb: bool, out: &mut FxHashSet<Rc<str>>) {
         match &s.kind {
@@ -153,10 +154,11 @@ fn prescan_mem2reg(items: &[Item], out: &mut FxHashSet<Rc<str>>) {
     for it in items {
         match it {
             Item::Always { body, .. } => {
+                // Every write counts where the block isn't one clock alone.
                 let comb = match &body.kind {
                     StmtKind::Event { event, .. } => match event {
                         ast::Event::Star => true,
-                        ast::Event::List(l) => l.iter().all(|i| i.edge.is_none()),
+                        ast::Event::List(l) => l.iter().filter(|i| i.edge.is_some()).count() != 1,
                     },
                     _ => true,
                 };

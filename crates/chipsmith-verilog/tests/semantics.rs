@@ -642,3 +642,34 @@ endmodule
 "#,
     );
 }
+
+/// An asynchronous reset tested inside a named block that declares its
+/// loop variable (secworks' cores write their register updates so).
+#[test]
+fn reset_inside_a_named_block() {
+    equiv(
+        "named_reset_block",
+        r#"
+module top(input clk, input reset_n, input we, input [7:0] d, output [7:0] y);
+  reg [7:0] m [0:3];
+  always @(posedge clk or negedge reset_n)
+    begin : reg_update
+      integer i;
+      if (!reset_n)
+        begin
+          for (i = 0; i < 4; i = i + 1)
+            m[i] <= 8'h0;
+        end
+      else if (we)
+        begin
+          m[0] <= d;
+          m[1] <= m[0];
+          m[2] <= m[1] ^ d;
+          m[3] <= m[2];
+        end
+    end
+  assign y = m[3];
+endmodule
+"#,
+    );
+}

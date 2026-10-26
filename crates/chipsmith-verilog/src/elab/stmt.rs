@@ -203,25 +203,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 params,
                 stmts,
             } => {
-                let inner = if decls.is_empty() && params.is_empty() && name.is_none() {
-                    scope
-                } else {
-                    let prefix = match name {
-                        Some(n) => format!("{}{}.", self.scopes[scope].prefix, n.name),
-                        None => self.scopes[scope].prefix.clone(),
-                    };
-                    let inner = self.new_scope(Some(scope), prefix);
-                    if let Some(n) = name {
-                        self.scopes[scope].blocks.insert(n.name.to_string(), inner);
-                    }
-                    for p in params {
-                        self.declare_param(inner, p)?;
-                    }
-                    for d in decls {
-                        self.declare_net(inner, d)?;
-                    }
-                    inner
-                };
+                let inner = self.block_scope(name.as_ref(), decls, params, scope)?;
                 for st in stmts {
                     self.exec(st, inner, env)?;
                 }
@@ -1219,6 +1201,35 @@ impl<'a, 'd> ModElab<'a, 'd> {
             | StmtKind::Repeat { body, .. } => self.blocking_lvalues(body, scope, out),
             _ => {}
         }
+    }
+
+    /// The scope a `begin ... end` runs in: its own when it is named or
+    /// declares something.
+    pub(super) fn block_scope(
+        &mut self,
+        name: Option<&'a crate::ast::Ident>,
+        decls: &'a [crate::ast::NetDecl],
+        params: &'a [crate::ast::ParamDecl],
+        scope: ScopeId,
+    ) -> Result<ScopeId> {
+        if decls.is_empty() && params.is_empty() && name.is_none() {
+            return Ok(scope);
+        }
+        let prefix = match name {
+            Some(n) => format!("{}{}.", self.scopes[scope].prefix, n.name),
+            None => self.scopes[scope].prefix.clone(),
+        };
+        let inner = self.new_scope(Some(scope), prefix);
+        if let Some(n) = name {
+            self.scopes[scope].blocks.insert(n.name.to_string(), inner);
+        }
+        for p in params {
+            self.declare_param(inner, p)?;
+        }
+        for d in decls {
+            self.declare_net(inner, d)?;
+        }
+        Ok(inner)
     }
 
     fn lvalue_bits(
