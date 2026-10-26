@@ -537,3 +537,39 @@ fn unsupported_m4k_shapes_are_refused() {
     let e = pack(&mut nl).unwrap_err();
     assert!(e.to_string().contains("A_ADDR[11] is a constant"), "{e}");
 }
+
+/// A register's output clocking another register (a divided clock): it
+/// reaches the clock through a clock control like a pin clock, and still
+/// feeds its own logic directly.
+#[test]
+fn a_clock_from_a_register_gets_a_clock_control() {
+    let (nl, stats) = packed(&[
+        (
+            "div",
+            "LCELL_FF",
+            None,
+            json!({"DATAIN": [12], "CLK": [10], "ENA": ["1"], "ACLR": ["0"], "SCLR": ["0"], "REGOUT": [20]}),
+        ),
+        (
+            "led",
+            "LCELL_FF",
+            None,
+            json!({"DATAIN": [12], "CLK": [20], "ENA": ["1"], "ACLR": ["0"], "SCLR": ["0"], "REGOUT": [11]}),
+        ),
+    ]);
+    assert_eq!(stats.clocks, 2);
+    let div = find(&nl, "div").unwrap();
+    let cc = nl
+        .cells()
+        .into_iter()
+        .find(|&c| {
+            nl.cell(c).kind == Kind::ClkCtrl
+                && nl
+                    .cell(c)
+                    .net(Port::Inclk)
+                    .is_some_and(|n| nl.net(n).driver == Some((div, Port::Regout)))
+        })
+        .expect("a clock control fed by the register");
+    let global = nl.cell(cc).net(Port::Outclk);
+    assert_eq!(cell(&nl, "led").net(Port::Clk), global);
+}

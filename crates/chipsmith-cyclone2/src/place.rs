@@ -909,6 +909,16 @@ impl<'a> State<'a> {
             sync_kind |= kind;
             let e: Ctl = (c.net(Port::Ena), c.ena_inv);
             let domain = (c.net(Port::Clk), e);
+            // One clock net per LAB, though a LAB has two LAB clocks. Which
+            // of them Quartus gives each of two clocks isn't predictable
+            // from what we know (cyclone2-re README, "LAB clocks": no rule
+            // fits all 15 measured LABs), and the bitstream has to say, so
+            // a LAB mixing clocks wouldn't assemble the same in Quartus.
+            // Remove once that choice is modelled; until then two domains
+            // in a LAB share a clock and differ in their enable.
+            if domains[..n_domains].iter().any(|d| d.0 != domain.0) {
+                return false;
+            }
             if !domains[..n_domains].contains(&domain) {
                 if n_domains == 2 {
                     return false;

@@ -223,16 +223,16 @@ fn clocks(json: &Value) -> Result<Vec<(u64, Clock)>> {
         let (Some(o), Some(i)) = (net_of(c, "OUTCLK"), net_of(c, "INCLK")) else {
             bail!("{name}: clock control not connected");
         };
-        let driver = cells.values().find(|d| {
-            d["connections"].as_object().is_some_and(|conns| {
-                conns.iter().any(|(p, b)| {
-                    d["port_directions"][p] == "output"
-                        && b.as_array().and_then(|a| a.first()?.as_u64()) == Some(i)
-                })
-            })
+        // The driving cell and port.
+        let driver = cells.iter().find_map(|(dn, d)| {
+            let (p, _) = d["connections"].as_object()?.iter().find(|(p, b)| {
+                d["port_directions"][*p] == "output"
+                    && b.as_array().and_then(|a| a.first()?.as_u64()) == Some(i)
+            })?;
+            Some((dn, d, p))
         });
         let source = match driver {
-            Some(d) if d["type"] == "CY2_IBUF" || d["type"] == "CY2_IOBUF" => ClockSource::Pin(
+            Some((_, d, _)) if d["type"] == "CY2_IBUF" || d["type"] == "CY2_IOBUF" => ClockSource::Pin(
                 d["attributes"]["PORT"]
                     .as_str()
                     .context("pin buffer without PORT")?
@@ -243,7 +243,13 @@ fn clocks(json: &Value) -> Result<Vec<(u64, Clock)>> {
         out.push((
             o,
             Clock {
-                name: names.get(&i).map_or_else(|| format!("net {i}"), |n| n.to_string()),
+                // Synthesis' own net names (`$...`) say nothing; the
+                // driver's port does (`jtag.TCKUTAP`).
+                name: match (names.get(&i), driver) {
+                    (Some(n), _) if !n.starts_with('$') => n.to_string(),
+                    (_, Some((dn, _, p))) => format!("{dn}.{p}"),
+                    (n, None) => n.map_or_else(|| format!("net {i}"), |n| n.to_string()),
+                },
                 source,
             },
         ));
