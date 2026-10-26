@@ -294,7 +294,12 @@ fn pack_m4k(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
             let lp = match port {
                 Port::Clk => CellPort::Clk(Sel::Zero),
                 Port::Ram(p) => p,
-                other => bail!("M4K {name}: unknown port {}", other.name()),
+                // Port names are parsed without the cell type: a PLL's
+                // CLK1 is an M4K's clock 1 here.
+                other => match CellPort::parse(&other.name()) {
+                    Some(p) => p,
+                    None => bail!("M4K {name}: unknown port {}", other.name()),
+                },
             };
             let driven = net.filter(|&n| !constant(nl, Some(n)));
             let side_writes = |s: Side| writes[s as usize];
