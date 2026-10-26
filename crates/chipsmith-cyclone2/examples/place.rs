@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let db = chipsmith_route::chipdb::ChipDb::read_cache(a[1].as_ref()).unwrap();
-    let pins: BTreeMap<String, String> = std::fs::read_to_string(&a[3])
+    let pins: BTreeMap<String, chipsmith_cyclone2::place::PinPlan> = std::fs::read_to_string(&a[3])
         .unwrap()
         .lines()
         .filter_map(|l| {
@@ -11,11 +11,21 @@ fn main() {
             (f.next()? == "set_location_assignment").then_some(())?;
             let pin = f.next()?.to_string();
             f.next()?;
-            Some((f.next()?.to_string(), pin))
+            let plan = chipsmith_cyclone2::place::PinPlan {
+                pin,
+                settings: Default::default(),
+            };
+            Some((f.next()?.to_string(), plan))
         })
         .collect();
     let t = std::time::Instant::now();
-    let s =
-        chipsmith_cyclone2::place::place_file(&db, a[2].as_ref(), &pins, a[4].as_ref()).unwrap();
+    let s = chipsmith_cyclone2::place::place_file(
+        &db,
+        a[2].as_ref(),
+        &pins,
+        Default::default(),
+        a[4].as_ref(),
+    )
+    .unwrap();
     eprintln!("{s:?} in {:.1} s", t.elapsed().as_secs_f64());
 }

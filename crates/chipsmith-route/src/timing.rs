@@ -98,6 +98,16 @@ const M4K_TCO: Ps = 209.0 + 2993.0 + 124.0;
 /// clock.
 const M4K_TSU: Ps = 142.0 - 35.0 - 124.0;
 
+/// Cyclone II I/O-cell registers, for a register-to-register path that
+/// starts or ends in a pin's I/O cell. quartus_sta on examples/de2-io
+/// (2026-10-26): an input register's uTco 143 ps plus 390 ps out through
+/// `regout`; an output or OE register's 269-279 ps cell delay from
+/// `datain` (column 279, row 269) and its −78 ps uTsu. The I/O register's
+/// clock reached it within 3 ps of an LE register's there (more wire,
+/// faster cell), so no skew is modelled.
+const IOE_TCO: Ps = 143.0 + 390.0;
+const IOE_TSU: Ps = 279.0 - 78.0;
+
 /// A delay from one timing node to another.
 #[derive(Debug, Clone, Copy)]
 pub struct Arc {
@@ -170,6 +180,22 @@ impl Graph {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// A Cyclone II pin's I/O-cell registers: the input register launches
+    /// at REGOUT, the output and OE registers capture DATAOUT and OE. A pin
+    /// without them neither launches nor captures (pins are unconstrained).
+    pub fn add_ioe_registers(&mut self, cell: &str, input: bool, output: bool, oe: bool) {
+        if input {
+            let n = self.node(cell, "REGOUT");
+            self.launch[n as usize] = Some(IOE_TCO);
+        }
+        for (used, port) in [(output, "DATAOUT"), (oe, "OE")] {
+            if used {
+                let n = self.node(cell, port);
+                self.setup[n as usize] = Some(IOE_TSU);
+            }
         }
     }
 

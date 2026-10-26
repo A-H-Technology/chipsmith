@@ -39,7 +39,11 @@ use chipsmith_jtag::usb_blaster::UsbBlaster;
 use chipsmith_jtag::{svf, xc7};
 
 use crate::device::{Clg400Pin, Device, Xc7Part, XC7Z010CLG400_1};
-use crate::manifest::{Clock, Frequency, Manifest, PinAssignment, QuartusPin, Sources, Target};
+use crate::manifest::{
+    Clock, De2Pin, Frequency, Manifest, PinAssignment, QuartusPin, Sources, Target,
+};
+use chipsmith_cyclone2::pin::{IoRegisters, UnusedPins};
+use chipsmith_cyclone2::place::PinPlan;
 
 /// A directory of nextpnr-himbaechel xilinx chip databases,
 /// `chipdb-<die>.bin`. Set by the nix wrapper and the devshell.
@@ -133,22 +137,28 @@ pub enum Step {
     /// Read Verilog with the Cyclone II cell library, elaborate `top` and
     /// synthesize it to Cyclone II cells, in process (`chipsmith_verilog`,
     /// `chipsmith_cyclone2::synth`); writes the netlist as yosys JSON.
+    /// `io_registers`: per port bit (`LEDR[0]`), the I/O-cell registers
+    /// synthesis is asked to fill.
     Synth {
         verilog: Vec<PathBuf>,
         top: String,
         netlist: PathBuf,
+        io_registers: BTreeMap<String, IoRegisters>,
     },
     /// Pack a yosys JSON netlist into LEs, pins and clock controls (nextpnr's
     /// JSON), in process.
     Pack { netlist: PathBuf, packed: PathBuf },
     /// Place a packed design (nextpnr JSON) and route it, in process.
-    /// `pins` maps top-level port bits (`LEDR[0]`) to pins (`PIN_AE23`).
-    /// The routed design's estimated slack is reported against `clock`.
+    /// `pins` maps top-level port bits (`LEDR[0]`) to pins (`PIN_AE23`)
+    /// and their I/O settings, which the placed design carries on to the
+    /// bitstream with `unused_pins`. The routed design's estimated slack is
+    /// reported against `clock`.
     PlaceRoute {
         packed: PathBuf,
         placed: PathBuf,
         routed: PathBuf,
-        pins: BTreeMap<String, String>,
+        pins: BTreeMap<String, PinPlan>,
+        unused_pins: UnusedPins,
         clock: Option<Frequency>,
     },
     /// Assemble a routed design (nextpnr JSON) into an RBF, in process
@@ -309,9 +319,11 @@ pub struct Plan {
 /// the environment the nix package (or devshell) sets.
 pub fn plan_build(manifest: &Manifest, layout: &Layout) -> Result<Plan> {
     Ok(match &manifest.target {
-        Target::Ep2c35f672c6 { pins, clock } => {
-            plan_cyclone2(manifest, pins, clock.as_ref(), layout)
-        }
+        Target::Ep2c35f672c6 {
+            pins,
+            clock,
+            unused_pins,
+        } => plan_cyclone2(manifest, pins, clock.as_ref(), *unused_pins, layout),
         Target::Xc7z010clg400_1 { pins, clocks } => {
             let part = XC7Z010CLG400_1;
             plan_xc7(
@@ -350,8 +362,9 @@ fn verilog_sources(manifest: &Manifest, layout: &Layout, steps: &mut Vec<Step>) 
 
 pub fn plan_cyclone2(
     manifest: &Manifest,
-    pins: &[PinAssignment<QuartusPin>],
+    pins: &[PinAssignment<QuartusPin, De2Pin>],
     clock: Option<&Clock>,
+    unused_pins: UnusedPins,
     layout: &Layout,
 ) -> Plan {
     let mut steps: Vec<Step> = Vec::new();
@@ -360,6 +373,11 @@ pub fn plan_cyclone2(
         verilog,
         top: manifest.top.clone(),
         netlist: layout.netlist(),
+        io_registers: pins
+            .iter()
+            .filter(|a| a.io.registers.any())
+            .map(|a| (a.port.to_string(), a.io.registers))
+            .collect(),
     });
     steps.push(Step::Pack {
         netlist: layout.netlist(),
@@ -371,8 +389,17 @@ pub fn plan_cyclone2(
         routed: layout.routed(),
         pins: pins
             .iter()
-            .map(|a| (a.port.to_string(), a.pin.as_str().to_string()))
+            .map(|a| {
+                (
+                    a.port.to_string(),
+                    PinPlan {
+                        pin: a.pin.as_str().to_string(),
+                        settings: a.io.settings,
+                    },
+                )
+            })
             .collect(),
+        unused_pins,
         clock: clock.map(|c| c.frequency),
     });
     steps.push(Step::Bitstream {
@@ -757,15 +784,17 @@ impl Plan {
                     verilog,
                     top,
                     netlist,
-                } => synth(verilog, top, netlist)?,
+                    io_registers,
+                } => synth(verilog, top, netlist, io_registers)?,
                 Step::Pack { netlist, packed } => pack(netlist, packed)?,
                 Step::PlaceRoute {
                     packed,
                     placed,
                     routed,
                     pins,
+                    unused_pins,
                     clock,
-                } => place_route(packed, placed, routed, pins, *clock)?,
+                } => place_route(packed, placed, routed, pins, *unused_pins, *clock)?,
                 Step::Bitstream { routed, rbf } => bitstream(routed, rbf)?,
                 Step::Svf { rbf, svf } => bitstream::svf_file(rbf, svf)?,
                 Step::NextpnrTiming(report) => nextpnr_timing(report)?,
@@ -798,7 +827,12 @@ impl Plan {
     }
 }
 
-fn synth(verilog: &[PathBuf], top: &str, netlist: &Path) -> Result<()> {
+fn synth(
+    verilog: &[PathBuf],
+    top: &str,
+    netlist: &Path,
+    io_registers: &BTreeMap<String, IoRegisters>,
+) -> Result<()> {
     let started = Instant::now();
     let mut fe = chipsmith_verilog::Frontend::new();
     fe.read_library_source(cells::LIBRARY_NAME, cells::LIBRARY)?;
@@ -813,15 +847,16 @@ fn synth(verilog: &[PathBuf], top: &str, netlist: &Path) -> Result<()> {
     );
 
     let started = Instant::now();
-    let out = chipsmith_cyclone2::synth::synthesize(design)?;
+    let out = chipsmith_cyclone2::synth::synthesize(design, io_registers)?;
     let s = out.stats;
     eprintln!(
-        "    {} gates ({} AIG ANDs) to {} LUTs, depth {}; {} registers, {} carry chains, {} M4Ks in {:.1} s",
+        "    {} gates ({} AIG ANDs) to {} LUTs, depth {}; {} registers ({} in I/O cells), {} carry chains, {} M4Ks in {:.1} s",
         s.lutmap.gates,
         s.lutmap.and_nodes,
         s.lutmap.luts,
         s.lutmap.depth,
         s.registers,
+        s.io_registers,
         s.chains,
         s.m4ks,
         started.elapsed().as_secs_f64()
@@ -856,7 +891,8 @@ fn place_route(
     packed: &Path,
     placed: &Path,
     routed: &Path,
-    pins: &BTreeMap<String, String>,
+    pins: &BTreeMap<String, PinPlan>,
+    unused_pins: UnusedPins,
     clock: Option<Frequency>,
 ) -> Result<()> {
     let started = Instant::now();
@@ -867,7 +903,7 @@ fn place_route(
     );
 
     let started = Instant::now();
-    let p = chipsmith_cyclone2::place::place_file(&graph, packed, pins, placed)?;
+    let p = chipsmith_cyclone2::place::place_file(&graph, packed, pins, unused_pins, placed)?;
     eprintln!(
         "    placed {} LEs ({} carry chains), wirelength {} -> {} in {:.1} s; critical path {:.2} ns (estimate)",
         p.les,
@@ -1233,10 +1269,15 @@ mod tests {
     /// The DE2 manifest's plan, with `sources` in place of the file's.
     fn cyclone2(sources: Sources) -> Plan {
         let m = manifest_for(DE2, sources);
-        let Target::Ep2c35f672c6 { pins, clock } = &m.target else {
+        let Target::Ep2c35f672c6 {
+            pins,
+            clock,
+            unused_pins,
+        } = &m.target
+        else {
             unreachable!()
         };
-        plan_cyclone2(&m, pins, clock.as_ref(), &layout(&m))
+        plan_cyclone2(&m, pins, clock.as_ref(), *unused_pins, &layout(&m))
     }
 
     fn xc7(sources: Sources) -> Plan {
@@ -1275,7 +1316,8 @@ mod tests {
             Step::Synth {
                 verilog: vec!["/p/src/blinky.v".into()],
                 top: "blinky".into(),
-                netlist: "/p/build/netlist.json".into()
+                netlist: "/p/build/netlist.json".into(),
+                io_registers: BTreeMap::new(),
             }
         );
         assert_eq!(
@@ -1345,7 +1387,10 @@ mod tests {
             panic!("{:?} is not place and route", plan.steps[2]);
         };
         assert_eq!(clock.map(Frequency::hz), Some(50_000_000));
-        let pins: Vec<(&str, &str)> = pins.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let pins: Vec<(&str, &str)> = pins
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.pin.as_str()))
+            .collect();
         assert_eq!(
             pins,
             [
@@ -1354,6 +1399,44 @@ mod tests {
                 ("LEDR[1]", "PIN_AF23")
             ]
         );
+    }
+
+    #[test]
+    fn pin_settings_reach_the_placer_and_register_requests_synthesis() {
+        let text = DE2.replace(
+            "LEDR = [\"PIN_AE23\", \"PIN_AF23\"]",
+            "LEDR = { pins = [\"PIN_AE23\", \"PIN_AF23\"], drive = \"8 mA\", registers = [\"output\"] }",
+        );
+        let text = text.replace("[target]\n", "[target]\nunused_pins = \"bus-hold\"\n");
+        let m = manifest_for(&text, Sources::Verilog(vec![]));
+        let Target::Ep2c35f672c6 {
+            pins,
+            clock,
+            unused_pins,
+        } = &m.target
+        else {
+            unreachable!()
+        };
+        let plan = plan_cyclone2(&m, pins, clock.as_ref(), *unused_pins, &layout(&m));
+        let Step::Synth { io_registers, .. } = &plan.steps[0] else {
+            panic!("{:?} is not synthesis", plan.steps[0]);
+        };
+        assert_eq!(
+            io_registers.keys().collect::<Vec<_>>(),
+            ["LEDR[0]", "LEDR[1]"]
+        );
+        let Step::PlaceRoute {
+            pins, unused_pins, ..
+        } = &plan.steps[2]
+        else {
+            panic!("{:?} is not place and route", plan.steps[2]);
+        };
+        assert_eq!(*unused_pins, UnusedPins::BusHold);
+        assert_eq!(
+            pins["LEDR[1]"].settings.params(),
+            [("CURRENT_STRENGTH_NEW", "8MA".to_string())]
+        );
+        assert!(pins["CLOCK_50"].settings.params().is_empty());
     }
 
     #[test]

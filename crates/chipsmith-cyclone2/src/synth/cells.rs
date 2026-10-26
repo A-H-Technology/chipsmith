@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 
 use chipsmith_netlist::{CellKind, Const, Dir, Generic, GenericPort, ParamValue, SigBit, State};
 
+use crate::pin::{register_param, PowerUp};
+
 pub const LCELL_COMB: &str = "LCELL_COMB";
 pub const LCELL_FF: &str = "LCELL_FF";
 pub const IBUF: &str = "CY2_IBUF";
@@ -105,30 +107,77 @@ impl Reg {
     }
 }
 
-pub fn ibuf(pad: SigBit, combout: SigBit) -> CellKind {
-    generic(
-        IBUF,
-        BTreeMap::new(),
-        vec![
-            port("PAD", Dir::In, vec![pad]),
-            port("COMBOUT", Dir::Out, vec![combout]),
-        ],
-    )
+/// The registers of a pin buffer's I/O cell. The output and OE registers
+/// share one clock (`IO_OUTREG_CLK_FAST_MUX`), so it is given once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IoRegs {
+    /// Input register: its clock and output (it samples the pad).
+    pub input: Option<(SigBit, SigBit, PowerUp)>,
+    /// The output-side clock, and which of the two registers it clocks.
+    pub output: Option<OutRegs>,
 }
 
-pub fn obuf(dataout: SigBit, pad: SigBit) -> CellKind {
-    generic(
-        OBUF,
-        BTreeMap::new(),
-        vec![
-            port("DATAOUT", Dir::In, vec![dataout]),
-            port("PAD", Dir::Out, vec![pad]),
-        ],
-    )
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutRegs {
+    pub clk: SigBit,
+    /// The output register: DATAOUT is what it samples.
+    pub data: Option<PowerUp>,
+    /// The OE register: OE is what it samples.
+    pub oe: Option<PowerUp>,
+}
+
+impl IoRegs {
+    fn add(self, ports: &mut Vec<GenericPort>, params: &mut BTreeMap<String, ParamValue>) {
+        let mut param = |name: &str, p: PowerUp| {
+            params.insert(name.into(), ParamValue::Str(p.param().into()));
+        };
+        if let Some((clk, q, p)) = self.input {
+            ports.push(port("INCLK", Dir::In, vec![clk]));
+            ports.push(port("REGOUT", Dir::Out, vec![q]));
+            param(register_param::INPUT, p);
+        }
+        if let Some(o) = self.output {
+            ports.push(port("OUTCLK", Dir::In, vec![o.clk]));
+            if let Some(p) = o.data {
+                param(register_param::OUTPUT, p);
+            }
+            if let Some(p) = o.oe {
+                param(register_param::OE, p);
+            }
+        }
+    }
+}
+
+/// An input pin: COMBOUT reads the pad, REGOUT (with an input register)
+/// what the register sampled.
+pub fn ibuf(pad: SigBit, combout: SigBit, regs: IoRegs) -> CellKind {
+    let mut ports = vec![
+        port("PAD", Dir::In, vec![pad]),
+        port("COMBOUT", Dir::Out, vec![combout]),
+    ];
+    let mut params = BTreeMap::new();
+    regs.add(&mut ports, &mut params);
+    generic(IBUF, params, ports)
+}
+
+pub fn obuf(dataout: SigBit, pad: SigBit, regs: IoRegs) -> CellKind {
+    let mut ports = vec![
+        port("DATAOUT", Dir::In, vec![dataout]),
+        port("PAD", Dir::Out, vec![pad]),
+    ];
+    let mut params = BTreeMap::new();
+    regs.add(&mut ports, &mut params);
+    generic(OBUF, params, ports)
 }
 
 /// A tri-state output (`combout` `None`) or a bidir.
-pub fn iobuf(dataout: SigBit, oe: SigBit, combout: Option<SigBit>, pad: SigBit) -> CellKind {
+pub fn iobuf(
+    dataout: SigBit,
+    oe: SigBit,
+    combout: Option<SigBit>,
+    pad: SigBit,
+    regs: IoRegs,
+) -> CellKind {
     let mut ports = vec![
         port("DATAOUT", Dir::In, vec![dataout]),
         port("OE", Dir::In, vec![oe]),
@@ -137,7 +186,9 @@ pub fn iobuf(dataout: SigBit, oe: SigBit, combout: Option<SigBit>, pad: SigBit) 
         ports.push(port("COMBOUT", Dir::Out, vec![c]));
     }
     ports.push(port("PAD", Dir::InOut, vec![pad]));
-    generic(IOBUF, BTreeMap::new(), ports)
+    let mut params = BTreeMap::new();
+    regs.add(&mut ports, &mut params);
+    generic(IOBUF, params, ports)
 }
 
 #[cfg(test)]
