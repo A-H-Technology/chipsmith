@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use super::device::{Device, Node};
 
 use super::addr;
-use super::io::{IoBit, IoDb, PinUse, UnusedPins};
+use super::io::{IoBit, IoDb, PinUse, UnusedPins, Vccio};
 use super::lab::LabDb;
 use super::logic::Logic;
 use super::m4k::{M4k, M4kDb};
@@ -64,6 +64,8 @@ pub struct PhysDesign {
     pub pins: Vec<PinUse>,
     /// What every other user pin does.
     pub unused_pins: UnusedPins,
+    /// What the I/O banks are powered at.
+    pub vccio: Vccio,
     /// M4K RAM blocks in use.
     pub m4ks: Vec<M4k>,
     /// The JTAG and serial-flash blocks, when the design uses them.
@@ -171,7 +173,10 @@ impl PhysDesign {
                 }
             }
         }
-        for (b, v) in db.io.bits(&self.pins, self.unused_pins, serial_flash)? {
+        for (b, v) in db
+            .io
+            .bits(&self.pins, self.unused_pins, self.vccio, serial_flash)?
+        {
             match b {
                 IoBit::Core(b) => core.push((b, v, Source::Io)),
                 IoBit::Rep(b) => rep.push((b, v)),

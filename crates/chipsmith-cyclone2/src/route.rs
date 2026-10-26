@@ -13,6 +13,8 @@ use chipsmith_route::chipdb::{ChipDb, NodeId};
 use chipsmith_route::timing::{self, Ps};
 use chipsmith_route::{Design, NetReq, Router, Tree};
 
+use crate::pin::register_param;
+
 /// A prebuilt routing graph (`chipsmith routing-graph`).
 pub const GRAPH_VAR: &str = "CHIPSMITH_CYCLONE2_GRAPH";
 /// cyclone2-re's `db/` directory, holding `EP2C35F672C6/chipdb.txt.xz`.
@@ -302,10 +304,20 @@ fn read_design(db: &ChipDb, json: &Value) -> Result<Design> {
             .and_then(|b| b.split_once('.'))
             .and_then(|(k, _)| k.parse().ok())
             .unwrap_or(0);
-        timing.add_cell(name, cell["type"].as_str().unwrap_or(""), &connected, le);
-        let clock = match cell["type"].as_str() {
-            Some("LCELL_FF") => net_of(cell, "CLK"),
-            Some("CY2_M4K") => net_of(cell, "CLK0"),
+        let ty = cell["type"].as_str().unwrap_or("");
+        timing.add_cell(name, ty, &connected, le);
+        if matches!(ty, "CY2_IBUF" | "CY2_OBUF" | "CY2_IOBUF") {
+            let reg = |p: &str| cell["parameters"][p].is_string();
+            timing.add_ioe_registers(
+                name,
+                reg(register_param::INPUT),
+                reg(register_param::OUTPUT),
+                reg(register_param::OE),
+            );
+        }
+        let clock = match ty {
+            "LCELL_FF" => net_of(cell, "CLK"),
+            "CY2_M4K" => net_of(cell, "CLK0"),
             _ => None,
         };
         if let Some(clock) = clock {

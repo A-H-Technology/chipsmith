@@ -296,6 +296,34 @@ impl Standard {
     fn low_voltage_input(self) -> bool {
         matches!(self, Standard::V18 | Standard::V15)
     }
+
+    /// The current the fitter gives an output that asks for none: on
+    /// every standard but 3.3-V LVTTL it differs between row and column
+    /// IOEs (std fuzz designs; README "I/O pins").
+    fn default_ma(self, block: i32) -> u32 {
+        match (self, block == BLOCK_COL) {
+            (Standard::Lvttl33, _) => 24,
+            (Standard::Lvcmos33, false) => 12,
+            (Standard::Lvcmos33, true) => 24,
+            (Standard::V25, false) => 8,
+            (Standard::V25, true) => 16,
+            (Standard::V18, _) => 12,
+            (Standard::V15, false) => 6,
+            (Standard::V15, true) => 8,
+        }
+    }
+}
+
+/// What each I/O bank is powered at, which an unclaimed dual-purpose pin
+/// follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vccio {
+    /// What the design's pins in it ask for, as Quartus infers it (the
+    /// last pin's standard; a bank's pins agree on VCCIO in Quartus' own
+    /// netlists). An empty bank is 3.3 V.
+    FromPins,
+    /// Every bank at the voltage of this standard, as a board powers them.
+    Board(Standard),
 }
 
 /// An I/O-cell register (no clear, no clock enable: those aren't modelled).
@@ -591,14 +619,7 @@ fn used_settings(block: i32, u: &PinUse) -> Result<Vec<Setting>> {
             v.push((IO_USE_OUTPUT_DUTY_CYCLE, -1, &[1, 1]));
         }
         if let Some(o) = u.dir.output() {
-            // The netlist names the current of every output; "Default" is
-            // only seen on 3.3-V LVTTL, where it is 24 mA. (Other
-            // standards' defaults differ between row and column IOEs.)
-            let ma = match (o.drive, u.standard) {
-                (Some(ma), _) => ma,
-                (None, Standard::Lvttl33) => 24,
-                (None, s) => bail!("{}: {s:?} output with no current strength", u.pin),
-            };
+            let ma = o.drive.unwrap_or(u.standard.default_ma(block));
             let code = drive_code(block, u.standard, ma).with_context(|| {
                 format!("{}: no drive code for {:?} at {ma} mA", u.pin, u.standard)
             })?;
@@ -721,11 +742,10 @@ impl IoDb {
         &self,
         uses: &[PinUse],
         unused: UnusedPins,
+        vccio: Vccio,
         serial_flash_claimed: bool,
     ) -> Result<Vec<(IoBit, bool)>> {
         let by_pin: HashMap<&str, &PinUse> = uses.iter().map(|u| (u.pin.as_str(), u)).collect();
-        // A bank's I/O standard is that of the pins the design puts in it
-        // (Quartus requires them to agree on VCCIO); empty banks are 3.3 V.
         let mut bank_std: HashMap<i32, Standard> = HashMap::new();
         for u in uses {
             let b = self
@@ -733,8 +753,14 @@ impl IoDb {
                 .get(&u.pin)
                 .with_context(|| format!("{} ({}) is not a user I/O pin", u.pin, u.port))?
                 .bank;
-            bank_std.insert(b, u.standard);
+            if vccio == Vccio::FromPins {
+                bank_std.insert(b, u.standard);
+            }
         }
+        let empty_bank = match vccio {
+            Vccio::FromPins => Standard::Lvttl33,
+            Vccio::Board(s) => s,
+        };
         let mut out = Vec::new();
         let mut pins: Vec<&Pin> = self.pins.values().collect();
         pins.sort_by(|a, b| a.name.cmp(&b.name));
@@ -752,7 +778,7 @@ impl IoDb {
                     let mut v = dual_purpose_settings(
                         p.ioe.block,
                         d,
-                        bank_std.get(&p.bank).copied().unwrap_or(Standard::Lvttl33),
+                        bank_std.get(&p.bank).copied().unwrap_or(empty_bank),
                     )?;
                     if serial_flash_claimed && d == DualPurpose::SerialFlash {
                         v.retain(|s| s.0 != arch::IO_USE_PULL_UP);

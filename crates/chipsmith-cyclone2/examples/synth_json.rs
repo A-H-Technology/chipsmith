@@ -37,7 +37,7 @@ fn main() -> Result<()> {
     }
     let design = read_json(&std::fs::read(input)?).with_context(|| input.display().to_string())?;
     let t = Instant::now();
-    let out = synthesize_observed(design, &mut Dump(dir))?;
+    let out = synthesize_observed(design, &Default::default(), &mut Dump(dir))?;
     eprintln!("{:?}", out.stats);
     let out = out.design;
     eprintln!("synthesized in {:.2} s", t.elapsed().as_secs_f64());

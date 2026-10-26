@@ -24,6 +24,7 @@ use serde_json::Value;
 
 use crate::hard;
 use crate::m4k;
+use crate::pin::{assignment, register_param, PinSettings, Pull, UnusedPins};
 use chipsmith_route::chipdb::{ChipDb, NodeId, Pad, PadIo};
 use chipsmith_route::timing::{self, Arc, Ps};
 
@@ -165,6 +166,9 @@ struct Cell {
     sclr_inv: bool,
     /// Pin buffers: the top-level port they serve (`LEDR[0]`).
     port: Option<String>,
+    /// Pin buffers: which of their I/O-cell registers they use (input,
+    /// output, OE).
+    io_regs: [bool; 3],
 }
 
 impl Cell {
@@ -299,6 +303,12 @@ fn read_design(json: &Value) -> Result<Design> {
             ena_inv: flag("ENA_INV"),
             sclr_inv: flag("SCLR_INV"),
             port: c["attributes"]["PORT"].as_str().map(str::to_string),
+            io_regs: [
+                register_param::INPUT,
+                register_param::OUTPUT,
+                register_param::OE,
+            ]
+            .map(|p| c["parameters"][p].is_string()),
         });
     }
 
@@ -312,7 +322,7 @@ fn read_design(json: &Value) -> Result<Design> {
                 (c.kind, port),
                 (Kind::Lut, Port::Combout | Port::Cout)
                     | (Kind::Ff, Port::Regout)
-                    | (Kind::Ibuf | Kind::Iobuf, Port::Combout)
+                    | (Kind::Ibuf | Kind::Iobuf, Port::Combout | Port::Regout)
                     | (Kind::ClkCtrl, Port::Outclk)
             ) || matches!(port, Port::M4k(pin) if pin.is_output())
                 || matches!(port, Port::Hard(pin) if pin.is_output());
@@ -463,6 +473,11 @@ fn read_design(json: &Value) -> Result<Design> {
             Kind::Lut => "LCELL_COMB",
             Kind::Ff => "LCELL_FF",
             Kind::M4k => "CY2_M4K",
+            Kind::Ibuf | Kind::Obuf | Kind::Iobuf => {
+                let [i, o, e] = c.io_regs;
+                timing.add_ioe_registers(&c.name, i, o, e);
+                continue;
+            }
             _ => continue,
         };
         let le = le_of[i]
@@ -561,7 +576,7 @@ impl Grid {
 fn fixed_cells(
     db: &ChipDb,
     design: &Design,
-    pins: &std::collections::BTreeMap<String, String>,
+    pins: &std::collections::BTreeMap<String, PinPlan>,
 ) -> Result<HashMap<usize, (u32, String)>> {
     let mut out = HashMap::default();
     let pads: HashMap<&str, &Pad> = db.pads.iter().map(|p| (p.pin.as_str(), p)).collect();
@@ -593,9 +608,10 @@ fn fixed_cells(
             .port
             .as_ref()
             .with_context(|| format!("{}: pin buffer without a top-level port", c.name))?;
-        let pin = pins
+        let plan = pins
             .get(port)
             .with_context(|| format!("no pin assignment for port {port}"))?;
+        let pin = &plan.pin;
         let ball = pin.strip_prefix("PIN_").unwrap_or(pin);
         let pad = pads
             .get(ball)
@@ -606,6 +622,21 @@ fn fixed_cells(
             }
             (PadIo::Bidir, _) | (PadIo::ClockInput, false) => (pad.tile, pad.bel.as_str()),
         };
+        // What the manifest couldn't check: which way the port goes, and
+        // which pins are clock inputs.
+        ensure!(
+            !drives || plan.settings.standard.drives(),
+            "port {port}: {} is an input standard here (every DE2 bank is 3.3 V), and the port drives",
+            plan.settings.standard.quartus_name()
+        );
+        ensure!(
+            pad.io != PadIo::ClockInput || plan.settings.pull == Pull::None,
+            "port {port}: {pin} is a dedicated clock input, which has neither a weak pull-up nor bus hold"
+        );
+        ensure!(
+            pad.io != PadIo::ClockInput || c.io_regs == [false; 3],
+            "port {port}: {pin} is a dedicated clock input, which has no I/O-cell registers"
+        );
         ensure!(
             !out.values()
                 .any(|(t, b): &(u32, String)| *t == tile && b == bel),
@@ -1256,12 +1287,23 @@ fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
     total_moves
 }
 
+/// Where a top-level port bit goes and how its pin is set up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinPlan {
+    /// `PIN_AE23`.
+    pub pin: String,
+    pub settings: PinSettings,
+}
+
 /// Place `packed`, write `placed`. `pins` maps top-level ports (`LEDR[0]`)
-/// to pins (`PIN_AE23`).
+/// to pins; their settings go onto the pins' cells as parameters, and
+/// `unused_pins` onto the top module as an attribute, for the bitstream
+/// (`crate::pin`).
 pub fn place_file(
     db: &ChipDb,
     packed: &Path,
-    pins: &std::collections::BTreeMap<String, String>,
+    pins: &std::collections::BTreeMap<String, PinPlan>,
+    unused_pins: UnusedPins,
     placed: &Path,
 ) -> Result<Stats> {
     let text =
@@ -1281,9 +1323,15 @@ pub fn place_file(
     let moves = anneal(&mut state, &mut Rng(0x9e37_79b9_7f4a_7c15));
     let critical = state.reweight();
 
-    let cells = json["modules"]["top"]["cells"]
-        .as_object_mut()
-        .context("no cells")?;
+    let top = &mut json["modules"]["top"];
+    if unused_pins != UnusedPins::default() {
+        top.as_object_mut()
+            .context("no top module")?
+            .entry("attributes")
+            .or_insert_with(|| Value::Object(Default::default()))[assignment::UNUSED_PINS] =
+            Value::String(unused_pins.quartus_name().into());
+    }
+    let cells = top["cells"].as_object_mut().context("no cells")?;
     for (i, c) in design.cells.iter().enumerate() {
         let (tile, bel) = match (design.le_of[i], design.ram_of[i]) {
             (Some(le), _) => {
@@ -1303,6 +1351,17 @@ pub fn place_file(
             .entry("attributes")
             .or_insert_with(|| Value::Object(Default::default()));
         attrs["NEXTPNR_BEL"] = Value::String(format!("X{x}Y{y}/{bel}"));
+        if let Some(plan) = c.port.as_ref().and_then(|p| pins.get(p)) {
+            let cell = cells.get_mut(&c.name).context("cell vanished")?;
+            let params = cell
+                .as_object_mut()
+                .context("cell is not an object")?
+                .entry("parameters")
+                .or_insert_with(|| Value::Object(Default::default()));
+            for (k, v) in plan.settings.params() {
+                params[k] = Value::String(v);
+            }
+        }
     }
     std::fs::write(placed, serde_json::to_string(&json)?)
         .with_context(|| format!("writing {}", placed.display()))?;
