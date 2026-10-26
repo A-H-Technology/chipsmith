@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use serde_json::Value;
 
 use chipsmith_route::chipdb::{ChipDb, NodeId};
@@ -43,12 +43,46 @@ pub fn load_graph() -> Result<ChipDb> {
     Ok(graph)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Stats {
     pub nets: usize,
     pub pips: usize,
     pub iterations: usize,
-    /// Estimated minimum clock period (critical register-to-register path).
+    /// Estimated minimum clock period (critical register-to-register path,
+    /// any clock to any clock).
+    pub critical: Ps,
+    /// Every global clock, and the critical path of every pair of them
+    /// that has a path.
+    pub clocks: Vec<Clock>,
+    pub pairs: Vec<ClockPair>,
+}
+
+/// One global clock: what feeds its clock control.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Clock {
+    /// The net into the clock control.
+    pub name: String,
+    pub source: ClockSource,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClockSource {
+    /// A pin, by top-level port bit (`CLOCK_50`).
+    Pin(String),
+    /// Output `output` (c0-c2) of PLL cell `cell`, at the frequency its
+    /// counters make of its input clock.
+    Pll { cell: String, output: u8, hz: f64 },
+    /// Logic in the core: a register, a LUT, the JTAG block's TCK. Its
+    /// frequency is the design's business.
+    Core,
+}
+
+/// The critical path from registers on `Stats::clocks[from]` to registers
+/// on `Stats::clocks[to]`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClockPair {
+    pub from: usize,
+    pub to: usize,
     pub critical: Ps,
 }
 
@@ -87,11 +121,27 @@ pub fn route_file(db: &ChipDb, placed: &Path, routed: &Path) -> Result<Stats> {
     }
     std::fs::write(routed, serde_json::to_string(&json)?)
         .with_context(|| format!("writing {}", routed.display()))?;
+    let clocks = clocks(&json)?;
+    let index = |net: u32| clocks.iter().position(|(id, _)| *id == u64::from(net));
+    let pairs = design
+        .timing
+        .clock_pairs(&Router::net_arcs(&design.nets, &trees))
+        .into_iter()
+        .filter_map(|p| {
+            Some(ClockPair {
+                from: index(p.from)?,
+                to: index(p.to)?,
+                critical: p.critical,
+            })
+        })
+        .collect();
     Ok(Stats {
         nets: design.nets.len(),
         pips,
         iterations,
         critical: analysis.critical,
+        clocks: clocks.into_iter().map(|(_, c)| c).collect(),
+        pairs,
     })
 }
 
@@ -152,6 +202,54 @@ fn routing_attribute(db: &ChipDb, net: &NetReq, tree: &Tree) -> String {
     s
 }
 
+fn net_of(cell: &Value, port: &str) -> Option<u64> {
+    cell["connections"][port].as_array()?.first()?.as_u64()
+}
+
+/// The global clocks, by the id of the clock control's output net.
+fn clocks(json: &Value) -> Result<Vec<(u64, Clock)>> {
+    let top = &json["modules"]["top"];
+    let cells = top["cells"].as_object().context("no cells")?;
+    let mut names: HashMap<u64, &str> = HashMap::new();
+    for (name, n) in top["netnames"].as_object().context("no netnames")? {
+        if let Some(id) = n["bits"].as_array().and_then(|a| a.first()?.as_u64()) {
+            names.entry(id).or_insert(name);
+        }
+    }
+    let mut out = Vec::new();
+    for (name, c) in cells.iter().filter(|(_, c)| c["type"] == "CLKCTRL") {
+        let (Some(o), Some(i)) = (net_of(c, "OUTCLK"), net_of(c, "INCLK")) else {
+            bail!("{name}: clock control not connected");
+        };
+        let driver = cells.values().find(|d| {
+            d["connections"].as_object().is_some_and(|conns| {
+                conns.iter().any(|(p, b)| {
+                    d["port_directions"][p] == "output"
+                        && b.as_array().and_then(|a| a.first()?.as_u64()) == Some(i)
+                })
+            })
+        });
+        let source = match driver {
+            Some(d) if d["type"] == "CY2_IBUF" || d["type"] == "CY2_IOBUF" => ClockSource::Pin(
+                d["attributes"]["PORT"]
+                    .as_str()
+                    .context("pin buffer without PORT")?
+                    .to_string(),
+            ),
+            _ => ClockSource::Core,
+        };
+        out.push((
+            o,
+            Clock {
+                name: names.get(&i).map_or_else(|| format!("net {i}"), |n| n.to_string()),
+                source,
+            },
+        ));
+    }
+    out.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+    Ok(out)
+}
+
 /// A net's endpoints in the graph, as cells name them.
 #[derive(Default)]
 struct Ends {
@@ -205,6 +303,17 @@ fn read_design(db: &ChipDb, json: &Value) -> Result<Design> {
             .and_then(|(k, _)| k.parse().ok())
             .unwrap_or(0);
         timing.add_cell(name, cell["type"].as_str().unwrap_or(""), &connected, le);
+        let clock = match cell["type"].as_str() {
+            Some("LCELL_FF") => net_of(cell, "CLK"),
+            Some("CY2_M4K") => net_of(cell, "CLK0"),
+            _ => None,
+        };
+        if let Some(clock) = clock {
+            for p in &connected {
+                let n = timing.node(name, p);
+                timing.set_clock(n, clock as u32);
+            }
+        }
         for (port, bits) in conns {
             let Some(net) = bits
                 .as_array()

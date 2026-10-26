@@ -625,24 +625,31 @@ fn fixed_cells(
             }
         }
     }
-    for (i, c) in design
+    // Clocks from pins first: each takes the nearest free clock control
+    // its pin reaches, as nextpnr's packer picks it. Clocks from the core
+    // then take any free one (every clock control has a core input), the
+    // nearest to their driver if that is fixed, else the nearest to the
+    // middle of the chip, where most of the logic driving it will be.
+    let clkctrls: Vec<(usize, usize)> = design
         .cells
         .iter()
         .enumerate()
         .filter(|(_, c)| c.kind == Kind::ClkCtrl)
-    {
-        let net = c
-            .net(Port::Inclk)
-            .with_context(|| format!("{}: INCLK unconnected", c.name))?;
-        let pin = design.driver[net as usize].context("clock control input undriven")?;
-        ensure!(
-            design.cells[pin].kind == Kind::Ibuf,
-            "{}: clocks must come straight from a pin",
-            c.name
-        );
+        .map(|(i, c)| {
+            let net = c
+                .net(Port::Inclk)
+                .with_context(|| format!("{}: INCLK unconnected", c.name))?;
+            let d = design.driver[net as usize]
+                .with_context(|| format!("{}: clock control input undriven", c.name))?;
+            Ok((i, d))
+        })
+        .collect::<Result<_>>()?;
+    let (from_pins, from_core): (Vec<_>, Vec<_>) = clkctrls
+        .into_iter()
+        .partition(|&(_, d)| design.cells[d].kind == Kind::Ibuf);
+    for (i, pin) in from_pins {
         let (tile, bel) = &out[&pin];
         let w = db.tile_type(*tile).bels[bel].pins["COMBOUT"];
-        // Nearest free clock control the pin reaches, as nextpnr's packer picks it.
         let start = db.node(*tile, w);
         let mut seen = HashSet::from_iter([start]);
         let mut queue = VecDeque::from([(start, 0)]);
@@ -672,6 +679,32 @@ fn fixed_cells(
                 )
             })?,
         );
+    }
+    let mut sites: Vec<(u32, String)> = inclk.into_values().collect();
+    sites.sort();
+    for (i, d) in from_core {
+        let target = match out.get(&d) {
+            Some((tile, _)) => {
+                let (x, y) = db.tile_xy(*tile);
+                (x as i64, y as i64)
+            }
+            None => (i64::from(db.width) / 2, i64::from(db.height) / 2),
+        };
+        let free = sites
+            .iter()
+            .filter(|s| !out.values().any(|v| v == *s))
+            .min_by_key(|(tile, _)| {
+                let (x, y) = db.tile_xy(*tile);
+                (x as i64 - target.0).abs() + (y as i64 - target.1).abs()
+            })
+            .cloned()
+            .with_context(|| {
+                format!(
+                    "{}: all 16 global clocks are taken",
+                    design.cells[i].name
+                )
+            })?;
+        out.insert(i, free);
     }
     Ok(out)
 }

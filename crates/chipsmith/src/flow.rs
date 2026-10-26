@@ -143,13 +143,15 @@ pub enum Step {
     Pack { netlist: PathBuf, packed: PathBuf },
     /// Place a packed design (nextpnr JSON) and route it, in process.
     /// `pins` maps top-level port bits (`LEDR[0]`) to pins (`PIN_AE23`).
-    /// The routed design's estimated slack is reported against `clock`.
+    /// Each global clock's estimated slack is reported against its
+    /// frequency: `clocks` for clocks from pins (by port bit), the PLL's for
+    /// its outputs.
     PlaceRoute {
         packed: PathBuf,
         placed: PathBuf,
         routed: PathBuf,
         pins: BTreeMap<String, String>,
-        clock: Option<Frequency>,
+        clocks: BTreeMap<String, Frequency>,
     },
     /// Assemble a routed design (nextpnr JSON) into an RBF, in process
     /// (`chipsmith_cyclone2::bitstream`).
@@ -309,9 +311,7 @@ pub struct Plan {
 /// the environment the nix package (or devshell) sets.
 pub fn plan_build(manifest: &Manifest, layout: &Layout) -> Result<Plan> {
     Ok(match &manifest.target {
-        Target::Ep2c35f672c6 { pins, clock } => {
-            plan_cyclone2(manifest, pins, clock.as_ref(), layout)
-        }
+        Target::Ep2c35f672c6 { pins, clocks } => plan_cyclone2(manifest, pins, clocks, layout),
         Target::Xc7z010clg400_1 { pins, clocks } => {
             let part = XC7Z010CLG400_1;
             plan_xc7(
@@ -351,7 +351,7 @@ fn verilog_sources(manifest: &Manifest, layout: &Layout, steps: &mut Vec<Step>) 
 pub fn plan_cyclone2(
     manifest: &Manifest,
     pins: &[PinAssignment<QuartusPin>],
-    clock: Option<&Clock>,
+    clocks: &[Clock],
     layout: &Layout,
 ) -> Plan {
     let mut steps: Vec<Step> = Vec::new();
@@ -373,7 +373,10 @@ pub fn plan_cyclone2(
             .iter()
             .map(|a| (a.port.to_string(), a.pin.as_str().to_string()))
             .collect(),
-        clock: clock.map(|c| c.frequency),
+        clocks: clocks
+            .iter()
+            .map(|c| (c.port.to_string(), c.frequency))
+            .collect(),
     });
     steps.push(Step::Bitstream {
         routed: layout.routed(),
@@ -764,8 +767,8 @@ impl Plan {
                     placed,
                     routed,
                     pins,
-                    clock,
-                } => place_route(packed, placed, routed, pins, *clock)?,
+                    clocks,
+                } => place_route(packed, placed, routed, pins, clocks)?,
                 Step::Bitstream { routed, rbf } => bitstream(routed, rbf)?,
                 Step::Svf { rbf, svf } => bitstream::svf_file(rbf, svf)?,
                 Step::NextpnrTiming(report) => nextpnr_timing(report)?,
@@ -857,7 +860,7 @@ fn place_route(
     placed: &Path,
     routed: &Path,
     pins: &BTreeMap<String, String>,
-    clock: Option<Frequency>,
+    clocks: &BTreeMap<String, Frequency>,
 ) -> Result<()> {
     let started = Instant::now();
     let graph = chipsmith_cyclone2::route::load_graph()?;
@@ -888,15 +891,61 @@ fn place_route(
         started.elapsed().as_secs_f64(),
         r.critical / 1000.0
     );
-    if let Some(f) = clock {
-        let slack = f.period_ns() - f64::from(r.critical) / 1000.0;
-        eprintln!(
-            "    {f}: slack {slack:.2} ns (estimate, Fmax {:.1} MHz){}",
-            1e6 / f64::from(r.critical),
-            if slack < 0.0 { "; FAILS timing" } else { "" }
-        );
+    for line in clock_report(&r, clocks) {
+        eprintln!("    {line}");
     }
     Ok(())
+}
+
+/// One line per global clock with paths of its own (Fmax, and slack when
+/// its frequency is known), one per pair of clocks with paths between them.
+fn clock_report(
+    r: &chipsmith_cyclone2::route::Stats,
+    clocks: &BTreeMap<String, Frequency>,
+) -> Vec<String> {
+    use chipsmith_cyclone2::route::ClockSource;
+    let hz = |i: usize| -> Option<f64> {
+        match &r.clocks[i].source {
+            ClockSource::Pin(port) => clocks.get(port).map(|f| f.hz() as f64),
+            ClockSource::Pll { hz, .. } => Some(*hz),
+            ClockSource::Core => None,
+        }
+    };
+    let what = |i: usize| -> String {
+        let c = &r.clocks[i];
+        match (&c.source, hz(i)) {
+            (ClockSource::Pin(port), Some(f)) => format!("clock {port} ({:.3} MHz)", f / 1e6),
+            (ClockSource::Pin(port), None) => format!("clock {port} (no frequency in [clocks])"),
+            (ClockSource::Pll { cell, output, hz }, _) => {
+                format!("clock {} ({cell} c{output}, {:.3} MHz)", c.name, hz / 1e6)
+            }
+            (ClockSource::Core, _) => format!("clock {} (from logic)", c.name),
+        }
+    };
+    let mut out = Vec::new();
+    for p in &r.pairs {
+        let ns = f64::from(p.critical) / 1000.0;
+        if p.from == p.to {
+            let slack = hz(p.from).map(|f| 1e9 / f - ns);
+            out.push(format!(
+                "{}: critical path {ns:.2} ns, Fmax {:.1} MHz{} (estimate)",
+                what(p.from),
+                1e3 / ns,
+                match slack {
+                    Some(s) if s < 0.0 => format!(", slack {s:.2} ns; FAILS timing"),
+                    Some(s) => format!(", slack {s:.2} ns"),
+                    None => String::new(),
+                }
+            ));
+        } else {
+            out.push(format!(
+                "{} -> {}: {ns:.2} ns, between clocks (not checked)",
+                what(p.from),
+                what(p.to)
+            ));
+        }
+    }
+    out
 }
 
 fn bitstream(routed: &Path, rbf: &Path) -> Result<()> {
@@ -1233,10 +1282,10 @@ mod tests {
     /// The DE2 manifest's plan, with `sources` in place of the file's.
     fn cyclone2(sources: Sources) -> Plan {
         let m = manifest_for(DE2, sources);
-        let Target::Ep2c35f672c6 { pins, clock } = &m.target else {
+        let Target::Ep2c35f672c6 { pins, clocks } = &m.target else {
             unreachable!()
         };
-        plan_cyclone2(&m, pins, clock.as_ref(), &layout(&m))
+        plan_cyclone2(&m, pins, clocks, &layout(&m))
     }
 
     fn xc7(sources: Sources) -> Plan {
@@ -1341,10 +1390,13 @@ mod tests {
     #[test]
     fn pins_and_the_clock_reach_the_placer() {
         let plan = cyclone2(Sources::Verilog(vec![]));
-        let Step::PlaceRoute { pins, clock, .. } = &plan.steps[2] else {
+        let Step::PlaceRoute { pins, clocks, .. } = &plan.steps[2] else {
             panic!("{:?} is not place and route", plan.steps[2]);
         };
-        assert_eq!(clock.map(Frequency::hz), Some(50_000_000));
+        assert_eq!(
+            clocks.get("CLOCK_50").map(|f| f.hz()),
+            Some(50_000_000)
+        );
         let pins: Vec<(&str, &str)> = pins.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
         assert_eq!(
             pins,

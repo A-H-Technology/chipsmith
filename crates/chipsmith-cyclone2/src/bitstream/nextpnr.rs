@@ -21,6 +21,7 @@ use super::io::{
     BLOCK_CLK_P,
 };
 use super::logic::{
+    BLOCK_INPUT_MUX, CORE_INPUT,
     clock_slots, Aclr, ClkCtrl, Ctl, Domain, GlobalClock, LabConfig, LeConfig, LeSource, Logic,
     Lut, Reg, Sload,
 };
@@ -541,7 +542,11 @@ impl Routed {
         let mut aclr: HashMap<(u32, u32, u32), Aclr> = HashMap::new();
         let mut sclr: HashMap<(u32, u32, u32), u8> = HashMap::new();
         let mut pia: HashMap<(u32, u32, u32), LeSource> = HashMap::new();
-        let mut clk_in: HashMap<u32, u8> = HashMap::new();
+        let mut clk_in: HashMap<u32, (Node, u8)> = HashMap::new();
+        // A clock control fed from the core: LAB line -> BLOCK_INPUT_MUX
+        // (532) -> CLKBUF_IN 4, both graph edges without bits of their own;
+        // the line is chosen by the clock control's COREIN mux.
+        let mut core_in: HashMap<Node, u8> = HashMap::new();
         let mut data_line: HashMap<(u32, u32, u32), u32> = HashMap::new();
         let mut oe_line: HashMap<(u32, u32, u32), u32> = HashMap::new();
         let mut datain: HashMap<(u32, u32, u32), [bool; 2]> = HashMap::new();
@@ -554,10 +559,17 @@ impl Routed {
             let mut pips = Vec::new();
             for p in &n.pips {
                 match (p.src, p.dst) {
-                    (Wire::Node(s), Wire::Node(d)) => pips.push(
-                        Pip::new(dev, s, d)
-                            .with_context(|| format!("{}: no edge {s:?} -> {d:?}", n.name))?,
-                    ),
+                    (Wire::Node(s), Wire::Node(d)) => {
+                        pips.push(
+                            Pip::new(dev, s, d)
+                                .with_context(|| format!("{}: no edge {s:?} -> {d:?}", n.name))?,
+                        );
+                        if dev.element_enum(s) == 276 && dev.element_enum(d) == BLOCK_INPUT_MUX {
+                            let t = &dev.routing.templates
+                                [dev.routing.elements[s.0 as usize].template as usize];
+                            core_in.insert(d, t.index as u8);
+                        }
+                    }
                     (
                         Wire::Le {
                             pin: LePin::Input(_),
@@ -732,7 +744,7 @@ impl Routed {
                     (Wire::Node(s), Wire::ClkIn { g }) => {
                         let t = &dev.routing.templates
                             [dev.routing.elements[s.0 as usize].template as usize];
-                        clk_in.insert(g, t.index as u8);
+                        clk_in.insert(g, (s, t.index as u8));
                     }
                     (
                         Wire::Node(s),
@@ -787,6 +799,7 @@ impl Routed {
         let mut pins = Vec::new();
         let mut m4ks = Vec::new();
         let mut hard = Hard::default();
+        let plls = Vec::new();
         let mut ff_domain: HashMap<(u32, u32, u32), Domain> = HashMap::new();
         let sdata: std::collections::HashSet<(u32, u32, u32)> = self
             .cells
@@ -876,13 +889,26 @@ impl Routed {
                     });
                 }
                 ("CLKCTRL", Bel::ClkCtrl { g }) => {
-                    let input = *clk_in
+                    let (node, input) = *clk_in
                         .get(&g)
                         .with_context(|| format!("{name}: input not routed"))?;
+                    // The BLOCK_INPUT_MUX feeding a core input, and the line
+                    // that feeds it.
+                    let core_line = core_in.iter().find_map(|(&m, &line)| {
+                        dev.edge(m, node).is_some().then_some(line)
+                    });
+                    ensure!(
+                        (input == CORE_INPUT) == core_line.is_some(),
+                        "{name}: clock control input {input} without its core path, or the other way round"
+                    );
                     clkctrls.push(ClkCtrl {
                         g: g as u8,
                         input,
-                        core_line: None,
+                        core_line,
+                        enable: None,
+                        // The Quartus export writes `ena_register_mode =
+                        // "none"` (cyclone2-re's quartus/export.rs).
+                        enable_registered: false,
                     });
                 }
                 ("CY2_IBUF" | "CY2_OBUF" | "CY2_IOBUF", Bel::Ioe { x, y, z }) => {
@@ -1027,6 +1053,7 @@ impl Routed {
             unused_pins: UnusedPins::InputTriStated,
             m4ks,
             hard,
+            plls,
             nets,
         })
     }

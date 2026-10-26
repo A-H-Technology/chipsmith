@@ -30,9 +30,9 @@ pub struct Manifest {
 pub enum Target {
     Ep2c35f672c6 {
         pins: Vec<PinAssignment<QuartusPin>>,
-        /// chipsmith's Cyclone II timing model times one clock domain, so
-        /// there is at most one clock to constrain.
-        clock: Option<Clock>,
+        /// Clocks entering at pins. PLL outputs take their frequency from
+        /// the PLL; clocks from logic have none.
+        clocks: Vec<Clock>,
     },
     Xc7z010clg400_1 {
         pins: Vec<PinAssignment<Clg400Pin>>,
@@ -188,8 +188,6 @@ pub enum ManifestError {
     BadFrequency { port: String, value: String },
     #[error("[clocks] {0}: a clock enters at a pin, and [pins] assigns none to {0}")]
     ClockWithoutPin(String),
-    #[error("[clocks] has {0} clocks; the {1} timing model times one clock domain")]
-    TooManyClocks(usize, Device),
     #[error("pin {pin} is assigned to both {first} and {second}")]
     PinTwice {
         pin: String,
@@ -256,14 +254,8 @@ impl Manifest {
         let target = match device {
             Device::Ep2c35f672c6 => {
                 let pins = flatten_pins(file.pins, QuartusPin::parse)?;
-                let mut clocks = parse_clocks(&file.clocks, &pins)?;
-                if clocks.len() > 1 {
-                    return Err(ManifestError::TooManyClocks(clocks.len(), device));
-                }
-                Target::Ep2c35f672c6 {
-                    pins,
-                    clock: clocks.pop(),
-                }
+                let clocks = parse_clocks(&file.clocks, &pins)?;
+                Target::Ep2c35f672c6 { pins, clocks }
             }
             Device::Xc7z010clg400_1 => {
                 let pins = flatten_pins(file.pins, |s| {
@@ -530,25 +522,26 @@ mod tests {
     }
 
     #[test]
-    fn a_clock_names_a_pin_and_cyclone_ii_takes_one() {
+    fn a_clock_names_a_pin() {
         let dir = scratch("clocks", &["src/a.v"]);
         let m =
             Manifest::parse(&format!("{DE2}\n[clocks]\nCLOCK_50 = \"50 MHz\"\n"), &dir).unwrap();
-        let Target::Ep2c35f672c6 { clock, .. } = &m.target else {
+        let Target::Ep2c35f672c6 { clocks, .. } = &m.target else {
             unreachable!()
         };
         assert_eq!(
-            clock
-                .as_ref()
-                .map(|c| (c.port.to_string(), c.frequency.hz())),
-            Some(("CLOCK_50".into(), 50_000_000))
+            clocks
+                .iter()
+                .map(|c| (c.port.to_string(), c.frequency.hz()))
+                .collect::<Vec<_>>(),
+            [("CLOCK_50".to_string(), 50_000_000)]
         );
 
         let two = format!("{DE2}\n[clocks]\nCLOCK_50 = \"50 MHz\"\n\"LEDR[0]\" = \"1 MHz\"\n");
-        assert!(matches!(
-            Manifest::parse(&two, &dir),
-            Err(ManifestError::TooManyClocks(2, Device::Ep2c35f672c6))
-        ));
+        let Target::Ep2c35f672c6 { clocks, .. } = Manifest::parse(&two, &dir).unwrap().target else {
+            unreachable!()
+        };
+        assert_eq!(clocks.len(), 2);
         let m = Manifest::parse(
             &format!("{ZYBO}\n[clocks]\nclk = \"125 MHz\"\n\"led[1]\" = \"10 MHz\"\n"),
             &dir,

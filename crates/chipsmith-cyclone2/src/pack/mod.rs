@@ -608,6 +608,9 @@ fn pack_lut1(nl: &mut Netlist, stats: &mut Stats) {
                 // Likewise into the JTAG and serial-flash blocks, which
                 // invert nothing either.
                 (Kind::Hard(_), _) if !inv => nl.reconnect(u, p, input),
+                // A buffer in front of a clock: the clock control takes the
+                // source.
+                (Kind::Ff(_), _) if p == Port::Clk && !inv => nl.reconnect(u, p, input),
                 (Kind::Ff(_), _) if matches!(p, Port::Ena | Port::Sclr) => {
                     nl.reconnect(u, p, input);
                     if let Kind::Ff(cfg) = &mut nl.cell_mut(u).kind {
@@ -716,7 +719,10 @@ fn pack_carry(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
 }
 
 /// A global clock control on every net that clocks a register or an M4K.
-/// Which one is the placer's choice.
+/// Which one is the placer's choice. The clock can come from a pin or from
+/// the core (an LE, the JTAG block's TCK): a clock control takes either,
+/// the core through its tile's LAB lines (cyclone2-re README, "Global clocks
+/// from the core").
 fn pack_clocks(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
     let is_clock = |nl: &Netlist, (u, p): (CellId, Port)| match nl.cell(u).kind {
         Kind::Ff(_) => p == Port::Clk,
@@ -730,9 +736,8 @@ fn pack_clocks(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
         .collect();
     for ni in clocks {
         let name = nl.net(ni).name.clone();
-        match nl.net(ni).driver {
-            Some((d, _)) if matches!(nl.cell(d).kind, Kind::Ibuf { .. }) => {}
-            _ => bail!("clock {name} must come straight from a pin"),
+        if nl.net(ni).driver.is_none() {
+            bail!("clock {name} has no driver");
         }
         let cc = nl.create_cell(format!("{name}$clkctrl"), Kind::ClkCtrl);
         nl.add_port(cc, Port::Inclk);

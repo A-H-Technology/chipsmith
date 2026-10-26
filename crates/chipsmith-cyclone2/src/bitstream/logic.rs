@@ -120,6 +120,12 @@ pub struct LabConfig {
     pub sync: Sync,
 }
 
+/// Routing element of the muxes from a clock control tile's LAB lines into
+/// its clock controls (and the PLLs' control inputs).
+pub const BLOCK_INPUT_MUX: i16 = 532;
+/// `CLKBUF_IN` index of a clock control's input from the core.
+pub const CORE_INPUT: u8 = 4;
+
 /// A global clock control block in use: GCLK `g` driven from its clock
 /// input `input` (CLKBUF_IN index: 0/1 dedicated clock pins, ...).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +135,12 @@ pub struct ClkCtrl {
     /// For a core-driven input (rcf `LOCAL_INTERCONNECT` ->
     /// `BLOCK_INPUT_MUX` -> `CLKBUF_IN`): the LAB line it takes.
     pub core_line: Option<u8>,
+    /// The clock enable: the LAB line it comes from (none: tied on).
+    pub enable: Option<u8>,
+    /// `ena_register_mode = "falling edge"` (the atom's default): the
+    /// enable is registered on the clock's falling edge, so the clock is
+    /// gated glitch-free. Otherwise ("none") it gates the clock directly.
+    pub enable_registered: bool,
 }
 
 #[derive(Debug, Default)]
@@ -156,7 +168,17 @@ impl Logic {
             for (k, &b) in sel.iter().enumerate() {
                 out.push((b as u32, code >> k & 1 == 1));
             }
-            out.push((db.clkctrl_enable[c.g as usize] as u32, true));
+            // CLKBUF_ENABLE_MODE is 1 for an unregistered enable, 0 for a
+            // registered one (k5, k6: the atom default, enable tied on);
+            // the first CLKBUF_ENABLE_AND_INVERT bit is 0 when the enable
+            // comes from the core (k3, k4), its mux then taking the line.
+            out.push((db.clkctrl_enable[c.g as usize] as u32, !c.enable_registered));
+            out.push((db.clkctrl_and_invert[c.g as usize] as u32, c.enable.is_none()));
+            if let Some(line) = c.enable {
+                for b in db.clkctrl_enout[c.g as usize].source_bits(0, line as usize)? {
+                    out.push((b as u32, true));
+                }
+            }
             if let Some(line) = c.core_line {
                 // Source = the LAB line, like an LE input mux (v5: G0 line 24).
                 for b in db.clkctrl_corein[c.g as usize].source_bits(0, line as usize)? {
@@ -175,29 +197,34 @@ impl Logic {
 /// control line).
 pub type Domain = (u8, bool, Option<Ctl>);
 
-/// Which LAB clock (0/1) each of a LAB's clock domains takes. The bitstream
-/// doesn't record the choice, so this reproduces the fitter's: CE 1 can
-/// only come from control lines 0/1 and CE 0 from 2/3 (asmdb fast-mux
-/// maps), and an LE's clock select picks clock and enable together, so an
-/// enabled domain's line fixes its LAB clock; the rest fill in inverted
-/// clocks first, then lowest buffer (fit to the two-clock fuzz LABs: 6
-/// non-inverted pairs, 1 inverted/non-inverted pair).
 /// `CLKBUF_CLK_INPUT_SELECT` code (LSB first) of clock-control input
 /// `CLKBUF_IN` index. The dedicated clock pins (0/1) and a core signal
-/// through `BLOCK_INPUT_MUX` (4: M4K designs v5, v11) select as their index;
-/// a user pin through the clock delay control (6) selects 5 (s8c). The other
-/// inputs were never seen, so they have no code here.
+/// through `BLOCK_INPUT_MUX` (4: M4K designs v5, v11; clock fuzz k1, k2)
+/// select as their index; a user pin through the clock delay control (6)
+/// selects 5 (s8c). The other inputs were never seen, so they have no code
+/// here.
 pub fn clkctrl_select_code(input: u8) -> Option<u8> {
     match input {
-        0 | 1 | 4 => Some(input),
+        0..=4 => Some(input),
         6 => Some(5),
         _ => None,
     }
 }
 
+/// Which LAB clock (0/1) each of a LAB's clock domains takes. The bitstream
+/// doesn't record the choice, so this reproduces the fitter's: CE 1 can
+/// only come from control lines 0/1 and CE 0 from 2/3 (asmdb fast-mux
+/// maps), and an LE's clock select picks clock and enable together, so an
+/// enabled domain's line fixes its LAB clock; the rest fill in inverted
+/// clocks first, then by row clock buffer in the order 5, 0, 1, 2, 3, 4.
+/// Fit to the two-clock LABs of the LE fuzz designs (lowest buffer first in
+/// all of them, buffers 2-4), M4K design h2 (buffer 5 before 2) and clock
+/// design k2 (buffer 5 before 4 and before 2). Neither the global clock
+/// index nor the netlist order fits all of them. **[inf]**: five LABs
+/// decide where buffer 5 goes.
 pub fn clock_slots(domains: &[Domain]) -> Result<[Option<Domain>; 2]> {
     let mut v = domains.to_vec();
-    v.sort_by_key(|d| (!d.1, d.0, d.2));
+    v.sort_by_key(|d| (!d.1, (d.0 + 1) % 6, d.2));
     v.dedup();
     ensure!(v.len() <= 2, "{} clock domains", v.len());
     let mut slot: [Option<Domain>; 2] = [None, None];
