@@ -57,8 +57,10 @@ module CY2_OBUF (input DATAOUT, input OUTCLK, output PAD);
   always @(posedge OUTCLK) q <= DATAOUT;
   assign PAD = OUTPUT_REGISTER == "none" ? DATAOUT : q;
 endmodule
-module CY2_IOBUF (input DATAOUT, input OE, input INCLK, input OUTCLK,
-                  output COMBOUT, output REGOUT, inout PAD);
+// The checker cuts every pin (`cut_pins`): EXT is what the outside drives
+// while the buffer is off.
+module CY2_IOBUF (input DATAOUT, input OE, input INCLK, input OUTCLK, input EXT,
+                  output COMBOUT, output REGOUT, output PAD);
   parameter INPUT_REGISTER = "none";
   parameter OUTPUT_REGISTER = "none";
   parameter OE_REGISTER = "none";
@@ -67,7 +69,7 @@ module CY2_IOBUF (input DATAOUT, input OE, input INCLK, input OUTCLK,
   always @(posedge OUTCLK) begin qd <= DATAOUT; qe <= OE; end
   wire d = OUTPUT_REGISTER == "none" ? DATAOUT : qd;
   wire e = OE_REGISTER == "none" ? OE : qe;
-  assign PAD = e ? d : 1'bz;
+  assign PAD = e ? d : EXT;
   assign COMBOUT = PAD;
   assign REGOUT = qi;
 endmodule
@@ -390,7 +392,10 @@ fn drop_undriven(m: &mut Module) {
         });
     }
     m.wires.retain(|w| {
-        w.port.is_some() || w.bits.iter().any(|b| b.net().is_none_or(|n| driven.contains(&n)))
+        w.port.is_some()
+            || w.bits
+                .iter()
+                .any(|b| b.net().is_none_or(|n| driven.contains(&n)))
     });
 }
 
@@ -765,7 +770,69 @@ fn in_set(m: &mut Module, q: &[SigBit], values: &[chipsmith_netlist::Const], tag
 /// yosys proves `gate` equivalent to `gold` (both JSON files, the
 /// memories already as they should be compared), with x in `gold` read as
 /// "any value". Returns how many `$equiv` it proved.
-fn equiv(dir: &Path, name: &str, gold: &Path, gate: &Path) -> Result<usize, String> {
+fn equiv(
+    dir: &Path,
+    name: &str,
+    gold: &Path,
+    gate: &Path,
+    reference: &Module,
+) -> Result<usize, String> {
+    match equiv_once(dir, name, gold, gate, &[]) {
+        Ok(n) => Ok(n),
+        Err((msg, unproven)) => {
+            // An internal wire synthesis gave a value only where it's
+            // observed (a register's next value specialized under its
+            // reset) can't be matched by name. Proving every port and
+            // register without matching those is still a proof: they are
+            // what the netlist shows.
+            let must: std::collections::HashSet<&str> = reference
+                .wires
+                .iter()
+                .filter(|w| w.port.is_some())
+                .map(|w| w.name.as_str())
+                .chain(register_wires(reference))
+                .collect();
+            if unproven.is_empty() || unproven.iter().any(|u| must.contains(u.as_str())) {
+                return Err(msg);
+            }
+            equiv_once(dir, &format!("{name}_unmatched"), gold, gate, &unproven)
+                .map_err(|(msg, _)| msg)
+        }
+    }
+}
+
+/// Names of wires a register drives.
+fn register_wires(m: &Module) -> impl Iterator<Item = &str> {
+    let q: std::collections::HashSet<Net> = m
+        .cells
+        .iter()
+        .flat_map(|c| match &c.kind {
+            CellKind::Ff(ff) => ff.q.iter().filter_map(|b| b.net()).collect(),
+            CellKind::FfGate(ff) => ff.q.net().into_iter().collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+    m.wires
+        .iter()
+        .filter(move |w| {
+            w.bits
+                .iter()
+                .any(|b| b.net().is_some_and(|n| q.contains(&n)))
+        })
+        .map(|w| w.name.as_str())
+}
+
+/// One run of the proof, wires named in `unmatched` left out of
+/// `equiv_make`. On failure, the message and the unproven wires' names.
+fn equiv_once(
+    dir: &Path,
+    name: &str,
+    gold: &Path,
+    gate: &Path,
+    unmatched: &[String],
+) -> Result<usize, (String, Vec<String>)> {
+    let blacklist = dir.join(format!("{name}.blacklist"));
+    std::fs::write(&blacklist, unmatched.join("\n")).unwrap();
     let sim = dir.join("cy2_sim.v");
     std::fs::write(&sim, SIM_MODELS).unwrap();
     // Tri-states have no SAT model: as opaque cells, merged when their
@@ -778,23 +845,41 @@ fn equiv(dir: &Path, name: &str, gold: &Path, gate: &Path) -> Result<usize, Stri
         "read_json {gold}\nread_verilog -overwrite {sim}\n{prep}\nrename top gold\ndesign -stash gold\n\
          read_json {gate}\nread_verilog -overwrite {sim}\n{prep}\nrename top gate\ndesign -stash gate\n\
          design -copy-from gold -as gold gold\ndesign -copy-from gate -as gate gate\n\
-         equiv_make gold gate equiv\nhierarchy -top equiv\nasync2sync\n\
+         equiv_make -blacklist {blacklist} gold gate equiv\nhierarchy -top equiv\nasync2sync\n\
          equiv_struct -fwd\nequiv_simple -undef -set-assumes\nequiv_induct -undef -set-assumes -ignore-unknown-cells\n\
          equiv_status -assert\n",
         gold = gold.display(),
         gate = gate.display(),
         sim = sim.display(),
+        blacklist = blacklist.display(),
     );
     let log = yosys(dir, name, &script, dir).map_err(|e| {
-        let unproven: Vec<&str> = e
-            .lines()
-            .filter(|l| l.contains("Unproven"))
-            .take(10)
+        let full = std::fs::read_to_string(dir.join(format!("{name}.log"))).unwrap_or_default();
+        let unproven: Vec<&str> = full.lines().filter(|l| l.contains("Unproven")).collect();
+        // `Unproven $equiv <cell>: \wire_gold [3] \wire_gate [3]`
+        let mut names: Vec<String> = unproven
+            .iter()
+            .filter_map(|l| l.split(": ").nth(1)?.split_whitespace().next())
+            .filter_map(|w| w.trim_start_matches('\\').strip_suffix("_gold"))
+            .map(str::to_owned)
             .collect();
-        format!(
-            "{name}: not proven equivalent:\n{}\n(see {})",
-            unproven.join("\n"),
-            dir.join(format!("{name}.log")).display()
+        names.sort();
+        names.dedup();
+        let shown: Vec<&str> = if unproven.is_empty() {
+            e.lines()
+                .filter(|l| l.contains("Unproven"))
+                .take(10)
+                .collect()
+        } else {
+            unproven.into_iter().take(10).collect()
+        };
+        (
+            format!(
+                "{name}: not proven equivalent:\n{}\n(see {})",
+                shown.join("\n"),
+                dir.join(format!("{name}.log")).display()
+            ),
+            names,
         )
     })?;
     Ok(log
@@ -867,6 +952,265 @@ fn prep_memories(
     Ok(d)
 }
 
+/// A latch is a LUT feeding its own output back (synthesis' `ff.rs`),
+/// which SAT can't take. Each feedback is cut through a `$ff`, so the LUT
+/// computes the latch's next value from what it held one step before:
+/// `async2sync`'s model of the RTL's latch.
+fn cut_loops(m: &mut Module) -> usize {
+    let mut cuts = Vec::new();
+    for (i, c) in m.cells.iter().enumerate() {
+        let CellKind::Other(g) = &c.kind else {
+            continue;
+        };
+        if g.ty != cells::LCELL_COMB {
+            continue;
+        }
+        let Some(y) = g.port("COMBOUT").map(|p| p.sig[0]) else {
+            continue;
+        };
+        if g.ports
+            .iter()
+            .any(|p| p.name != "COMBOUT" && p.sig.contains(&y))
+        {
+            cuts.push((i, y));
+        }
+    }
+    for &(i, y) in &cuts {
+        let held = SigBit::Net(m.new_net());
+        let CellKind::Other(g) = &mut m.cells[i].kind else {
+            unreachable!()
+        };
+        for p in g.ports.iter_mut().filter(|p| p.name != "COMBOUT") {
+            for b in &mut p.sig {
+                if *b == y {
+                    *b = held;
+                }
+            }
+        }
+        m.add_cell(
+            format!("$latch_cut${i}"),
+            CellKind::Ff(chipsmith_netlist::Ff {
+                q: vec![held],
+                kind: chipsmith_netlist::FfKind::Global { d: vec![y] },
+            }),
+        );
+    }
+    cuts.len()
+}
+
+/// yosys' `async2sync` models a latch's asynchronous reset (`$adlatch`,
+/// `$dlatchsr`, `$sr`) as overriding Q without being held: released, the
+/// latch shows what it held before the reset, which no hardware does. So
+/// the reference's latches get their resets through the enable and data
+/// first (`EN | rst`, `rst ? value : D`), which it models right.
+fn latch_resets_to_logic(m: &mut Module) {
+    use chipsmith_netlist::{Ctrl, Ff, FfKind, LatchReset, Polarity, SetClr, Word};
+    let mut g = chipsmith_synth::rewrite::Gates::new(m, "latch_reset");
+    let high = |g: &mut chipsmith_synth::rewrite::Gates, s: SigBit, p: Polarity| match p {
+        Polarity::Pos => s,
+        Polarity::Neg => g.not(s),
+    };
+    let cells = std::mem::take(&mut g.m.cells);
+    for mut c in cells {
+        let CellKind::Ff(ff) = &c.kind else {
+            g.m.cells.push(c);
+            continue;
+        };
+        // Per bit: (Q, EN, D), all active high.
+        let set_clr = |g: &mut chipsmith_synth::rewrite::Gates,
+                       sr: &SetClr<Word>,
+                       i: usize,
+                       en: SigBit,
+                       d: SigBit| {
+            let set = high(g, sr.set[i], sr.set_polarity);
+            let clr = high(g, sr.clr[i], sr.clr_polarity);
+            let any = g.or(set, clr);
+            let en = g.or(en, any);
+            let d = g.or(d, set);
+            let not_clr = g.not(clr);
+            (en, g.and(d, not_clr))
+        };
+        let bits: Vec<(SigBit, SigBit, SigBit)> = match &ff.kind {
+            FfKind::Dlatch {
+                en,
+                d,
+                reset: LatchReset::Async { arst, value },
+            } => {
+                let r = high(&mut g, arst.sig, arst.polarity);
+                let e = high(&mut g, en.sig, en.polarity);
+                let e = g.or(e, r);
+                (0..ff.q.len())
+                    .map(|i| {
+                        let v = SigBit::Const(value.0[i]);
+                        (ff.q[i], e, g.mux(d[i], v, r))
+                    })
+                    .collect()
+            }
+            FfKind::Dlatch {
+                en,
+                d,
+                reset: LatchReset::SetClr(sr),
+            } => {
+                let e = high(&mut g, en.sig, en.polarity);
+                (0..ff.q.len())
+                    .map(|i| {
+                        let (e, d) = set_clr(&mut g, sr, i, e, d[i]);
+                        (ff.q[i], e, d)
+                    })
+                    .collect()
+            }
+            FfKind::Sr(sr) => (0..ff.q.len())
+                .map(|i| {
+                    let (e, d) = set_clr(&mut g, sr, i, SigBit::ZERO, SigBit::ZERO);
+                    (ff.q[i], e, d)
+                })
+                .collect(),
+            _ => {
+                g.m.cells.push(c);
+                continue;
+            }
+        };
+        for (i, (q, en, d)) in bits.into_iter().enumerate() {
+            c.kind = CellKind::Ff(Ff::<Word> {
+                q: vec![q],
+                kind: FfKind::Dlatch {
+                    en: Ctrl {
+                        sig: en,
+                        polarity: Polarity::Pos,
+                    },
+                    d: vec![d],
+                    reset: LatchReset::None,
+                },
+            });
+            let mut bit = c.clone();
+            bit.name = format!("{}$bit{i}", c.name);
+            g.m.cells.push(bit);
+        }
+    }
+}
+
+/// A tri-stated pin reads back what it drives while enabled and the
+/// outside world otherwise. Each one becomes that, on both sides alike:
+/// an input `__ext_<pin>` for the outside, the pin an output of
+/// `EN ? A : ext`, and logic reading the pin reads that. (As opaque cells,
+/// tri-states were only merged once their inputs were proven equal, which
+/// a design whose pin reads feed back into its enables never got.)
+fn cut_pins(m: &mut Module) {
+    use chipsmith_netlist::Dir;
+    let mut pads: HashMap<Net, (usize, usize)> = HashMap::new();
+    // A pad is named by its inout (or tri-state output) port, though other
+    // output ports may read it too.
+    for dir in [Dir::InOut, Dir::Out] {
+        for (wi, w) in m.wires.iter().enumerate() {
+            if w.port == Some(dir) {
+                for (i, b) in w.bits.iter().enumerate() {
+                    if let SigBit::Net(n) = b {
+                        pads.entry(*n).or_insert((wi, i));
+                    }
+                }
+            }
+        }
+    }
+    // (pad, data, enable): the RTL's tri-states.
+    let mut drivers: Vec<(Net, SigBit, SigBit)> = Vec::new();
+    m.cells.retain(|c| match &c.kind {
+        CellKind::Tribuf(t)
+            if t.y
+                .iter()
+                .all(|y| y.net().is_some_and(|n| pads.contains_key(&n))) =>
+        {
+            for (a, y) in t.a.iter().zip(&t.y) {
+                drivers.push((y.net().expect("checked"), *a, t.en));
+            }
+            false
+        }
+        _ => true,
+    });
+    let mut subst = chipsmith_synth::rewrite::Subst::new(m);
+    let mut ext: BTreeMap<usize, Vec<SigBit>> = BTreeMap::new();
+    // Every inout gets its outside input, cut or not: one side may have
+    // folded a buffer that is always on.
+    for (wi, w) in m.wires.iter().enumerate() {
+        if w.port == Some(Dir::InOut) {
+            ext.insert(wi, Vec::new());
+        }
+    }
+    let widths: Vec<usize> = m.wires.iter().map(|w| w.bits.len()).collect();
+    for (wi, bits) in &mut ext {
+        *bits = (0..widths[*wi]).map(|_| SigBit::Net(m.new_net())).collect();
+        // Never driven (`assign p = 1'bz`): the pin is the outside.
+        for (i, b) in m.wires[*wi].bits.iter_mut().enumerate() {
+            if matches!(b, SigBit::Const(State::Z | State::X)) {
+                *b = bits[i];
+            }
+        }
+    }
+    // The pin buffers keep their registers: they take the outside as EXT.
+    for c in &mut m.cells {
+        let CellKind::Other(g) = &mut c.kind else {
+            continue;
+        };
+        if g.ty != cells::IOBUF {
+            continue;
+        }
+        let Some(pad) = g.port("PAD").and_then(|p| p.sig[0].net()) else {
+            continue;
+        };
+        let outside = pads
+            .get(&pad)
+            .and_then(|&(wi, i)| ext.get(&wi).map(|bits| bits[i]))
+            .unwrap_or(SigBit::ZERO);
+        for p in &mut g.ports {
+            if p.name == "PAD" {
+                p.dir = Some(Dir::Out);
+            }
+        }
+        g.ports.push(chipsmith_netlist::GenericPort {
+            name: "EXT".into(),
+            dir: Some(Dir::In),
+            sig: vec![outside],
+        });
+    }
+    for (pad, a, en) in drivers {
+        let (wi, i) = pads[&pad];
+        // A tri-state output reads nothing back: released, it is 0.
+        let outside = ext.get(&wi).map_or(SigBit::ZERO, |bits| bits[i]);
+        let r = SigBit::Net(m.new_net());
+        m.add_cell(
+            format!("$pin_cut${}${i}", m.wires[wi].name),
+            CellKind::Gate(Gate::new(GateOp::Mux, &[outside, a, en], r).unwrap()),
+        );
+        subst.set(pad, r);
+    }
+    for (wi, bits) in ext {
+        m.wires[wi].port = Some(Dir::Out);
+        let mut w = Wire::new(format!("__ext_{}", m.wires[wi].name), bits);
+        w.port = Some(Dir::In);
+        m.wires.push(w);
+    }
+    subst.apply(m);
+}
+
+/// Power-up values left on wires no register drives any more (a read
+/// register `memory_dff` merged into its memory): meaningless, but
+/// `async2sync` stops on them when the other side's wire has none.
+fn drop_stray_inits(m: &mut Module) {
+    let mut q = std::collections::HashSet::new();
+    for c in &m.cells {
+        match &c.kind {
+            CellKind::Ff(ff) => q.extend(ff.q.iter().filter_map(|b| b.net())),
+            CellKind::FfGate(ff) => q.extend(ff.q.net()),
+            _ => {}
+        }
+    }
+    let mut init = chipsmith_synth::rewrite::inits(m);
+    let before = init.len();
+    init.retain(|n, _| q.contains(n));
+    if init.len() != before {
+        chipsmith_synth::rewrite::set_inits(m, &init);
+    }
+}
+
 /// Proves synthesis correct in two steps. `refined` is the RTL with every
 /// x resolved (synthesis' first stage), `gate` its final netlist before
 /// wire names are purged. First the RTL against `refined`, x in the RTL
@@ -906,13 +1250,13 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
     // ports the RTL's and synthesis' memories can differ: synthesis reads
     // a register's enable, reset and bypass multiplexers into the port.)
     let mut gold = prep_memories(dir, "gold_prep", rtl, &mapped, &sync_cut)?;
-    let mut mid_cut = prep_memories(dir, "mid_cut_prep", &refined_path, &mapped, &sync_cut)?;
-    if !cut.is_empty() {
-        cut_memories(top_mut(&mut gold))?;
-        cut_memories(top_mut(&mut mid_cut))?;
-    }
-    // That against the result: the memories in blocks as words.
     let mut mid = prep_memories(dir, "mid_prep", &refined_path, &mapped, &sync_cut)?;
+    for m in gold.modules.iter_mut().chain(&mut mid.modules) {
+        latch_resets_to_logic(m);
+        drop_stray_inits(m);
+        chipsmith_synth::tribuf::tribuf(m);
+        cut_pins(m);
+    }
     let mut cut_gate = gate.clone();
     {
         let gt = cut_gate
@@ -926,14 +1270,19 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
         }
         drop_undriven(gt);
     }
+    for m in cut_gate.modules.iter_mut().filter(|m| !m.is_blackbox()) {
+        cut_loops(m);
+        cut_pins(m);
+    }
     if !cut.is_empty() {
+        cut_memories(top_mut(&mut gold))?;
         cut_memories(top_mut(&mut mid))?;
     }
     let gold_path = dir.join("gold.json");
     write(&gold, &gold_path);
-    let mid_path = dir.join("mid_cut.json");
-    write(&mid_cut, &mid_path);
-    let first = equiv(dir, "equiv_refine", &gold_path, &mid_path)?;
+    let mid_path = dir.join("mid.json");
+    write(&mid, &mid_path);
+    let first = equiv(dir, "equiv_refine", &gold_path, &mid_path, top(&gold))?;
 
     let gm = mid
         .modules
@@ -1067,7 +1416,7 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
             dir,
             "claims",
             &format!(
-                "read_json {}\nhierarchy -top top\nproc\nflatten\nchtype -set chipsmith_mem t:$mem_v2\n\
+                "read_json {}\nhierarchy -top top\nproc\nflatten\nasync2sync\nchtype -set chipsmith_mem t:$mem_v2\n\
                  sat -tempinduct -prove __claims {}'b{all} -maxsteps 8 -show __claims -ignore_unknown_cells\n",
                 claims_path.display(),
                 all.len()
@@ -1122,7 +1471,7 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
     drop_undriven(top_mut(&mut mid));
     let sub_path = dir.join("mid_constants.json");
     write(&mid, &sub_path);
-    let second = equiv(dir, "equiv_synth", &sub_path, &cut_gate_path)?;
+    let second = equiv(dir, "equiv_synth", &sub_path, &cut_gate_path, top(&mid))?;
     Ok(Proof {
         constant_registers: claims.len(),
         equivalences: first + second,

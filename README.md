@@ -18,7 +18,7 @@ no nextpnr, no cram. GHDL translates VHDL in front of it.
 
 | device | board | build | on hardware |
 |---|---|---|---|
-| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis): LUT/carry/register logic, M4K RAM blocks (below), global clocks from pins and from logic (a register, the JTAG block's TCK; one clock per LAB), PLLs (`CY2_PLL`); pins input, output, tri-state, bidirectional, open drain, at 3.3-V LVTTL (any current) or LVCMOS or 2.5-V inputs, with pull-up or bus hold and I/O-cell registers (Manifest, below) | yes (2026-10-25, chipsmith's own synthesis end to end, checked over JTAG: examples/de2-jtag-counter (its earlier CLOCK_50-sampled version) reads back `"DE2!"` at 50.00 MHz after a JTAG load and after `flash --persist` (loader synthesized by chipsmith too, EPCS written, verified and reloaded from; 2026-10-26 also after a power cycle); picorv32 with the same readback added runs its loop at 3.33 MHz. 2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
+| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis): LUT/carry/register logic, M4K RAM blocks (below), global clocks from pins and from logic (a register, the JTAG block's TCK; one clock per LAB), PLLs (`CY2_PLL`; both on the board 2026-10-26, examples/de2-jtag-counter on TCK and examples/de2-pll-counter at 100 and 40 MHz from CLOCK_50); pins input, output, tri-state, bidirectional, open drain, at 3.3-V LVTTL (any current) or LVCMOS or 2.5-V inputs, with pull-up or bus hold and I/O-cell registers (Manifest, below) | yes (2026-10-25, chipsmith's own synthesis end to end, checked over JTAG: examples/de2-jtag-counter (its earlier CLOCK_50-sampled version) reads back `"DE2!"` at 50.00 MHz after a JTAG load and after `flash --persist` (loader synthesized by chipsmith too, EPCS written, verified and reloaded from; 2026-10-26 also after a power cycle); picorv32 with the same readback added runs its loop at 3.33 MHz. 2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
 | xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes: what yosys `synth_xilinx` and openXC7's nextpnr's packer handle, LVCMOS33 pins; chipsmith places LUT/register/carry logic, RAM32Ms, pins, BUFGs, BSCANs and the PS7 and routes the interconnect (below) | yes (2026-10-24: zybo-jtag-counter placed and routed by chipsmith, read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga) |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
@@ -28,20 +28,22 @@ LEDs, 1,171 LEs; a build takes about 42 s, half of it placement.
 checked without watching the board: the Cyclone II's JTAG block makes it a
 64-bit USER1 register holding `"DE2!"` and a Gray-coded 50 MHz counter.
 `cargo run --release -p chipsmith-cyclone2 --example de2_user1` reads it
-twice, a second apart. Read on 2026-10-25 from the earlier version (below):
+twice, a second apart. Read on 2026-10-26, clocked by TCK:
 
 ```
-USER1 0x44453221633f8c74: tag "DE2!", count 1110112167
-USER1 0x444532216744cde8: tag "DE2!", count 1166505648
-56393481 counts in 1.128 s: 50.00 MHz
+USER1 444532210c0ec0a4: tag "DE2!", counts 134971192
+USER1 444532210e8c6078: tag "DE2!", counts 185090128
+counter 0: 50118936 counts in 1.002 s: 50.00 MHz
 ```
 
 Since 2026-10-26 the register is clocked by TCK itself: the JTAG block's
 TCK output goes through the core to a clock control and onto a global
 clock (cyclone2-re README, "Global clocks from the core"), so the reader
 shifts in byte mode. Quartus assembles chipsmith's placement and routing
-of it into the same RBF (`bench/quartus-validate.sh`); not yet read on the
-board. Before, the DE2 back end clocked registers from pins only, so the
+of it into the same RBF (`bench/quartus-validate.sh`), and on the board
+(2026-10-26) it reads back `"DE2!"` counting at 50.00 MHz. The cable
+samples TDO after the shifting edge in byte mode too, so the reader still
+gets the register from its bit 1. Before, the DE2 back end clocked registers from pins only, so the
 register ran on CLOCK_50 and sampled TCK through two flip-flops, and the
 reader had to bit-bang its shift slowly enough for that sampling, its
 first bit being the register's bit 1.
@@ -59,10 +61,11 @@ logic. The timing report times each output at its frequency.
 and 40 MHz from CLOCK_50, each clock runs a Gray-coded counter, and a
 128-bit USER1 register clocked by TCK holds `"PLL!"` and the three counts.
 `cargo run --release -p chipsmith-cyclone2 --example de2_user1 -- --words 4`
-should print counter 1 at 2.000000 and counter 2 at 0.800000 times counter
-0 (CLOCK_50); LEDG[0] is the lock. Quartus assembles chipsmith's placement
+prints counter 1 at 2.000000 and counter 2 at 0.800000 times counter 0
+(CLOCK_50), observed on the DE2 on 2026-10-26: 50.00, 100.0000 and
+40.0000 MHz; LEDG[0] is the lock. Quartus assembles chipsmith's placement
 and routing of it byte-identically (setup slack 6.21 ns at 100 MHz in
-quartus_sta, 6.20 ns estimated); not yet run on the board.
+quartus_sta, 6.20 ns estimated).
 
 `examples/bidir` is cyclone2-re's tri-state test: expansion-header and
 SRAM data pins driven with their output enable from a switch, an
@@ -208,9 +211,40 @@ and blinky-vhdl (16.65 ns of slack at 50 MHz), on picorv32 (10.60 ns
 since cyclone2-re 9cfe9be, see below; 11.08 ns before) and on bidir
 (16.64 ns), all built through chipsmith's LUT mapper, and on ram
 (16.21 ns), ram_widths (14.80 ns) and ram-leds (14.80 ns). Those were
-yosys-synthesized. chipsmith's synthesis gives the same RBF only for the
-blinkies and the flash loader (the others have other cell and net names,
-so another placement) and hasn't been through Quartus yet.
+yosys-synthesized. With chipsmith's own synthesis, `bench/de2-timing.sh`
+builds every DE2 example with a clock and has Quartus time the same
+placement and routing (2026-10-27, 50 MHz constraint; error is the
+estimate's critical path against Quartus'):
+
+| design | estimate | Quartus | error | RBF byte-identical |
+|---|---|---|---|---|
+| blinky-verilog, blinky-vhdl | 3.37 ns | 3.35 ns | +0.5% | yes |
+| bidir | 3.37 ns | 3.36 ns | +0.3% | yes |
+| ram | 3.80 ns | 3.79 ns | +0.3% | yes |
+| ram_widths | 3.80 ns | 3.78 ns | +0.5% | yes |
+| ram-leds | 5.04 ns | 5.12 ns | -1.6% | yes |
+| de2-jtag-counter | 3.80 ns | 3.79 ns | +0.3% | no (12 frame bits) |
+| uart | 6.05 ns | 6.26 ns | -3.3% | no |
+| spi-master | 4.71 ns | 4.46 ns | +5.7% | no |
+| i2c-master | 7.82 ns | 8.83 ns | -11.4% | no |
+| femtorv32 | 13.74 ns | 14.28 ns | -3.8% | yes |
+| serv | 11.86 ns | 13.28 ns | -10.7% | yes |
+| sha256 | 26.24 ns | 27.73 ns | -5.4% | no |
+
+Small designs are within 2%; the larger ones run 4 to 11% slower in
+Quartus than estimated. Over the 355 connections of the 300 worst
+Quartus paths of picorv32, femtorv32, serv and ram-leds that route the
+same in both (`bench/timing-calib.py`), Quartus' routing delay is 1.08
+times the model's (C4 the most: 312 ps median against the model's 285).
+Scaling every routing delay by that brought the four larger designs'
+mean error from 6.6% to 5.3%, but Quartus timed three of them slower on
+the placements it led to (picorv32 8.57 to 9.07 ns, i2c-master 8.83 to
+9.89 ns), so the model stays as it is; the gap is where per-wire delays
+(fanout, wire length) would have to come in. The designs that aren't
+byte-identical are timed on Quartus' reassembly: uart and i2c-master feed
+a pin through an inverter into a register (the known case below);
+spi-master's and de2-jtag-counter's differences aren't investigated yet. de2-io's I/O registers need a
+newer cyclone2-re `cram quartus-export`.
 picorv32 has no M4K; its slack moved because cyclone2-re's synthesis
 script gained `memory_libmap`, which renames yosys' cells and nets. Same
 logic, same 1,175 LEs, but other net ids and so another placement. The
@@ -574,6 +608,54 @@ share chipsmith's own netlist IR, not Verilog.
      (50.0 s CPU) through yosys. The nix
      package carries no cyclone2-re techmap any more, and yosys only for
      the Zybo.
+   - Gaps closed (2026-10-27). What made synthesis stop is now built:
+     latches (a LUT feeding its own output back, as Quartus 13.0sp1 does on
+     this family, and with Quartus' warning that their power-up value is
+     undefined) and registers with an asynchronous load or set and reset
+     (Quartus' emulation: a latch, an LE register holding `D ^ latch`, a
+     LUT choosing; ADR-0009); `/` and `%`, signed and unsigned, a power of
+     two as wiring, constant divisors with only the stages they need. A
+     sum of three or more terms is a balanced tree of carry chains: four
+     18-bit terms run at 204 MHz (137 MHz as a chain; the yosys flow's
+     `$macc` 186 MHz with 123 LUTs against 90). The front end takes
+     multi-dimensional arrays and an asynchronous reset tested inside a
+     named block, with memories written under such a reset made registers.
+     Re-evaluating the exclusive `$pmux` trade (ADR-0007): masking a
+     select only by the later selects it can overlap maps picorv32 to the
+     same 1,058 LUTs, so the trade stays as it was. Every DE2 example builds
+     to the RBF it built before except bidir: an output reading an inout
+     (`assign LEDR = GPIO_0`) became a tri-state copy of its driver and
+     floated while the pin was released; it now reads the pin's input
+     buffer. The checker hadn't caught that (tri-states were opaque cells);
+     it now cuts every pin into an outside input and `EN ? A : outside` on
+     both sides.
+
+     A corpus of open-source cores, unmodified behind DE2 wrappers
+     (`examples/<name>`, upstream and commit in each manifest), each proven
+     equivalent to yosys' RTL. LEs and Fmax, chipsmith's synthesis against
+     the yosys flow (`de2_synth --yosys`; both through chipsmith's back
+     end, Fmax its estimate, which runs up to 11% optimistic on the larger
+     ones, see the timing table above) and Quartus 13.0sp1's own synthesis
+     and fit (its STA, 50 MHz constraint):
+
+     | design | chipsmith | yosys flow | Quartus |
+     |---|---|---|---|
+     | uart (Forencich) | 190 LEs, 165.3 MHz | 225 LEs, 154.2 MHz | |
+     | spi-master (nandland) | 179 LEs, 212.3 MHz | can't build: an asynchronous reset to 1 that powers up 0 | |
+     | i2c-master (Forencich) | 225 LEs, 127.9 MHz | 245 LEs, 118.6 MHz | |
+     | femtorv32 quark | 788 LEs, 72.8 MHz | 832 LEs, 87.5 MHz | 473 LEs + 1 M4K, 83.7 MHz |
+     | serv | 3,091 LEs, 84.3 MHz | 3,111 LEs, 78.6 MHz | 336 LEs + 1 M4K, 108.6 MHz |
+     | sha256 (secworks) | 6,053 LEs, 38.1 MHz | can't build (as spi-master) | 3,303 LEs, 63.7 MHz |
+     | picorv32 | 1,171 LEs, 123.4 MHz | 1,175 LEs, 114.4 MHz | |
+
+     Where Quartus is far ahead, it is the register files (serv's and
+     femtorv32's go into an M4K; chipsmith's M4K mapping doesn't take their
+     shapes yet) and wide multiplexers: sha256's 16-word schedule read maps
+     to about 20 LUTs a bit, against Quartus' 11 (the mapper, not the
+     netlist: the same read as a `$bmux` tree maps no better). Still
+     rejected: arrays declared inside functions (Forencich's `lfsr.v`,
+     dropped from the corpus), `$pow` with a non-constant base, the yosys
+     flow's own limits above.
 5. **Own Verilog frontend** (done for the DE2, in the build since
    2026-10-25): the synthesizable subset that GHDL and HDL generators emit.
    - Elaboration (done, 2026-10-25, the DE2 build's front end since then): `crates/chipsmith-verilog`

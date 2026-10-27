@@ -27,14 +27,6 @@ fn into_ctx(v: SigSpec, ctx: Ty) -> SigSpec {
     extend(&v, ctx.width, ctx.signed)
 }
 
-/// What a select's base is.
-pub(crate) enum Base {
-    /// A vector: its current value and declared range.
-    Vector { bits: SigSpec, dim: Dim },
-    /// A memory word (`mem[addr]`), not yet read.
-    Mem { mem: usize },
-}
-
 impl<'a, 'd> ModElab<'a, 'd> {
     // -----------------------------------------------------------------
     // Names
@@ -194,16 +186,13 @@ impl<'a, 'd> ModElab<'a, 'd> {
                     }
                 }
             }
-            ExprKind::Index { base, .. } => {
-                if let Some(Sym::Mem(m)) = self.expr_sym(base, scope)? {
-                    Ty {
-                        width: self.mems[m].width(),
-                        signed: self.mems[m].signed,
-                    }
-                } else {
-                    Ty::BIT
-                }
-            }
+            ExprKind::Index { .. } => match self.mem_word(e, scope)? {
+                Some((m, _)) => Ty {
+                    width: self.mems[m].width(),
+                    signed: self.mems[m].signed,
+                },
+                None => Ty::BIT,
+            },
             ExprKind::Slice { msb, lsb, .. } => {
                 let m = self.eval_i64(msb, scope)?;
                 let l = self.eval_i64(lsb, scope)?;
@@ -382,19 +371,20 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 into_ctx(v, ctx)
             }
             ExprKind::Index { base, index } => {
-                let v = match self.select_base(base, scope, env)? {
-                    Base::Mem { mem } => {
-                        let (addr, _) = self.lower_self(index, scope, env)?;
+                let v = match self.mem_word(e, scope)? {
+                    Some((mem, indices)) => {
+                        let addr = self.mem_addr(mem, &indices, scope, env, span)?;
                         self.mem_read(mem, addr, env, span)?
                     }
-                    Base::Vector { bits, dim } => self.bit_select(&bits, dim, index, scope, env)?,
+                    None => {
+                        let (bits, dim) = self.select_base(base, scope, env)?;
+                        self.bit_select(&bits, dim, index, scope, env)?
+                    }
                 };
                 into_ctx(v, ctx)
             }
             ExprKind::Slice { base, msb, lsb } => {
-                let Base::Vector { bits, dim } = self.select_base(base, scope, env)? else {
-                    bail!(span, "a part-select of a memory needs a word index first");
-                };
+                let (bits, dim) = self.select_base(base, scope, env)?;
                 let m = self.eval_i64(msb, scope)?;
                 let l = self.eval_i64(lsb, scope)?;
                 if (m < l) != dim.upto() && m != l {
@@ -413,9 +403,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 width,
                 up,
             } => {
-                let Base::Vector { bits, dim } = self.select_base(base, scope, env)? else {
-                    bail!(span, "a part-select of a memory needs a word index first");
-                };
+                let (bits, dim) = self.select_base(base, scope, env)?;
                 let w = self.eval_i64(width, scope)? as usize;
                 let v = self.indexed_select(&bits, dim, start, w, *up, scope, env, span)?;
                 into_ctx(v, ctx)
@@ -693,60 +681,183 @@ impl<'a, 'd> ModElab<'a, 'd> {
         }
     }
 
-    /// The thing a select applies to: a vector's bits, or a memory.
-    pub fn select_base(&mut self, base: &'a Expr, scope: ScopeId, env: &mut Env) -> Result<Base> {
+    /// The bits a select applies to, and their declared range.
+    pub fn select_base(
+        &mut self,
+        base: &'a Expr,
+        scope: ScopeId,
+        env: &mut Env,
+    ) -> Result<(SigSpec, Dim)> {
+        if let Some((m, indices)) = self.mem_word(base, scope)? {
+            let addr = self.mem_addr(m, &indices, scope, env, base.span)?;
+            let word = self.mem_read(m, addr, env, base.span)?;
+            return Ok((word, self.mems[m].word));
+        }
         match &base.kind {
             ExprKind::Ident(_) | ExprKind::Hier(_) => {
                 let sym = self.expr_sym(base, scope)?.expect("a name");
                 match sym {
-                    Sym::Mem(mem) => Ok(Base::Mem { mem }),
+                    Sym::Mem(_) => bail!(
+                        base.span,
+                        "a part-select of a memory needs a word index first"
+                    ),
                     Sym::Var(v) => {
                         let dim = self.vars[v].dim;
-                        Ok(Base::Vector {
-                            bits: self.read_var(v, env, base.span)?,
-                            dim,
-                        })
+                        Ok((self.read_var(v, env, base.span)?, dim))
                     }
                     Sym::Local(l) => {
                         let dim = self.locals[l].dim;
-                        Ok(Base::Vector {
-                            bits: self.read_sym(&sym, env, base.span)?,
-                            dim,
-                        })
+                        Ok((self.read_sym(&sym, env, base.span)?, dim))
                     }
-                    Sym::Param(c) => Ok(Base::Vector {
-                        dim: Dim::of_width(c.bits.len()),
-                        bits: konst(&c.bits),
-                    }),
+                    Sym::Param(c) => Ok((konst(&c.bits), Dim::of_width(c.bits.len()))),
                     Sym::Func(..) | Sym::Task(..) => {
                         bail!(base.span, "a function or task is not a value")
                     }
                 }
             }
-            // mem[a][b]: a word, then a select in it.
-            ExprKind::Index { base: inner, index } => {
-                if let Some(Sym::Mem(m)) = self.expr_sym(inner, scope)? {
-                    let (addr, _) = self.lower_self(index, scope, env)?;
-                    let word = self.mem_read(m, addr, env, base.span)?;
-                    return Ok(Base::Vector {
-                        bits: word,
-                        dim: self.mems[m].word,
-                    });
-                }
-                let (bits, t) = self.lower_self(base, scope, env)?;
-                Ok(Base::Vector {
-                    bits,
-                    dim: Dim::of_width(t.width),
-                })
-            }
             _ => {
                 let (bits, t) = self.lower_self(base, scope, env)?;
-                Ok(Base::Vector {
-                    bits,
-                    dim: Dim::of_width(t.width),
-                })
+                Ok((bits, Dim::of_width(t.width)))
             }
         }
+    }
+
+    /// `m[i][j]...` naming a whole word of memory `m`: the memory and the
+    /// indices, outermost first. `None` if `e` isn't a memory word (a
+    /// select of one has more indices than the memory has dimensions).
+    pub fn mem_word(
+        &mut self,
+        e: &'a Expr,
+        scope: ScopeId,
+    ) -> Result<Option<(usize, Vec<&'a Expr>)>> {
+        let mut indices = Vec::new();
+        let mut root = e;
+        while let ExprKind::Index { base, index } = &root.kind {
+            indices.push(&**index);
+            root = base;
+        }
+        let Some(Sym::Mem(m)) = self.expr_sym(root, scope)? else {
+            return Ok(None);
+        };
+        indices.reverse();
+        let n = self.mems[m].shape.indices();
+        if indices.len() < n {
+            bail!(
+                e.span,
+                "memory `{}` has {n} dimensions: a word needs all {n} indices",
+                self.mems[m].name
+            );
+        }
+        if indices.len() > n {
+            return Ok(None);
+        }
+        Ok(Some((m, indices)))
+    }
+
+    /// A word's address from its indices. Several dimensions are
+    /// flattened as yosys flattens them: each index counted from its
+    /// dimension's left bound, in the context of all the indices and the
+    /// 32-bit integer constants yosys builds the arithmetic with.
+    pub fn mem_addr(
+        &mut self,
+        m: usize,
+        indices: &[&'a Expr],
+        scope: ScopeId,
+        env: &mut Env,
+        span: Span,
+    ) -> Result<SigSpec> {
+        let (addr, signed) = match &self.mems[m].shape {
+            super::MemShape::Flat => {
+                let (a, t) = self.lower_self(indices[0], scope, env)?;
+                (a, t.signed)
+            }
+            super::MemShape::Multi(dims) => {
+                let dims = dims.clone();
+                self.flat_addr(&dims, indices, scope, env, span)?
+            }
+        };
+        // yosys' mem2reg compares a variable address through a wire of
+        // clog2(hi + 1) bits: a wider one wraps onto the words.
+        if matches!(self.mems[m].storage, super::proc::MemStorage::Regs(_))
+            && as_const(&addr).is_none()
+        {
+            let words = self.mems[m].hi.max(0) as u64 + 1;
+            let bits = (64 - (words - 1).leading_zeros() as usize).max(1);
+            let mut a = extend(&addr, bits.max(addr.len()), signed);
+            a.truncate(bits);
+            return Ok(a);
+        }
+        Ok(addr)
+    }
+
+    /// The address of a word of a multi-dimensional memory, and whether
+    /// it's signed.
+    fn flat_addr(
+        &mut self,
+        dims: &[Dim],
+        indices: &[&'a Expr],
+        scope: ScopeId,
+        env: &mut Env,
+        span: Span,
+    ) -> Result<(SigSpec, bool)> {
+        let mut ctx = Ty::INTEGER;
+        for &i in indices {
+            let t = self.self_ty(i, scope)?;
+            ctx = Ty {
+                width: ctx.width.max(t.width),
+                signed: ctx.signed && t.signed,
+            };
+        }
+        let k = |v: i64| konst(&chipsmith_netlist::Const::from_int(v, ctx.width).0);
+        let mut addr: Option<SigSpec> = None;
+        for (d, &i) in dims.iter().zip(indices) {
+            let v = self.lower(i, ctx, scope, env)?;
+            let pos = if d.upto() {
+                self.b.binary(
+                    BinaryOp::Sub,
+                    v,
+                    ctx.signed,
+                    k(d.msb),
+                    ctx.signed,
+                    ctx.width,
+                    span,
+                )
+            } else {
+                self.b.binary(
+                    BinaryOp::Sub,
+                    k(d.msb),
+                    ctx.signed,
+                    v,
+                    ctx.signed,
+                    ctx.width,
+                    span,
+                )
+            };
+            addr = Some(match addr {
+                None => pos,
+                Some(a) => {
+                    let scaled = self.b.binary(
+                        BinaryOp::Mul,
+                        a,
+                        ctx.signed,
+                        k(d.width() as i64),
+                        ctx.signed,
+                        ctx.width,
+                        span,
+                    );
+                    self.b.binary(
+                        BinaryOp::Add,
+                        scaled,
+                        ctx.signed,
+                        pos,
+                        ctx.signed,
+                        ctx.width,
+                        span,
+                    )
+                }
+            });
+        }
+        Ok((addr.expect("two or more dimensions"), ctx.signed))
     }
 
     /// `v[i]`: a constant index takes the bit (x if out of range); a

@@ -33,9 +33,10 @@
 //! `opt_dff`), latches `$dlatch`. A memory is one `$mem_v2` named after
 //! it, with an asynchronous read port per read (`memory_dff` merges the
 //! registers after them, as for yosys' front end), a write port per write
-//! in a clocked block, and its initial contents; one written from logic
-//! or with `=` becomes a register per word (`mem[3]`), as yosys'
-//! `mem2reg`. `c ? d : 'z` is a `$tribuf` (what yosys' `tribuf` pass
+//! in a clocked block, and its initial contents; one written from logic,
+//! with `=` or under an asynchronous reset becomes a register per word
+//! (`mem[3]`), as yosys' `mem2reg`. A multi-dimensional array is one
+//! memory, its indices flattened as yosys flattens them. `c ? d : 'z` is a `$tribuf` (what yosys' `tribuf` pass
 //! makes of the `$mux` its front end builds). Initial values are `init`
 //! attributes on register wires. Cells are named `$type$file:line$n`,
 //! wires keep their Verilog names (`gen[2].x` inside generate blocks).

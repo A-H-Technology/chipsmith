@@ -131,6 +131,10 @@ pub struct Graph {
     /// opaque id the caller hands out, e.g. the clock net). Nodes without
     /// one belong to clock 0.
     clocks: HashMap<u32, u32>,
+    /// The LUT a node is a port of (an index into `luts`), for cutting
+    /// latch loops.
+    lut: Vec<Option<u32>>,
+    luts: u32,
 }
 
 impl Graph {
@@ -144,6 +148,7 @@ impl Graph {
         self.names.push(format!("{cell}.{port}"));
         self.launch.push(None);
         self.setup.push(None);
+        self.lut.push(None);
         self.index.insert(key, n);
         n
     }
@@ -153,6 +158,12 @@ impl Graph {
     pub fn add_cell(&mut self, cell: &str, ty: &str, ports: &[&str], le: u8) {
         match ty {
             "LCELL_COMB" => {
+                let lut = self.luts;
+                self.luts += 1;
+                for &p in ports {
+                    let n = self.node(cell, p);
+                    self.lut[n as usize] = Some(lut);
+                }
                 for &i in ports {
                     for &o in ports {
                         if let Some(delay) = lut_arc(i, o, le) {
@@ -280,9 +291,23 @@ impl Graph {
     /// Arrival and required times over the cell arcs plus `net_arcs`, with
     /// the clock period set to the critical path itself (so the worst slack
     /// is 0 and criticality is relative, as VPR does without a constraint).
+    ///
+    /// A LUT's output wired back into its own input is a latch (Quartus maps
+    /// latches that way); like quartus_sta, which times combinational loops
+    /// as latches, the feedback arc is cut, so paths are timed from the
+    /// latch's data and enable.
     pub fn analyse(&self, net_arcs: &[Arc]) -> Analysis {
         let n = self.len();
-        let arcs: Vec<Arc> = self.cell_arcs.iter().chain(net_arcs).copied().collect();
+        let feedback = |a: &Arc| {
+            self.lut[a.from as usize].is_some()
+                && self.lut[a.from as usize] == self.lut[a.to as usize]
+        };
+        let arcs: Vec<Arc> = self
+            .cell_arcs
+            .iter()
+            .chain(net_arcs.iter().filter(|a| !feedback(a)))
+            .copied()
+            .collect();
         let mut fanout: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut indegree = vec![0u32; n];
         for (i, a) in arcs.iter().enumerate() {
@@ -474,6 +499,29 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// reg a -> latch x (COMBOUT back into DATAC) -> reg b: timed from a.
+    #[test]
+    fn a_latch_loop_is_cut() {
+        let mut g = Graph::default();
+        g.add_cell("a", "LCELL_FF", &["REGOUT"], 0);
+        g.add_cell("x", "LCELL_COMB", &["DATAA", "DATAC", "COMBOUT"], 0);
+        g.add_cell("b", "LCELL_FF", &["DATAIN"], 0);
+        let (aq, xa, xc, xo, bd) = (
+            g.node("a", "REGOUT"),
+            g.node("x", "DATAA"),
+            g.node("x", "DATAC"),
+            g.node("x", "COMBOUT"),
+            g.node("b", "DATAIN"),
+        );
+        let arc = |from, to| Arc {
+            from,
+            to,
+            delay: 100.0,
+        };
+        let t = g.analyse(&[arc(aq, xa), arc(xo, xc), arc(xo, bd)]);
+        assert_eq!(t.critical, TCO + 100.0 + 438.0 + 100.0 + 84.0 + TSU);
     }
 
     /// reg a -> LUT x (DATAA) -> reg b, and reg a -> reg c directly.

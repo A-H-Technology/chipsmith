@@ -203,25 +203,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 params,
                 stmts,
             } => {
-                let inner = if decls.is_empty() && params.is_empty() && name.is_none() {
-                    scope
-                } else {
-                    let prefix = match name {
-                        Some(n) => format!("{}{}.", self.scopes[scope].prefix, n.name),
-                        None => self.scopes[scope].prefix.clone(),
-                    };
-                    let inner = self.new_scope(Some(scope), prefix);
-                    if let Some(n) = name {
-                        self.scopes[scope].blocks.insert(n.name.to_string(), inner);
-                    }
-                    for p in params {
-                        self.declare_param(inner, p)?;
-                    }
-                    for d in decls {
-                        self.declare_net(inner, d)?;
-                    }
-                    inner
-                };
+                let inner = self.block_scope(name.as_ref(), decls, params, scope)?;
                 for st in stmts {
                     self.exec(st, inner, env)?;
                 }
@@ -490,8 +472,8 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 })
             }
             ExprKind::Index { base, index } => {
-                if let Some(mem) = self.mem_of(base, scope)? {
-                    let (addr, _) = self.lower_self(index, scope, env)?;
+                if let Some((mem, indices)) = self.mem_word(lhs, scope)? {
+                    let addr = self.mem_addr(mem, &indices, scope, env, lhs.span)?;
                     let w = self.mems[mem].width();
                     return Ok(Target::Mem {
                         mem,
@@ -499,14 +481,10 @@ impl<'a, 'd> ModElab<'a, 'd> {
                         bits: (0, w),
                     });
                 }
-                if let ExprKind::Index {
-                    base: inner,
-                    index: addr_e,
-                } = &base.kind
                 {
-                    if let Some(mem) = self.mem_of(inner, scope)? {
+                    if let Some((mem, indices)) = self.mem_word(base, scope)? {
                         // mem[a][b] = ...
-                        let (addr, _) = self.lower_self(addr_e, scope, env)?;
+                        let addr = self.mem_addr(mem, &indices, scope, env, base.span)?;
                         let i = self.eval_i64(index, scope).map_err(|_| {
                             Diag::new(
                                 index.span,
@@ -549,13 +527,9 @@ impl<'a, 'd> ModElab<'a, 'd> {
             ExprKind::Slice { base, msb, lsb } => {
                 let m = self.eval_i64(msb, scope)?;
                 let l = self.eval_i64(lsb, scope)?;
-                if let ExprKind::Index {
-                    base: inner,
-                    index: addr_e,
-                } = &base.kind
                 {
-                    if let Some(mem) = self.mem_of(inner, scope)? {
-                        let (addr, _) = self.lower_self(addr_e, scope, env)?;
+                    if let Some((mem, indices)) = self.mem_word(base, scope)? {
+                        let addr = self.mem_addr(mem, &indices, scope, env, base.span)?;
                         let word = self.mems[mem].word;
                         let (Some(a), Some(b)) = (word.pos(m), word.pos(l)) else {
                             bail!(lhs.span, "part-select [{m}:{l}] is outside the memory word");
@@ -628,20 +602,6 @@ impl<'a, 'd> ModElab<'a, 'd> {
             }
             _ => bail!(lhs.span, "not something that can be assigned to"),
         }
-    }
-
-    fn mem_of(&mut self, e: &'a Expr, scope: ScopeId) -> Result<Option<usize>> {
-        Ok(match &e.kind {
-            ExprKind::Ident(id) => match self.resolve(scope, id)? {
-                Sym::Mem(m) => Some(m),
-                _ => None,
-            },
-            ExprKind::Hier(p) => match self.resolve_hier(scope, p, e.span)? {
-                Sym::Mem(m) => Some(m),
-                _ => None,
-            },
-            _ => None,
-        })
     }
 
     fn base_slot(&mut self, base: &'a Expr, scope: ScopeId) -> Result<(Slot, Dim)> {
@@ -1241,6 +1201,35 @@ impl<'a, 'd> ModElab<'a, 'd> {
             | StmtKind::Repeat { body, .. } => self.blocking_lvalues(body, scope, out),
             _ => {}
         }
+    }
+
+    /// The scope a `begin ... end` runs in: its own when it is named or
+    /// declares something.
+    pub(super) fn block_scope(
+        &mut self,
+        name: Option<&'a crate::ast::Ident>,
+        decls: &'a [crate::ast::NetDecl],
+        params: &'a [crate::ast::ParamDecl],
+        scope: ScopeId,
+    ) -> Result<ScopeId> {
+        if decls.is_empty() && params.is_empty() && name.is_none() {
+            return Ok(scope);
+        }
+        let prefix = match name {
+            Some(n) => format!("{}{}.", self.scopes[scope].prefix, n.name),
+            None => self.scopes[scope].prefix.clone(),
+        };
+        let inner = self.new_scope(Some(scope), prefix);
+        if let Some(n) = name {
+            self.scopes[scope].blocks.insert(n.name.to_string(), inner);
+        }
+        for p in params {
+            self.declare_param(inner, p)?;
+        }
+        for d in decls {
+            self.declare_net(inner, d)?;
+        }
+        Ok(inner)
     }
 
     fn lvalue_bits(

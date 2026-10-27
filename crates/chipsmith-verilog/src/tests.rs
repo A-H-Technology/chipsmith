@@ -222,6 +222,10 @@ fn errors_point_at_the_source() {
         .starts_with("t.v:2:3: module sub is not defined"));
     assert!(error("module top(input clk, d, output reg q);\n  always @(posedge clk or posedge d) q <= d;\nendmodule")
         .contains("must start with `if` testing the asynchronous ones"));
+    assert_eq!(
+        error("module top(input [1:0] a, output [7:0] y);\n  reg [7:0] m [0:3][0:3];\n  assign y = m[a];\nendmodule"),
+        "t.v:3:14: memory `m` has 2 dimensions: a word needs all 2 indices"
+    );
     assert!(
         error("module top(input a, output y);\n  assign y = $random;\nendmodule")
             .contains("system function $random is not supported")

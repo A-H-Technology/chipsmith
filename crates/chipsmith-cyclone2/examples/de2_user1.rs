@@ -82,18 +82,20 @@ fn main() -> anyhow::Result<()> {
 fn read_dr(cable: &mut UsbBlaster, words: usize) -> anyhow::Result<Vec<u32>> {
     let bits = 32 * words;
     cable.tms(&TapState::Idle.path_to(TapState::DrShift))?;
-    // One bit more than the register: all but the last go out in byte
-    // mode, which samples TDO at the rising TCK that also shifts the
-    // register. The last one (leaving Shift-DR, with TMS high) is
-    // bit-banged and sampled after that edge, so it may already be the
-    // next bit; the extra bit takes that place and is dropped.
+    // The USB-Blaster samples TDO after the rising TCK that shifts the
+    // register, so the first bit captured is already bit 1 (observed on the
+    // DE2: the tag reads back one bit low otherwise). Bit 0 is lost; it
+    // costs counter 0 its LSB, which the rate measurement doesn't notice.
     let tdo = cable
-        .shift(&vec![0; bits / 8 + 1], bits + 1, true, true)?
+        .shift(&vec![0; bits / 8], bits, true, true)?
         .expect("captured");
     cable.tms(&TapState::DrExit1.path_to(TapState::Idle))?;
     cable.flush()?;
-    Ok((0..words)
+    let dr = (0..words)
         .map(|w| u32::from_le_bytes(tdo[4 * w..4 * w + 4].try_into().unwrap()))
+        .collect::<Vec<_>>();
+    Ok((0..words)
+        .map(|w| dr[w] << 1 | if w == 0 { 0 } else { dr[w - 1] >> 31 })
         .collect())
 }
 

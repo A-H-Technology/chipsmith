@@ -18,7 +18,9 @@ use std::collections::BTreeMap;
 use anyhow::{bail, Context, Result};
 use chipsmith_netlist::{attr, is_set, CellKind, Design, Module};
 use chipsmith_synth::rewrite::define_inits;
-use chipsmith_synth::{alumacc, clean, fsm, lutmap, memory, opt, techmap, tribuf, undef, wreduce};
+use chipsmith_synth::{
+    alumacc, clean, divmod, fsm, lutmap, memory, opt, techmap, tribuf, undef, wreduce,
+};
 
 use crate::pin::IoRegisters;
 
@@ -37,6 +39,12 @@ pub struct Stats {
     /// The LUT mapping: gates in, LUTs out, their depth.
     pub lutmap: lutmap::Stats,
     pub registers: usize,
+    /// Latches, each a LUT holding its own output (power-up undefined on
+    /// the hardware, as Quartus warns).
+    pub latches: usize,
+    /// Registers with an asynchronous load or set, emulated with a latch
+    /// (counted in `registers` too).
+    pub emulated: usize,
     /// Registers moved into pins' I/O cells (copied, for an output or OE
     /// register whose original something else reads).
     pub io_registers: usize,
@@ -126,6 +134,11 @@ fn run(
     opt::lower_bitwise(m)?;
     opt::opt_seq(m, removable)?;
     obs.stage("opt", m);
+    // Before wreduce and alumacc: its stages are subtractions and
+    // comparisons, which they narrow and put on carry chains.
+    if divmod::lower(m) {
+        opt::opt(m, removable);
+    }
     while wreduce::wreduce(m) {
         opt::opt(m, removable);
     }
@@ -148,7 +161,11 @@ fn run(
     obs.stage("gates", m);
 
     let io_registers = io::registers(m, io_registers)?;
-    let registers = ff::map(m)?;
+    let ff::Counts {
+        registers,
+        latches,
+        emulated,
+    } = ff::map(m)?;
     let lutmap = lutmap::map_module(m)?;
     io::luts(m);
     clean(m);
@@ -161,6 +178,8 @@ fn run(
     Ok(Stats {
         lutmap,
         registers,
+        latches,
+        emulated,
         io_registers,
         chains,
         m4ks,
