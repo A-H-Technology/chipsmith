@@ -373,12 +373,6 @@ fn serv() {
     design("serv", "top", &example("serv"), true);
 }
 
-#[test]
-#[ignore = "yosys' front end (the oracle's RTL) runs over 20 minutes on lfsr.v's constant functions"]
-fn crc32() {
-    design("crc32", "top", &example("crc32"), true);
-}
-
 /// The serial flash loader `flash --persist` builds: JTAG and ASMI hard
 /// blocks.
 #[test]
