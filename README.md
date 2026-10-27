@@ -159,11 +159,37 @@ inputs, and the read data from the M4K buffers.
   counter and the switches, read data folded onto the LEDs. Not run on the
   board yet.
 
-M4K mapping, checked 2026-10-27 (`crates/chipsmith-cyclone2/tests/synth.rs`
-`m4k_*`; Quartus: `cram quartus-export` of chipsmith's placement and
+M4K mapping, checked 2026-10-27 (equivalence: `crates/chipsmith-cyclone2/tests/synth.rs`
+`m4k_*`, hours each for the larger ones, "running" where it hadn't ended
+when this was written; Quartus: `cram quartus-export` of chipsmith's placement and
 routing, assembled by Quartus 13.0sp1, compared with chipsmith's RBF):
 
-QTABLE
+| design | memories | M4Ks | Quartus | equivalence |
+|---|---|---|---|---|
+| m4k-bytes | byte enables: 256 x 16 (2), 128 x 32 (4) | 2 | byte-identical | proven |
+| m4k-deep | 2048 x 9 over 4 blocks, 8192 x 2 ROM over 4, 256 x 40 over 3 | 11 | byte-identical | running |
+| m4k-dualclock | written on CLOCK_50, read on CLOCK_27 (x9; x36 as two x18) | 3 | byte-identical | proven |
+| m4k-enables | clock enable, read enables on ENA0/ENA1, one held in LEs | 4 | byte-identical | proven |
+| m4k-mixed | write x32 read x8, write x8 read x32, write x2 read x1 | 3 | byte-identical | running |
+| m4k-outreg | output registers: plain, cleared, own enable; a synchronous reset | 4 | byte-identical | proven |
+| m4k-shallow | 64 x 8, 32 x 36, 16 x 4 ROM | 3 | byte-identical | running |
+| m4k-tdp | true dual port x9/x9 and x4/x18 | 2 | byte-identical | running |
+| m4k-random-1 | TrueDual 600 x 5 | 2 | byte-identical | running |
+| m4k-random-2 | SimpleDual 16 x 24, byte enables, two clocks | 2 | byte-identical | proven |
+| m4k-random-3 | SimpleDual 16 x 5, write x1 read x4 words | 1 | byte-identical | proven |
+| m4k-random-4 | SimpleDual 1024 x 32, byte enables, output register (plain) | 8 | byte-identical | running |
+| m4k-random-5 | TrueDual 2048 x 2 | 1 | byte-identical | running |
+| m4k-random-6 | Rom 1024 x 32, contents, output register (cleared) | 8 | byte-identical | proven |
+| m4k-random-7 | SimpleDual 1024 x 36, read enable, write under it, sync reset | 8 | byte-identical | running |
+| m4k-random-8 | SingleNew 1024 x 36, contents | 8 | byte-identical | running |
+| m4k-random-9 | SingleNew 64 x 32 | 2 | byte-identical | running |
+| m4k-random-10 | SimpleDual 512 x 4, write x2 read x1 words, output register (cleared) | 1 | byte-identical | proven |
+| m4k-random-11 | SimpleDual 4096 x 9, contents | 8 | byte-identical | running |
+| m4k-random-12 | SingleNew 600 x 36, contents | 6 | byte-identical | running |
+| m4k-random-13 | SingleNew 4096 x 8 | 8 | byte-identical | running |
+| m4k-random-14 | SingleNew 16 x 4 | 1 | byte-identical | running |
+| m4k-random-15 | SingleOld 2048 x 18, read enable, write under it, output register (plain) | 8 | byte-identical | running |
+| m4k-random-16 | SimpleDual 512 x 5, write x2 read x1 words, output register (plain) | 1 | byte-identical | running |
 
 The random designs are `crates/chipsmith-cyclone2/tests/support/m4k_random.rs`,
 seeds 1-16 (`cargo run --release -p chipsmith-cyclone2 --example
