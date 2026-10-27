@@ -532,7 +532,7 @@ share chipsmith's own netlist IR, not Verilog.
      this family, and with Quartus' warning that their power-up value is
      undefined) and registers with an asynchronous load or set and reset
      (Quartus' emulation: a latch, an LE register holding `D ^ latch`, a
-     LUT choosing; ADR-0008); `/` and `%`, signed and unsigned, a power of
+     LUT choosing; ADR-0009); `/` and `%`, signed and unsigned, a power of
      two as wiring, constant divisors with only the stages they need. A
      sum of three or more terms is a balanced tree of carry chains: four
      18-bit terms run at 204 MHz (137 MHz as a chain; the yosys flow's
