@@ -776,8 +776,9 @@ fn equiv(
     gold: &Path,
     gate: &Path,
     reference: &Module,
+    words: bool,
 ) -> Result<usize, String> {
-    match equiv_once(dir, name, gold, gate, &[]) {
+    match equiv_once(dir, name, gold, gate, &[], words) {
         Ok(n) => Ok(n),
         Err((msg, unproven)) => {
             // An internal wire synthesis gave a value only where it's
@@ -795,8 +796,15 @@ fn equiv(
             if unproven.is_empty() || unproven.iter().any(|u| must.contains(u.as_str())) {
                 return Err(msg);
             }
-            equiv_once(dir, &format!("{name}_unmatched"), gold, gate, &unproven)
-                .map_err(|(msg, _)| msg)
+            equiv_once(
+                dir,
+                &format!("{name}_unmatched"),
+                gold,
+                gate,
+                &unproven,
+                words,
+            )
+            .map_err(|(msg, _)| msg)
         }
     }
 }
@@ -830,6 +838,7 @@ fn equiv_once(
     gold: &Path,
     gate: &Path,
     unmatched: &[String],
+    words: bool,
 ) -> Result<usize, (String, Vec<String>)> {
     let blacklist = dir.join(format!("{name}.blacklist"));
     std::fs::write(&blacklist, unmatched.join("\n")).unwrap();
@@ -846,8 +855,13 @@ fn equiv_once(
          read_json {gate}\nread_verilog -overwrite {sim}\n{prep}\nrename top gate\ndesign -stash gate\n\
          design -copy-from gold -as gold gold\ndesign -copy-from gate -as gate gate\n\
          equiv_make -blacklist {blacklist} gold gate equiv\nhierarchy -top equiv\nasync2sync\n\
-         equiv_struct -fwd\nequiv_simple -undef -set-assumes\nequiv_induct -undef -set-assumes -ignore-unknown-cells\n\
+         equiv_struct -fwd\n{simple}equiv_induct -undef -set-assumes -ignore-unknown-cells\n\
          equiv_status -assert\n",
+        // With memories as words, `equiv_simple` proves a few hundred of
+        // tens of thousands of word bits (each needs the step before):
+        // induction alone, which proves them all, takes a third of the
+        // time (m4k-bytes: 22 min against over an hour).
+        simple = if words { "" } else { "equiv_simple -undef -set-assumes\n" },
         gold = gold.display(),
         gate = gate.display(),
         sim = sim.display(),
@@ -1282,7 +1296,15 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
     write(&gold, &gold_path);
     let mid_path = dir.join("mid.json");
     write(&mid, &mid_path);
-    let first = equiv(dir, "equiv_refine", &gold_path, &mid_path, top(&gold))?;
+    let words = !in_blocks.is_empty();
+    let first = equiv(
+        dir,
+        "equiv_refine",
+        &gold_path,
+        &mid_path,
+        top(&gold),
+        words,
+    )?;
 
     let gm = mid
         .modules
@@ -1471,7 +1493,14 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
     drop_undriven(top_mut(&mut mid));
     let sub_path = dir.join("mid_constants.json");
     write(&mid, &sub_path);
-    let second = equiv(dir, "equiv_synth", &sub_path, &cut_gate_path, top(&mid))?;
+    let second = equiv(
+        dir,
+        "equiv_synth",
+        &sub_path,
+        &cut_gate_path,
+        top(&mid),
+        words,
+    )?;
     Ok(Proof {
         constant_registers: claims.len(),
         equivalences: first + second,
