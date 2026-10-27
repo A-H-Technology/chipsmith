@@ -133,31 +133,12 @@ fn exclusive_selects(m: &mut Module) {
             unreachable!()
         };
         let s = p.s.clone();
-        // A select only gives way to later ones it can be set together
-        // with: masking it by one it excludes changes nothing.
-        let compares: Vec<_> = s.iter().map(|&b| compared(g.m, &drivers, b)).collect();
-        let disjoint = |j: usize, k: usize| match (&compares[j], &compares[k]) {
-            (Some((x, a)), Some((y, b))) => x == y && a.iter().all(|c| !b.contains(c)),
-            _ => false,
-        };
-        let n = s.len();
-        // Every later select, as one shared chain.
-        let mut suffix = vec![SigBit::ZERO; n + 1];
-        for k in (0..n).rev() {
-            suffix[k] = g.or(suffix[k + 1], s[k]);
-        }
-        let mut out = vec![SigBit::ZERO; n];
-        for j in 0..n {
-            let overlapping: Vec<usize> = (j + 1..n).filter(|&k| !disjoint(j, k)).collect();
-            let later = if overlapping.len() == n - j - 1 {
-                suffix[j + 1]
-            } else {
-                overlapping
-                    .into_iter()
-                    .fold(SigBit::ZERO, |acc, k| g.or(acc, s[k]))
-            };
+        let mut later = SigBit::ZERO;
+        let mut out = vec![SigBit::ZERO; s.len()];
+        for j in (0..s.len()).rev() {
             let nl = g.not(later);
             out[j] = g.and(s[j], nl);
+            later = g.or(later, s[j]);
         }
         if let CellKind::Pmux(p) = &mut g.m.cells[i].kind {
             p.s = out;
