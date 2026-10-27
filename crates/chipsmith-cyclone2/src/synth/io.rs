@@ -357,6 +357,15 @@ pub fn pads(m: &mut Module) -> Result<()> {
             }
         }
     }
+    // Bus nets an inout names: an output reading one reads the pin.
+    let mut on_inout = vec![false; m.net_count()];
+    for (_, w, d) in m.ports() {
+        if d == Dir::InOut {
+            for n in w.bits.iter().filter_map(|b| b.net()) {
+                on_inout[n.index()] = true;
+            }
+        }
+    }
     let mut used_tribufs = vec![false; m.cells.len()];
     let mut new_cells = Vec::new();
     let mut subst = Subst::new(m);
@@ -388,6 +397,11 @@ pub fn pads(m: &mut Module) -> Result<()> {
             let tri = b.net().and_then(|n| tribuf_of[n.index()]);
             let cell = match (dir, tri) {
                 (Dir::In, _) => ibuf(pad, b, io_regs),
+                // `assign LEDR = GPIO`: the inout's input buffer, which the
+                // substitution below puts in place of the bus.
+                (Dir::Out, Some(_)) if b.net().is_some_and(|n| on_inout[n.index()]) => {
+                    obuf(data_of(b), pad, io_regs)
+                }
                 (Dir::Out | Dir::InOut, Some((ci, k))) => {
                     let CellKind::Tribuf(Tribuf { a, en, .. }) = &m.cells[ci].kind else {
                         unreachable!("indexed tri-state buffers");
