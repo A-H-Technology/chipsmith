@@ -80,6 +80,11 @@ pub struct LabDb {
     /// By G: the two-level mux from the clock control's LAB lines onto its
     /// core input (`CLKBUF_INTERFACE_COREIN` G; absolute addresses).
     pub clkctrl_corein: Vec<Feature>,
+    /// By G: the same kind of mux onto its clock enable
+    /// (`CLKBUF_INTERFACE_ENOUT` G), and the first bit of its
+    /// `CLKBUF_ENABLE_AND_INVERT` setting.
+    pub clkctrl_enout: Vec<Feature>,
+    pub clkctrl_and_invert: Vec<i32>,
     /// (x, y) -> base flat address of the LAB block.
     bases: HashMap<(u32, u32), u32>,
 }
@@ -156,12 +161,36 @@ impl LabDb {
                 grp.with_context(|| format!("asmdb has no CLKBUF_INTERFACE_COREIN {g}"))?,
             ));
         }
+        let mut clkctrl_enout: Vec<Feature> = Vec::new();
+        for g in 0..16 {
+            let grp = db
+                .arch_groups
+                .iter()
+                .find(|a| a.arch_type == arch::CLKBUF_INTERFACE_ENOUT && a.group_index == g);
+            clkctrl_enout.push(Feature::from(
+                db,
+                grp.with_context(|| format!("asmdb has no CLKBUF_INTERFACE_ENOUT {g}"))?,
+            ));
+        }
+        let clkctrl_and_invert: Vec<i32> = one(arch::CLKBUF_ENABLE_AND_INVERT)?
+            .paths()
+            .iter()
+            .map(|p| {
+                p.first()
+                    .copied()
+                    .flatten()
+                    .map(|m| db.mux(m).bits[0])
+                    .context("CLKBUF_ENABLE_AND_INVERT without a mux")
+            })
+            .collect::<Result<_>>()?;
         Ok(LabDb {
             features,
             bases,
             clkctrl_select,
             clkctrl_enable,
             clkctrl_corein,
+            clkctrl_enout,
+            clkctrl_and_invert,
         })
     }
 

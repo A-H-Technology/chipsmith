@@ -74,3 +74,30 @@ endmodule
 (* blackbox *)
 module CY2_ASMI (input DCLKIN, input SCEIN, input SDOIN, output DATA0OUT);
 endmodule
+
+// A PLL (four per device, crate::pll): clocks CLK0-CLK2 at
+// f(INCLK) * CLKk_MULTIPLY_BY / CLKk_DIVIDE_BY, as altpll names it. INCLK
+// must come straight from a dedicated clock pin (CLOCK_50 feeds PLL_1).
+// INCLK0_INPUT_FREQUENCY is its period in ps; CLKk_PHASE_SHIFT is in ps,
+// CLKk_DUTY_CYCLE in percent. OPERATION_MODE "NORMAL" compensates the
+// global clock network's delay, "NO_COMPENSATION" doesn't. LOCKED goes high
+// once the loop is locked; ARESET (active high) resets it, PFDENA (active
+// high, default on) lets its phase detector run.
+(* blackbox *)
+module CY2_PLL (input INCLK, input ARESET, input PFDENA, output CLK0, output CLK1, output CLK2,
+                output LOCKED);
+  parameter INCLK0_INPUT_FREQUENCY = 20000;
+  parameter OPERATION_MODE = "NORMAL";
+  parameter CLK0_MULTIPLY_BY = 1;
+  parameter CLK0_DIVIDE_BY = 1;
+  parameter CLK0_PHASE_SHIFT = 0;
+  parameter CLK0_DUTY_CYCLE = 50;
+  parameter CLK1_MULTIPLY_BY = 1;
+  parameter CLK1_DIVIDE_BY = 1;
+  parameter CLK1_PHASE_SHIFT = 0;
+  parameter CLK1_DUTY_CYCLE = 50;
+  parameter CLK2_MULTIPLY_BY = 1;
+  parameter CLK2_DIVIDE_BY = 1;
+  parameter CLK2_PHASE_SHIFT = 0;
+  parameter CLK2_DUTY_CYCLE = 50;
+endmodule

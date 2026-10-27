@@ -131,6 +131,17 @@ impl Device {
         self.template(n).element_enum
     }
 
+    /// The element's tile.
+    pub fn xy(&self, n: Node) -> (i16, i16) {
+        let e = &self.routing.elements[n.0 as usize];
+        (e.x, e.y)
+    }
+
+    /// The element's index among its type in its tile (`I` in an rcf).
+    pub fn index(&self, n: Node) -> i16 {
+        self.template(n).index
+    }
+
     fn template(&self, n: Node) -> &Template {
         &self.routing.templates[self.routing.elements[n.0 as usize].template as usize]
     }
@@ -174,6 +185,12 @@ pub fn element_name(e: i16) -> String {
         301 => "IO_DATAIN",
         513 => "CLKBUF_IN",
         515 => "CLKBUF_OUT",
+        532 => "BLOCK_INPUT_MUX",
+        512 => "CLKBUF_ENABLE",
+        520 => "CLKPIN_TO_PLLCLKIN_MUX",
+        329 => "PLL_CLKIN",
+        69 => "PLL_BUFFER",
+        347 => "PLL_LOCKED_PIN",
         560 => "BLK_CLK_BUF",
         // The rcf's names for the JTAG and serial-flash blocks' outputs.
         361 => "JTAG_TMSUTAP_PIN",

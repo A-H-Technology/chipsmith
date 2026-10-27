@@ -275,8 +275,15 @@ fn read_design(json: &Value) -> Result<Design> {
                 .and_then(|a| a.first())
                 .and_then(Value::as_u64)
             {
-                let p =
-                    Port::parse(port).with_context(|| format!("{name}: unknown port {port}"))?;
+                // A hard block's pins first: a PLL's CLK0 is no M4K's.
+                let hard_pin = match kind {
+                    Kind::Hard(b) => hard::Pin::parse(port).filter(|p| b.pins().contains(p)),
+                    _ => None,
+                };
+                let p = hard_pin
+                    .map(Port::Hard)
+                    .or_else(|| Port::parse(port))
+                    .with_context(|| format!("{name}: unknown port {port}"))?;
                 let next = net_ids.len() as NetId;
                 let id = *net_ids.entry(net).or_insert(next);
                 match (p.index(), p) {
@@ -585,9 +592,11 @@ fn fixed_cells(
             Kind::Ibuf => false,
             Kind::Obuf | Kind::Iobuf => true,
             Kind::Lut | Kind::Ff | Kind::ClkCtrl | Kind::M4k => continue,
-            // One of each per device, at a fixed bel.
+            // One of each per device, at a fixed bel; PLLs come below.
             Kind::Hard(b) => {
-                let ((x, y), bel) = b.bel();
+                let Some(((x, y), bel)) = b.bel() else {
+                    continue;
+                };
                 let tile = db.tile_index(x, y).context("hard block off chip")?;
                 ensure!(
                     db.tile_type(tile).bels.contains_key(bel),
@@ -645,44 +654,48 @@ fn fixed_cells(
         out.insert(i, (tile, bel.to_string()));
     }
 
-    // INCLK node of every clock control.
+    // INCLK node of every clock control, and of every PLL.
     let mut inclk: HashMap<NodeId, (u32, String)> = HashMap::default();
+    let mut pll_inclk: HashMap<NodeId, (u32, String)> = HashMap::default();
     for tile in 0..db.width * db.height {
         for (name, bel) in &db.tile_type(tile).bels {
-            if bel.ty == "CLKCTRL" {
-                if let Some(&w) = bel.pins.get("INCLK") {
-                    inclk.insert(db.node(tile, w), (tile, name.clone()));
-                }
+            let to = match bel.ty.as_str() {
+                "CLKCTRL" => &mut inclk,
+                "PLL" => &mut pll_inclk,
+                _ => continue,
+            };
+            if let Some(&w) = bel.pins.get("INCLK") {
+                to.insert(db.node(tile, w), (tile, name.clone()));
             }
         }
     }
-    for (i, c) in design
-        .cells
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.kind == Kind::ClkCtrl)
-    {
-        let net = c
-            .net(Port::Inclk)
-            .with_context(|| format!("{}: INCLK unconnected", c.name))?;
-        let pin = design.driver[net as usize].context("clock control input undriven")?;
-        ensure!(
-            design.cells[pin].kind == Kind::Ibuf,
-            "{}: clocks must come straight from a pin",
-            c.name
-        );
-        let (tile, bel) = &out[&pin];
-        let w = db.tile_type(*tile).bels[bel].pins["COMBOUT"];
-        // Nearest free clock control the pin reaches, as nextpnr's packer picks it.
-        let start = db.node(*tile, w);
+    // The output node of a fixed cell's port.
+    let out_node =
+        |out: &HashMap<usize, (u32, String)>, cell: usize, port: Port| -> Result<NodeId> {
+            let (tile, bel) = &out[&cell];
+            let pin = match port {
+                Port::Hard(p) => p.name(),
+                _ => "COMBOUT",
+            };
+            let w = *db.tile_type(*tile).bels[bel]
+                .pins
+                .get(pin)
+                .with_context(|| format!("bel {bel} has no pin {pin}"))?;
+            Ok(db.node(*tile, w))
+        };
+    // The nearest free bel among `targets` that `start` reaches through
+    // dedicated wiring (a few hops), as nextpnr's packer picks a clock
+    // control for a clock pin.
+    let nearest = |out: &HashMap<usize, (u32, String)>,
+                   targets: &HashMap<NodeId, (u32, String)>,
+                   start: NodeId|
+     -> Option<(u32, String)> {
         let mut seen = HashSet::from_iter([start]);
         let mut queue = VecDeque::from([(start, 0)]);
-        let mut found = None;
         while let Some((n, depth)) = queue.pop_front() {
-            if let Some(cc) = inclk.get(&n) {
+            if let Some(cc) = targets.get(&n) {
                 if !out.values().any(|v| v == cc) {
-                    found = Some(cc.clone());
-                    break;
+                    return Some(cc.clone());
                 }
             }
             if depth > 8 {
@@ -694,15 +707,100 @@ fn fixed_cells(
                 }
             }
         }
+        None
+    };
+    // PLLs: the one whose input the clock pin reaches (each PLL takes the
+    // dedicated clock pins of one side of the chip).
+    for (i, c) in design
+        .cells
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.kind == Kind::Hard(hard::Block::Pll))
+    {
+        let net = c
+            .net(Port::Inclk)
+            .with_context(|| format!("{}: PLL INCLK unconnected", c.name))?;
+        let pin = design.driver[net as usize]
+            .filter(|&d| design.cells[d].kind == Kind::Ibuf)
+            .with_context(|| {
+                format!(
+                    "{}: a PLL's INCLK must come straight from a clock pin",
+                    c.name
+                )
+            })?;
+        let site = nearest(&out, &pll_inclk, out_node(&out, pin, Port::Combout)?).with_context(|| {
+            format!(
+                "{}: no free PLL reachable from {}: a PLL takes a dedicated clock pin of its side (CLOCK_50, PIN_N2, feeds PLL_1)",
+                c.name, design.cells[pin].name
+            )
+        })?;
+        out.insert(i, site);
+    }
+    // Clocks from pins first: each takes the nearest free clock control
+    // its pin reaches, as nextpnr's packer picks it. Clocks from the core
+    // then take any free one (every clock control has a core input), the
+    // nearest to their driver if that is fixed, else the nearest to the
+    // middle of the chip, where most of the logic driving it will be.
+    let clkctrls: Vec<(usize, usize)> = design
+        .cells
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.kind == Kind::ClkCtrl)
+        .map(|(i, c)| {
+            let net = c
+                .net(Port::Inclk)
+                .with_context(|| format!("{}: INCLK unconnected", c.name))?;
+            let d = design.driver[net as usize]
+                .with_context(|| format!("{}: clock control input undriven", c.name))?;
+            Ok((i, d))
+        })
+        .collect::<Result<_>>()?;
+    let dedicated = |d: usize| {
+        matches!(
+            design.cells[d].kind,
+            Kind::Ibuf | Kind::Hard(hard::Block::Pll)
+        )
+    };
+    let (from_pins, from_core): (Vec<_>, Vec<_>) =
+        clkctrls.into_iter().partition(|&(_, d)| dedicated(d));
+    for (i, d) in from_pins {
+        let net = design.cells[i].net(Port::Inclk).unwrap();
+        let port = design.cells[d]
+            .connections()
+            .find(|&(_, n)| n == net)
+            .map(|(p, _)| p)
+            .context("clock control input")?;
+        let found = nearest(&out, &inclk, out_node(&out, d, port)?);
         out.insert(
             i,
             found.with_context(|| {
                 format!(
                     "no free clock control reachable from {}",
-                    design.cells[pin].name
+                    design.cells[d].name
                 )
             })?,
         );
+    }
+    let mut sites: Vec<(u32, String)> = inclk.into_values().collect();
+    sites.sort();
+    for (i, d) in from_core {
+        let target = match out.get(&d) {
+            Some((tile, _)) => {
+                let (x, y) = db.tile_xy(*tile);
+                (x as i64, y as i64)
+            }
+            None => (i64::from(db.width) / 2, i64::from(db.height) / 2),
+        };
+        let free = sites
+            .iter()
+            .filter(|s| !out.values().any(|v| v == *s))
+            .min_by_key(|(tile, _)| {
+                let (x, y) = db.tile_xy(*tile);
+                (x as i64 - target.0).abs() + (y as i64 - target.1).abs()
+            })
+            .cloned()
+            .with_context(|| format!("{}: all 16 global clocks are taken", design.cells[i].name))?;
+        out.insert(i, free);
     }
     Ok(out)
 }
@@ -876,6 +974,16 @@ impl<'a> State<'a> {
             sync_kind |= kind;
             let e: Ctl = (c.net(Port::Ena), c.ena_inv);
             let domain = (c.net(Port::Clk), e);
+            // One clock net per LAB, though a LAB has two LAB clocks. Which
+            // of them Quartus gives each of two clocks isn't predictable
+            // from what we know (cyclone2-re README, "LAB clocks": no rule
+            // fits all 15 measured LABs), and the bitstream has to say, so
+            // a LAB mixing clocks wouldn't assemble the same in Quartus.
+            // Remove once that choice is modelled; until then two domains
+            // in a LAB share a clock and differ in their enable.
+            if domains[..n_domains].iter().any(|d| d.0 != domain.0) {
+                return false;
+            }
             if !domains[..n_domains].contains(&domain) {
                 if n_domains == 2 {
                     return false;

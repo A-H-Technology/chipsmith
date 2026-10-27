@@ -84,15 +84,18 @@ impl IoBit {
 /// bytes per frame starting at byte 1. Fit to the unused-pin pull-up design
 /// (455 IOE pull-up bits) and the 16 dedicated clock inputs; every IOE bit
 /// of every I/O fuzz design lands where this puts it. `(lane, first
-/// block, off)`.
+/// block, off)`. Three lanes start with a PLL (8 blocks, asmdb bases 2928,
+/// 6192 and 9120), which the IOE data left unplaced in the gaps: the PLL
+/// fuzz designs put them at the start of lanes 5, 3 and 1 (each would run
+/// past the end of the lane before).
 const CFF_LANES: [(u16, u32, i64); 8] = [
     (7, 0, -216),
     (6, 64, 1176),
-    (5, 126, 2808),
+    (5, 122, 2808),
     (4, 190, 4440),
-    (3, 266, 6024),
+    (3, 258, 6024),
     (2, 324, 7368),
-    (1, 388, 9120),
+    (1, 380, 9120),
     (0, 452, 10704),
 ];
 

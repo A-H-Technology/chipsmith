@@ -22,7 +22,7 @@ use super::io::{
 };
 use super::logic::{
     clock_slots, Aclr, ClkCtrl, Ctl, Domain, GlobalClock, LabConfig, LeConfig, LeSource, Logic,
-    Lut, Reg, Sload,
+    Lut, Reg, Sload, BLOCK_INPUT_MUX, CORE_INPUT,
 };
 use super::m4k::{self, Content, Controls, CtlSrc, M4k, Mode, ReadPort, Sel, Width};
 use super::phys::{PhysDesign, Pip, RoutedNet};
@@ -71,6 +71,12 @@ pub enum Wire {
     },
     /// An input of the JTAG or serial-flash block.
     Hard(HardInput),
+    /// A control input of the PLL in tile (x, y).
+    PllIn {
+        x: u32,
+        y: u32,
+        input: super::pll::Control,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -119,6 +125,7 @@ pub enum Bel {
     M4k { x: u32, y: u32 },
     Jtag,
     Asmi,
+    Pll { x: u32, y: u32 },
 }
 
 #[derive(Debug)]
@@ -257,6 +264,14 @@ fn wire(dev: &Device, tx: u32, ty: u32, name: &str) -> Result<Wire> {
         {
             return Ok(Wire::Hard(h));
         }
+        if bel == "PLL" {
+            if let Some(input) = super::pll::Control::ALL
+                .into_iter()
+                .find(|c| c.pin() == pin)
+            {
+                return Ok(Wire::PllIn { x, y, input });
+            }
+        }
     }
     bail!("unknown wire {name} in tile X{tx}Y{ty}")
 }
@@ -283,6 +298,9 @@ fn bel(tx: u32, ty: u32, name: &str) -> Result<Bel> {
     }
     if name == "ASMI" {
         return Ok(Bel::Asmi);
+    }
+    if name == "PLL" {
+        return Ok(Bel::Pll { x, y });
     }
     bail!("unknown bel {name}")
 }
@@ -557,7 +575,11 @@ impl Routed {
         let mut aclr: HashMap<(u32, u32, u32), Aclr> = HashMap::new();
         let mut sclr: HashMap<(u32, u32, u32), u8> = HashMap::new();
         let mut pia: HashMap<(u32, u32, u32), LeSource> = HashMap::new();
-        let mut clk_in: HashMap<u32, u8> = HashMap::new();
+        let mut clk_in: HashMap<u32, (Node, u8)> = HashMap::new();
+        // A clock control fed from the core: LAB line -> BLOCK_INPUT_MUX
+        // (532) -> CLKBUF_IN 4, both graph edges without bits of their own;
+        // the line is chosen by the clock control's COREIN mux.
+        let mut core_in: HashMap<Node, u8> = HashMap::new();
         let mut data_line: HashMap<(u32, u32, u32), u32> = HashMap::new();
         let mut oe_line: HashMap<(u32, u32, u32), u32> = HashMap::new();
         let mut datain: HashMap<(u32, u32, u32), [bool; 2]> = HashMap::new();
@@ -569,15 +591,23 @@ impl Routed {
         let mut ram_pia: HashMap<(u32, u32), [Option<u8>; 8]> = HashMap::new();
         let mut ram_ctl: HashMap<(u32, u32, u8), CtlSrc> = HashMap::new();
         let mut hard_in: HashMap<HardInput, hard::Line> = HashMap::new();
+        let mut pll_in: HashMap<(u32, u32, super::pll::Control), u8> = HashMap::new();
         let mut nets = Vec::new();
         for n in self.nets.values() {
             let mut pips = Vec::new();
             for p in &n.pips {
                 match (p.src, p.dst) {
-                    (Wire::Node(s), Wire::Node(d)) => pips.push(
-                        Pip::new(dev, s, d)
-                            .with_context(|| format!("{}: no edge {s:?} -> {d:?}", n.name))?,
-                    ),
+                    (Wire::Node(s), Wire::Node(d)) => {
+                        pips.push(
+                            Pip::new(dev, s, d)
+                                .with_context(|| format!("{}: no edge {s:?} -> {d:?}", n.name))?,
+                        );
+                        if dev.element_enum(s) == 276 && dev.element_enum(d) == BLOCK_INPUT_MUX {
+                            let t = &dev.routing.templates
+                                [dev.routing.elements[s.0 as usize].template as usize];
+                            core_in.insert(d, t.index as u8);
+                        }
+                    }
                     (
                         Wire::Le {
                             pin: LePin::Input(_),
@@ -617,6 +647,15 @@ impl Routed {
                             }
                             M4kPin::Fast(_) => unreachable!(),
                         }
+                    }
+                    (Wire::Node(s), Wire::PllIn { x, y, input }) => {
+                        ensure!(
+                            dev.element_enum(s) == 276,
+                            "{}: PLL {input:?} from {}",
+                            n.name,
+                            element_name(dev.element_enum(s))
+                        );
+                        pll_in.insert((x, y, input), dev.index(s) as u8);
                     }
                     (Wire::Node(s), Wire::Hard(h)) => {
                         let t = &dev.routing.templates
@@ -752,7 +791,7 @@ impl Routed {
                     (Wire::Node(s), Wire::ClkIn { g }) => {
                         let t = &dev.routing.templates
                             [dev.routing.elements[s.0 as usize].template as usize];
-                        clk_in.insert(g, t.index as u8);
+                        clk_in.insert(g, (s, t.index as u8));
                     }
                     (
                         Wire::Node(s),
@@ -845,6 +884,7 @@ impl Routed {
         let mut pins = Vec::new();
         let mut m4ks = Vec::new();
         let mut hard = Hard::default();
+        let mut plls = Vec::new();
         let mut ff_domain: HashMap<(u32, u32, u32), Domain> = HashMap::new();
         let sdata: std::collections::HashSet<(u32, u32, u32)> = self
             .cells
@@ -915,6 +955,43 @@ impl Routed {
                         content: shape.content,
                     });
                 }
+                ("CY2_PLL", Bel::Pll { x, y }) => {
+                    use super::pll::{Control, Pll, Site};
+                    let site = Site::ALL
+                        .into_iter()
+                        .find(|s| s.xy() == (x, y))
+                        .with_context(|| format!("{name}: no PLL at X{x} Y{y}"))?;
+                    let used = [0, 1, 2].map(|k| c.conns.contains_key(&format!("CLK{k}")));
+                    let solved = crate::pll::Request::from_params(&c.params, used)
+                        .and_then(|r| r.solve())
+                        .with_context(|| name.clone())?;
+                    // The clock pin: the CLK_BUFFER its INCLK net starts at,
+                    // by its index (z) along the side.
+                    let net = c
+                        .conns
+                        .get("INCLK")
+                        .with_context(|| format!("{name}: INCLK unconnected"))?;
+                    let inclk_pin = self.nets[net]
+                        .pips
+                        .iter()
+                        .find_map(|p| match p.src {
+                            Wire::Node(s) if dev.element_enum(s) == 289 => Some(
+                                dev.routing.templates
+                                    [dev.routing.elements[s.0 as usize].template as usize]
+                                    .z as u8,
+                            ),
+                            _ => None,
+                        })
+                        .with_context(|| format!("{name}: INCLK not routed from a clock pin"))?;
+                    let control = |c: Control| pll_in.get(&(x, y, c)).copied();
+                    plls.push(Pll {
+                        site,
+                        config: solved.config,
+                        inclk_pin,
+                        areset: control(Control::Areset),
+                        pfdena: control(Control::Pfdena),
+                    });
+                }
                 ("CY2_JTAG", Bel::Jtag) => {
                     hard.jtag = Some(Jtag {
                         tdouser: hard_in.get(&HardInput::Tdouser).copied(),
@@ -934,13 +1011,26 @@ impl Routed {
                     });
                 }
                 ("CLKCTRL", Bel::ClkCtrl { g }) => {
-                    let input = *clk_in
+                    let (node, input) = *clk_in
                         .get(&g)
                         .with_context(|| format!("{name}: input not routed"))?;
+                    // The BLOCK_INPUT_MUX feeding a core input, and the line
+                    // that feeds it.
+                    let core_line = core_in
+                        .iter()
+                        .find_map(|(&m, &line)| dev.edge(m, node).is_some().then_some(line));
+                    ensure!(
+                        (input == CORE_INPUT) == core_line.is_some(),
+                        "{name}: clock control input {input} without its core path, or the other way round"
+                    );
                     clkctrls.push(ClkCtrl {
                         g: g as u8,
                         input,
-                        core_line: None,
+                        core_line,
+                        enable: None,
+                        // The Quartus export writes `ena_register_mode =
+                        // "none"` (cyclone2-re's quartus/export.rs).
+                        enable_registered: false,
                     });
                 }
                 ("CY2_IBUF" | "CY2_OBUF" | "CY2_IOBUF", Bel::Ioe { x, y, z }) => {
@@ -1118,6 +1208,7 @@ impl Routed {
             vccio: Vccio::Board(Standard::Lvttl33),
             m4ks,
             hard,
+            plls,
             nets,
         })
     }
