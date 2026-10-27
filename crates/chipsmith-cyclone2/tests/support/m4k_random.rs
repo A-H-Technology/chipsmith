@@ -286,9 +286,11 @@ impl Config {
                 v += "  always @(posedge clk) begin\n";
                 write(&mut v, &wa(1), "we", 1, 0);
                 v += &format!("    q <= we ? {} : m[{}];\n  end\n", bits(0, w), wa(1));
+                // Not both ports on one word at once: a race in Verilog.
+                v += &format!("  wire webx = web & ({} != {});\n", ra(1), wa(1));
                 v += "  always @(posedge clk) begin\n";
-                write(&mut v, &ra(1), "web", 1, 12);
-                v += &format!("    qb <= web ? {} : m[{}];\n  end\n", bits(12, w), ra(1));
+                write(&mut v, &ra(1), "webx", 1, 12);
+                v += &format!("    qb <= webx ? {} : m[{}];\n  end\n", bits(12, w), ra(1));
             }
         }
         let out = match (self.out_reg, self.kind) {

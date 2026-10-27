@@ -12,6 +12,11 @@ module top(input CLOCK_50, input [17:0] SW, input [3:0] KEY, output [17:0] LEDR,
   wire [35:0] d = {cnt[31:14], cnt[17:0]} ^ {SW, SW};
   wire wea = SW[17] & cnt[2];
   wire web = SW[16] & cnt[3];
+  // Port B doesn't write the word port A writes on the same edge: two
+  // always blocks writing one word at once is a race in Verilog (yosys and
+  // chipsmith order them differently), and the block writes neither.
+  wire web9 = web & (ab[8:0] != aa[8:0]);
+  wire web4 = web & (ab[9:2] != aa[7:0]);
   wire [11:0] aa = cnt[31:20];
   wire [11:0] ab = cnt[30:19] ^ SW[11:0];
 
@@ -22,8 +27,8 @@ module top(input CLOCK_50, input [17:0] SW, input [3:0] KEY, output [17:0] LEDR,
     qa9 <= wea ? d[8:0] : t9[aa[8:0]];
   end
   always @(posedge clk) begin
-    if (web) t9[ab[8:0]] <= d[17:9];
-    qb9 <= web ? d[17:9] : t9[ab[8:0]];
+    if (web9) t9[ab[8:0]] <= d[17:9];
+    qb9 <= web9 ? d[17:9] : t9[ab[8:0]];
   end
 
   reg [3:0] t4 [0:1023];
@@ -39,8 +44,8 @@ module top(input CLOCK_50, input [17:0] SW, input [3:0] KEY, output [17:0] LEDR,
     qa16 <= wea ? d[15:0] : {t4[{aa[7:0], 2'd3}], t4[{aa[7:0], 2'd2}], t4[{aa[7:0], 2'd1}], t4[{aa[7:0], 2'd0}]};
   end
   always @(posedge clk) begin
-    if (web) t4[ab[9:0]] <= d[35:32];
-    qb4 <= web ? d[35:32] : t4[ab[9:0]];
+    if (web4) t4[ab[9:0]] <= d[35:32];
+    qb4 <= web4 ? d[35:32] : t4[ab[9:0]];
   end
 
   localparam N = 38;
