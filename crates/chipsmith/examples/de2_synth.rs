@@ -8,7 +8,9 @@
 //! two; with `--yosys-rtl` yosys elaborates (`proc; flatten`) and chipsmith
 //! synthesizes.
 //!
-//! `de2_synth [--yosys | --yosys-rtl] <project dir> <scratch dir>`. Needs
+//! `de2_synth [--yosys | --yosys-rtl] <project dir> <scratch dir>`: the
+//! scratch dir gets the netlists, `routed.json`, the .rbf and, with a
+//! `[clocks]` entries, `top.sdc` (for `bench/quartus-timing.sh`). Needs
 //! the devshell for the comparisons (yosys, `CHIPSMITH_CYCLONE2_SYNTH`) and
 //! for VHDL (GHDL).
 
@@ -219,6 +221,25 @@ fn main() -> Result<()> {
     let db = bitstream::load_db()?;
     let rbf = dir.join(format!("{}.rbf", manifest.name));
     bitstream::pack_file(&db, &routed, &rbf)?;
+    // The manifest's clocks as Quartus' constraints, for bench/quartus-timing.sh.
+    let sdc = dir.join("top.sdc");
+    if clocks.is_empty() {
+        if sdc.exists() {
+            std::fs::remove_file(&sdc)?;
+        }
+    } else {
+        let text: String = clocks
+            .iter()
+            .map(|c| {
+                format!(
+                    "create_clock -name {{{0}}} -period {1} [get_ports {{{0}}}]\n",
+                    c.port,
+                    c.frequency.period_ns()
+                )
+            })
+            .collect();
+        std::fs::write(&sdc, text)?;
+    }
     let fmax = 1e6 / f64::from(r.critical);
     let slack = clocks
         .first()
