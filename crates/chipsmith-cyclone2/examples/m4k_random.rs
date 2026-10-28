@@ -4,6 +4,7 @@
 //!     cargo run --release -p chipsmith-cyclone2 --example m4k_random -- <dir> <first seed> <last seed>
 
 #[path = "../tests/support/m4k_random.rs"]
+#[allow(dead_code)]
 mod m4k_random;
 
 fn main() {

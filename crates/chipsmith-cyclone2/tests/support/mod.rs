@@ -315,33 +315,42 @@ fn cut_memories(m: &mut Module) -> Result<BTreeMap<String, MemShape>, String> {
             continue;
         };
         let id = mem.memid.trim_start_matches('\\').to_owned();
-        let [rd] = &mem.rd[..] else {
-            return Err(format!("memory {id}: not one read port"));
-        };
         let abits = (usize::BITS - mem.size.saturating_sub(1).leading_zeros()) as usize;
-        let rdata = (0..mem.width)
-            .map(|_| SigBit::Net(m.new_net()))
-            .collect::<Vec<_>>();
-        for (q, n) in rd.data.iter().zip(&rdata) {
-            if let (SigBit::Net(q), n) = (q, n) {
-                subst.set(*q, *n);
+        for (i, rd) in mem.rd.iter().enumerate() {
+            let rdata = (0..rd.data.len())
+                .map(|_| SigBit::Net(m.new_net()))
+                .collect::<Vec<_>>();
+            for (q, n) in rd.data.iter().zip(&rdata) {
+                if let (SigBit::Net(q), n) = (q, n) {
+                    subst.set(*q, *n);
+                }
             }
+            ports.push((format!("__mem_{id}_rdata{i}"), Dir::In, rdata));
+            ports.push((
+                format!("__mem_{id}_raddr{i}"),
+                Dir::Out,
+                rd.addr[..abits.min(rd.addr.len())].to_vec(),
+            ));
         }
-        ports.push((format!("__mem_{id}_rdata"), Dir::In, rdata));
-        ports.push((
-            format!("__mem_{id}_raddr"),
-            Dir::Out,
-            rd.addr[..abits].to_vec(),
-        ));
-        if let Some(w) = mem.wr.first() {
+        for (j, w) in mem.wr.iter().enumerate() {
             // What is written only matters where it is written: masked by
-            // the enable, so x in what isn't written can't differ.
-            let en: Vec<SigBit> = w.en.clone();
-            let addr = w.addr[..abits].to_vec();
-            let data = w.data.clone();
-            masked.push((format!("__mem_{id}_waddr"), addr, vec![en[0]; abits]));
-            masked.push((format!("__mem_{id}_wdata"), data, en.clone()));
-            ports.push((format!("__mem_{id}_we"), Dir::Out, vec![en[0]]));
+            // the enables, so x in what isn't written can't differ.
+            let addr = w.addr[..abits.min(w.addr.len())].to_vec();
+            let any: Vec<SigBit> = {
+                let mut acc = SigBit::ZERO;
+                for (k, &e) in w.en.iter().enumerate() {
+                    let y = SigBit::Net(m.new_net());
+                    m.add_cell(
+                        format!("$cut${id}$any{j}${k}"),
+                        CellKind::Gate(Gate::new(GateOp::Or, &[acc, e], y).unwrap()),
+                    );
+                    acc = y;
+                }
+                vec![acc; addr.len()]
+            };
+            masked.push((format!("__mem_{id}_waddr{j}"), addr, any));
+            masked.push((format!("__mem_{id}_wdata{j}"), w.data.clone(), w.en.clone()));
+            ports.push((format!("__mem_{id}_we{j}"), Dir::Out, w.en.clone()));
         }
         shapes.insert(
             id,
@@ -915,15 +924,17 @@ fn prep_memories(
     name: &str,
     design: &Path,
     to_logic: &[String],
-    in_blocks: &[String],
+    cut: &[String],
 ) -> Result<Design, String> {
-    let mut map = String::new();
-    // A memory in M4Ks reads synchronously: its read registers merged in
-    // as yosys does (`memory_dff`), so its ports line up with the blocks'.
-    for id in in_blocks {
-        map += &format!("memory_dff m:{id} t:$memrd* r:MEMID=\\{id} %i %u t:*dff* %u\n");
+    let mut map = String::from("memory_collect\n");
+    // A memory compared at its ports reads asynchronously on both sides,
+    // its read registers outside it (`memory_nordff`): synthesis merges
+    // registers into read ports where yosys' `memory_dff` doesn't (through
+    // enable, reset and bypass multiplexers), so their sync ports needn't
+    // line up, but the logic with the registers outside does.
+    for id in cut {
+        map += &format!("memory_nordff t:$mem_v2 r:MEMID=\\{id} %i\n");
     }
-    map += "memory_collect\n";
     for id in to_logic {
         map += &format!("memory_map t:$mem_v2 r:MEMID=\\{id} %i\n");
     }
@@ -1232,6 +1243,97 @@ fn drop_stray_inits(m: &mut Module) {
 /// has as constants are proven constant on `refined` (exactly: it has no
 /// x), replaced by those constants, and the rest compared.
 pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<Proof, String> {
+    check_impl(dir, Some(rtl), refined, gate, false)
+}
+
+/// Synthesis with M4Ks checked around the blocks, never through them: the
+/// RTL against the stage before the M4K mapping (memories compared at
+/// their ports), and the stage right after it against the result (the
+/// blocks compared at their pins, their parameters equal). The mapping
+/// itself is `m4k_shape_*`'s (one block per configuration, proven) and
+/// the co-simulation's (several blocks and the logic between).
+pub fn check_staged(
+    dir: &Path,
+    rtl: &Path,
+    refined: &Design,
+    before_m4k: &Design,
+    after_m4k: &Design,
+    gate: &Design,
+) -> Result<Proof, String> {
+    let pre = dir.join("pre");
+    let post = dir.join("post");
+    std::fs::create_dir_all(&pre).unwrap();
+    std::fs::create_dir_all(&post).unwrap();
+    let a = check_impl(&pre, Some(rtl), refined, before_m4k, false)?;
+    let b = check_impl(&post, None, after_m4k, gate, true)?;
+    Ok(Proof {
+        constant_registers: a.constant_registers + b.constant_registers,
+        equivalences: a.equivalences + b.equivalences,
+    })
+}
+
+/// A stage after the M4K mapping against a later one, the blocks
+/// compared at their pins.
+pub fn check_after_m4k(dir: &Path, after_m4k: &Design, gate: &Design) -> Result<Proof, String> {
+    check_impl(dir, None, after_m4k, gate, true)
+}
+
+/// Replaces every CY2_M4K by ports: its inputs out, its read data in
+/// (`__blk_<cell>_<port>`), so two netlists with the same blocks are
+/// compared around them. Returns each block's parameters.
+fn cut_block_cells(
+    m: &mut Module,
+) -> BTreeMap<String, BTreeMap<String, chipsmith_netlist::ParamValue>> {
+    use chipsmith_netlist::Dir;
+    let mut params = BTreeMap::new();
+    let mut ports = Vec::new();
+    let mut subst = chipsmith_synth::rewrite::Subst::new(m);
+    let mut keep = Vec::new();
+    for c in std::mem::take(&mut m.cells) {
+        let CellKind::Other(g) = &c.kind else {
+            keep.push(c);
+            continue;
+        };
+        if g.ty != "CY2_M4K" {
+            keep.push(c);
+            continue;
+        }
+        let tag: String = c
+            .name
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+            .collect();
+        for p in &g.ports {
+            let name = format!("__blk_{tag}_{}", p.name);
+            if p.dir == Some(Dir::Out) {
+                let fresh: Vec<SigBit> = p.sig.iter().map(|_| SigBit::Net(m.new_net())).collect();
+                for (old, new) in p.sig.iter().zip(&fresh) {
+                    if let SigBit::Net(n) = old {
+                        subst.set(*n, *new);
+                    }
+                }
+                ports.push((name, Dir::In, fresh));
+            } else {
+                ports.push((name, Dir::Out, p.sig.clone()));
+            }
+        }
+        params.insert(c.name.clone(), g.params.clone());
+    }
+    m.cells = keep;
+    for (name, dir, bits) in ports {
+        add_port(m, name, dir, bits);
+    }
+    subst.apply(m);
+    params
+}
+
+fn check_impl(
+    dir: &Path,
+    rtl: Option<&Path>,
+    refined: &Design,
+    gate: &Design,
+    cut_blocks: bool,
+) -> Result<Proof, String> {
     let gate_mod = top(gate);
     let to_logic = logic_memories(gate_mod);
     let refined_path = dir.join("refined.json");
@@ -1239,38 +1341,80 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
     let gate_path = dir.join("gate.json");
     write(gate, &gate_path);
 
-    // Memories in blocks become registers on both sides, the blocks
-    // through their model (`model_blocks`), and are compared word by word.
-    // Memories an earlier stage still has as memories are compared at
-    // their ports (cut out on both sides).
+    // Step 1, the RTL against `refined`: every memory compared at its
+    // ports (cut out on both sides, its read registers outside it), the
+    // ones in blocks too. Step 2, `refined` against `gate`: memories still
+    // memories in `gate` cut likewise; the ones in blocks either as words
+    // on both sides (the blocks through their model, `model_blocks`) or,
+    // with `cut_blocks`, the blocks cut at their pins on both sides.
     let in_blocks = block_memories(gate_mod);
-    let mut sync_cut = in_blocks.clone();
     let mut cut = Vec::new();
     for c in &gate_mod.cells {
         if let CellKind::Mem(mem) = &c.kind {
-            let id = mem.memid.trim_start_matches('\\').to_owned();
-            if mem.rd.iter().all(|r| r.sync.is_some()) {
-                sync_cut.push(id.clone());
-            }
-            cut.push(id);
+            cut.push(mem.memid.trim_start_matches('\\').to_owned());
         }
     }
+    let prep_side = |d: &mut Design| {
+        for m in d.modules.iter_mut() {
+            latch_resets_to_logic(m);
+            drop_stray_inits(m);
+            chipsmith_synth::tribuf::tribuf(m);
+            cut_pins(m);
+        }
+    };
+    let first = match rtl {
+        Some(rtl) => {
+            let mut all_cut = cut.clone();
+            if !cut_blocks {
+                all_cut.extend(in_blocks.iter().cloned());
+            }
+            let mut gold = prep_memories(dir, "gold_prep", rtl, &to_logic, &all_cut)?;
+            let mut mid1 = prep_memories(dir, "mid_cut_prep", &refined_path, &to_logic, &all_cut)?;
+            prep_side(&mut gold);
+            prep_side(&mut mid1);
+            if cut_blocks {
+                cut_block_cells(top_mut(&mut mid1));
+            }
+            // Cut memories keep their contents: the RTL's, where it gives
+            // any, must be synthesis'.
+            let ours = mem_infos(&mid1);
+            for (id, g) in mem_infos(&gold) {
+                let Some(o) = ours.get(&id) else { continue };
+                if g.init
+                    .0
+                    .iter()
+                    .zip(&o.init.0)
+                    .any(|(a, b)| matches!(a, State::Zero | State::One) && a != b)
+                {
+                    return Err(format!("memory {id}: contents differ from the RTL's"));
+                }
+            }
+            if !all_cut.is_empty() {
+                cut_memories(top_mut(&mut gold))?;
+                cut_memories(top_mut(&mut mid1))?;
+            }
+            let gold_path = dir.join("gold.json");
+            write(&gold, &gold_path);
+            let mid_path = dir.join("mid.json");
+            write(&mid1, &mid_path);
+            equiv(
+                dir,
+                "equiv_refine",
+                &gold_path,
+                &mid_path,
+                top(&gold),
+                false,
+            )?
+        }
+        None => 0,
+    };
+
     let mut mapped = to_logic.clone();
-    mapped.extend(in_blocks.iter().cloned());
-    // Synthesis merged the read registers of the memories it put in
-    // blocks into them; yosys' `memory_dff` does the same on both sides.
-    // The RTL against the netlist with x resolved, and that against the
-    // result: the memories in blocks as words on every side. (At their
-    // ports the RTL's and synthesis' memories can differ: synthesis reads
-    // a register's enable, reset and bypass multiplexers into the port.)
-    let mut gold = prep_memories(dir, "gold_prep", rtl, &mapped, &sync_cut)?;
-    let mut mid = prep_memories(dir, "mid_prep", &refined_path, &mapped, &sync_cut)?;
-    for m in gold.modules.iter_mut().chain(&mut mid.modules) {
-        latch_resets_to_logic(m);
-        drop_stray_inits(m);
-        chipsmith_synth::tribuf::tribuf(m);
-        cut_pins(m);
+    if !cut_blocks {
+        mapped.extend(in_blocks.iter().cloned());
     }
+    let mut mid = prep_memories(dir, "mid_prep", &refined_path, &mapped, &cut)?;
+    prep_side(&mut mid);
     let mut cut_gate = gate.clone();
     {
         let gt = cut_gate
@@ -1278,7 +1422,15 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
             .iter_mut()
             .find(|m| !m.is_blackbox())
             .expect("top");
-        model_blocks(gt, &mem_infos(refined))?;
+        if cut_blocks {
+            let theirs = cut_block_cells(gt);
+            let ours = cut_block_cells(top_mut(&mut mid));
+            if theirs != ours {
+                return Err("the M4K blocks' names or parameters differ between the stages".into());
+            }
+        } else {
+            model_blocks(gt, &mem_infos(refined))?;
+        }
         if !cut.is_empty() {
             cut_memories(gt)?;
         }
@@ -1289,22 +1441,9 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
         cut_pins(m);
     }
     if !cut.is_empty() {
-        cut_memories(top_mut(&mut gold))?;
         cut_memories(top_mut(&mut mid))?;
     }
-    let gold_path = dir.join("gold.json");
-    write(&gold, &gold_path);
-    let mid_path = dir.join("mid.json");
-    write(&mid, &mid_path);
-    let words = !in_blocks.is_empty();
-    let first = equiv(
-        dir,
-        "equiv_refine",
-        &gold_path,
-        &mid_path,
-        top(&gold),
-        words,
-    )?;
+    let words = !cut_blocks && !in_blocks.is_empty();
 
     let gm = mid
         .modules
@@ -1505,4 +1644,157 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
         constant_registers: claims.len(),
         equivalences: first + second,
     })
+}
+
+/// What a co-simulation found.
+#[derive(Debug)]
+pub struct Cosim {
+    pub cycles: usize,
+    /// Output bits compared, summed over the cycles (x in the RTL skipped).
+    pub compared: u64,
+}
+
+/// Simulates the RTL and the synthesized netlist side by side (iverilog),
+/// the blocks as their model (`model_blocks`, the same model the proofs
+/// use), with the same random inputs: every input but the clocks redrawn
+/// from `seed` after each falling edge of the first clock, every output
+/// compared just after it, `cycles` times. An output bit the RTL leaves
+/// x isn't compared. Fails with the seed and the cycle of the first
+/// difference.
+pub fn cosim(
+    dir: &Path,
+    rtl: &Path,
+    refined: &Design,
+    gate: &Design,
+    cycles: usize,
+    seed: u32,
+) -> Result<Cosim, String> {
+    use chipsmith_netlist::Dir;
+    let mut g = gate.clone();
+    {
+        let gt = g
+            .modules
+            .iter_mut()
+            .find(|m| !m.is_blackbox())
+            .expect("top");
+        model_blocks(gt, &mem_infos(refined))?;
+    }
+    let gate_json = dir.join("cosim_gate.json");
+    write(&g, &gate_json);
+    let sim = dir.join("cy2_sim.v");
+    std::fs::write(&sim, SIM_MODELS).unwrap();
+    let gold_v = dir.join("cosim_gold.v");
+    let gate_v = dir.join("cosim_gate.v");
+    yosys(
+        dir,
+        "cosim_netlists",
+        &format!(
+            "read_json {rtl}\nhierarchy -top top\nproc\nmemory_collect\nopt_clean\nrename top gold\n\
+             write_verilog -noattr {gold_v}\ndesign -reset\n\
+             read_json {gate}\nread_verilog -overwrite {sim}\nhierarchy -top top\nproc\nflatten\n\
+             techmap t:$bmux t:$demux\nopt_clean\nrename top gate\nwrite_verilog -noattr {gate_v}\n",
+            rtl = rtl.display(),
+            gate = gate_json.display(),
+            sim = sim.display(),
+            gold_v = gold_v.display(),
+            gate_v = gate_v.display(),
+        ),
+        dir,
+    )?;
+    // The ports, from the RTL.
+    let d = read(rtl);
+    let t = top(&d);
+    let is_clock = |n: &str| n.starts_with("CLOCK_") || n == "clk" || n == "clk2" || n == "rclk";
+    let mut clocks = Vec::new();
+    let mut inputs = Vec::new();
+    let mut outputs = Vec::new();
+    for (_, w, dir) in t.ports() {
+        match dir {
+            Dir::In if is_clock(&w.name) => clocks.push(w.name.clone()),
+            Dir::In => inputs.push((w.name.clone(), w.bits.len())),
+            Dir::Out => outputs.push((w.name.clone(), w.bits.len())),
+            Dir::InOut => return Err(format!("co-simulation: inout port {}", w.name)),
+        }
+    }
+    let Some(main) = clocks.first().cloned() else {
+        return Err("co-simulation: no clock".into());
+    };
+    let mut tb = String::from("`timescale 1ns/1ps\nmodule tb;\n");
+    // Clock periods: 20 ns, then 37 ns, 26 ns, ... so edges rarely meet.
+    for (i, c) in clocks.iter().enumerate() {
+        let half = [10.0, 18.5, 13.0, 23.5][i % 4];
+        tb += &format!("  reg {c} = 0;\n  always #{half} {c} = ~{c};\n");
+    }
+    for (n, w) in &inputs {
+        tb += &format!("  reg [{}:0] {n};\n", w - 1);
+    }
+    for (n, w) in &outputs {
+        tb += &format!("  wire [{}:0] {n}_g, {n}_t;\n", w - 1);
+    }
+    let conns = |sfx: &str| -> String {
+        clocks
+            .iter()
+            .map(|c| format!(".{c}({c})"))
+            .chain(inputs.iter().map(|(n, _)| format!(".{n}({n})")))
+            .chain(outputs.iter().map(|(n, _)| format!(".{n}({n}_{sfx})")))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    tb += &format!("  gold g({});\n  gate t({});\n", conns("g"), conns("t"));
+    tb += &format!("  integer seed = {seed}, cyc = 0, i;\n  reg [63:0] compared = 0;\n");
+    let draw: String = inputs
+        .iter()
+        .map(|(n, w)| {
+            let words = w.div_ceil(32);
+            let parts: Vec<String> = (0..words).map(|_| "$random(seed)".to_string()).collect();
+            format!("    {n} = {{{}}};\n", parts.join(", "))
+        })
+        .collect();
+    tb += &format!("  initial begin\n{draw}  end\n");
+    let mut check = String::new();
+    for (n, w) in &outputs {
+        check += &format!(
+            "    for (i = 0; i < {w}; i = i + 1)\n      if ({n}_g[i] !== 1'bx) begin\n        compared = compared + 1;\n        \
+             if ({n}_g[i] !== {n}_t[i]) begin\n          $display(\"MISMATCH seed=%0d cycle=%0d {n}[%0d] rtl=%b netlist=%b\", {seed}, cyc, i, {n}_g[i], {n}_t[i]);\n          $finish;\n        end\n      end\n"
+        );
+    }
+    tb += &format!(
+        "  always @(negedge {main}) begin\n    #1;\n{check}{draw}    cyc = cyc + 1;\n    if (cyc == {cycles}) begin\n      $display(\"PASS %0d\", compared);\n      $finish;\n    end\n  end\nendmodule\n"
+    );
+    let tb_v = dir.join("cosim_tb.v");
+    std::fs::write(&tb_v, tb).unwrap();
+    let vvp = dir.join("cosim.vvp");
+    let out = Command::new("iverilog")
+        .args(["-g2012", "-o"])
+        .arg(&vvp)
+        .args([&tb_v, &gold_v, &gate_v])
+        .output()
+        .map_err(|e| format!("iverilog: {e} (run in the devshell)"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "iverilog failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    let out = Command::new("vvp")
+        .arg("-n")
+        .arg(&vvp)
+        .output()
+        .map_err(|e| format!("vvp: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    std::fs::write(dir.join("cosim.log"), &text).unwrap();
+    if let Some(l) = text.lines().find(|l| l.starts_with("MISMATCH")) {
+        return Err(l.to_string());
+    }
+    let compared = text
+        .lines()
+        .find_map(|l| l.strip_prefix("PASS "))
+        .and_then(|n| n.trim().parse().ok())
+        .ok_or_else(|| {
+            format!(
+                "co-simulation didn't finish (see {})",
+                dir.join("cosim.log").display()
+            )
+        })?;
+    Ok(Cosim { cycles, compared })
 }

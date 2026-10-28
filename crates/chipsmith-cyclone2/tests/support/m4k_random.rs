@@ -138,6 +138,35 @@ impl Config {
         }
     }
 
+    /// The large shapes of the examples, as configurations.
+    pub fn shapes() -> Vec<Config> {
+        let cfg = |kind, width, depth, wr_factor, rd_factor, init| Config {
+            seed: 1000 + depth as u64 * 64 + width as u64,
+            kind,
+            width,
+            depth,
+            wr_factor,
+            rd_factor,
+            byteena: false,
+            read_enable: false,
+            write_under_enable: false,
+            out_reg: OutReg::None,
+            sync_reset: false,
+            two_clocks: false,
+            init,
+        };
+        vec![
+            // m4k-deep
+            cfg(Kind::SimpleDual, 9, 2048, 1, 1, false),
+            cfg(Kind::Rom, 2, 8192, 1, 1, true),
+            cfg(Kind::SingleNew, 40, 256, 1, 1, false),
+            // m4k-mixed
+            cfg(Kind::SimpleDual, 8, 512, 4, 1, false),
+            cfg(Kind::SimpleDual, 8, 512, 1, 4, false),
+            cfg(Kind::SimpleDual, 1, 4096, 2, 1, false),
+        ]
+    }
+
     pub fn name(&self) -> String {
         format!("m4k-random-{}", self.seed)
     }
@@ -319,6 +348,46 @@ impl Config {
         );
         v += "  assign LEDR = f[17:0];\n  assign LEDG = f[26:18];\nendmodule\n";
         v
+    }
+
+    /// The same memory with its addresses, data and controls straight from
+    /// a 128-bit input and its read data straight out, for co-simulation:
+    /// every input redrawn each cycle reaches every address.
+    pub fn verilog_direct(&self) -> String {
+        let v = self.verilog();
+        let mut out = String::new();
+        let mut n = 0;
+        for line in v.lines() {
+            let t = line.trim_start();
+            if t.starts_with("module top(") {
+                out += "module top(input CLOCK_50, input CLOCK_27, input [127:0] in, output [OUTW:0] out);\n";
+            } else if t.starts_with("output [17:0] LEDR") {
+                continue;
+            } else if t.starts_with("wire [47:0] dd =") {
+                out += "  wire [47:0] dd = in[47:0];\n";
+            } else if t.starts_with("wire [15:0] wa =") {
+                out += "  wire [15:0] wa = in[63:48];\n";
+            } else if t.starts_with("wire [15:0] ra =") {
+                out += "  wire [15:0] ra = in[79:64];\n";
+            } else if t.starts_with("wire we =") {
+                out += "  wire we = in[80];\n";
+            } else if t.starts_with("wire web =") {
+                out += "  wire web = in[81];\n";
+            } else if t.starts_with("wire re =") {
+                out += "  wire re = in[82];\n";
+            } else if t.starts_with("always @(posedge rclk) begin clr <=") {
+                out += "  always @(posedge rclk) begin clr <= in[83]; rst <= in[84]; oen <= in[85]; end\n";
+            } else if let Some(r) = t.strip_prefix("wire [").filter(|_| t.contains("] all =")) {
+                n = r.split(':').next().unwrap().parse::<usize>().unwrap();
+                out += line;
+                out += "\n  assign out = all;\nendmodule\n";
+                break;
+            } else {
+                out += line;
+                out += "\n";
+            }
+        }
+        out.replace("OUTW", &n.to_string())
     }
 
     fn read_stmt(&self, v: &mut String, en: &str, expr: &str) {

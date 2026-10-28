@@ -63,6 +63,8 @@
             pkgs.just
             pkgs.pkg-config
             pkgs.libusb1
+            # Random co-simulation of M4K designs against their RTL (tests).
+            pkgs.iverilog
           ]
           ++ flowTools;
           # cyclone2-re's yosys flow, the oracle chipsmith's synthesis is

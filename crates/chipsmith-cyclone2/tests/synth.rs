@@ -25,6 +25,8 @@ fn scratch(name: &str) -> PathBuf {
 #[derive(Default)]
 struct Stages {
     refined: Option<Design>,
+    alumacc: Option<Design>,
+    m4k: Option<Design>,
     cells: Option<Design>,
 }
 
@@ -35,10 +37,41 @@ impl Observer for Stages {
         });
         match name {
             "refined" => self.refined = d,
+            "alumacc" => self.alumacc = d,
+            "m4k" => self.m4k = d,
             "cells" => self.cells = d,
             _ => {}
         }
     }
+}
+
+/// The equivalence check for a synthesized design: with M4Ks, around the
+/// blocks (`support::check_staged`), else straight.
+fn prove(name: &str, s: &Synthesized) -> support::Proof {
+    let st = &s.stages;
+    let cells = st.cells.as_ref().expect("a cells stage");
+    let blocks = cells.modules[0]
+        .cells
+        .iter()
+        .any(|c| c.kind.type_name() == "CY2_M4K");
+    let r = if blocks {
+        support::check_staged(
+            &s.dir,
+            &s.rtl,
+            st.refined.as_ref().expect("a refined stage"),
+            st.alumacc.as_ref().expect("an alumacc stage"),
+            st.m4k.as_ref().expect("an m4k stage"),
+            cells,
+        )
+    } else {
+        support::check(
+            &s.dir,
+            &s.rtl,
+            st.refined.as_ref().expect("a refined stage"),
+            cells,
+        )
+    };
+    r.unwrap_or_else(|e| panic!("{name}: {e}"))
 }
 
 struct Synthesized {
@@ -94,13 +127,7 @@ fn design_with(
     io_registers: &BTreeMap<String, IoRegisters>,
 ) {
     let s = synthesize_with(name, top, files, io_registers);
-    let proof = support::check(
-        &s.dir,
-        &s.rtl,
-        s.stages.refined.as_ref().expect("a refined stage"),
-        s.stages.cells.as_ref().expect("a cells stage"),
-    )
-    .unwrap_or_else(|e| panic!("{name}: {e}"));
+    let proof = prove(name, &s);
     eprintln!(
         "{name}: {} $equiv proven, {} registers proven constant",
         proof.equivalences, proof.constant_registers
@@ -575,10 +602,16 @@ fn every_stage_is_equivalent() {
             .unwrap()
             .1
             .clone();
-        for (name, stage) in &all.0 {
+        // From the M4K mapping on, stages are compared with it around the
+        // blocks; the mapping itself is the `m4k_shape_*` proofs'.
+        let m4k_at = all.0.iter().position(|(n, _)| n == "m4k");
+        for (i, (name, stage)) in all.0.iter().enumerate() {
             let d = scratch(&format!("{ex}-stage-{name}"));
-            support::check(&d, &rtl, &refined, stage)
-                .unwrap_or_else(|e| panic!("{ex}, stage {name}: {e}"));
+            let r = match m4k_at {
+                Some(at) if i >= at => support::check_after_m4k(&d, &all.0[at].1, stage),
+                _ => support::check(&d, &rtl, &refined, stage),
+            };
+            r.unwrap_or_else(|e| panic!("{ex}, stage {name}: {e}"));
         }
     }
 }
@@ -620,12 +653,11 @@ fn a_wrong_lut_bit_is_caught() {
     assert!(err.contains("not proven equivalent"), "{err}");
 }
 
-/// An M4K example or a held-out random memory: in blocks, proven
-/// equivalent to the RTL with the blocks' contents compared word by word
-/// (`support::check`), packed.
-fn m4k_design(name: &str, files: &[PathBuf]) {
-    let s = synthesize(name, "top", files);
-    let blocks = support::read(&s.netlist)
+/// Co-simulation cycles per design.
+const COSIM_CYCLES: usize = 10_000;
+
+fn blocks_in(netlist: &Path) -> usize {
+    support::read(netlist)
         .modules
         .iter()
         .find(|m| !m.is_blackbox())
@@ -633,17 +665,38 @@ fn m4k_design(name: &str, files: &[PathBuf]) {
         .cells
         .iter()
         .filter(|c| c.kind.type_name() == "CY2_M4K")
-        .count();
+        .count()
+}
+
+/// An M4K example or a held-out random memory: in blocks, proven
+/// equivalent to the RTL around the blocks (`support::check_staged`),
+/// co-simulated against the RTL through them, packed.
+fn m4k_design(name: &str, files: &[PathBuf]) {
+    let t = std::time::Instant::now();
+    let s = synthesize(name, "top", files);
+    let blocks = blocks_in(&s.netlist);
     assert!(blocks > 0, "{name}: no M4K");
-    support::check(
+    let proof = prove(name, &s);
+    let proved = t.elapsed();
+    let sim = support::cosim(
         &s.dir,
         &s.rtl,
         s.stages.refined.as_ref().unwrap(),
         s.stages.cells.as_ref().unwrap(),
+        COSIM_CYCLES,
+        1,
     )
-    .unwrap_or_else(|e| panic!("{name}: {e}"));
+    .unwrap_or_else(|e| panic!("{name}: co-simulation: {e}"));
     pack(&s.dir, name, &s.netlist);
-    eprintln!("{name}: {blocks} M4Ks, proven");
+    eprintln!(
+        "{name}: {blocks} M4Ks; around the blocks {} $equiv proven in {:.0?}; \
+         co-simulated {} cycles, {} output bits compared, in {:.0?}",
+        proof.equivalences,
+        proved,
+        sim.cycles,
+        sim.compared,
+        t.elapsed() - proved
+    );
 }
 
 macro_rules! m4k_examples {
@@ -669,7 +722,11 @@ m4k_examples!(
 #[path = "support/m4k_random.rs"]
 mod m4k_random;
 
-/// Held-out random memories (`support/m4k_random.rs`).
+#[path = "support/m4k_shapes.rs"]
+mod m4k_shapes;
+
+/// Held-out random memories (`support/m4k_random.rs`), as built for the
+/// DE2 (counters and switches in, LEDs out).
 fn m4k_random(seed: u64) {
     let cfg = m4k_random::Config::new(seed);
     let name = cfg.name();
@@ -680,30 +737,165 @@ fn m4k_random(seed: u64) {
     m4k_design(&name, &[v]);
 }
 
+/// A memory with its ports straight on the design's, co-simulated against
+/// its RTL: every address reachable every cycle.
+fn m4k_direct(
+    cfg: &m4k_random::Config,
+    mutate: impl Fn(&mut Design),
+) -> Result<support::Cosim, String> {
+    let name = format!("{}-direct", cfg.name());
+    let dir = scratch(&format!("{name}-src"));
+    let v = dir.join("top.v");
+    std::fs::write(&v, cfg.verilog_direct()).unwrap();
+    let s = synthesize(&name, "top", &[v]);
+    assert!(blocks_in(&s.netlist) > 0, "{name}: no M4K");
+    let mut gate = s.stages.cells.clone().unwrap();
+    mutate(&mut gate);
+    support::cosim(
+        &s.dir,
+        &s.rtl,
+        s.stages.refined.as_ref().unwrap(),
+        &gate,
+        COSIM_CYCLES,
+        (cfg.seed as u32).wrapping_mul(2_654_435_761),
+    )
+}
+
 macro_rules! m4k_random_tests {
-    ($($f:ident = $seed:literal),*) => {$(
+    ($($f:ident, $g:ident = $seed:literal),*) => {$(
         #[test]
         fn $f() {
             m4k_random($seed);
+        }
+        #[test]
+        fn $g() {
+            let cfg = m4k_random::Config::new($seed);
+            let r = m4k_direct(&cfg, |_| {}).unwrap_or_else(|e| panic!("{cfg:?}: {e}"));
+            eprintln!("{}: {r:?}", cfg.name());
         }
     )*};
 }
 
 m4k_random_tests!(
-    m4k_random_1 = 1,
-    m4k_random_2 = 2,
-    m4k_random_3 = 3,
-    m4k_random_4 = 4,
-    m4k_random_5 = 5,
-    m4k_random_6 = 6,
-    m4k_random_7 = 7,
-    m4k_random_8 = 8,
-    m4k_random_9 = 9,
-    m4k_random_10 = 10,
-    m4k_random_11 = 11,
-    m4k_random_12 = 12,
-    m4k_random_13 = 13,
-    m4k_random_14 = 14,
-    m4k_random_15 = 15,
-    m4k_random_16 = 16
+    m4k_random_1,
+    m4k_cosim_random_1 = 1,
+    m4k_random_2,
+    m4k_cosim_random_2 = 2,
+    m4k_random_3,
+    m4k_cosim_random_3 = 3,
+    m4k_random_4,
+    m4k_cosim_random_4 = 4,
+    m4k_random_5,
+    m4k_cosim_random_5 = 5,
+    m4k_random_6,
+    m4k_cosim_random_6 = 6,
+    m4k_random_7,
+    m4k_cosim_random_7 = 7,
+    m4k_random_8,
+    m4k_cosim_random_8 = 8,
+    m4k_random_9,
+    m4k_cosim_random_9 = 9,
+    m4k_random_10,
+    m4k_cosim_random_10 = 10,
+    m4k_random_11,
+    m4k_cosim_random_11 = 11,
+    m4k_random_12,
+    m4k_cosim_random_12 = 12,
+    m4k_random_13,
+    m4k_cosim_random_13 = 13,
+    m4k_random_14,
+    m4k_cosim_random_14 = 14,
+    m4k_random_15,
+    m4k_cosim_random_15 = 15,
+    m4k_random_16,
+    m4k_cosim_random_16 = 16
 );
+
+/// The examples' large memories (deep, mixed widths), co-simulated with
+/// their ports on the design's.
+#[test]
+fn m4k_cosim_large_shapes() {
+    for cfg in m4k_random::Config::shapes() {
+        let r = m4k_direct(&cfg, |_| {}).unwrap_or_else(|e| panic!("{cfg:?}: {e}"));
+        eprintln!("{cfg:?}: {r:?}");
+    }
+}
+
+/// The co-simulation isn't vacuous: two address pins of a block swapped,
+/// or the write enables of two block rows (a wrong block select), and it
+/// fails.
+#[test]
+fn m4k_cosim_catches_wrong_blocks() {
+    let deep = m4k_random::Config::shapes().remove(0);
+    let swap_addr = |d: &mut Design| {
+        let m = &mut d.modules[0];
+        let c = m
+            .cells
+            .iter_mut()
+            .find(|c| c.kind.type_name() == "CY2_M4K")
+            .unwrap();
+        let CellKind::Other(g) = &mut c.kind else {
+            unreachable!()
+        };
+        let a = g.ports.iter_mut().find(|p| p.name == "B_ADDR").unwrap();
+        a.sig.swap(10, 11);
+    };
+    let swap_rows = |d: &mut Design| {
+        let m = &mut d.modules[0];
+        let we = |m: &Module, row: &str| {
+            m.cells
+                .iter()
+                .position(|c| c.name.ends_with(row) && c.kind.type_name() == "CY2_M4K")
+                .unwrap()
+        };
+        let (i, j) = (we(m, ".0.0"), we(m, ".1.0"));
+        let get = |m: &Module, i: usize| match &m.cells[i].kind {
+            CellKind::Other(g) => g.port("A_WE").unwrap().sig.clone(),
+            _ => unreachable!(),
+        };
+        let (a, b) = (get(m, i), get(m, j));
+        for (k, v) in [(i, b), (j, a)] {
+            if let CellKind::Other(g) = &mut m.cells[k].kind {
+                g.ports.iter_mut().find(|p| p.name == "A_WE").unwrap().sig = v;
+            }
+        }
+    };
+    for (what, f) in [
+        ("swapped address pins", &swap_addr as &dyn Fn(&mut Design)),
+        ("swapped block rows", &swap_rows),
+    ] {
+        let err = m4k_direct(&deep, f).expect_err(what);
+        assert!(err.starts_with("MISMATCH seed="), "{what}: {err}");
+        eprintln!("{what}: {err}");
+    }
+}
+
+/// One block per configuration class (`support/m4k_shapes.rs`), the
+/// mapping proven: the blocks' model against yosys' memory, word by word.
+#[test]
+fn m4k_shapes_proven() {
+    let only = std::env::var("M4K_SHAPE").ok();
+    for (name, v, blocks) in m4k_shapes::shapes() {
+        if only.as_deref().is_some_and(|o| o != name) {
+            continue;
+        }
+        let t = std::time::Instant::now();
+        let dir = scratch(&format!("m4k-shape-{name}-src"));
+        let f = dir.join("top.v");
+        std::fs::write(&f, v).unwrap();
+        let s = synthesize(&format!("m4k-shape-{name}"), "top", &[f]);
+        assert_eq!(blocks_in(&s.netlist), blocks, "{name}: blocks");
+        let p = support::check(
+            &s.dir,
+            &s.rtl,
+            s.stages.refined.as_ref().unwrap(),
+            s.stages.cells.as_ref().unwrap(),
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+        eprintln!(
+            "m4k shape {name}: {} $equiv proven in {:.0?}",
+            p.equivalences,
+            t.elapsed()
+        );
+    }
+}
