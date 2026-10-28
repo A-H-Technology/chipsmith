@@ -1323,8 +1323,10 @@ fn build(
             let mut ports = Vec::new();
             ports.push(port("CLK", Dir::In, vec![r.domains[0].clk]));
             let mut addr = [vec![SigBit::ZERO; 12], vec![SigBit::ZERO; 12]];
-            let mut din_a = vec![SigBit::ZERO; 36];
-            let mut din_b = vec![SigBit::ZERO; 18];
+            // Columns no memory bit sits in take x: nothing writes there, so
+            // nothing drives them (a constant memory bit is driven, `pack`).
+            let mut din_a = vec![SigBit::X; 36];
+            let mut din_b = vec![SigBit::X; 18];
             let mut we = [SigBit::ZERO; 2];
             let mut be: [Option<SigSpec>; 2] = [None, None];
             for s in 0..2 {
