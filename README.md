@@ -191,7 +191,9 @@ used.
   LEDR[3:1] counting with LEDR[0] off. Since then a ninth memory, a true
   dual port whose ports write one word on every write edge (the
   collision above), checks each port reads back its own write and the
-  word holds port B's; not run on the board yet.
+  word holds port B's. Run with it on the DE2 2026-10-29 (chipsmith
+  816ddd5, 12 M4Ks, loaded over JTAG): `"M4K!"`, the passes rising,
+  0 errors.
 
 How the M4K mapping is checked (2026-10-28, after merging `open` 5b22b89;
 `crates/chipsmith-cyclone2/tests/synth.rs`, times on luna with two checks
