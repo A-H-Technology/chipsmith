@@ -573,3 +573,25 @@ fn a_clock_from_a_register_gets_a_clock_control() {
     let global = nl.cell(cc).net(Port::Outclk);
     assert_eq!(cell(&nl, "led").net(Port::Clk), global);
 }
+
+/// A data bit synthesis writes as a constant is driven by an LE: the block
+/// doesn't read an unconnected data input as 0 (Quartus routes its GND
+/// there). A cell from the yosys flow (no SLICE) keeps it unconnected.
+#[test]
+fn a_constant_data_bit_gets_an_le() {
+    let mut d = single_port_ram(2);
+    let ram = &mut d["modules"]["top"]["cells"]["ram"];
+    ram["connections"]["A_DATAIN"][1] = json!("0");
+    let legacy = d.clone();
+    d["modules"]["top"]["cells"]["ram"]["parameters"]["SLICE"] = json!(format!("{:032b}", 2));
+    let mut nl = yosys::import(&d).unwrap();
+    pack(&mut nl).unwrap();
+    let n = cell(&nl, "ram")
+        .net(Port::M4k(Pin::Di(1)))
+        .expect("DI1 driven");
+    let (drv, _) = nl.net(n).driver.unwrap();
+    assert_eq!(nl.cell(drv).kind, Kind::Lut { mask: 0 });
+    let mut nl = yosys::import(&legacy).unwrap();
+    pack(&mut nl).unwrap();
+    assert!(cell(&nl, "ram").net(Port::M4k(Pin::Di(1))).is_none());
+}

@@ -63,8 +63,9 @@ pub fn pack_file(netlist: &Path, packed: &Path) -> Result<Stats> {
 fn pack(nl: &mut Netlist) -> Result<Stats> {
     let mut stats = Stats::default();
     pack_io(nl)?;
-    pack_m4k(nl, &mut stats)?;
+    let tied_data = pack_m4k(nl, &mut stats)?;
     pack_constants(nl, &mut stats)?;
+    drive_tied_data(nl, tied_data);
     pack_lut1(nl, &mut stats);
     pack_lut_ff(nl, &mut stats)?;
     pack_carry(nl, &mut stats)?;
@@ -242,7 +243,8 @@ fn pack_io(nl: &mut Netlist) -> Result<()> {
 /// enables tied active and clears tied inactive are dropped (an unconnected
 /// one reads that way). A port whose write enable is never driven doesn't
 /// write: a ROM.
-fn pack_m4k(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
+fn pack_m4k(nl: &mut Netlist, stats: &mut Stats) -> Result<Vec<(CellId, Pin, bool)>> {
+    let mut tied_data = Vec::new();
     // Driven by GND/VCC, or not at all; a net without a driver isn't.
     let constant = |nl: &Netlist, n: Option<NetId>| {
         n.is_none_or(|n| {
@@ -267,6 +269,7 @@ fn pack_m4k(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
         };
         stats.m4ks += 1;
         let name = nl.cell(c).name.clone();
+        let synthesized = nl.cell(c).params.contains_key("SLICE");
         let mut writes = [false; 2];
         for (i, side) in [Side::A, Side::B].into_iter().enumerate() {
             let we = nl.cell(c).net(Port::Ram(CellPort::We(side)));
@@ -363,6 +366,19 @@ fn pack_m4k(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
             };
             if let Some(n) = driven.filter(|_| keep) {
                 pins.push((lp.pin(), n));
+            } else if let (CellPort::DataIn(side, col), true, Some(v)) = (lp, keep, tied(nl, net)) {
+                // A data bit written as a constant: the block doesn't read
+                // an unconnected data input as 0 (Quartus routes its GND
+                // there), so an LE drives it. Columns no data bit sits in
+                // (and cells from the yosys flow, which don't say which
+                // those are) stay unconnected.
+                let used = synthesized
+                    && shape.width(side).is_some_and(|w| {
+                        (0..shape.data_bits(w)).any(|k| shape.column(w, k) == col as usize)
+                    });
+                if used {
+                    tied_data.push((c, lp.pin(), v));
+                }
             }
         }
         for (pin, n) in pins.into_iter().chain(outs) {
@@ -374,7 +390,33 @@ fn pack_m4k(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
             nl.connect(c, port, n);
         }
     }
-    Ok(())
+    Ok(tied_data)
+}
+
+/// An LE for each M4K data input written as a constant (`pack_m4k`),
+/// after `pack_constants`, which would take an input-less LUT for the
+/// constant itself.
+fn drive_tied_data(nl: &mut Netlist, tied: Vec<(CellId, Pin, bool)>) {
+    for (c, pin, v) in tied {
+        let name = format!("{}${pin}", nl.cell(c).name);
+        let lut = nl.create_cell(
+            format!("{name}$const"),
+            Kind::Lut {
+                mask: if v { 0xFFFF } else { 0x0000 },
+            },
+        );
+        for p in LUT_INPUTS
+            .into_iter()
+            .chain([Port::Cin, Port::Combout, Port::Cout])
+        {
+            nl.add_port(lut, p);
+        }
+        let n = nl.create_net(format!("{name}$const_net"));
+        nl.connect(lut, Port::Combout, n);
+        let port = Port::M4k(pin);
+        nl.add_port(c, port);
+        nl.connect(c, port, n);
+    }
 }
 
 /// Constants have no driver in the fabric: LUT inputs are folded into the

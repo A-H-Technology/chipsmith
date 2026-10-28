@@ -1415,7 +1415,33 @@ fn check_impl(
     }
     let mut mid = prep_memories(dir, "mid_prep", &refined_path, &mapped, &cut)?;
     prep_side(&mut mid);
-    let mut cut_gate = gate.clone();
+    // A stage that still has memories: their read registers outside them
+    // too (`memory_nordff`), as on the other side.
+    let mut cut_gate = if cut.is_empty() {
+        gate.clone()
+    } else {
+        let lib = dir.join("cells.v");
+        std::fs::write(&lib, cells::LIBRARY).unwrap();
+        let out = dir.join("gate_nordff.json");
+        let nordff: String = cut
+            .iter()
+            .map(|id| format!("memory_nordff t:$mem_v2 r:MEMID=\\{id} %i\n"))
+            .collect();
+        yosys(
+            dir,
+            "gate_nordff",
+            &format!(
+                "read_verilog -lib {}\nread_json {}\nhierarchy -top top\n{nordff}opt_clean\nwrite_json {}\n",
+                lib.display(),
+                gate_path.display(),
+                out.display()
+            ),
+            dir,
+        )?;
+        let mut d = read(&out);
+        d.modules.retain(|m| !m.is_blackbox());
+        d
+    };
     {
         let gt = cut_gate
             .modules
