@@ -118,7 +118,16 @@ fn run(
     // word at a time has one enable.
     opt::opt_word(m);
     opt::opt_merge(m);
-    memory::merge_registers(m, m4k::mappable)?;
+    // A memory declared as logic keeps its registers where they are.
+    let logic: std::collections::HashSet<String> = m
+        .cells
+        .iter()
+        .filter_map(|c| match &c.kind {
+            CellKind::Mem(mem) if m4k::wants_logic(&c.attributes) => Some(mem.memid.clone()),
+            _ => None,
+        })
+        .collect();
+    memory::merge_registers(m, |mem| !logic.contains(&mem.memid) && m4k::mappable(mem))?;
     undef::refine(m)?;
     obs.stage("refined", m);
     fsm::compare_states(m);

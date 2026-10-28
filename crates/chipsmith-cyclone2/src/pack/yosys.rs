@@ -245,12 +245,15 @@ fn kind_of(ty: &str, params: &BTreeMap<String, Value>, name: &str) -> Result<Kin
             in_reg: register(register_param::INPUT)?,
         },
         "CY2_M4K" => {
-            let mode = params.get("MODE").and_then(Value::as_str);
-            let width = params.get("WIDTH").and_then(int);
-            let (Some(mode), Some(width)) = (mode, width) else {
-                bail!("M4K {name}: MODE or WIDTH missing");
-            };
-            Kind::M4k(m4k::Shape::parse(mode, width).with_context(|| format!("M4K {name}"))?)
+            // The packer needs no more than the shape's ports: a cell from
+            // the yosys flow is taken as using every column; the bitstream
+            // reads which it uses off its pins.
+            let shape = m4k::Shape::parse(
+                |k| params.get(k).and_then(Value::as_str).map(str::to_owned),
+                |k| params.get(k).and_then(int),
+                |w| w.bits() as u8,
+            );
+            Kind::M4k(shape.with_context(|| format!("M4K {name}"))?)
         }
         other => match crate::hard::Block::from_cell_type(other) {
             Some(b) => Kind::Hard(b),

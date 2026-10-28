@@ -13,6 +13,7 @@ use chipsmith_route::chipdb::{ChipDb, NodeId};
 use chipsmith_route::timing::{self, Ps};
 use chipsmith_route::{Design, NetReq, Router, Tree};
 
+use crate::m4k::{Pin, Ports, Sel, Shape, Side};
 use crate::pin::register_param;
 
 /// A prebuilt routing graph (`chipsmith routing-graph`).
@@ -204,6 +205,59 @@ fn routing_attribute(db: &ChipDb, net: &NetReq, tree: &Tree) -> String {
     s
 }
 
+/// A packed M4K's shape, from its parameters (yosys' JSON strings).
+fn m4k_shape(cell: &Value) -> Option<Shape> {
+    let p = &cell["parameters"];
+    Shape::parse(
+        |k| p[k].as_str().map(|v| v.trim_end().to_owned()),
+        |k| {
+            p[k].as_str()
+                .and_then(|v| u64::from_str_radix(v.trim(), 2).ok())
+        },
+        |w| w.bits() as u8,
+    )
+    .ok()
+}
+
+/// The clock a pin of an M4K launches or captures on: a port's inputs on
+/// its input clock, the read data on its output register's clock (else
+/// the read port's), a clock enable or clear on its own clock.
+fn m4k_pin_clock(s: Shape, pin: &str) -> Option<Sel> {
+    let side_of_data = |k: u8| -> Side {
+        let tdp = matches!(s.ports(), Ports::TrueDual { .. });
+        if tdp && k >= 18 {
+            Side::B
+        } else {
+            match s.ports() {
+                Ports::SimpleDual { .. } => Side::B,
+                _ => Side::A,
+            }
+        }
+    };
+    Some(match Pin::parse(pin)? {
+        Pin::Clk0 | Pin::Clk1 => return None,
+        Pin::Ena(k) | Pin::Clr(k) => k,
+        Pin::We => s.input_clock(Side::A),
+        Pin::Re | Pin::Ra(_) => s.input_clock(Side::B),
+        Pin::Wa(_) => s.input_clock(Side::A),
+        Pin::Be(k) => s.input_clock(if k >= 2 && matches!(s.ports(), Ports::TrueDual { .. }) {
+            Side::B
+        } else {
+            Side::A
+        }),
+        Pin::Di(k) => {
+            let b = matches!(s.ports(), Ports::TrueDual { .. }) && k >= 18
+                || matches!(k, 26 | 35) && s.width(Side::B).is_some_and(|w| w.addr_bits() >= 11);
+            s.input_clock(if b { Side::B } else { Side::A })
+        }
+        Pin::Do(k) => {
+            let side = side_of_data(k);
+            let r = s.read_ports().into_iter().find(|(x, _)| *x == side)?.1;
+            r.out_reg.map_or(s.input_clock(side), |o| o.clock)
+        }
+    })
+}
+
 fn net_of(cell: &Value, port: &str) -> Option<u64> {
     cell["connections"][port].as_array()?.first()?.as_u64()
 }
@@ -350,9 +404,18 @@ fn read_design(db: &ChipDb, json: &Value) -> Result<Design> {
             _ => None,
         };
         if let Some(clock) = clock {
+            // A block on two clocks: each pin on its own (`m4k_pin_clock`).
+            let shape = (ty == "CY2_M4K").then(|| m4k_shape(cell)).flatten();
             for p in &connected {
                 let n = timing.node(name, p);
-                timing.set_clock(n, clock as u32);
+                let c = shape
+                    .and_then(|s| m4k_pin_clock(s, p))
+                    .and_then(|sel| match sel {
+                        Sel::Zero => net_of(cell, "CLK0"),
+                        Sel::One => net_of(cell, "CLK1"),
+                    })
+                    .unwrap_or(clock);
+                timing.set_clock(n, c as u32);
             }
         }
         for (port, bits) in conns {

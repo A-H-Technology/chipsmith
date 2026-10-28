@@ -56,6 +56,17 @@ impl Width {
     fn class(self) -> usize {
         self as usize
     }
+    pub fn from_bits(bits: u64) -> Option<Self> {
+        Some(match bits {
+            1 => Width::X1,
+            2 => Width::X2,
+            4 => Width::X4,
+            9 => Width::X9,
+            18 => Width::X18,
+            36 => Width::X36,
+            _ => return None,
+        })
+    }
     pub fn from_addr_bits(n: u32) -> Option<Self> {
         Some(match n {
             12 => Width::X1,

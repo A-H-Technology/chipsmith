@@ -90,6 +90,8 @@
             cudaToolkit
             # experiments/cubecl-hello links with it, see its .cargo/config.toml.
             pkgs.lld
+            # Random co-simulation of M4K designs against their RTL (tests).
+            pkgs.iverilog
           ]
           ++ flowTools;
           ROCM_PATH = pkgs.rocmPackages.clr;

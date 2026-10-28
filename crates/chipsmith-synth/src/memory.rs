@@ -402,6 +402,107 @@ pub fn merge_registers(m: &mut Module, accept: impl Fn(&Mem) -> bool) -> Result<
     Ok(())
 }
 
+/// What [`through_muxes`] finds: the register, its bit, its clocking, the
+/// reset value and the write a bypass reads through (enable, data).
+type ReadRegister = (
+    usize,
+    usize,
+    Clocking,
+    Option<State>,
+    Option<(SigBit, SigBit)>,
+);
+
+/// The register a read data bit goes into: straight, or through the
+/// multiplexers `proc` makes of an enable (`en ? data : q`) and a
+/// synchronous reset (`rst ? value : data`), which `opt_dff` would only
+/// later fold into the register. Returns the register, its bit, its
+/// clocking with those folded in, and the reset value.
+fn through_muxes(
+    m: &Module,
+    readers: &[Vec<(usize, Option<usize>)>],
+    n: Net,
+) -> Option<ReadRegister> {
+    enum Layer {
+        En(Ctrl, SigBit),
+        Srst(Ctrl, State),
+        /// `we ? wdata : data`: a write's new data, read through.
+        Bypass(SigBit, SigBit),
+    }
+    let mut layers = Vec::new();
+    let mut cur = n;
+    loop {
+        match readers[cur.index()][..] {
+            [(cell, Some(bit))] => {
+                let CellKind::Ff(ff) = &m.cells[cell].kind else {
+                    return None;
+                };
+                let mut c = clocking(ff)?;
+                if layers.is_empty() {
+                    return Some((cell, bit, c, None, None));
+                }
+                // proc's registers are plain; the muxes are all there is.
+                if c.en.is_some() || c.srst.is_some() {
+                    return None;
+                }
+                let mut value = None;
+                let mut bypass = None;
+                for l in &layers {
+                    match *l {
+                        // Only innermost: what the read itself returns.
+                        Layer::Bypass(we, d) => {
+                            if !matches!(layers.first(), Some(Layer::Bypass(..)))
+                                || bypass.is_some()
+                            {
+                                return None;
+                            }
+                            bypass = Some((we, d));
+                        }
+                        Layer::En(e, hold) => {
+                            if hold != ff.q[bit] || c.en.is_some() {
+                                return None;
+                            }
+                            c.en = Some(e);
+                        }
+                        Layer::Srst(r, v) => {
+                            if c.srst.is_some() {
+                                return None;
+                            }
+                            value = Some(v);
+                            c.srst = Some((r, false));
+                        }
+                    }
+                }
+                // A reset inside the enable (`en ? (rst ? v : data) : q`)
+                // only acts on enabled edges.
+                if let ([Layer::Srst(..), Layer::En(..)], Some((r, _))) = (&layers[..], c.srst) {
+                    c.srst = Some((r, true));
+                }
+                return Some((cell, bit, c, value, bypass));
+            }
+            [(cell, None)] if layers.len() < 3 => {
+                // usize::MAX: a module port reads it.
+                let Some(CellKind::Mux(mx)) = m.cells.get(cell).map(|c| &c.kind) else {
+                    return None;
+                };
+                let s = Ctrl::pos(mx.s);
+                let me = SigBit::Net(cur);
+                let j = (0..mx.y.len()).find(|&j| mx.a[j] == me || mx.b[j] == me)?;
+                if mx.b[j] == me && mx.a[j] != me {
+                    layers.push(Layer::En(s, mx.a[j]));
+                } else if let (true, SigBit::Const(v)) = (mx.a[j] == me, mx.b[j]) {
+                    layers.push(Layer::Srst(s, v));
+                } else if mx.a[j] == me && layers.is_empty() {
+                    layers.push(Layer::Bypass(mx.s, mx.b[j]));
+                } else {
+                    return None;
+                }
+                cur = mx.y[j].net()?;
+            }
+            _ => return None,
+        }
+    }
+}
+
 fn output_register(
     m: &Module,
     readers: &[Vec<(usize, Option<usize>)>],
@@ -410,25 +511,34 @@ fn output_register(
     rd: &MemRd,
     ff_drop: &mut HashMap<usize, Vec<bool>>,
 ) -> Option<MemRd> {
-    let mut found: Vec<(usize, usize)> = Vec::new();
+    let mut found: Vec<(usize, usize, Option<State>)> = Vec::new();
     let mut clk: Option<Clocking> = None;
-    for b in &rd.data {
+    // Bypassed write ports: per write port, whether every data bit reads
+    // its new data through (then the read is transparent to it) or none.
+    let mut bypassed: Vec<Option<bool>> = vec![None; mem.wr.len()];
+    for (k, b) in rd.data.iter().enumerate() {
         let SigBit::Net(n) = b else { return None };
-        let [(cell, Some(bit))] = readers[n.index()][..] else {
+        let (cell, bit, this, value, bypass) = through_muxes(m, readers, *n)?;
+        for (j, w) in mem.wr.iter().enumerate() {
+            let hit = bypass.is_some_and(|(we, d)| {
+                w.addr == rd.addr && w.en.get(k) == Some(&we) && w.data.get(k) == Some(&d)
+            });
+            if bypassed[j].is_some_and(|x| x != hit) {
+                return None;
+            }
+            bypassed[j] = Some(hit);
+        }
+        if bypass.is_some() && !bypassed.contains(&Some(true)) {
             return None;
-        };
+        }
         if ff_drop.get(&cell).is_some_and(|d| d[bit]) {
             return None;
         }
-        let CellKind::Ff(ff) = &m.cells[cell].kind else {
-            return None;
-        };
-        let this = clocking(ff)?;
         if clk.as_ref().is_some_and(|c| *c != this) {
             return None;
         }
         clk = Some(this);
-        found.push((cell, bit));
+        found.push((cell, bit, value));
     }
     let clk = clk?;
     // The enable and reset must be active high for the port's signals.
@@ -439,7 +549,7 @@ fn output_register(
     }
     let mut data = Vec::new();
     let (mut init_value, mut srst_value) = (Vec::new(), Vec::new());
-    for &(cell, bit) in &found {
+    for &(cell, bit, mux_value) in &found {
         let CellKind::Ff(ff) = &m.cells[cell].kind else {
             unreachable!()
         };
@@ -451,13 +561,13 @@ fn output_register(
                 .copied()
                 .unwrap_or(State::X),
         );
-        srst_value.push(match &ff.kind {
+        srst_value.push(mux_value.unwrap_or(match &ff.kind {
             FfKind::Dff {
                 control: DffControl::Sync { value, .. },
                 ..
             } => value.0[bit],
             _ => State::X,
-        });
+        }));
         ff_drop
             .entry(cell)
             .or_insert_with(|| vec![false; ff.width()])[bit] = true;
@@ -475,7 +585,7 @@ fn output_register(
             init_value: Const(init_value),
             arst_value: Const::filled(State::X, mem.width),
             srst_value: Const(srst_value),
-            transparent: vec![false; mem.wr.len()],
+            transparent: bypassed.iter().map(|x| *x == Some(true)).collect(),
             collision_x: vec![false; mem.wr.len()],
         }),
     })

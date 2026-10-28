@@ -26,7 +26,7 @@ use mask::{fix, invert_input, normalise_carry, substitute, BUFFERS};
 use netlist::{CellId, IoeIn, Kind, NetId, Netlist, Port, LUT_INPUTS};
 pub use yosys::bit_name;
 
-use crate::m4k::{AddrPort, Mode, Pin, Width};
+use crate::m4k::{CellPort, Param, Pin, Ports, Sel, Side};
 use crate::pin::{register_param, PowerUp};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -63,8 +63,9 @@ pub fn pack_file(netlist: &Path, packed: &Path) -> Result<Stats> {
 fn pack(nl: &mut Netlist) -> Result<Stats> {
     let mut stats = Stats::default();
     pack_io(nl)?;
-    pack_m4k(nl, &mut stats)?;
+    let tied_data = pack_m4k(nl, &mut stats)?;
     pack_constants(nl, &mut stats)?;
+    drive_tied_data(nl, tied_data);
     pack_lut1(nl, &mut stats);
     pack_lut_ff(nl, &mut stats)?;
     pack_carry(nl, &mut stats)?;
@@ -234,13 +235,16 @@ fn pack_io(nl: &mut Netlist) -> Result<()> {
     Ok(())
 }
 
-/// M4K: the logical ports synth/m4k_map.v gives a CY2_M4K become the
-/// block's physical pins (`m4k::Pin`): CLK -> CLK0, A_WE -> WE,
-/// A_DATAIN[c] -> DI<c>, DATAOUT[c] -> DO<c>, address bit p of port A or B
-/// -> `Pin::addr`. An n-bit address uses bits 12 - n ..= 11; libmap ties
-/// the ones below to 0 and they are dropped, as are data bits past the
-/// width and constant data inputs. A_WE never driven is a ROM.
-fn pack_m4k(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
+/// M4K: the cell's logical ports become the block's physical pins
+/// (`CellPort::pin`): CLK -> CLK0, A_WE -> WE, B_WE -> RE, A_DATAIN[c] ->
+/// DI<c>, B_DATAIN[c] -> DI<18+c>, DATAOUT[c] -> DO<c>, address bit p ->
+/// `Pin::addr`. An n-bit address uses bits 12 - n ..= 11; the ones below,
+/// a port's pins when the shape has no such port, constant data inputs,
+/// enables tied active and clears tied inactive are dropped (an unconnected
+/// one reads that way). A port whose write enable is never driven doesn't
+/// write: a ROM.
+fn pack_m4k(nl: &mut Netlist, stats: &mut Stats) -> Result<Vec<(CellId, Pin, bool)>> {
+    let mut tied_data = Vec::new();
     // Driven by GND/VCC, or not at all; a net without a driver isn't.
     let constant = |nl: &Netlist, n: Option<NetId>| {
         n.is_none_or(|n| {
@@ -249,80 +253,152 @@ fn pack_m4k(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
                 .is_some_and(|(d, _)| matches!(nl.cell(d).kind, Kind::Const(_)))
         })
     };
+    let tied = |nl: &Netlist, n: Option<NetId>| -> Option<bool> {
+        let n = n?;
+        match nl.net(n).driver {
+            Some((d, _)) => match nl.cell(d).kind {
+                Kind::Const(v) => Some(v),
+                _ => None,
+            },
+            None => None,
+        }
+    };
     for c in nl.cells() {
         let Kind::M4k(shape) = nl.cell(c).kind else {
             continue;
         };
         stats.m4ks += 1;
         let name = nl.cell(c).name.clone();
-        let width = shape.width();
-        let (bits, low_addr) = (width.bits(), 12 - width.addr_bits());
-        let dual = shape.mode() == Mode::SimpleDual;
-        let we = nl.cell(c).net(Port::RamWe);
-        let writes = !constant(nl, we);
-        if let Some(we) = we.filter(|_| !writes) {
-            if nl
-                .net(we)
-                .driver
-                .is_some_and(|(d, _)| nl.cell(d).kind == Kind::Const(true))
-            {
+        let synthesized = nl.cell(c).params.contains_key("SLICE");
+        let mut writes = [false; 2];
+        for (i, side) in [Side::A, Side::B].into_iter().enumerate() {
+            let we = nl.cell(c).net(Port::Ram(CellPort::We(side)));
+            if tied(nl, we) == Some(true) {
                 bail!("M4K {name}: write enable tied high is not supported");
             }
+            writes[i] = shape.writable(side) && !constant(nl, we);
         }
-        if dual && !writes && width != Width::X36 {
-            bail!("M4K {name}: a read-only simple dual port narrower than x36 is not supported");
-        }
+        shape
+            .mode(writes[0])
+            .with_context(|| format!("M4K {name}"))?;
+        let low_addr = |side: Side| shape.width(side).map(|w| 12 - w.addr_bits() as u8);
+        let uses_clock1 = shape.input_clock(Side::B) == Sel::One
+            || shape
+                .read_ports()
+                .iter()
+                .any(|(_, r)| r.out_reg.is_some_and(|o| o.clock == Sel::One));
         // nextpnr iterates a cell's ports newest first.
         let old: Vec<(Port, Option<NetId>)> = nl.cell(c).ports().collect();
+        // Columns whose read data something uses: in a yosys-flow cell
+        // (single or simple dual port, one width, data bit k in column k)
+        // the columns written that are memory bits, not padding.
+        let read_cols: std::collections::HashSet<u8> = old
+            .iter()
+            .filter_map(|&(port, net)| {
+                let lp = match port {
+                    Port::Ram(p) => Some(p),
+                    other => CellPort::parse(&other.name()),
+                };
+                match lp {
+                    Some(CellPort::DataOut(col)) if nl.has_users(net) => Some(col),
+                    _ => None,
+                }
+            })
+            .collect();
         let mut pins: Vec<(Pin, NetId)> = Vec::new();
         let mut outs: Vec<(Pin, NetId)> = Vec::new();
         for &(port, net) in old.iter().rev() {
             nl.disconnect(c, port);
             nl.remove_port(c, port);
-            match port {
-                Port::RamDataOut(k) => {
+            let lp = match port {
+                Port::Clk => CellPort::Clk(Sel::Zero),
+                Port::Ram(p) => p,
+                // Port names are parsed without the cell type: a PLL's
+                // CLK1 is an M4K's clock 1 here.
+                other => match CellPort::parse(&other.name()) {
+                    Some(p) => p,
+                    None => bail!("M4K {name}: unknown port {}", other.name()),
+                },
+            };
+            let driven = net.filter(|&n| !constant(nl, Some(n)));
+            let side_writes = |s: Side| writes[s as usize];
+            let keep = match lp {
+                CellPort::DataOut(_) => {
                     // Read bits nothing uses stay off the routing (and out of
                     // the atom width Quartus is given).
-                    if k < bits && nl.has_users(net) {
-                        outs.push((Pin::Do(k), net.unwrap()));
+                    if nl.has_users(net) {
+                        outs.push((lp.pin(), net.unwrap()));
                     }
+                    continue;
                 }
-                Port::Clk => {
-                    let Some(n) = net.filter(|&n| !constant(nl, Some(n))) else {
+                CellPort::Clk(Sel::Zero) => {
+                    if driven.is_none() {
                         bail!("M4K {name}: clock not driven");
-                    };
-                    pins.push((Pin::Clk0, n));
-                }
-                Port::RamWe => {
-                    if let Some(n) = net.filter(|_| writes) {
-                        pins.push((Pin::We, n));
                     }
+                    true
                 }
-                Port::RamDataIn(k) => {
-                    if let Some(n) = net.filter(|&n| writes && k < bits && !constant(nl, Some(n))) {
-                        pins.push((Pin::Di(k), n));
+                CellPort::Clk(Sel::One) => {
+                    if uses_clock1 && driven.is_none() {
+                        bail!("M4K {name}: clock 1 not driven");
                     }
+                    uses_clock1
                 }
-                Port::RamAddr(ab, p) => {
-                    // A read-only x36 simple dual port reads on port B; port
-                    // A then has nothing.
-                    let unused = match ab {
-                        AddrPort::A => dual && !writes,
-                        AddrPort::B => !dual,
-                    };
-                    if unused || p < low_addr {
-                        continue;
+                CellPort::Ena(_) => {
+                    if tied(nl, net) == Some(false) {
+                        bail!("M4K {name}: clock enable tied low");
                     }
-                    let Some(n) = net.filter(|&n| !constant(nl, Some(n))) else {
+                    true
+                }
+                CellPort::Clr(_) => {
+                    if tied(nl, net) == Some(true) {
+                        bail!("M4K {name}: clear tied high");
+                    }
+                    true
+                }
+                CellPort::We(s) => side_writes(s),
+                CellPort::DataIn(s, _) => side_writes(s),
+                CellPort::ByteEna(s, _) => {
+                    if side_writes(s) && tied(nl, net) == Some(false) {
+                        bail!("M4K {name}: byte enable tied low");
+                    }
+                    side_writes(s)
+                }
+                CellPort::Addr(s, p) => {
+                    // A read-only x36 simple dual port reads on port B;
+                    // port A then has nothing.
+                    let idle = s == Side::A
+                        && !writes[0]
+                        && matches!(shape.ports(), Ports::SimpleDual { .. });
+                    let used = !idle && low_addr(s).is_some_and(|low| p >= low);
+                    if used && driven.is_none() {
                         bail!(
-                            "M4K {name}: address pin {} is a constant; memories shallower than \
-                             their M4K configuration are not supported",
+                            "M4K {name}: address pin {} is a constant; synthesis repeats \
+                             another address bit there",
                             port.name()
                         );
-                    };
-                    pins.push((Pin::addr(ab, p), n));
+                    }
+                    used
                 }
-                other => bail!("M4K {name}: unknown port {}", other.name()),
+            };
+            if let Some(n) = driven.filter(|_| keep) {
+                pins.push((lp.pin(), n));
+            } else if let (CellPort::DataIn(side, col), true, Some(v)) = (lp, keep, tied(nl, net)) {
+                // A data bit written as a constant: the block doesn't read
+                // an unconnected data input as 0 (Quartus routes its GND
+                // there), so an LE drives it. Columns no data bit sits in
+                // stay unconnected: synthesis' cells say which those are;
+                // the yosys flow pads with 0, so there a column counts if
+                // its read data is used.
+                let used = if synthesized {
+                    shape.width(side).is_some_and(|w| {
+                        (0..shape.data_bits(w)).any(|k| shape.column(w, k) == col as usize)
+                    })
+                } else {
+                    read_cols.contains(&col)
+                };
+                if used {
+                    tied_data.push((c, lp.pin(), v));
+                }
             }
         }
         for (pin, n) in pins.into_iter().chain(outs) {
@@ -334,7 +410,33 @@ fn pack_m4k(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
             nl.connect(c, port, n);
         }
     }
-    Ok(())
+    Ok(tied_data)
+}
+
+/// An LE for each M4K data input written as a constant (`pack_m4k`),
+/// after `pack_constants`, which would take an input-less LUT for the
+/// constant itself.
+fn drive_tied_data(nl: &mut Netlist, tied: Vec<(CellId, Pin, bool)>) {
+    for (c, pin, v) in tied {
+        let name = format!("{}${pin}", nl.cell(c).name);
+        let lut = nl.create_cell(
+            format!("{name}$const"),
+            Kind::Lut {
+                mask: if v { 0xFFFF } else { 0x0000 },
+            },
+        );
+        for p in LUT_INPUTS
+            .into_iter()
+            .chain([Port::Cin, Port::Combout, Port::Cout])
+        {
+            nl.add_port(lut, p);
+        }
+        let n = nl.create_net(format!("{name}$const_net"));
+        nl.connect(lut, Port::Combout, n);
+        let port = Port::M4k(pin);
+        nl.add_port(c, port);
+        nl.connect(c, port, n);
+    }
 }
 
 /// Constants have no driver in the fabric: LUT inputs are folded into the
@@ -736,7 +838,7 @@ fn pack_carry(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
 fn pack_clocks(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
     let is_clock = |nl: &Netlist, (u, p): (CellId, Port)| match nl.cell(u).kind {
         Kind::Ff(_) => p == Port::Clk,
-        Kind::M4k(_) => p == Port::M4k(Pin::Clk0),
+        Kind::M4k(_) => matches!(p, Port::M4k(pin) if pin.is_clock()),
         Kind::Ibuf { .. } | Kind::Obuf { .. } | Kind::Iobuf { .. } => {
             matches!(p, Port::Inclk | Port::Outclk)
         }
@@ -848,11 +950,17 @@ fn to_json(nl: &Netlist) -> Result<Value> {
             Kind::Hard(b) => b.cell_type(),
             Kind::M4k(shape) => {
                 // As yosys wrote them: a string and a 32-bit binary number.
-                params.insert("MODE".into(), Value::String(shape.mode_name().into()));
-                params.insert(
-                    "WIDTH".into(),
-                    Value::String(format!("{:032b}", shape.width().bits())),
-                );
+                // The rest of the shape's parameters passed through.
+                for (k, v) in shape.params() {
+                    if !["MODE", "WIDTH"].contains(&k) {
+                        continue;
+                    }
+                    let v = match v {
+                        Param::Str(s) => s.to_string(),
+                        Param::Int(i) => format!("{i:032b}"),
+                    };
+                    params.insert(k.into(), Value::String(v));
+                }
                 "CY2_M4K"
             }
             Kind::Const(_) | Kind::TopIn | Kind::TopOut | Kind::TopInOut => {
