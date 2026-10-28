@@ -35,8 +35,16 @@ module LCELL_COMB (input DATAA, input DATAB, input DATAC, input DATAD, input CIN
   parameter [15:0] LUT_MASK = 16'hFFFF;
   // Either CIN (arithmetic) or DATAC (logic) is used; the other is tied 1.
   wire c = CIN & DATAC;
-  assign COMBOUT = LUT_MASK[{DATAD, c, DATAB, DATAA}];
-  assign COUT = LUT_MASK[{1'b0, CIN, DATAB, DATAA}];
+  // A multiplexer tree rather than an index: an input the LUT doesn't
+  // depend on can be x without making the output x, as in the hardware
+  // (co-simulation would otherwise see x where the RTL has a value).
+  wire [7:0] d8 = DATAD ? LUT_MASK[15:8] : LUT_MASK[7:0];
+  wire [3:0] c4 = c ? d8[7:4] : d8[3:0];
+  wire [1:0] b2 = DATAB ? c4[3:2] : c4[1:0];
+  assign COMBOUT = DATAA ? b2[1] : b2[0];
+  wire [3:0] k4 = CIN ? LUT_MASK[7:4] : LUT_MASK[3:0];
+  wire [1:0] k2 = DATAB ? k4[3:2] : k4[1:0];
+  assign COUT = DATAA ? k2[1] : k2[0];
 endmodule
 module LCELL_FF (input DATAIN, input CLK, input ENA, input ACLR, input SCLR, output reg REGOUT);
   initial REGOUT = 1'b0;
@@ -302,12 +310,57 @@ pub struct MemShape {
 
 /// Replaces each `$mem_v2` by ports: its read data become an input
 /// `__mem_<id>_rdata`, its addresses, write data and enable outputs.
-fn cut_memories(m: &mut Module) -> Result<BTreeMap<String, MemShape>, String> {
+fn cut_memories(m: &mut Module, canonical: bool) -> Result<BTreeMap<String, MemShape>, String> {
     use chipsmith_netlist::Dir;
     let mut shapes = BTreeMap::new();
     let mut ports = Vec::new();
     let mut masked = Vec::new();
     let mut subst = chipsmith_synth::rewrite::Subst::new(m);
+    // Ports in an order both sides agree on: yosys' and chipsmith's front
+    // ends number a memory's ports differently. A read port by the names
+    // of what its data reach (a wire on them, or on the register they go
+    // into), a write port by the names on its address; then by the
+    // address's constant bits (the words of a wide port).
+    let mut names: HashMap<Net, Vec<String>> = HashMap::new();
+    for w in &m.wires {
+        if w.name.starts_with('$') {
+            continue;
+        }
+        for b in &w.bits {
+            if let SigBit::Net(n) = b {
+                names.entry(*n).or_default().push(w.name.clone());
+            }
+        }
+    }
+    let mut ff_q: HashMap<Net, Net> = HashMap::new();
+    for c in &m.cells {
+        if let CellKind::Ff(ff) = &c.kind {
+            if let chipsmith_netlist::FfKind::Dff { d, .. } = &ff.kind {
+                for (dq, q) in d.iter().zip(&ff.q) {
+                    if let (SigBit::Net(dn), SigBit::Net(qn)) = (dq, q) {
+                        ff_q.insert(*dn, *qn);
+                    }
+                }
+            }
+        }
+    }
+    let label = |bits: &[SigBit]| -> String {
+        let mut v: Vec<String> = Vec::new();
+        for b in bits {
+            match b {
+                SigBit::Net(n) => {
+                    let ns = names
+                        .get(n)
+                        .or_else(|| ff_q.get(n).and_then(|q| names.get(q)));
+                    v.extend(ns.into_iter().flatten().cloned());
+                }
+                SigBit::Const(c) => v.push(format!("={}", c.char())),
+            }
+        }
+        v.sort();
+        v.dedup();
+        v.join(",")
+    };
     let mut keep = Vec::new();
     for c in std::mem::take(&mut m.cells) {
         let CellKind::Mem(mem) = &c.kind else {
@@ -316,7 +369,39 @@ fn cut_memories(m: &mut Module) -> Result<BTreeMap<String, MemShape>, String> {
         };
         let id = mem.memid.trim_start_matches('\\').to_owned();
         let abits = (usize::BITS - mem.size.saturating_sub(1).leading_zeros()) as usize;
-        for (i, rd) in mem.rd.iter().enumerate() {
+        let mut rds: Vec<&chipsmith_netlist::MemRd> = mem.rd.iter().collect();
+        // Two stages of chipsmith's keep their order; only the RTL's and
+        // chipsmith's need lining up.
+        rds.sort_by_cached_key(|r| {
+            if !canonical {
+                return (String::new(), String::new());
+            }
+            let consts: String = r
+                .addr
+                .iter()
+                .map(|b| match b {
+                    SigBit::Const(c) => c.char(),
+                    _ => 'n',
+                })
+                .collect();
+            (label(&r.data), consts)
+        });
+        let mut wrs: Vec<&chipsmith_netlist::MemWr> = mem.wr.iter().collect();
+        wrs.sort_by_cached_key(|w| {
+            if !canonical {
+                return (String::new(), String::new());
+            }
+            let consts: String = w
+                .addr
+                .iter()
+                .map(|b| match b {
+                    SigBit::Const(c) => c.char(),
+                    _ => 'n',
+                })
+                .collect();
+            (label(&w.addr), consts)
+        });
+        for (i, rd) in rds.into_iter().enumerate() {
             let rdata = (0..rd.data.len())
                 .map(|_| SigBit::Net(m.new_net()))
                 .collect::<Vec<_>>();
@@ -332,7 +417,7 @@ fn cut_memories(m: &mut Module) -> Result<BTreeMap<String, MemShape>, String> {
                 rd.addr[..abits.min(rd.addr.len())].to_vec(),
             ));
         }
-        for (j, w) in mem.wr.iter().enumerate() {
+        for (j, w) in wrs.into_iter().enumerate() {
             // What is written only matters where it is written: masked by
             // the enables, so x in what isn't written can't differ.
             let addr = w.addr[..abits.min(w.addr.len())].to_vec();
@@ -406,6 +491,50 @@ fn drop_undriven(m: &mut Module) {
                 .iter()
                 .any(|b| b.net().is_none_or(|n| driven.contains(&n)))
     });
+    // An undriven bit of a wire that stays has no power-up value either.
+    let inputs: std::collections::HashSet<_> = m
+        .wires
+        .iter()
+        .filter(|w| w.port.is_some())
+        .flat_map(|w| w.bits.iter().filter_map(|b| b.net()))
+        .collect();
+    for w in &mut m.wires {
+        let Some(chipsmith_netlist::ParamValue::Bits(c)) =
+            w.attributes.get_mut(chipsmith_netlist::attr::INIT)
+        else {
+            continue;
+        };
+        for (b, s) in w.bits.iter().zip(c.0.iter_mut()) {
+            if b.net()
+                .is_some_and(|n| !driven.contains(&n) && !inputs.contains(&n))
+            {
+                *s = State::X;
+            }
+        }
+        if c.0.iter().all(|s| *s == State::X) {
+            w.attributes.remove(chipsmith_netlist::attr::INIT);
+        }
+    }
+}
+
+/// Drops power-up values on wire bits that are constants: yosys'
+/// `async2sync` calls them a conflict.
+fn drop_constant_inits(m: &mut Module) {
+    for w in &mut m.wires {
+        let Some(chipsmith_netlist::ParamValue::Bits(c)) =
+            w.attributes.get_mut(chipsmith_netlist::attr::INIT)
+        else {
+            continue;
+        };
+        for (b, s) in w.bits.iter().zip(c.0.iter_mut()) {
+            if matches!(b, SigBit::Const(_)) {
+                *s = State::X;
+            }
+        }
+        if c.0.iter().all(|s| *s == State::X) {
+            w.attributes.remove(chipsmith_netlist::attr::INIT);
+        }
+    }
 }
 
 /// A memory as synthesis saw it, for the blocks' model.
@@ -1362,50 +1491,72 @@ fn check_impl(
             cut_pins(m);
         }
     };
-    let first = match rtl {
-        Some(rtl) => {
-            let mut all_cut = cut.clone();
-            if !cut_blocks {
-                all_cut.extend(in_blocks.iter().cloned());
-            }
-            let mut gold = prep_memories(dir, "gold_prep", rtl, &to_logic, &all_cut)?;
-            let mut mid1 = prep_memories(dir, "mid_cut_prep", &refined_path, &to_logic, &all_cut)?;
-            prep_side(&mut gold);
-            prep_side(&mut mid1);
-            if cut_blocks {
-                cut_block_cells(top_mut(&mut mid1));
-            }
-            // Cut memories keep their contents: the RTL's, where it gives
-            // any, must be synthesis'.
-            let ours = mem_infos(&mid1);
-            for (id, g) in mem_infos(&gold) {
-                let Some(o) = ours.get(&id) else { continue };
-                if g.init
-                    .0
-                    .iter()
-                    .zip(&o.init.0)
-                    .any(|(a, b)| matches!(a, State::Zero | State::One) && a != b)
-                {
-                    return Err(format!("memory {id}: contents differ from the RTL's"));
-                }
-            }
-            if !all_cut.is_empty() {
-                cut_memories(top_mut(&mut gold))?;
-                cut_memories(top_mut(&mut mid1))?;
-            }
-            let gold_path = dir.join("gold.json");
-            write(&gold, &gold_path);
-            let mid_path = dir.join("mid.json");
-            write(&mid1, &mid_path);
-            equiv(
-                dir,
-                "equiv_refine",
-                &gold_path,
-                &mid_path,
-                top(&gold),
-                false,
-            )?
+    // At their ports the RTL's and synthesis' memories can differ beyond
+    // what `memory_nordff` evens out (yosys and chipsmith's front end
+    // order a memory's ports differently: a wide read, a true dual port):
+    // then the memories as words instead, slower but exact.
+    let step1 = |rtl: &Path, words: bool| -> Result<usize, String> {
+        let mut all_cut = cut.clone();
+        if !cut_blocks {
+            all_cut.extend(in_blocks.iter().cloned());
         }
+        let mut mapped1 = to_logic.clone();
+        if words {
+            mapped1.append(&mut all_cut);
+        }
+        let mut gold = prep_memories(dir, "gold_prep", rtl, &mapped1, &all_cut)?;
+        let mut mid1 = prep_memories(dir, "mid_cut_prep", &refined_path, &mapped1, &all_cut)?;
+        prep_side(&mut gold);
+        prep_side(&mut mid1);
+        if cut_blocks {
+            cut_block_cells(top_mut(&mut mid1));
+        }
+        // Cut memories keep their contents: the RTL's, where it gives any,
+        // must be synthesis'.
+        let ours = mem_infos(&mid1);
+        for (id, g) in mem_infos(&gold) {
+            let Some(o) = ours.get(&id) else { continue };
+            if g.init
+                .0
+                .iter()
+                .zip(&o.init.0)
+                .any(|(a, b)| matches!(a, State::Zero | State::One) && a != b)
+            {
+                return Err(format!("memory {id}: contents differ from the RTL's"));
+            }
+        }
+        if !all_cut.is_empty() {
+            cut_memories(top_mut(&mut gold), true)?;
+            cut_memories(top_mut(&mut mid1), true)?;
+        }
+        let gold_path = dir.join("gold.json");
+        write(&gold, &gold_path);
+        let mid_path = dir.join("mid.json");
+        write(&mid1, &mid_path);
+        equiv(
+            dir,
+            "equiv_refine",
+            &gold_path,
+            &mid_path,
+            top(&gold),
+            words,
+        )
+    };
+    let first = match rtl {
+        Some(rtl) => match step1(rtl, false) {
+            Ok(n) => n,
+            Err(e)
+                if e.contains("not proven equivalent")
+                    && !(cut.is_empty() && in_blocks.is_empty()) =>
+            {
+                eprintln!(
+                    "{}: memories at their ports didn't line up; as words",
+                    dir.display()
+                );
+                step1(rtl, true)?
+            }
+            Err(e) => return Err(e),
+        },
         None => 0,
     };
 
@@ -1458,16 +1609,17 @@ fn check_impl(
             model_blocks(gt, &mem_infos(refined))?;
         }
         if !cut.is_empty() {
-            cut_memories(gt)?;
+            cut_memories(gt, false)?;
         }
         drop_undriven(gt);
+        drop_constant_inits(gt);
     }
     for m in cut_gate.modules.iter_mut().filter(|m| !m.is_blackbox()) {
         cut_loops(m);
         cut_pins(m);
     }
     if !cut.is_empty() {
-        cut_memories(top_mut(&mut mid))?;
+        cut_memories(top_mut(&mut mid), false)?;
     }
     let words = !cut_blocks && !in_blocks.is_empty();
 

@@ -132,6 +132,22 @@ fn design_with(
         "{name}: {} $equiv proven, {} registers proven constant",
         proof.equivalences, proof.constant_registers
     );
+    // Through the blocks: co-simulated.
+    if blocks_in(&s.netlist) > 0 {
+        let sim = support::cosim(
+            &s.dir,
+            &s.rtl,
+            s.stages.refined.as_ref().unwrap(),
+            s.stages.cells.as_ref().unwrap(),
+            COSIM_CYCLES,
+            1,
+        )
+        .unwrap_or_else(|e| panic!("{name}: co-simulation: {e}"));
+        eprintln!(
+            "{name}: co-simulated {} cycles, {} output bits compared",
+            sim.cycles, sim.compared
+        );
+    }
     let ours = pack(&s.dir, "chipsmith", &s.netlist);
     if compare {
         let flow = support::yosys_flow(&s.dir, top, files).unwrap_or_else(|e| panic!("{e}"));
@@ -157,7 +173,9 @@ fn design_with(
             ours.chains <= theirs.chains || ours.luts < theirs.luts,
             "{name}: carry chains"
         );
-        assert_eq!(ours.m4ks, theirs.m4ks, "{name}: M4Ks");
+        // chipsmith puts every memory a block takes into blocks, as
+        // Quartus does; the yosys flow keeps small ones in logic.
+        assert!(ours.m4ks >= theirs.m4ks, "{name}: M4Ks");
     }
 }
 
@@ -746,9 +764,11 @@ fn m4k_random(seed: u64) {
 /// its RTL: every address reachable every cycle.
 fn m4k_direct(
     cfg: &m4k_random::Config,
+    tag: &str,
     mutate: impl Fn(&mut Design),
 ) -> Result<support::Cosim, String> {
-    let name = format!("{}-direct", cfg.name());
+    // A scratch directory of its own per use: tests run side by side.
+    let name = format!("{}-direct{tag}", cfg.name());
     let dir = scratch(&format!("{name}-src"));
     let v = dir.join("top.v");
     std::fs::write(&v, cfg.verilog_direct()).unwrap();
@@ -775,7 +795,7 @@ macro_rules! m4k_random_tests {
         #[test]
         fn $g() {
             let cfg = m4k_random::Config::new($seed);
-            let r = m4k_direct(&cfg, |_| {}).unwrap_or_else(|e| panic!("{cfg:?}: {e}"));
+            let r = m4k_direct(&cfg, "", |_| {}).unwrap_or_else(|e| panic!("{cfg:?}: {e}"));
             eprintln!("{}: {r:?}", cfg.name());
         }
     )*};
@@ -821,7 +841,7 @@ m4k_random_tests!(
 #[test]
 fn m4k_cosim_large_shapes() {
     for cfg in m4k_random::Config::shapes() {
-        let r = m4k_direct(&cfg, |_| {}).unwrap_or_else(|e| panic!("{cfg:?}: {e}"));
+        let r = m4k_direct(&cfg, "", |_| {}).unwrap_or_else(|e| panic!("{cfg:?}: {e}"));
         eprintln!("{cfg:?}: {r:?}");
     }
 }
@@ -865,11 +885,15 @@ fn m4k_cosim_catches_wrong_blocks() {
             }
         }
     };
-    for (what, f) in [
-        ("swapped address pins", &swap_addr as &dyn Fn(&mut Design)),
-        ("swapped block rows", &swap_rows),
+    for (what, tag, f) in [
+        (
+            "swapped address pins",
+            "-swap-addr",
+            &swap_addr as &dyn Fn(&mut Design),
+        ),
+        ("swapped block rows", "-swap-rows", &swap_rows),
     ] {
-        let err = m4k_direct(&deep, f).expect_err(what);
+        let err = m4k_direct(&deep, tag, f).expect_err(what);
         assert!(err.starts_with("MISMATCH seed="), "{what}: {err}");
         eprintln!("{what}: {err}");
     }
@@ -877,30 +901,60 @@ fn m4k_cosim_catches_wrong_blocks() {
 
 /// One block per configuration class (`support/m4k_shapes.rs`), the
 /// mapping proven: the blocks' model against yosys' memory, word by word.
-#[test]
-fn m4k_shapes_proven() {
-    let only = std::env::var("M4K_SHAPE").ok();
-    for (name, v, blocks) in m4k_shapes::shapes() {
-        if only.as_deref().is_some_and(|o| o != name) {
-            continue;
-        }
-        let t = std::time::Instant::now();
-        let dir = scratch(&format!("m4k-shape-{name}-src"));
-        let f = dir.join("top.v");
-        std::fs::write(&f, v).unwrap();
-        let s = synthesize(&format!("m4k-shape-{name}"), "top", &[f]);
-        assert_eq!(blocks_in(&s.netlist), blocks, "{name}: blocks");
-        let p = support::check(
-            &s.dir,
-            &s.rtl,
-            s.stages.refined.as_ref().unwrap(),
-            s.stages.cells.as_ref().unwrap(),
-        )
-        .unwrap_or_else(|e| panic!("{name}: {e}"));
-        eprintln!(
-            "m4k shape {name}: {} $equiv proven in {:.0?}",
-            p.equivalences,
-            t.elapsed()
-        );
-    }
+fn m4k_shape(name: &str) {
+    let (_, v, blocks) = m4k_shapes::shapes()
+        .into_iter()
+        .find(|s| s.0 == name)
+        .expect("a shape");
+    let t = std::time::Instant::now();
+    let dir = scratch(&format!("m4k-shape-{name}-src"));
+    let f = dir.join("top.v");
+    std::fs::write(&f, v).unwrap();
+    let s = synthesize(&format!("m4k-shape-{name}"), "top", &[f]);
+    assert_eq!(blocks_in(&s.netlist), blocks, "{name}: blocks");
+    let p = support::check(
+        &s.dir,
+        &s.rtl,
+        s.stages.refined.as_ref().unwrap(),
+        s.stages.cells.as_ref().unwrap(),
+    )
+    .unwrap_or_else(|e| panic!("{name}: {e}"));
+    eprintln!(
+        "m4k shape {name}: {} $equiv proven in {:.0?}",
+        p.equivalences,
+        t.elapsed()
+    );
 }
+
+macro_rules! m4k_shape_tests {
+    ($($f:ident = $n:literal),*) => {$(
+        #[test]
+        fn $f() {
+            m4k_shape($n);
+        }
+    )*};
+}
+
+m4k_shape_tests!(
+    m4k_shape_sp_x1 = "sp_x1",
+    m4k_shape_sp_x2 = "sp_x2",
+    m4k_shape_sdp_x4 = "sdp_x4",
+    m4k_shape_sdp_x9 = "sdp_x9",
+    m4k_shape_sp_x18 = "sp_x18",
+    m4k_shape_sdp_x36 = "sdp_x36",
+    m4k_shape_rom_x36 = "rom_x36",
+    m4k_shape_rom_x8_read_enable = "rom_x8_read_enable",
+    m4k_shape_bytes_x16 = "bytes_x16",
+    m4k_shape_bytes_x32 = "bytes_x32",
+    m4k_shape_mixed_w32_r8 = "mixed_w32_r8",
+    m4k_shape_mixed_w8_r32 = "mixed_w8_r32",
+    m4k_shape_tdp_x9 = "tdp_x9",
+    m4k_shape_tdp_x16_x4 = "tdp_x16_x4",
+    m4k_shape_two_clocks_x9 = "two_clocks_x9",
+    m4k_shape_clock_enable_x9 = "clock_enable_x9",
+    m4k_shape_read_enable_x18 = "read_enable_x18",
+    m4k_shape_read_enable_held_x9 = "read_enable_held_x9",
+    m4k_shape_outreg_clear_x9 = "outreg_clear_x9",
+    m4k_shape_sync_reset_x18 = "sync_reset_x18",
+    m4k_shape_shallow_x8 = "shallow_x8"
+);
