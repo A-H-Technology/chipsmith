@@ -174,7 +174,7 @@ How the M4K mapping is checked (2026-10-28, after merging `open` 5b22b89;
 `crates/chipsmith-cyclone2/tests/synth.rs`, times on luna with two checks
 at a time):
 
-- **Proven, one block per configuration** (`m4k_shapes_proven`,
+- **Proven, one block per configuration** (`m4k_shape_*`,
   `tests/support/m4k_shapes.rs`): a memory alone in a design, its ports on
   the design's, for each class: single port x1, x2, x18, simple dual port
   x4, x9, x36, ROM x36, ROM under a read enable, byte enables x16 and x32,
@@ -186,7 +186,9 @@ at a time):
   RTL's through `memory_map`, the block through a model of it
   (`tests/support/mod.rs`, `model_blocks`: contents as registers named after
   the memory words they hold, the block's read and write behaviour, its
-  INIT checked against the memory's contents). TIMES_SHAPES
+  INIT checked against the memory's contents). 3.5 to 7 minutes each
+  (ROMs and the shallow memory 8 to 10 s), the two true dual ports 21 and
+  29 minutes; all 21 pass.
 - **Proven around the blocks, every design** (`check_staged`): the RTL
   against synthesis' last stage before the M4K mapping, memories compared
   at their ports (read registers outside on both sides, `memory_nordff`),
@@ -216,7 +218,45 @@ run grew to 7 GB.
 
 Results:
 
-QTABLE
+All 88 tests of the cyclone2 synthesis suite pass on one binary, 85
+minutes under a 20 GB memory cap, two at a time. Per design, below: the
+check around the blocks (time of the proof), the co-simulation (output
+bits compared, time with the build), and for the random designs the
+co-simulation with the memory's ports on the design's. A low bit count
+means the RTL leaves most outputs x (memories read before they are
+written): m4k-mixed (60 bits), m4k-random-4 (1,080) and `ram` (108) are
+covered through the blocks mostly by the direct co-simulation of their
+large shapes (2048 x 9 over four blocks: 56,142 bits; 8192 x 2: 20,000;
+256 x 40: 389,680; write x32 read x8: 78,096; write x8 read x32: 286,968;
+write x2 read x1: 6,254). serv, m4k-selftest and every design below are
+Quartus byte-identical.
+
+| design | memories | M4Ks | Quartus | proven around the blocks | co-simulated | co-simulated, ports direct |
+|---|---|---|---|---|---|---|
+| m4k-bytes | byte enables: 256 x 16 (2), 128 x 32 (4) | 2 | byte-identical | 1356 $equiv, 5s | 2,136 bits, 15s |  |
+| m4k-deep | 2048 x 9 over 4 blocks, 8192 x 2 ROM over 4, 256 x 40 over 3 | 11 | byte-identical | 1804 $equiv, 27s | 179,982 bits, 37s |  |
+| m4k-dualclock | written on CLOCK_50, read on CLOCK_27 (x9; x36 as two x18) | 3 | byte-identical | 1104 $equiv, 4s | 1,512 bits, 16s |  |
+| m4k-enables | clock enable, read enables on ENA0/ENA1, one held in LEs | 4 | byte-identical | 990 $equiv, 7s | 80,562 bits, 13s |  |
+| m4k-mixed | write x32 read x8, write x8 read x32, write x2 read x1 | 3 | byte-identical | 1080 $equiv, 5s | 60 bits, 14s |  |
+| m4k-outreg | output registers: plain, cleared, own enable; a synchronous reset | 4 | byte-identical | 1102 $equiv, 6s | 67,356 bits, 19s |  |
+| m4k-shallow | 64 x 8, 32 x 36, 16 x 4 ROM | 3 | byte-identical | 912 $equiv, 4s | 7,776 bits, 15s |  |
+| m4k-tdp | true dual port x9/x9 and x4/x18 | 2 | byte-identical | 993 $equiv, 7s | 247,662 bits, 22s |  |
+| m4k-random-1 | TrueDual 600 x 5 | 2 | byte-identical | 717 $equiv, 5s | 257,015 bits, 12s | 76,420 bits |
+| m4k-random-2 | SimpleDual 16 x 24, byte enables, two clocks | 2 | byte-identical | 957 $equiv, 4s | 44,600 bits, 12s | 237,824 bits |
+| m4k-random-3 | SimpleDual 16 x 5, write x1 read x4 words | 1 | byte-identical | 497 $equiv, 3s | 82,545 bits, 8s | 199,515 bits |
+| m4k-random-4 | SimpleDual 1024 x 32, byte enables, output register (plain) | 8 | byte-identical | 1915 $equiv, 7s | 1,080 bits, 21s | 201,472 bits |
+| m4k-random-5 | TrueDual 2048 x 2 | 1 | byte-identical | 564 $equiv, 4s | 268,536 bits, 7s | 35,982 bits |
+| m4k-random-6 | Rom 1024 x 32, contents, output register (cleared) | 8 | byte-identical | 1072 $equiv, 6s | 269,973 bits, 22s | 320,000 bits |
+| m4k-random-7 | SimpleDual 1024 x 36, read enable, write under it, sync reset | 8 | byte-identical | 1481 $equiv, 10s | 67,635 bits, 23s | 292,536 bits |
+| m4k-random-8 | SingleNew 1024 x 36, contents | 8 | byte-identical | 1344 $equiv, 8s | 270,000 bits, 24s | 360,000 bits |
+| m4k-random-9 | SingleNew 64 x 32 | 2 | byte-identical | 680 $equiv, 3s | 269,892 bits, 11s | 318,592 bits |
+| m4k-random-10 | SimpleDual 512 x 4, write x2 read x1 words, output register (cleared) | 1 | byte-identical | 534 $equiv, 5s | 244,912 bits, 8s | 39,560 bits |
+| m4k-random-11 | SimpleDual 4096 x 9, contents | 8 | byte-identical | 1238 $equiv, 19s | 270,000 bits, 26s | 90,000 bits |
+| m4k-random-12 | SingleNew 600 x 36, contents | 6 | byte-identical | 1148 $equiv, 8s | 203,148 bits, 25s | 208,692 bits |
+| m4k-random-13 | SingleNew 4096 x 8 | 8 | byte-identical | 1117 $equiv, 4s | 269,712 bits, 17s | 56,576 bits |
+| m4k-random-14 | SingleNew 16 x 4 | 1 | byte-identical | 349 $equiv, 3s | 269,984 bits, 6s | 39,900 bits |
+| m4k-random-15 | SingleOld 2048 x 18, read enable, write under it, output register (plain) | 8 | byte-identical | 1317 $equiv, 6s | 268,956 bits, 23s | 77,058 bits |
+| m4k-random-16 | SimpleDual 512 x 5, write x2 read x1 words, output register (plain) | 1 | byte-identical | 548 $equiv, 3s | 220,410 bits, 7s | 47,285 bits |
 
 A memory bit written as a constant gets an LE driving the block's data
 input: the block doesn't read an unconnected data input as 0, and Quartus
@@ -231,7 +271,9 @@ seeds 1-16 (`cargo run --release -p chipsmith-cyclone2 --example
 m4k_random -- <dir> 1 16` writes them as projects): one memory each, its
 kind, widths, depth, byte enables, read enable, output register, reset,
 clocks and contents drawn from the seed. Every existing DE2 example builds
-to the same RBF as on `open`.
+to the same RBF as on `open` but serv, whose register file is now an M4K
+(Quartus byte-identical; it was LE registers). de2-io and de2-pll-counter
+don't build here and don't on `open` either.
 
 Quartus assembles chipsmith's placement and routing into the same RBF bit
 for bit (`bench/quartus-timing.sh`): checked 2026-10-24 on blinky-verilog

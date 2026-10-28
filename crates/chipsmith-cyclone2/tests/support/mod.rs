@@ -317,10 +317,10 @@ fn cut_memories(m: &mut Module, canonical: bool) -> Result<BTreeMap<String, MemS
     let mut masked = Vec::new();
     let mut subst = chipsmith_synth::rewrite::Subst::new(m);
     // Ports in an order both sides agree on: yosys' and chipsmith's front
-    // ends number a memory's ports differently. A read port by the names
-    // of what its data reach (a wire on them, or on the register they go
-    // into), a write port by the names on its address; then by the
-    // address's constant bits (the words of a wide port).
+    // ends number a memory's ports differently. A port by the names on its
+    // address, then by the address's constant bits (the words of a wide
+    // port), a read port last by the names of what its data reach (a wire
+    // on them, or on the register they go into).
     let mut names: HashMap<Net, Vec<String>> = HashMap::new();
     for w in &m.wires {
         if w.name.starts_with('$') {
@@ -374,7 +374,7 @@ fn cut_memories(m: &mut Module, canonical: bool) -> Result<BTreeMap<String, MemS
         // chipsmith's need lining up.
         rds.sort_by_cached_key(|r| {
             if !canonical {
-                return (String::new(), String::new());
+                return (String::new(), String::new(), String::new());
             }
             let consts: String = r
                 .addr
@@ -384,7 +384,7 @@ fn cut_memories(m: &mut Module, canonical: bool) -> Result<BTreeMap<String, MemS
                     _ => 'n',
                 })
                 .collect();
-            (label(&r.data), consts)
+            (label(&r.addr), consts, label(&r.data))
         });
         let mut wrs: Vec<&chipsmith_netlist::MemWr> = mem.wr.iter().collect();
         wrs.sort_by_cached_key(|w| {
@@ -1055,12 +1055,26 @@ fn prep_memories(
     to_logic: &[String],
     cut: &[String],
 ) -> Result<Design, String> {
-    let mut map = String::from("memory_collect\n");
+    // The RTL's memories get their read registers merged as synthesis
+    // merges them (through enable and reset multiplexers: `opt_dff` first;
+    // `memory_dff` reads a bypass multiplexer as transparency), so a read
+    // transparent in one is transparent in the other. `proc` leaves a write
+    // port's address behind a multiplexer with an x input and an unnamed
+    // wire; folding it (only fixing what the RTL left x, so the proof gets
+    // no weaker) puts the address' names on the port, which is what lines
+    // the ports up with synthesis' (`cut_memories`).
+    let mut map = if name.starts_with("gold_prep") && !cut.is_empty() {
+        let mut m = String::from("opt_expr -mux_undef\nopt_clean\nopt_dff\n");
+        for id in cut {
+            m += &format!("memory_dff m:{id} t:$memrd* r:MEMID=\\{id} %i %u t:*dff* %u\n");
+        }
+        m + "memory_collect\n"
+    } else {
+        String::from("memory_collect\n")
+    };
     // A memory compared at its ports reads asynchronously on both sides,
-    // its read registers outside it (`memory_nordff`): synthesis merges
-    // registers into read ports where yosys' `memory_dff` doesn't (through
-    // enable, reset and bypass multiplexers), so their sync ports needn't
-    // line up, but the logic with the registers outside does.
+    // its read registers outside it (`memory_nordff`), so whatever registers
+    // each side merged, the logic with them outside lines up.
     for id in cut {
         map += &format!("memory_nordff t:$mem_v2 r:MEMID=\\{id} %i\n");
     }
@@ -1504,8 +1518,15 @@ fn check_impl(
         if words {
             mapped1.append(&mut all_cut);
         }
-        let mut gold = prep_memories(dir, "gold_prep", rtl, &mapped1, &all_cut)?;
-        let mut mid1 = prep_memories(dir, "mid_cut_prep", &refined_path, &mapped1, &all_cut)?;
+        let sfx = if words { "_words" } else { "" };
+        let mut gold = prep_memories(dir, &format!("gold_prep{sfx}"), rtl, &mapped1, &all_cut)?;
+        let mut mid1 = prep_memories(
+            dir,
+            &format!("mid_cut_prep{sfx}"),
+            &refined_path,
+            &mapped1,
+            &all_cut,
+        )?;
         prep_side(&mut gold);
         prep_side(&mut mid1);
         if cut_blocks {
@@ -1529,13 +1550,13 @@ fn check_impl(
             cut_memories(top_mut(&mut gold), true)?;
             cut_memories(top_mut(&mut mid1), true)?;
         }
-        let gold_path = dir.join("gold.json");
+        let gold_path = dir.join(format!("gold{sfx}.json"));
         write(&gold, &gold_path);
-        let mid_path = dir.join("mid.json");
+        let mid_path = dir.join(format!("mid{sfx}.json"));
         write(&mid1, &mid_path);
         equiv(
             dir,
-            "equiv_refine",
+            &format!("equiv_refine{sfx}"),
             &gold_path,
             &mid_path,
             top(&gold),
@@ -1873,9 +1894,12 @@ module CY2_M4K (input CLK, input CLK1, input ENA0, input ENA1, input CLR0, input
   wire [1:0] beb = (B_BYTEENA === 2'bz) ? 2'h3 : B_BYTEENA;
   wire bclk = B_CLOCK ? clk1 : clk0;
   wire bena = B_CLOCK ? ena1 : ena0;
-  integer aa, ab, c;
-  always @* aa = A_ADDR >> (12 - abits(PA));
-  always @* ab = B_ADDR >> (12 - abits(PB));
+  // Continuous, not `always @*`: an address that never changes (tied, or
+  // a counter's top bits for the whole run) never wakes an `always @*`, so
+  // it would stay x.
+  integer c;
+  wire [11:0] aa = A_ADDR >> (12 - abits(PA));
+  wire [11:0] ab = B_ADDR >> (12 - abits(PB));
   reg mem [0:4607];
   integer i;
   initial for (i = 0; i < 4608; i = i + 1) mem[i] = INIT[i];
