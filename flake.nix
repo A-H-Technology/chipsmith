@@ -72,7 +72,6 @@
           default = chipsmith;
           xc7-chipdb = xc7.chipdb;
           xc7-routing-graph = chipsmith.xc7RoutingGraph;
-          cubecl-hello = pkgs.callPackage ./nix/cubecl-hello.nix { inherit cudaToolkit; };
         };
 
         devShells.default = pkgs.mkShell {
