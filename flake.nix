@@ -40,6 +40,8 @@
         flowTools = [
           pkgs.ghdl
           pkgs.yosys
+          # Co-simulation in the tests (tests/support/cosim.rs).
+          pkgs.iverilog
           xc7.tools
         ];
         chipsmith = pkgs.callPackage ./nix/package.nix {

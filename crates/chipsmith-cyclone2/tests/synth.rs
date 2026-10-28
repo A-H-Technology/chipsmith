@@ -6,6 +6,8 @@
 //! cell. Needs yosys (and GHDL for the VHDL example): run in the devshell.
 
 mod support;
+#[path = "support/mult.rs"]
+mod mult;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -617,3 +619,186 @@ fn a_wrong_lut_bit_is_caught() {
     let err = support::check(&dir, &s.rtl, refined, &gate).expect_err("a changed LUT bit");
     assert!(err.contains("not proven equivalent"), "{err}");
 }
+
+/// One multiplier configuration per test (`support::mult::shapes`): the
+/// `$mul` maps to the expected number of blocks and the netlist is proven
+/// against the RTL, the blocks modelled by `SIM_MODELS`' CY2_MULT.
+fn mult_shape(name: &str) {
+    let (_, verilog, blocks) = mult::shapes()
+        .into_iter()
+        .find(|(n, _, _)| *n == name)
+        .unwrap_or_else(|| panic!("no multiplier shape {name}"));
+    let dir = scratch(&format!("mult-{name}"));
+    let v = dir.join("top.v");
+    std::fs::write(&v, verilog).unwrap();
+    let s = synthesize(&format!("mult-{name}"), "top", std::slice::from_ref(&v));
+    let cells = s.stages.cells.as_ref().expect("a cells stage");
+    let mults = cells.modules[0]
+        .cells
+        .iter()
+        .filter(|c| matches!(&c.kind, CellKind::Other(g) if g.ty == "CY2_MULT"))
+        .count();
+    assert_eq!(mults, blocks, "{name}: multiplier blocks");
+    let started = std::time::Instant::now();
+    let proof = support::check(
+        &s.dir,
+        &s.rtl,
+        s.stages.refined.as_ref().expect("a refined stage"),
+        cells,
+    )
+    .unwrap_or_else(|e| panic!("{name}: {e}"));
+    eprintln!(
+        "mult {name}: {blocks} blocks, {} $equiv proven in {:.1} s",
+        proof.equivalences,
+        started.elapsed().as_secs_f64()
+    );
+    let stats = pack(&s.dir, "chipsmith", &s.netlist);
+    assert_eq!(stats.mults, blocks, "{name}: packed multipliers");
+    let started = std::time::Instant::now();
+    let sim = support::cosim::cosim(&s.dir, &s.rtl, cells, 2000, 1)
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+    eprintln!(
+        "mult {name}: co-simulated {} cycles, {} output bits compared in {:.1} s",
+        sim.cycles,
+        sim.compared,
+        started.elapsed().as_secs_f64()
+    );
+}
+
+/// Dense products over several blocks, which the proofs can't do: the
+/// RTL against the netlist on thousands of random operand pairs.
+fn mult_dense(name: &str, wa: usize, wb: usize, signed: bool, wp: usize, blocks: usize) {
+    let sg = if signed { "signed " } else { "" };
+    let dir = scratch(&format!("mult-dense-{name}"));
+    let v = dir.join("top.v");
+    std::fs::write(
+        &v,
+        format!(
+            "module top(input clk, input [{wa1}:0] a, input [{wb1}:0] b, output reg [{wp1}:0] p);
+  reg {sg}[{wa1}:0] ra; reg {sg}[{wb1}:0] rb;
+  always @(posedge clk) begin ra <= a; rb <= b; p <= ra * rb; end
+endmodule
+",
+            wa1 = wa - 1,
+            wb1 = wb - 1,
+            wp1 = wp - 1
+        ),
+    )
+    .unwrap();
+    let s = synthesize(&format!("mult-dense-{name}"), "top", std::slice::from_ref(&v));
+    let cells = s.stages.cells.as_ref().expect("a cells stage");
+    let stats = pack(&s.dir, "chipsmith", &s.netlist);
+    assert_eq!(stats.mults, blocks, "{name}: packed multipliers");
+    let started = std::time::Instant::now();
+    let sim = support::cosim::cosim(&s.dir, &s.rtl, cells, 5000, 7)
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+    eprintln!(
+        "mult dense {name}: {blocks} blocks, co-simulated {} cycles, {} output bits compared in {:.1} s",
+        sim.cycles,
+        sim.compared,
+        started.elapsed().as_secs_f64()
+    );
+}
+
+#[test]
+fn mult_dense_u20x20() {
+    mult_dense("u20x20", 20, 20, false, 40, 4);
+}
+
+#[test]
+fn mult_dense_s24x24() {
+    mult_dense("s24x24", 24, 24, true, 48, 4);
+}
+
+#[test]
+fn mult_dense_u32x32_32() {
+    mult_dense("u32x32_32", 32, 32, false, 32, 3);
+}
+
+#[test]
+fn mult_dense_s32x32() {
+    mult_dense("s32x32", 32, 32, true, 64, 4);
+}
+
+#[test]
+fn mult_dense_u36x18() {
+    mult_dense("u36x18", 36, 18, false, 54, 2);
+}
+
+/// The co-simulation has teeth: two bits of one operand swapped, or one
+/// operand's sign wrong, and it fails.
+#[test]
+fn mult_cosim_catches_a_swapped_bit_and_a_wrong_sign() {
+    let (_, verilog, _) = mult::shapes()
+        .into_iter()
+        .find(|(n, _, _)| *n == "s12x7")
+        .unwrap();
+    let dir = scratch("mult-mutations");
+    let v = dir.join("top.v");
+    std::fs::write(&v, verilog).unwrap();
+    let s = synthesize("mult-mutations", "top", std::slice::from_ref(&v));
+    let cells = s.stages.cells.as_ref().expect("a cells stage");
+    let mutate = |what: &str, slug: &str, f: &dyn Fn(&mut chipsmith_netlist::Generic)| {
+        let mut d = cells.clone();
+        let m = d
+            .modules
+            .iter_mut()
+            .find(|m| !m.is_blackbox())
+            .unwrap()
+            .cells
+            .iter_mut()
+            .find_map(|c| match &mut c.kind {
+                CellKind::Other(g) if g.ty == "CY2_MULT" => Some(g),
+                _ => None,
+            })
+            .expect("a multiplier");
+        f(m);
+        let dir = scratch(&format!("mult-mutations-{slug}"));
+        match support::cosim::cosim(&dir, &s.rtl, &d, 500, 3) {
+            Ok(_) => panic!("{what}: not caught"),
+            Err(e) => {
+                assert!(e.starts_with("MISMATCH"), "{what}: {e}");
+                eprintln!("{what}: caught ({e})");
+            }
+        }
+    };
+    mutate("swapped operand bits", "swap", &|g| {
+        let a = g.ports.iter_mut().find(|p| p.name == "A").unwrap();
+        a.sig.swap(2, 5);
+    });
+    mutate("wrong sign", "sign", &|g| {
+        g.params.insert("B_SIGNED".into(), ParamValue::int(0));
+    });
+}
+
+macro_rules! mult_shapes {
+    ($($name:ident),* $(,)?) => {
+        $(
+            #[test]
+            fn $name() {
+                mult_shape(&stringify!($name)["mult_".len()..]);
+            }
+        )*
+    };
+}
+
+mult_shapes!(
+    mult_u9x9,
+    mult_s9x9,
+    mult_s9x3,
+    mult_u4x7,
+    mult_u18x18,
+    mult_s18x18,
+    mult_s12x7,
+    mult_u18x10,
+    mult_u16x16_16,
+    mult_u22x22_sparse,
+    mult_s22x22_sparse,
+    mult_u32x32_32_sparse,
+    mult_u40x18_sparse,
+    mult_s40x18_sparse,
+    mult_s12xu8,
+    mult_const_k,
+    mult_one_bit,
+    mult_two_products,
+);

@@ -1253,17 +1253,25 @@ impl Routed {
 
 /// A placed `CY2_MULT`: its shape and `DATA_ZERO` mask (the packer's,
 /// `pack_mult`) and the lines routed into its pins.
-fn mult_of(c: &Cell, y: u32, lines: &HashMap<(u32, cmult::Pin), bmult::Line>) -> Result<Mult> {
-    let int = |k: &str| -> Result<u64> {
-        let v = c.params.get(k).with_context(|| format!("{k} missing"))?;
-        u64::from_str_radix(v.trim_end(), 2).with_context(|| format!("{k} = {v}"))
-    };
-    let shape = cmult::Shape::new(
+/// A placed `CY2_MULT`'s shape, from the packer's parameters (32-bit
+/// binary strings, as yosys writes integers).
+pub fn mult_shape(c: &Cell) -> Result<cmult::Shape> {
+    let int = |k: &str| mult_param(c, k);
+    cmult::Shape::new(
         int("A_WIDTH")? as usize,
         int("B_WIDTH")? as usize,
         [int("A_SIGNED")? != 0, int("B_SIGNED")? != 0],
-    )?;
-    let zero = int("DATA_ZERO")?;
+    )
+}
+
+fn mult_param(c: &Cell, k: &str) -> Result<u64> {
+    let v = c.params.get(k).with_context(|| format!("{k} missing"))?;
+    u64::from_str_radix(v.trim_end(), 2).with_context(|| format!("{k} = {v}"))
+}
+
+fn mult_of(c: &Cell, y: u32, lines: &HashMap<(u32, cmult::Pin), bmult::Line>) -> Result<Mult> {
+    let shape = mult_shape(c)?;
+    let zero = mult_param(c, "DATA_ZERO")?;
     let mut data = BTreeMap::new();
     for k in 0..bmult::DATA as u32 {
         if zero >> k & 1 == 1 {

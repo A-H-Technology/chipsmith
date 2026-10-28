@@ -18,6 +18,8 @@
 
 #![allow(dead_code)]
 
+pub mod cosim;
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -72,6 +74,27 @@ module CY2_IOBUF (input DATAOUT, input OE, input INCLK, input OUTCLK, input EXT,
   assign PAD = e ? d : EXT;
   assign COMBOUT = PAD;
   assign REGOUT = qi;
+endmodule
+// The embedded multiplier (cells.v): the product of the low A_WIDTH and
+// B_WIDTH bits, each two's complement when its *_SIGNED is set. Each
+// signedness case is written so yosys makes one `$mul` of the operands'
+// own widths and signs (as the RTL's is), which the proof then matches
+// structurally rather than by SAT.
+module CY2_MULT (input [17:0] A, input [17:0] B, output [35:0] P);
+  parameter A_WIDTH = 18;
+  parameter B_WIDTH = 18;
+  parameter A_SIGNED = 0;
+  parameter B_SIGNED = 0;
+  wire [A_WIDTH-1:0] a = A[A_WIDTH-1:0];
+  wire [B_WIDTH-1:0] b = B[B_WIDTH-1:0];
+  wire [A_WIDTH+B_WIDTH-1:0] p;
+  generate
+    if (A_SIGNED && B_SIGNED) assign p = $signed(a) * $signed(b);
+    else if (A_SIGNED) assign p = $signed(a) * $signed({1'b0, b});
+    else if (B_SIGNED) assign p = $signed({1'b0, a}) * $signed(b);
+    else assign p = a * b;
+  endgenerate
+  assign P = {{(36-A_WIDTH-B_WIDTH){1'bx}}, p};
 endmodule
 "#;
 
@@ -214,7 +237,7 @@ pub fn read(path: &Path) -> Design {
     read_json(&std::fs::read(path).unwrap()).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
-fn top(d: &Design) -> &Module {
+pub fn top(d: &Design) -> &Module {
     d.modules
         .iter()
         .find(|m| !m.is_blackbox() && m.name == "top")

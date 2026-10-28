@@ -418,27 +418,24 @@ fn pack_mult(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
 }
 
 /// An unsigned operand needs a 0 on its sign input, which reads 1 undriven:
-/// a LUT with no inputs and an all-zero mask drives it, one per block, as
-/// Quartus' `~GND` cell does.
+/// a LUT with no inputs and an all-zero mask drives it, one for the whole
+/// design, as Quartus' `~GND` cell does (one cell; cyclone2-re's export
+/// names it `~GND` so Quartus keeps it where it is placed).
 fn unsigned_signs(nl: &mut Netlist) {
     use crate::mult::{Operand, Pin as MPin};
+    let mut gnd = None;
     for c in nl.cells() {
         let Kind::Mult(shape) = nl.cell(c).kind else {
             continue;
         };
-        let ops: Vec<Operand> = [Operand::A, Operand::B]
-            .into_iter()
-            .filter(|&op| !shape.signed[op as usize])
-            .collect();
-        if ops.is_empty() {
-            continue;
-        }
-        let name = format!("{}~GND", nl.cell(c).name);
-        let gnd = nl.create_cell(name.clone(), Kind::Lut { mask: 0 });
-        let net = nl.create_net(name);
-        nl.add_port(gnd, Port::Combout);
-        nl.connect(gnd, Port::Combout, net);
-        for op in ops {
+        for op in [Operand::A, Operand::B].into_iter().filter(|&op| !shape.signed[op as usize]) {
+            let net = *gnd.get_or_insert_with(|| {
+                let cell = nl.create_cell("~GND".to_string(), Kind::Lut { mask: 0 });
+                let net = nl.create_net("~GND".to_string());
+                nl.add_port(cell, Port::Combout);
+                nl.connect(cell, Port::Combout, net);
+                net
+            });
             let port = Port::Mult(MPin::Sign(op));
             nl.add_port(c, port);
             nl.connect(c, port, net);
