@@ -92,6 +92,41 @@ impl Shape {
     }
 }
 
+/// Which of a block's registers a `CY2_MULT` uses: one on each operand
+/// (all its bits) and one on the product. They share the block's one
+/// clock, enable and clear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Regs {
+    pub a: bool,
+    pub b: bool,
+    pub p: bool,
+}
+
+impl Regs {
+    /// The cell parameters that carry them.
+    pub const PARAMS: [&'static str; 3] = ["A_REG", "B_REG", "P_REG"];
+
+    pub fn any(self) -> bool {
+        self.a || self.b || self.p
+    }
+
+    pub fn of(self, op: Operand) -> bool {
+        match op {
+            Operand::A => self.a,
+            Operand::B => self.b,
+        }
+    }
+
+    /// In `PARAMS` order.
+    pub fn flags(self) -> [bool; 3] {
+        [self.a, self.b, self.p]
+    }
+
+    pub fn from_flags([a, b, p]: [bool; 3]) -> Regs {
+        Regs { a, b, p }
+    }
+}
+
 /// A physical pin of the `MULT` bel (cyclone2-re `chipdb.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Pin {
@@ -101,6 +136,15 @@ pub enum Pin {
     B(u8),
     /// The signs (`SIGNA`, `SIGNB`): 1 = signed. Unconnected reads 1.
     Sign(Operand),
+    /// The registers' clock: a row clock or a LAB line through the
+    /// block's control input 0 (`CLK`).
+    Clk,
+    /// Their clock enable, from a LAB line through control input 1
+    /// (`ENA`); unconnected, they're enabled.
+    Ena,
+    /// Their asynchronous clear, active high, a row clock or a line
+    /// through control input 2 (`ACLR`); unconnected, never.
+    Aclr,
     /// Product bit 0-35 (`MULTOUT<k>`, on `DSP_BUFFER` k).
     Out(u8),
 }
@@ -115,6 +159,9 @@ impl Pin {
         let pin = match name {
             "SIGNA" => Pin::Sign(Operand::A),
             "SIGNB" => Pin::Sign(Operand::B),
+            "CLK" => Pin::Clk,
+            "ENA" => Pin::Ena,
+            "ACLR" => Pin::Aclr,
             _ => {
                 if let Some(k) = num("MULTA") {
                     Pin::A(k)
@@ -132,7 +179,7 @@ impl Pin {
         match self {
             Pin::A(k) | Pin::B(k) => (k as usize) < MAX_WIDTH,
             Pin::Out(k) => (k as usize) < 2 * MAX_WIDTH,
-            Pin::Sign(_) => true,
+            Pin::Sign(_) | Pin::Clk | Pin::Ena | Pin::Aclr => true,
         }
     }
 
@@ -141,6 +188,7 @@ impl Pin {
         let mut v: Vec<Pin> = (0..MAX_WIDTH as u8).map(Pin::A).collect();
         v.extend((0..MAX_WIDTH as u8).map(Pin::B));
         v.extend([Pin::Sign(Operand::A), Pin::Sign(Operand::B)]);
+        v.extend([Pin::Clk, Pin::Ena, Pin::Aclr]);
         v.extend((0..2 * MAX_WIDTH as u8).map(Pin::Out));
         v
     }
@@ -153,6 +201,9 @@ impl fmt::Display for Pin {
             Pin::B(k) => write!(f, "MULTB{k}"),
             Pin::Sign(Operand::A) => f.write_str("SIGNA"),
             Pin::Sign(Operand::B) => f.write_str("SIGNB"),
+            Pin::Clk => f.write_str("CLK"),
+            Pin::Ena => f.write_str("ENA"),
+            Pin::Aclr => f.write_str("ACLR"),
             Pin::Out(k) => write!(f, "MULTOUT{k}"),
         }
     }

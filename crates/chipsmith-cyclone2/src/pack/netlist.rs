@@ -235,8 +235,8 @@ pub enum Kind {
     ClkCtrl,
     /// An M4K RAM block; its contents (`INIT`) pass through as a parameter.
     M4k(m4k::Shape),
-    /// An embedded multiplier.
-    Mult(mult::Shape),
+    /// An embedded multiplier, and which of its registers are in use.
+    Mult(mult::Shape, mult::Regs),
     /// The JTAG or serial-flash block.
     Hard(hard::Block),
     /// GND / VCC: the frontend's driver of a constant bit.
@@ -299,7 +299,7 @@ impl Kind {
             Kind::Iobuf { .. } => matches!(port, Port::Combout | Port::Regout),
             Kind::ClkCtrl => port == Port::Outclk,
             Kind::M4k(_) => matches!(port, Port::RamDataOut(_) | Port::M4k(m4k::Pin::Do(_))),
-            Kind::Mult(_) => {
+            Kind::Mult(..) => {
                 matches!(port, Port::MultP(_)) || matches!(port, Port::Mult(p) if p.is_output())
             }
             Kind::Hard(_) => matches!(port, Port::Hard(p) if p.is_output()),

@@ -71,8 +71,12 @@ pub enum Wire {
         y: u32,
         pin: M4kPin,
     },
-    /// An input of the multiplier at (X39, y), behind its source mux.
+    /// An input of the multiplier at (X39, y), behind its source mux
+    /// (data, signs, enable) or its fast mux (clock, clear).
     Mult { y: u32, pin: cmult::Pin },
+    /// Control input k (0 clock, 2 clear) of the multiplier at (X39, y): a
+    /// LAB line into the fast mux.
+    MultCtl { y: u32, k: u8 },
     /// An input of the JTAG or serial-flash block.
     Hard(HardInput),
     /// A control input of the PLL in tile (x, y).
@@ -215,6 +219,9 @@ fn wire(dev: &Device, tx: u32, ty: u32, name: &str) -> Result<Wire> {
         return Ok(Wire::Node(find(dev, x, y, 280, 0, k)?));
     }
     if let Some(pin) = name.strip_prefix("MULT.") {
+        if let Some(k) = num(pin, "CTL") {
+            return Ok(Wire::MultCtl { y, k: k as u8 });
+        }
         let pin = cmult::Pin::parse(pin)
             .filter(|p| !p.is_output())
             .with_context(|| format!("wire {name}"))?;
@@ -610,6 +617,8 @@ impl Routed {
         let mut ram_ctl: HashMap<(u32, u32, u8), CtlSrc> = HashMap::new();
         let mut hard_in: HashMap<HardInput, hard::Line> = HashMap::new();
         let mut mult_in: HashMap<(u32, cmult::Pin), bmult::Line> = HashMap::new();
+        let mut mult_ctl_line: HashMap<(u32, u8), bmult::Line> = HashMap::new();
+        let mut mult_ctl: HashMap<(u32, cmult::Pin), bmult::Ctl> = HashMap::new();
         let mut pll_in: HashMap<(u32, u32, super::pll::Control), u8> = HashMap::new();
         let mut nets = Vec::new();
         for n in self.nets.values() {
@@ -667,8 +676,34 @@ impl Routed {
                             M4kPin::Fast(_) => unreachable!(),
                         }
                     }
-                    // Multiplier data and sign inputs: a LAB line of the
-                    // block through its source mux.
+                    // Multiplier clock and clear from a row clock (their
+                    // fast mux) or from a control input fed by a line.
+                    (Wire::Node(s), Wire::Mult { y, pin: pin @ (cmult::Pin::Clk | cmult::Pin::Aclr) }) => {
+                        ensure!(
+                            dev.element_enum(s) == 560,
+                            "{}: multiplier {pin} from {}",
+                            n.name,
+                            element_name(dev.element_enum(s))
+                        );
+                        mult_ctl.insert((y, pin), bmult::Ctl::global(dev.index(s) as u32)?);
+                    }
+                    (Wire::MultCtl { y, k }, Wire::Mult { pin, .. }) => {
+                        let line = *mult_ctl_line
+                            .get(&(y, k))
+                            .with_context(|| format!("{}: multiplier control input {k} not fed", n.name))?;
+                        mult_ctl.insert((y, pin), bmult::Ctl::Line(line));
+                    }
+                    (Wire::Node(s), Wire::MultCtl { y, k }) => {
+                        ensure!(
+                            dev.element_enum(s) == 276,
+                            "{}: multiplier control input from {}",
+                            n.name,
+                            element_name(dev.element_enum(s))
+                        );
+                        mult_ctl_line.insert((y, k), bmult::Line::new(dev.index(s) as u32)?);
+                    }
+                    // Multiplier data, sign and enable inputs: a LAB line of
+                    // the block through its source mux.
                     (Wire::Node(s), Wire::Mult { y, pin }) => {
                         let t = &dev.routing.templates
                             [dev.routing.elements[s.0 as usize].template as usize];
@@ -989,7 +1024,7 @@ impl Routed {
                     });
                 }
                 ("CY2_MULT", Bel::Mult { y }) => {
-                    mults.push(mult_of(c, y, &mult_in).with_context(|| name.clone())?);
+                    mults.push(mult_of(c, y, &mult_in, &mult_ctl).with_context(|| name.clone())?);
                 }
                 ("CY2_PLL", Bel::Pll { x, y }) => {
                     use super::pll::{Control, Pll, Site};
@@ -1269,8 +1304,23 @@ fn mult_param(c: &Cell, k: &str) -> Result<u64> {
     u64::from_str_radix(v.trim_end(), 2).with_context(|| format!("{k} = {v}"))
 }
 
-fn mult_of(c: &Cell, y: u32, lines: &HashMap<(u32, cmult::Pin), bmult::Line>) -> Result<Mult> {
+/// The register flags of a placed `CY2_MULT`.
+pub fn mult_regs(c: &Cell) -> Result<cmult::Regs> {
+    let mut flags = [false; 3];
+    for (f, k) in flags.iter_mut().zip(cmult::Regs::PARAMS) {
+        *f = c.params.get(k).map_or(Ok(0), |_| mult_param(c, k))? != 0;
+    }
+    Ok(cmult::Regs::from_flags(flags))
+}
+
+fn mult_of(
+    c: &Cell,
+    y: u32,
+    lines: &HashMap<(u32, cmult::Pin), bmult::Line>,
+    ctl: &HashMap<(u32, cmult::Pin), bmult::Ctl>,
+) -> Result<Mult> {
     let shape = mult_shape(c)?;
+    let regs = mult_regs(c)?;
     let zero = mult_param(c, "DATA_ZERO")?;
     let mut data = BTreeMap::new();
     for k in 0..bmult::DATA as u32 {
@@ -1279,9 +1329,12 @@ fn mult_of(c: &Cell, y: u32, lines: &HashMap<(u32, cmult::Pin), bmult::Line>) ->
         }
     }
     let mut sign = [Sign::Signed; 2];
+    let mut enable = None;
     for (&(at, pin), &line) in lines.iter().filter(|((at, _), _)| *at == y) {
         debug_assert_eq!(at, y);
         match pin {
+            cmult::Pin::Ena => enable = Some(line),
+            cmult::Pin::Clk | cmult::Pin::Aclr => unreachable!("fast-muxed pins aren't lines"),
             cmult::Pin::A(k) => {
                 data.insert(DataPin::new(k as u32)?, DataIn::Line(line));
             }
@@ -1301,12 +1354,30 @@ fn mult_of(c: &Cell, y: u32, lines: &HashMap<(u32, cmult::Pin), bmult::Line>) ->
             "unsigned operand {op:?} without a routed sign"
         );
     }
+    // The block's registers: the operand's rows (row 0 in nine-bit mode,
+    // both in 18-bit mode) and the product's.
+    let registers = if regs.any() {
+        let rows: [bool; 2] = [true, !shape.nine_bit()];
+        let clock = *ctl
+            .get(&(y, cmult::Pin::Clk))
+            .context("registered multiplier without a routed clock")?;
+        Some(super::mult::Registers {
+            clock,
+            enable,
+            clear: ctl.get(&(y, cmult::Pin::Aclr)).copied(),
+            input: rows.map(|r| [r && regs.a, r && regs.b]),
+            sign: [false; 2],
+            output: rows.map(|r| r && regs.p),
+        })
+    } else {
+        None
+    };
     Ok(Mult {
         y,
         nine_bit: shape.nine_bit(),
         data,
         sign,
-        registers: None,
+        registers,
     })
 }
 

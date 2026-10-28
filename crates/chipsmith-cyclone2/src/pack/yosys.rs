@@ -264,7 +264,16 @@ fn kind_of(ty: &str, params: &BTreeMap<String, Value>, name: &str) -> Result<Kin
                 get("B_WIDTH")? as usize,
                 [get("A_SIGNED")? != 0, get("B_SIGNED")? != 0],
             );
-            Kind::Mult(shape.with_context(|| format!("multiplier {name}"))?)
+            // Registers are optional: an instantiated CY2_MULT may leave
+            // them out.
+            let mut flags = [false; 3];
+            for (f, k) in flags.iter_mut().zip(crate::mult::Regs::PARAMS) {
+                *f = params.get(k).and_then(int).unwrap_or(0) != 0;
+            }
+            Kind::Mult(
+                shape.with_context(|| format!("multiplier {name}"))?,
+                crate::mult::Regs::from_flags(flags),
+            )
         }
         other => match crate::hard::Block::from_cell_type(other) {
             Some(b) => Kind::Hard(b),
@@ -274,11 +283,14 @@ fn kind_of(ty: &str, params: &BTreeMap<String, Value>, name: &str) -> Result<Kin
 }
 
 /// The parameters `Kind` holds; the rest pass through.
-const TYPED_PARAMS: [&str; 10] = [
+const TYPED_PARAMS: [&str; 13] = [
     "A_WIDTH",
     "B_WIDTH",
     "A_SIGNED",
     "B_SIGNED",
+    "A_REG",
+    "B_REG",
+    "P_REG",
     "LUT_MASK",
     "MODE",
     "WIDTH",

@@ -347,11 +347,13 @@ fn pack_m4k(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
 /// reads 1, so operand bits tied to 1 are left off. Bits tied to 0 and the
 /// unused low pins of the row read 0 through the block's input inversion:
 /// `DATA_ZERO`, a mask over the 36 data inputs (operand A's 0-17, B's
-/// 18-35). The sign inputs get theirs in `unsigned_signs`.
+/// 18-35). The sign inputs get theirs in `unsigned_signs`. The registers'
+/// clock, enable and clear move onto the block's control pins; an enable
+/// tied on or a clear tied off is left unconnected, which reads the same.
 fn pack_mult(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
     use crate::mult::{Operand, Pin as MPin};
     for c in nl.cells() {
-        let Kind::Mult(shape) = nl.cell(c).kind else {
+        let Kind::Mult(shape, regs) = nl.cell(c).kind else {
             continue;
         };
         stats.mults += 1;
@@ -377,7 +379,32 @@ fn pack_mult(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
                 Port::MultB(i) => Some((Operand::B, i)),
                 _ => None,
             };
+            let constant = |n: Option<NetId>| {
+                n.and_then(|n| nl.net(n).driver).and_then(|(d, _)| match nl.cell(d).kind {
+                    Kind::Const(v) => Some(v),
+                    _ => None,
+                })
+            };
             match (port, operand) {
+                (Port::Clk | Port::Ena | Port::Aclr, _) if !regs.any() => {
+                    bail!("multiplier {name}: {} without a register", port.name())
+                }
+                (Port::Clk, _) => {
+                    let Some(n) = net.filter(|&n| constant(Some(n)).is_none()) else {
+                        bail!("multiplier {name}: clock not driven");
+                    };
+                    pins.push((MPin::Clk, n));
+                }
+                (Port::Ena, _) => match (net, constant(net)) {
+                    (_, Some(true)) | (None, _) => {}
+                    (_, Some(false)) => bail!("multiplier {name}: registers never enabled"),
+                    (Some(n), None) => pins.push((MPin::Ena, n)),
+                },
+                (Port::Aclr, _) => match (net, constant(net)) {
+                    (_, Some(false)) | (None, _) => {}
+                    (_, Some(true)) => bail!("multiplier {name}: registers always cleared"),
+                    (Some(n), None) => pins.push((MPin::Aclr, n)),
+                },
                 (Port::MultP(k), _) => {
                     if (k as usize) < shape.width(Operand::A) + shape.width(Operand::B)
                         && nl.has_users(net)
@@ -425,7 +452,7 @@ fn unsigned_signs(nl: &mut Netlist) {
     use crate::mult::{Operand, Pin as MPin};
     let mut gnd = None;
     for c in nl.cells() {
-        let Kind::Mult(shape) = nl.cell(c).kind else {
+        let Kind::Mult(shape, _) = nl.cell(c).kind else {
             continue;
         };
         for op in [Operand::A, Operand::B].into_iter().filter(|&op| !shape.signed[op as usize]) {
@@ -722,7 +749,7 @@ fn pack_lut1(nl: &mut Netlist, stats: &mut Stats) {
                 // block inverts no data or address pin.
                 (Kind::M4k(_), _) if !inv => nl.reconnect(u, p, input),
                 // And into a multiplier's operands.
-                (Kind::Mult(_), _) if !inv => nl.reconnect(u, p, input),
+                (Kind::Mult(..), _) if !inv => nl.reconnect(u, p, input),
                 // Likewise into the JTAG and serial-flash blocks, which
                 // invert nothing either.
                 (Kind::Hard(_), _) if !inv => nl.reconnect(u, p, input),
@@ -845,6 +872,7 @@ fn pack_clocks(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
     let is_clock = |nl: &Netlist, (u, p): (CellId, Port)| match nl.cell(u).kind {
         Kind::Ff(_) => p == Port::Clk,
         Kind::M4k(_) => p == Port::M4k(Pin::Clk0),
+        Kind::Mult(..) => p == Port::Mult(crate::mult::Pin::Clk),
         Kind::Ibuf { .. } | Kind::Obuf { .. } | Kind::Iobuf { .. } => {
             matches!(p, Port::Inclk | Port::Outclk)
         }
@@ -954,14 +982,17 @@ fn to_json(nl: &Netlist) -> Result<Value> {
             }
             Kind::ClkCtrl => "CLKCTRL",
             Kind::Hard(b) => b.cell_type(),
-            Kind::Mult(shape) => {
-                use crate::mult::Operand;
+            Kind::Mult(shape, regs) => {
+                use crate::mult::{Operand, Regs};
                 for (k, v) in [
                     ("A_WIDTH", shape.width(Operand::A)),
                     ("B_WIDTH", shape.width(Operand::B)),
                     ("A_SIGNED", usize::from(shape.signed[0])),
                     ("B_SIGNED", usize::from(shape.signed[1])),
-                ] {
+                ]
+                .into_iter()
+                .chain(Regs::PARAMS.into_iter().zip(regs.flags().map(usize::from)))
+                {
                     params.insert(k.into(), Value::String(format!("{v:032b}")));
                 }
                 "CY2_MULT"

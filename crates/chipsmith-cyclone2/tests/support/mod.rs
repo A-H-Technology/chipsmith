@@ -76,17 +76,29 @@ module CY2_IOBUF (input DATAOUT, input OE, input INCLK, input OUTCLK, input EXT,
   assign REGOUT = qi;
 endmodule
 // The embedded multiplier (cells.v): the product of the low A_WIDTH and
-// B_WIDTH bits, each two's complement when its *_SIGNED is set. Each
-// signedness case is written so yosys makes one `$mul` of the operands'
-// own widths and signs (as the RTL's is), which the proof then matches
-// structurally rather than by SAT.
-module CY2_MULT (input [17:0] A, input [17:0] B, output [35:0] P);
+// B_WIDTH bits, each two's complement when its *_SIGNED is set, with the
+// operand and product registers *_REG ask for (rising edge of CLK, enable
+// active high, clear asynchronous to 0). Each signedness case is written
+// so yosys makes one `$mul` of the operands' own widths and signs (as the
+// RTL's is), which the proof then matches structurally rather than by
+// SAT.
+module CY2_MULT (input [17:0] A, input [17:0] B, input CLK, input ENA, input ACLR,
+                 output [35:0] P);
   parameter A_WIDTH = 18;
   parameter B_WIDTH = 18;
   parameter A_SIGNED = 0;
   parameter B_SIGNED = 0;
-  wire [A_WIDTH-1:0] a = A[A_WIDTH-1:0];
-  wire [B_WIDTH-1:0] b = B[B_WIDTH-1:0];
+  parameter A_REG = 0;
+  parameter B_REG = 0;
+  parameter P_REG = 0;
+  reg [A_WIDTH-1:0] qa = 0;
+  reg [B_WIDTH-1:0] qb = 0;
+  reg [A_WIDTH+B_WIDTH-1:0] qp = 0;
+  always @(posedge CLK, posedge ACLR)
+    if (ACLR) begin qa <= 0; qb <= 0; qp <= 0; end
+    else if (ENA) begin qa <= A[A_WIDTH-1:0]; qb <= B[B_WIDTH-1:0]; qp <= p; end
+  wire [A_WIDTH-1:0] a = A_REG ? qa : A[A_WIDTH-1:0];
+  wire [B_WIDTH-1:0] b = B_REG ? qb : B[B_WIDTH-1:0];
   wire [A_WIDTH+B_WIDTH-1:0] p;
   generate
     if (A_SIGNED && B_SIGNED) assign p = $signed(a) * $signed(b);
@@ -94,7 +106,7 @@ module CY2_MULT (input [17:0] A, input [17:0] B, output [35:0] P);
     else if (B_SIGNED) assign p = $signed({1'b0, a}) * $signed(b);
     else assign p = a * b;
   endgenerate
-  assign P = {{(36-A_WIDTH-B_WIDTH){1'bx}}, p};
+  assign P = {{(36-A_WIDTH-B_WIDTH){1'bx}}, P_REG ? qp : p};
 endmodule
 "#;
 

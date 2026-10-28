@@ -335,6 +335,14 @@ fn read_design(db: &ChipDb, json: &Value) -> Result<Design> {
             .unwrap_or(0);
         let ty = cell["type"].as_str().unwrap_or("");
         timing.add_cell(name, ty, &connected, le);
+        if ty == "CY2_MULT" {
+            let flag = |p: &str| {
+                cell["parameters"][p]
+                    .as_str()
+                    .is_some_and(|v| v.trim_end().contains('1'))
+            };
+            timing.add_mult_registers(name, flag("A_REG"), flag("B_REG"), flag("P_REG"));
+        }
         if matches!(ty, "CY2_IBUF" | "CY2_OBUF" | "CY2_IOBUF") {
             let reg = |p: &str| cell["parameters"][p].is_string();
             timing.add_ioe_registers(
@@ -347,6 +355,7 @@ fn read_design(db: &ChipDb, json: &Value) -> Result<Design> {
         let clock = match ty {
             "LCELL_FF" => net_of(cell, "CLK"),
             "CY2_M4K" => net_of(cell, "CLK0"),
+            "CY2_MULT" => net_of(cell, "CLK"),
             _ => None,
         };
         if let Some(clock) = clock {

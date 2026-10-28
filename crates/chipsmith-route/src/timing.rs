@@ -31,7 +31,10 @@ pub fn wire_delay(wire_type: &str) -> Ps {
         // M4K read data onto the routing. One connection measured, not a
         // median: M4K_BUFFER, two R4s and a LAB line in 975 ps.
         "M4K_BUFFER" => 143.0,
-        // Multiplier product bits onto the routing: MULT_BUFFER_PLACEHOLDER
+        // Multiplier product bits onto the routing: taken as the M4K's
+        // (one quartus_sta path, DSP_BUFFER to an LE's sdata through an R4
+        // and a LAB line, was 1,232 ps; the model's R4 + LAB line + sdata
+        // account for most of it).
         "DSP_BUFFER" => 143.0,
         "IO_DATAIN" => 66.0,
         "BLK_CLK_BUF" => 96.0,
@@ -101,8 +104,14 @@ const M4K_TCO: Ps = 209.0 + 2993.0 + 124.0;
 const M4K_TSU: Ps = 142.0 - 35.0 - 124.0;
 
 /// An embedded multiplier, data in to product out, unregistered:
-/// MULT_COMB_PLACEHOLDER
-const MULT_COMB: Ps = 5000.0;
+/// quartus_sta on an 18 x 18 product (2026-10-29): 2,679 ps through the
+/// mac_mult and 224 ps through the mac_out it leaves by.
+const MULT_COMB: Ps = 2679.0 + 224.0;
+/// Its input registers' setup and its output register's clock-to-output,
+/// the LE register's until measured (the block's registers are in the
+/// same rows as the LEs', on the same row clocks).
+const MULT_TSU: Ps = TSU;
+const MULT_TCO: Ps = TCO;
 /// Cyclone II I/O-cell registers, for a register-to-register path that
 /// starts or ends in a pin's I/O cell. quartus_sta on examples/de2-io
 /// (2026-10-26): an input register's uTco 143 ps plus 390 ps out through
@@ -201,7 +210,8 @@ impl Graph {
             }
             "CY2_MULT" => {
                 let outs: Vec<&str> = ports.iter().copied().filter(|p| p.starts_with("MULTOUT")).collect();
-                for &i in ports.iter().filter(|p| !p.starts_with("MULTOUT")) {
+                let data = |p: &&&str| p.starts_with("MULTA") || p.starts_with("MULTB") || p.starts_with("SIGN");
+                for &i in ports.iter().filter(data) {
                     for &o in &outs {
                         let (from, to) = (self.node(cell, i), self.node(cell, o));
                         self.cell_arcs.push(Arc {
@@ -214,6 +224,45 @@ impl Graph {
             }
             _ => {}
         }
+    }
+
+    /// A Cyclone II multiplier's registers (`add_cell` gave it the
+    /// combinational arcs): an operand register captures its data pins,
+    /// the product register launches the product pins; a registered
+    /// operand's path to an unregistered product starts at the register,
+    /// an unregistered operand's to a registered product ends at it.
+    pub fn add_mult_registers(&mut self, cell: &str, a: bool, b: bool, p: bool) {
+        let nodes: Vec<(String, u32)> = self
+            .index
+            .iter()
+            .filter(|((c, _), _)| c == cell)
+            .map(|((_, port), &n)| (port.clone(), n))
+            .collect();
+        let registered_in = |port: &str| {
+            (a && port.starts_with("MULTA")) || (b && port.starts_with("MULTB"))
+        };
+        for (port, n) in &nodes {
+            let n = *n as usize;
+            if port.starts_with("MULTOUT") {
+                if p {
+                    self.launch[n] = Some(MULT_TCO);
+                } else if a || b {
+                    self.launch[n] = Some(MULT_TCO + MULT_COMB);
+                }
+            } else if registered_in(port) {
+                self.setup[n] = Some(MULT_TSU);
+            } else if p && !port.starts_with("SIGN") && !matches!(port.as_str(), "CLK" | "ENA" | "ACLR") {
+                self.setup[n] = Some(MULT_TSU + MULT_COMB);
+            }
+        }
+        // Arcs through a register are no longer combinational.
+        let regs: std::collections::HashSet<u32> = nodes
+            .iter()
+            .filter(|(port, _)| registered_in(port) || (p && port.starts_with("MULTOUT")))
+            .map(|(_, n)| *n)
+            .collect();
+        self.cell_arcs
+            .retain(|arc| !regs.contains(&arc.from) && !regs.contains(&arc.to));
     }
 
     /// A Cyclone II pin's I/O-cell registers: the input register launches
