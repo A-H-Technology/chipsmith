@@ -1672,6 +1672,98 @@ fn check_impl(
     })
 }
 
+/// A behavioural model of CY2_M4K for co-simulation (iverilog): the block
+/// in physical terms (cells.v, crate::m4k), the same semantics as
+/// `model_blocks`, which the proofs use, but as one array, so 10,000 cycles
+/// of a design with a dozen blocks take seconds, not hours. An
+/// unconnected input reads as cells.v says: enables on, clears off, no
+/// write.
+pub const COSIM_M4K: &str = r#"
+module CY2_M4K (input CLK, input CLK1, input ENA0, input ENA1, input CLR0, input CLR1,
+                input [11:0] A_ADDR, input [35:0] A_DATAIN, input A_WE, input [3:0] A_BYTEENA,
+                input [11:0] B_ADDR, input [17:0] B_DATAIN, input B_WE, input [1:0] B_BYTEENA,
+                output [35:0] DATAOUT);
+  parameter MODE = "SINGLE";
+  parameter WIDTH = 1;
+  parameter B_WIDTH = WIDTH;
+  parameter B_CLOCK = 0;
+  parameter A_OUTREG = "NONE";
+  parameter A_OUTCLR = "NONE";
+  parameter B_OUTREG = "NONE";
+  parameter B_OUTCLR = "NONE";
+  parameter BASE = 1;
+  parameter SLICE = 1;
+  parameter PACKING = "DENSE";
+  parameter [4607:0] INIT = 4608'b0;
+  localparam TDP = MODE == "TRUE_DUAL";
+  localparam SDP = MODE == "SIMPLE_DUAL";
+  localparam PA = WIDTH, PB = SDP || TDP ? B_WIDTH : WIDTH;
+  function integer abits(input integer w);
+    abits = w == 1 ? 12 : w == 2 ? 11 : w == 4 ? 10 : w == 9 ? 9 : w == 18 ? 8 : 7;
+  endfunction
+  // Linear position of column c of word a of a port of width p.
+  function integer lin(input integer p, input integer a, input integer c);
+    integer l;
+    begin
+      l = a * p + c;
+      lin = p < 9 ? l / 8 * 9 + l % 8 : l;
+    end
+  endfunction
+  wire clk0 = CLK;
+  wire clk1 = (CLK1 === 1'bz) ? CLK : CLK1;
+  wire ena0 = (ENA0 === 1'bz) ? 1'b1 : ENA0;
+  wire ena1 = (ENA1 === 1'bz) ? 1'b1 : ENA1;
+  wire clr0 = (CLR0 === 1'bz) ? 1'b0 : CLR0;
+  wire clr1 = (CLR1 === 1'bz) ? 1'b0 : CLR1;
+  wire wea = (A_WE === 1'bz) ? 1'b0 : A_WE;
+  wire web = TDP && !(B_WE === 1'bz) ? B_WE : 1'b0;
+  wire [3:0] bea = (A_BYTEENA === 4'bz) ? 4'hf : A_BYTEENA;
+  wire [1:0] beb = (B_BYTEENA === 2'bz) ? 2'h3 : B_BYTEENA;
+  wire bclk = B_CLOCK ? clk1 : clk0;
+  wire bena = B_CLOCK ? ena1 : ena0;
+  integer aa, ab, c;
+  always @* aa = A_ADDR >> (12 - abits(PA));
+  always @* ab = B_ADDR >> (12 - abits(PB));
+  reg mem [0:4607];
+  integer i;
+  initial for (i = 0; i < 4608; i = i + 1) mem[i] = INIT[i];
+  // Port A: writes (but a read-only simple dual port), reads but in
+  // simple dual port; each read sees its own port's write (new data, a
+  // byte left out undefined) and the other's old data.
+  reg [35:0] qa = 0, qb = 0;
+  always @(posedge clk0) if (ena0) begin
+    if (!SDP)
+      for (c = 0; c < PA; c = c + 1)
+        qa[c] <= wea ? ((PA < 18 || bea[c / 9]) ? A_DATAIN[c] : 1'bx) : mem[lin(PA, aa, c)];
+    if (wea)
+      for (c = 0; c < PA; c = c + 1)
+        if (PA < 18 || bea[c / 9]) mem[lin(PA, aa, c)] <= A_DATAIN[c];
+  end
+  always @(posedge bclk) if (bena && (SDP || TDP)) begin
+    for (c = 0; c < PB; c = c + 1)
+      qb[c] <= web ? ((PB < 18 || beb[c / 9]) ? B_DATAIN[c] : 1'bx) : mem[lin(PB, ab, c)];
+    if (web)
+      for (c = 0; c < PB; c = c + 1)
+        if (PB < 18 || beb[c / 9]) mem[lin(PB, ab, c)] <= B_DATAIN[c];
+  end
+  // Both ports writing one bit on one edge: undefined.
+  always @(posedge clk0) if (TDP && !B_CLOCK && ena0 && wea && web)
+    for (c = 0; c < PB; c = c + 1)
+      if (lin(PA, aa, 0) <= lin(PB, ab, c) && lin(PB, ab, c) <= lin(PA, aa, PA - 1)) mem[lin(PB, ab, c)] <= 1'bx;
+  // Output registers.
+  reg [35:0] pa = 0, pb = 0;
+  wire oca = A_OUTREG == "CLOCK1" ? clk1 : clk0, ocb = B_OUTREG == "CLOCK1" ? clk1 : clk0;
+  wire oea = A_OUTREG == "CLOCK1" ? ena1 : ena0, oeb = B_OUTREG == "CLOCK1" ? ena1 : ena0;
+  wire cla = A_OUTCLR == "CLEAR0" ? clr0 : A_OUTCLR == "CLEAR1" ? clr1 : 1'b0;
+  wire clb = B_OUTCLR == "CLEAR0" ? clr0 : B_OUTCLR == "CLEAR1" ? clr1 : 1'b0;
+  always @(posedge oca or posedge cla) if (cla) pa <= 0; else if (oea) pa <= qa;
+  always @(posedge ocb or posedge clb) if (clb) pb <= 0; else if (oeb) pb <= qb;
+  wire [35:0] oa = A_OUTREG == "NONE" ? qa : pa;
+  wire [35:0] ob = B_OUTREG == "NONE" ? qb : pb;
+  assign DATAOUT = TDP ? {ob[17:0], oa[17:0]} : SDP ? ob : oa;
+endmodule
+"#;
+
 /// What a co-simulation found.
 #[derive(Debug)]
 pub struct Cosim {
@@ -1681,8 +1773,7 @@ pub struct Cosim {
 }
 
 /// Simulates the RTL and the synthesized netlist side by side (iverilog),
-/// the blocks as their model (`model_blocks`, the same model the proofs
-/// use), with the same random inputs: every input but the clocks redrawn
+/// the blocks as [`COSIM_M4K`], with the same random inputs: every input but the clocks redrawn
 /// from `seed` after each falling edge of the first clock, every output
 /// compared just after it, `cycles` times. An output bit the RTL leaves
 /// x isn't compared. Fails with the seed and the cycle of the first
@@ -1696,19 +1787,15 @@ pub fn cosim(
     seed: u32,
 ) -> Result<Cosim, String> {
     use chipsmith_netlist::Dir;
-    let mut g = gate.clone();
-    {
-        let gt = g
-            .modules
-            .iter_mut()
-            .find(|m| !m.is_blackbox())
-            .expect("top");
-        model_blocks(gt, &mem_infos(refined))?;
-    }
+    let _ = refined;
     let gate_json = dir.join("cosim_gate.json");
-    write(&g, &gate_json);
+    write(gate, &gate_json);
     let sim = dir.join("cy2_sim.v");
     std::fs::write(&sim, SIM_MODELS).unwrap();
+    let lib = dir.join("cells.v");
+    std::fs::write(&lib, cells::LIBRARY).unwrap();
+    let m4k_v = dir.join("cosim_m4k.v");
+    std::fs::write(&m4k_v, COSIM_M4K).unwrap();
     let gold_v = dir.join("cosim_gold.v");
     let gate_v = dir.join("cosim_gate.v");
     yosys(
@@ -1717,8 +1804,9 @@ pub fn cosim(
         &format!(
             "read_json {rtl}\nhierarchy -top top\nproc\nmemory_collect\nopt_clean\nrename top gold\n\
              write_verilog -noattr {gold_v}\ndesign -reset\n\
-             read_json {gate}\nread_verilog -overwrite {sim}\nhierarchy -top top\nproc\nflatten\n\
-             techmap t:$bmux t:$demux\nopt_clean\nrename top gate\nwrite_verilog -noattr {gate_v}\n",
+             read_verilog -lib {lib}\nread_json {gate}\nread_verilog -overwrite {sim}\nhierarchy -top top\nproc\nflatten\n\
+             opt_clean\nrename top gate\nwrite_verilog -noattr {gate_v}\n",
+            lib = lib.display(),
             rtl = rtl.display(),
             gate = gate_json.display(),
             sim = sim.display(),
@@ -1793,7 +1881,7 @@ pub fn cosim(
     let out = Command::new("iverilog")
         .args(["-g2012", "-o"])
         .arg(&vvp)
-        .args([&tb_v, &gold_v, &gate_v])
+        .args([&tb_v, &gold_v, &gate_v, &m4k_v])
         .output()
         .map_err(|e| format!("iverilog: {e} (run in the devshell)"))?;
     if !out.status.success() {

@@ -538,7 +538,9 @@ fn m4k_cells_are_the_yosys_flows() {
                                         chipsmith_netlist::SigBit::Net(_) => 'n',
                                         // Unused data columns: x here, 0 in
                                         // the yosys flow; neither is wired.
-                                        chipsmith_netlist::SigBit::Const(chipsmith_netlist::State::X) => '0',
+                                        chipsmith_netlist::SigBit::Const(
+                                            chipsmith_netlist::State::X,
+                                        ) => '0',
                                         chipsmith_netlist::SigBit::Const(s) => s.char(),
                                     })
                                     .collect();
