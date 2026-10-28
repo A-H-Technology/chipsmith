@@ -162,6 +162,55 @@ endmodule",
 endmodule",
             1,
         ),
+        // Both ports writing one word on one edge, in one process so the
+        // later write wins in either front end; each port still reads its
+        // own write's data (the block gives the masked one the old word).
+        (
+            "tdp_collide_x9",
+            "module top(input clk, input wea, input web, input [8:0] aa, input [8:0] ab, input [8:0] da, input [8:0] db,
+           output reg [8:0] qa, output reg [8:0] qb);
+  reg [8:0] m [0:511];
+  always @(posedge clk) begin
+    if (wea) m[aa] <= da;
+    if (web) m[ab] <= db;
+    qa <= wea ? da : m[aa];
+    qb <= web ? db : m[ab];
+  end
+endmodule",
+            1,
+        ),
+        (
+            "tdp_collide_x16_x4",
+            "module top(input clk, input wea, input web, input [7:0] aa, input [9:0] ab, input [15:0] da, input [3:0] db,
+           output reg [15:0] qa, output reg [3:0] qb);
+  reg [3:0] m [0:1023];
+  always @(posedge clk) begin
+    if (wea) begin
+      m[{aa, 2'd0}] <= da[3:0];
+      m[{aa, 2'd1}] <= da[7:4];
+      m[{aa, 2'd2}] <= da[11:8];
+      m[{aa, 2'd3}] <= da[15:12];
+    end
+    if (web) m[ab] <= db;
+    qa <= wea ? da : {m[{aa, 2'd3}], m[{aa, 2'd2}], m[{aa, 2'd1}], m[{aa, 2'd0}]};
+    qb <= web ? db : m[ab];
+  end
+endmodule",
+            1,
+        ),
+        (
+            "two_writes_one_read_x9",
+            "module top(input clk, input a, input b, input [8:0] x, input [8:0] y, input [8:0] d1, input [8:0] d2,
+           output reg [8:0] q);
+  reg [8:0] m [0:511];
+  always @(posedge clk) begin
+    if (a) m[x] <= d1;
+    if (b) m[y] <= d2;
+    q <= a ? d1 : m[x];
+  end
+endmodule",
+            1,
+        ),
         (
             "two_clocks_x9",
             "module top(input clk, input clk2, input we, input [8:0] wa, input [8:0] ra, input [8:0] d, output reg [8:0] q);

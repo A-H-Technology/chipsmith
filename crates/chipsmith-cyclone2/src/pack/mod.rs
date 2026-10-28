@@ -289,6 +289,22 @@ fn pack_m4k(nl: &mut Netlist, stats: &mut Stats) -> Result<Vec<(CellId, Pin, boo
                 .any(|(_, r)| r.out_reg.is_some_and(|o| o.clock == Sel::One));
         // nextpnr iterates a cell's ports newest first.
         let old: Vec<(Port, Option<NetId>)> = nl.cell(c).ports().collect();
+        // Columns whose read data something uses: in a yosys-flow cell
+        // (single or simple dual port, one width, data bit k in column k)
+        // the columns written that are memory bits, not padding.
+        let read_cols: std::collections::HashSet<u8> = old
+            .iter()
+            .filter_map(|&(port, net)| {
+                let lp = match port {
+                    Port::Ram(p) => Some(p),
+                    other => CellPort::parse(&other.name()),
+                };
+                match lp {
+                    Some(CellPort::DataOut(col)) if nl.has_users(net) => Some(col),
+                    _ => None,
+                }
+            })
+            .collect();
         let mut pins: Vec<(Pin, NetId)> = Vec::new();
         let mut outs: Vec<(Pin, NetId)> = Vec::new();
         for &(port, net) in old.iter().rev() {
@@ -370,12 +386,16 @@ fn pack_m4k(nl: &mut Netlist, stats: &mut Stats) -> Result<Vec<(CellId, Pin, boo
                 // A data bit written as a constant: the block doesn't read
                 // an unconnected data input as 0 (Quartus routes its GND
                 // there), so an LE drives it. Columns no data bit sits in
-                // (and cells from the yosys flow, which don't say which
-                // those are) stay unconnected.
-                let used = synthesized
-                    && shape.width(side).is_some_and(|w| {
+                // stay unconnected: synthesis' cells say which those are;
+                // the yosys flow pads with 0, so there a column counts if
+                // its read data is used.
+                let used = if synthesized {
+                    shape.width(side).is_some_and(|w| {
                         (0..shape.data_bits(w)).any(|k| shape.column(w, k) == col as usize)
-                    });
+                    })
+                } else {
+                    read_cols.contains(&col)
+                };
                 if used {
                     tied_data.push((c, lp.pin(), v));
                 }

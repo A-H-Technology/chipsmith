@@ -101,6 +101,11 @@ struct RdPort {
 struct Ports {
     wr: Vec<WrPort>,
     rd: Vec<RdPort>,
+    /// Two write ports that never write one word on one edge: one's enable
+    /// requires their addresses to differ (Quartus' true dual port
+    /// template masks collisions so). Without it, collisions get logic
+    /// (`Resolve`), which Quartus would find dead and sweep.
+    disjoint: bool,
 }
 
 /// Merges port pairs `{a, 0}` and `{a, 1}` (at the bit above their width)
@@ -286,7 +291,11 @@ fn ports(mem: &Mem) -> Option<Ports> {
             ..p.clone()
         },
     );
-    Some(Ports { wr, rd })
+    Some(Ports {
+        wr,
+        rd,
+        disjoint: false,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,6 +336,68 @@ fn cross_port_ok(r: &RdPort, w: usize) -> bool {
 
 fn partial(w: &WrPort) -> bool {
     w.en.iter().any(|&e| e != w.en[0])
+}
+
+/// Both block ports writing one word on one edge: the block writes
+/// neither reliably, so the netlist makes sure only one port writes each
+/// bit, and it writes what `memory_map` would leave there (the write yosys
+/// gives priority, `hi`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Resolve {
+    /// The loser's word lies within the winner's (no wider), which writes
+    /// all of it: the loser's write enable is masked.
+    MaskLoser,
+    /// The winner's word lies within the loser's narrower span, which
+    /// writes all of it: the winner is masked and the loser writes the
+    /// winner's data there.
+    Redirect,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Collision {
+    hi: usize,
+    lo: usize,
+    how: Resolve,
+}
+
+/// How two writing block ports' collisions are resolved: `Ok(None)` if
+/// at most one port writes, `Err` if neither way works (a port with byte
+/// enables where the other must be masked by a single signal).
+fn collision(mem: &Mem, p: &Ports, sides: &[Use; 2]) -> Result<Option<Collision>, ()> {
+    let (Some(w0), Some(w1)) = (sides[0].wr, sides[1].wr) else {
+        return Ok(None);
+    };
+    if p.disjoint {
+        return Ok(None);
+    }
+    let hi_first = mem.wr[p.wr[w0].ids[0]].priority.get(p.wr[w1].ids[0]) == Some(&true);
+    let (hi, lo) = if hi_first { (w0, w1) } else { (w1, w0) };
+    let (fh, fl) = (p.wr[hi].factor, p.wr[lo].factor);
+    let how = if fl <= fh && !partial(&p.wr[hi]) {
+        Resolve::MaskLoser
+    } else if fh < fl && !partial(&p.wr[lo]) {
+        Resolve::Redirect
+    } else {
+        return Err(());
+    };
+    Ok(Some(Collision { hi, lo, how }))
+}
+
+/// The reads that a resolved collision changes from what the block gives:
+/// one beside a write the netlist changed, reading its own new data.
+fn bypassed_reads(p: &Ports, sides: &[Use; 2], c: Collision) -> Vec<usize> {
+    let changed = match c.how {
+        Resolve::MaskLoser => vec![c.lo],
+        Resolve::Redirect => vec![c.lo, c.hi],
+    };
+    sides
+        .iter()
+        .filter(|u| u.wr.is_some_and(|w| changed.contains(&w)))
+        .filter_map(|u| {
+            let (w, r) = (u.wr?, u.rd?);
+            (p.rd[r].transparent[w] && !p.rd[r].collision_x[w]).then_some(r)
+        })
+        .collect()
 }
 
 /// Every way the memory's ports go onto a block's two.
@@ -585,12 +656,14 @@ fn byte_groups(
 }
 
 /// The cheapest layout, if a block can take the memory.
-fn layout(mem: &Mem) -> Option<Layout> {
-    let p = ports(mem)?;
+fn layout(mem: &Mem, p: &Ports) -> Option<Layout> {
     let abits = (usize::BITS - (mem.size - 1).leading_zeros()) as usize;
     let mut best: Option<Layout> = None;
-    for (kind, sides) in roles(&p) {
-        let factors = sides.map(|u| factor(&p, u));
+    for (kind, sides) in roles(p) {
+        if collision(mem, p, &sides).is_err() {
+            continue;
+        }
+        let factors = sides.map(|u| factor(p, u));
         for base in WIDTHS {
             for packing in [Packing::Dense, Packing::Bytes] {
                 if packing == Packing::Bytes && base < Width::X9 {
@@ -695,7 +768,7 @@ fn layout(mem: &Mem) -> Option<Layout> {
 
 /// Whether the blocks take this memory.
 pub fn mappable(mem: &Mem) -> bool {
-    layout(mem).is_some()
+    ports(mem).is_some_and(|p| layout(mem, &p).is_some())
 }
 
 /// A memory's declaration asks for logic (Quartus' `ramstyle`, yosys'
@@ -806,6 +879,90 @@ impl Context {
             {
                 next(b.a.sig[0]) || next(b.b.sig[0])
             }
+            CellKind::Mux(mx) => {
+                let Some(j) = mx.y.iter().position(|&y| y == x) else {
+                    return false;
+                };
+                (mx.a[j] == SigBit::ZERO && (next(mx.s) || next(mx.b[j])))
+                    || (mx.b[j] == SigBit::ZERO && next(mx.a[j]))
+            }
+            CellKind::Gate(g) if g.op() == chipsmith_netlist::GateOp::And => {
+                g.inputs().iter().any(|&a| next(a))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the two write ports can't write one word on one edge: every
+    /// enable bit of one of them is 1 only while their addresses differ
+    /// above the wider port's span.
+    fn disjoint(&self, m: &Module, p: &Ports) -> bool {
+        let [a, b] = &p.wr[..] else { return false };
+        let lg = log2(a.factor.max(b.factor));
+        let top = a.addr.len().max(b.addr.len());
+        let bit = |x: &WrPort, t: usize| x.addr.get(t).copied().unwrap_or(SigBit::ZERO);
+        let pairs: Vec<(SigBit, SigBit)> = (lg..top).map(|t| (bit(a, t), bit(b, t))).collect();
+        [a, b].iter().any(|w| {
+            w.en.iter()
+                .all(|&e| self.requires_difference(m, e, &pairs, 6))
+        })
+    }
+
+    /// Whether `x` can only be 1 while some pair differs: an AND (or a
+    /// `s ? b : 0`) of an OR of XORs of pairs, as `!=` lowers.
+    fn requires_difference(
+        &self,
+        m: &Module,
+        x: SigBit,
+        pairs: &[(SigBit, SigBit)],
+        depth: u32,
+    ) -> bool {
+        if x == SigBit::ZERO {
+            return true;
+        }
+        let SigBit::Net(n) = x else { return false };
+        if depth == 0 {
+            return false;
+        }
+        let Some(ci) = self.driver[n.index()] else {
+            return false;
+        };
+        let next = |a: SigBit| self.requires_difference(m, a, pairs, depth - 1);
+        let is_pair = |a: SigBit, b: SigBit| pairs.iter().any(|&p| p == (a, b) || p == (b, a));
+        // An OR of differences: every input is one.
+        let differs = |a: SigBit| -> bool {
+            fn go(
+                ctx: &Context,
+                m: &Module,
+                x: SigBit,
+                is_pair: &dyn Fn(SigBit, SigBit) -> bool,
+                depth: u32,
+            ) -> bool {
+                let SigBit::Net(n) = x else { return false };
+                let Some(ci) = ctx.driver[n.index()].filter(|_| depth > 0) else {
+                    return false;
+                };
+                match &m.cells[ci].kind {
+                    CellKind::Gate(g) => match g.op() {
+                        chipsmith_netlist::GateOp::Xor => {
+                            let i = g.inputs();
+                            i.len() == 2 && is_pair(i[0], i[1])
+                        }
+                        chipsmith_netlist::GateOp::Or => g
+                            .inputs()
+                            .iter()
+                            .all(|&a| go(ctx, m, a, is_pair, depth - 1)),
+                        _ => false,
+                    },
+                    _ => false,
+                }
+            }
+            go(self, m, a, &is_pair, 16)
+        };
+        if differs(x) {
+            return true;
+        }
+        match &m.cells[ci].kind {
             CellKind::Mux(mx) => {
                 let Some(j) = mx.y.iter().position(|&y| y == x) else {
                     return false;
@@ -952,7 +1109,11 @@ struct Realized {
     reads: Vec<ReadImpl>,
 }
 
-fn realize(m: &Module, ctx: &Context, p: &Ports, l: &Layout) -> Realized {
+fn realize(m: &Module, ctx: &Context, mem: &Mem, p: &Ports, l: &Layout) -> Realized {
+    let bypassed: Vec<usize> = match collision(mem, p, &l.sides) {
+        Ok(Some(c)) => bypassed_reads(p, &l.sides, c),
+        _ => Vec::new(),
+    };
     let side_domain = |s: usize, hw: bool| -> Option<Domain> {
         let u = l.sides[s];
         let clk = match (u.wr, u.rd) {
@@ -1038,7 +1199,8 @@ fn realize(m: &Module, ctx: &Context, p: &Ports, l: &Layout) -> Realized {
             reads[r].hw_en = hw_s;
             // The output register follows the read data straight out of
             // the block: not with LE logic between.
-            let soft = (!hw_s && rd.en != SigBit::ONE) || rd.srst != SigBit::ZERO;
+            let soft =
+                (!hw_s && rd.en != SigBit::ONE) || rd.srst != SigBit::ZERO || bypassed.contains(&r);
             if soft {
                 continue;
             }
@@ -1223,53 +1385,70 @@ fn build(
         })
         .collect();
 
-    // Write-collision priority between two write ports: the one yosys
-    // gives priority (or the later one) wins, as memory_map has it; the
-    // block would write neither reliably. A bit of the losing port's word
-    // is masked where the winner writes the same bit of the same word.
+    // Write collisions (`Resolve`): enables and data as the block gets
+    // them, and per read the bits it gets wrong, with what the RTL reads
+    // there instead (registered below like the block's read).
     let mut wr_en: Vec<SigSpec> = p.wr.iter().map(|x| x.en.clone()).collect();
-    if let (Some(w0), Some(w1)) = (l.sides[0].wr, l.sides[1].wr) {
-        let hi_first = mem.wr[p.wr[w0].ids[0]].priority.get(p.wr[w1].ids[0]) == Some(&true);
-        let (hi, lo) = if hi_first { (w0, w1) } else { (w1, w0) };
-        // Word address of sub-word `sub` of a port.
-        let word = |x: &WrPort, sub: usize| -> SigSpec {
-            let lg = log2(x.factor);
-            (0..l.abits)
-                .map(|t| {
-                    if t < lg {
-                        SigBit::from(State::from(sub >> t & 1 == 1))
-                    } else {
-                        x.addr.get(t).copied().unwrap_or(SigBit::ZERO)
+    let mut wr_data: Vec<SigSpec> = p.wr.iter().map(|x| x.data.clone()).collect();
+    let mut fixes: HashMap<usize, (SigSpec, SigSpec)> = HashMap::new();
+    if let Ok(Some(c)) = collision(mem, p, &l.sides) {
+        let (ph, pl) = (&p.wr[c.hi], &p.wr[c.lo]);
+        let (lg_h, lg_l) = (log2(ph.factor), log2(pl.factor));
+        // The two ports' spans (each port's word) overlap: the address
+        // above the wider span agrees.
+        let top = ph.addr.len().max(pl.addr.len());
+        let eq: Vec<SigBit> = (lg_h.max(lg_l)..top)
+            .map(|t| {
+                let bit = |x: &WrPort| x.addr.get(t).copied().unwrap_or(SigBit::ZERO);
+                g.xnor(bit(ph), bit(pl))
+            })
+            .collect();
+        let same = g.reduce(chipsmith_netlist::GateOp::And, &eq, SigBit::ONE);
+        let reads: Vec<(usize, usize)> = l
+            .sides
+            .iter()
+            .filter_map(|u| Some((u.wr?, u.rd?)))
+            .filter(|&(_, r)| bypassed_reads(p, &l.sides, c).contains(&r))
+            .collect();
+        let read_of = |wi: usize| reads.iter().find(|&&(w, _)| w == wi).map(|&(_, r)| r);
+        match c.how {
+            Resolve::MaskLoser => {
+                // The winner writes its whole span, uniformly.
+                let clash = g.and(ph.en[0], same);
+                let keep = g.not(clash);
+                let lost: SigSpec = pl.en.iter().map(|&e| g.and(e, clash)).collect();
+                wr_en[c.lo] = pl.en.iter().map(|&e| g.and(e, keep)).collect();
+                if let Some(r) = read_of(c.lo) {
+                    fixes.insert(r, (lost, pl.data.clone()));
+                }
+            }
+            Resolve::Redirect => {
+                // The loser writes its whole span, uniformly, and takes the
+                // winner's data on the bits the winner writes in it.
+                let clash = g.and(pl.en[0], same);
+                let keep = g.not(clash);
+                let lost: SigSpec = ph.en.iter().map(|&e| g.and(e, clash)).collect();
+                wr_en[c.hi] = ph.en.iter().map(|&e| g.and(e, keep)).collect();
+                let sel: SigSpec = (lg_h..lg_l)
+                    .map(|t| ph.addr.get(t).copied().unwrap_or(SigBit::ZERO))
+                    .collect();
+                let mut taken = vec![SigBit::ZERO; pl.data.len()];
+                for sub in 0..pl.factor {
+                    let here = equals(g, &sel, sub >> lg_h);
+                    let here = g.and(clash, here);
+                    for b in 0..w {
+                        let (k, j) = (sub * w + b, (sub % ph.factor) * w + b);
+                        taken[k] = g.and(here, ph.en[j]);
+                        wr_data[c.lo][k] = g.mux(pl.data[k], ph.data[j], taken[k]);
                     }
-                })
-                .collect()
-        };
-        let (ph, pl) = (&p.wr[hi], &p.wr[lo]);
-        let mut same: HashMap<(usize, usize), SigBit> = HashMap::new();
-        // Bits alike share their gates, so a byte keeps one enable.
-        let mut masked: HashMap<(SigBit, usize, Vec<SigBit>), SigBit> = HashMap::new();
-        for k in 0..wr_en[lo].len() {
-            let (sub_lo, bit) = (k / w, k % w);
-            let his: Vec<SigBit> = (0..ph.factor).map(|s| wr_en[hi][s * w + bit]).collect();
-            let key = (wr_en[lo][k], sub_lo, his);
-            if let Some(&e) = masked.get(&key) {
-                wr_en[lo][k] = e;
-                continue;
+                }
+                if let Some(r) = read_of(c.lo) {
+                    fixes.insert(r, (taken, pl.data.clone()));
+                }
+                if let Some(r) = read_of(c.hi) {
+                    fixes.insert(r, (lost, ph.data.clone()));
+                }
             }
-            let mut clash = Vec::new();
-            for sub_hi in 0..ph.factor {
-                let eq = *same.entry((sub_lo, sub_hi)).or_insert_with(|| {
-                    let (a, b) = (word(pl, sub_lo), word(ph, sub_hi));
-                    let bits: Vec<SigBit> = a.iter().zip(&b).map(|(&x, &y)| g.xnor(x, y)).collect();
-                    g.reduce(chipsmith_netlist::GateOp::And, &bits, SigBit::ONE)
-                });
-                let c = g.and(wr_en[hi][sub_hi * w + bit], eq);
-                clash.push(c);
-            }
-            let any = g.reduce_or(&clash);
-            let keep = g.not(any);
-            wr_en[lo][k] = g.and(wr_en[lo][k], keep);
-            masked.insert(key, wr_en[lo][k]);
         }
     }
 
@@ -1335,7 +1514,6 @@ fn build(
                 let (Some(wi), Some(width)) = (l.sides[s].wr, l.widths[s]) else {
                     continue;
                 };
-                let wp = &p.wr[wi];
                 let en = &wr_en[wi];
                 let mut groups: Vec<Option<SigBit>> = vec![None; width.bits().div_ceil(9)];
                 for k in 0..shape.data_bits(width) {
@@ -1344,8 +1522,8 @@ fn build(
                     };
                     let c = shape.column(width, k);
                     match s {
-                        0 => din_a[c] = wp.data[bit],
-                        _ => din_b[c] = wp.data[bit],
+                        0 => din_a[c] = wr_data[wi][bit],
+                        _ => din_b[c] = wr_data[wi][bit],
                     }
                     groups[c / 9] = Some(en[bit]);
                 }
@@ -1467,6 +1645,18 @@ fn build(
             }));
             y
         };
+        if let Some((flags, want)) = fixes.get(&ri) {
+            // A read beside a write the collision changed: where the block
+            // read something else, the RTL's read of its own write's data.
+            // Registered as the block's read is (same clock, same enable).
+            let flag = add_ff(g, rd.clk, domain_en, flags.clone());
+            let dq = add_ff(g, rd.clk, domain_en, want.clone());
+            data = data
+                .iter()
+                .zip(flag.iter().zip(&dq))
+                .map(|(&b, (&f, &d))| g.mux(b, d, f))
+                .collect();
+        }
         if !ri_impl.hw_en && rd.en != SigBit::ONE {
             // The block reads on every edge; LE registers hold what it read
             // when the read was enabled.
@@ -1526,9 +1716,10 @@ pub fn map(m: &mut Module) -> usize {
         }
         let mut mem = mem.clone();
         ctx.same_enables(m, &mut mem);
-        let Some(l) = layout(&mem) else { continue };
-        let p = ports(&mem).expect("a laid-out memory has ports");
-        let r = realize(m, &ctx, &p, &l);
+        let Some(mut p) = ports(&mem) else { continue };
+        p.disjoint = ctx.disjoint(m, &p);
+        let Some(l) = layout(&mem, &p) else { continue };
+        let r = realize(m, &ctx, &mem, &p, &l);
         work.push((i, mem, p, l, r));
     }
     // The output registers the blocks take over go first, while cell

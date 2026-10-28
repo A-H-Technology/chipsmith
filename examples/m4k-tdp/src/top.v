@@ -12,9 +12,10 @@ module top(input CLOCK_50, input [17:0] SW, input [3:0] KEY, output [17:0] LEDR,
   wire [35:0] d = {cnt[31:14], cnt[17:0]} ^ {SW, SW};
   wire wea = SW[17] & cnt[2];
   wire web = SW[16] & cnt[3];
-  // Port B doesn't write the word port A writes on the same edge: two
-  // always blocks writing one word at once is a race in Verilog (yosys and
-  // chipsmith order them differently), and the block writes neither.
+  // Port B doesn't write the word port A writes on the same edge: from two
+  // always blocks, which write lands is a race in Verilog (yosys and
+  // chipsmith order them differently). Collisions written in one process
+  // map too (README, tests/support/m4k_shapes.rs tdp_collide_*).
   wire web9 = web & (ab[8:0] != aa[8:0]);
   wire web4 = web & (ab[9:2] != aa[7:0]);
   wire [11:0] aa = cnt[31:20];

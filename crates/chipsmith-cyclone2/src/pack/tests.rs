@@ -591,7 +591,19 @@ fn a_constant_data_bit_gets_an_le() {
         .expect("DI1 driven");
     let (drv, _) = nl.net(n).driver.unwrap();
     assert_eq!(nl.cell(drv).kind, Kind::Lut { mask: 0 });
+    // A yosys-flow cell doesn't say which columns are memory bits: one
+    // whose read data nothing uses is padding and stays unconnected, one
+    // read is a bit written as a constant.
     let mut nl = yosys::import(&legacy).unwrap();
     pack(&mut nl).unwrap();
     assert!(cell(&nl, "ram").net(Port::M4k(Pin::Di(1))).is_none());
+    let mut read = legacy;
+    read["modules"]["top"]["cells"]["buf"]["connections"]["DATAB"] = json!([101]);
+    let mut nl = yosys::import(&read).unwrap();
+    pack(&mut nl).unwrap();
+    let n = cell(&nl, "ram")
+        .net(Port::M4k(Pin::Di(1)))
+        .expect("DI1 driven");
+    let (drv, _) = nl.net(n).driver.unwrap();
+    assert_eq!(nl.cell(drv).kind, Kind::Lut { mask: 0 });
 }

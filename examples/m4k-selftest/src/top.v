@@ -4,7 +4,8 @@
 // USER1 holds "M4K!", the passes (top 16 bits of the count de2_user1
 // prints) and the reads that differed (bottom 16 bits, saturating): a good
 // board shows the passes rising and 0 errors. LEDR[0] lights on an error,
-// LEDR[3:1] show the pass count.
+// LEDR[3:1] show the pass count's top bits (about 6,100 passes a second:
+// the low bits would flicker too fast to see).
 //
 //   s9   512 x 9 simple dual port
 //   d9   2048 x 9 over four blocks (decoded writes, multiplexed reads)
@@ -14,6 +15,9 @@
 //   o9   512 x 9 with its output registered again (output register)
 //   r18  256 x 18 ROM read under a read enable (clock enable)
 //   s8   64 x 8 (shallower than its block)
+//   c9   512 x 9 true dual port, both ports writing one word on every
+//        write edge: port B's write lands (it comes last), each port
+//        reads back its own write's data on that edge
 module top(input CLOCK_50, output [3:0] LEDR);
   wire clk = CLOCK_50;
   reg [11:0] a = 0;
@@ -41,9 +45,9 @@ module top(input CLOCK_50, output [3:0] LEDR);
   // Read-back pipeline: the address and the pass of the last two reads.
   reg [11:0] a1 = 0, a2 = 0;
   reg [15:0] p1 = 0, p2 = 0;
-  reg v1 = 0, v2 = 0;
+  reg v1 = 0, v2 = 0, w1 = 0;
   always @(posedge clk) begin
-    a1 <= a; p1 <= pass; v1 <= rd;
+    a1 <= a; p1 <= pass; v1 <= rd; w1 <= we;
     a2 <= a1; p2 <= p1; v2 <= v1;
   end
   // What is written now (w_*) and what last cycle's read should give (x_*).
@@ -138,9 +142,26 @@ module top(input CLOCK_50, output [3:0] LEDR);
   end
   wire e_s8 = v1 && s8[s8_a] != x_6[7:0];
 
-  wire bad = e_s9 | e_d9 | e_b16 | e_w32 | e_t18 | e_o9 | e_r18 | e_s8;
+  // Port B's address is port A's, but synthesis can't know that: it
+  // flips only once the error count saturates.
+  reg never = 0;
+  always @(posedge clk) never <= never | &errors;
+  wire [8:0] cb = a[8:0] ^ {9{never}};
+  wire [35:0] w_c = h({3'h0, a[8:0]} ^ 12'h0f0, pass), x_c = h({3'h0, a1[8:0]} ^ 12'h0f0, p1);
+  reg [8:0] c9 [0:511];
+  reg [8:0] q_ca, q_cb;
+  always @(posedge clk) begin
+    if (we) c9[a[8:0]] <= w_a[17:9];
+    if (we) c9[cb] <= w_c[8:0];
+    q_ca <= we ? w_a[17:9] : c9[a[8:0]];
+    q_cb <= we ? w_c[8:0] : c9[cb];
+  end
+  wire e_c9 = w1 && (q_ca != x_a[17:9] || q_cb != x_c[8:0])
+           || v1 && (q_ca != x_c[8:0] || q_cb != x_c[8:0]);
+
+  wire bad = e_s9 | e_d9 | e_b16 | e_w32 | e_t18 | e_o9 | e_r18 | e_s8 | e_c9;
   always @(posedge clk) if (bad && ~&errors) errors <= errors + 1'b1;
-  assign LEDR = {pass[2:0], errors != 0};
+  assign LEDR = {pass[15:13], errors != 0};
 
   wire tck, tdi, shift, usr1;
   reg [63:0] dr = 0;
