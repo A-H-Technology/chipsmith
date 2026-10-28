@@ -2,3 +2,4 @@
 /result*
 build/
 /.claude/
+/experiments/*/target

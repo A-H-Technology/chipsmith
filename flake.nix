@@ -46,12 +46,33 @@
           cyclone2-db = open.db;
           inherit xc7;
         };
+        # CUDA is unfree; this instance exists only so the rest of the
+        # flake keeps nixpkgs' default refusal of unfree packages.
+        cudaPackages =
+          (import nixpkgs {
+            inherit system;
+            config.allowUnfree = true;
+          }).cudaPackages;
+        # What CubeCL's CUDA backend reads: cudarc's build.rs takes the CUDA
+        # version from `nvcc --version`, cubecl-cuda hands NVRTC
+        # $CUDA_PATH/include, and NVRTC is dlopened at runtime.
+        cudaToolkit = pkgs.symlinkJoin {
+          name = "cubecl-cuda-toolkit";
+          paths = with cudaPackages; [
+            cuda_nvcc
+            (pkgs.lib.getDev cuda_cudart)
+            (pkgs.lib.getDev cuda_nvrtc)
+            (pkgs.lib.getLib cuda_nvrtc)
+            cccl
+          ];
+        };
       in
       {
         packages = {
           default = chipsmith;
           xc7-chipdb = xc7.chipdb;
           xc7-routing-graph = chipsmith.xc7RoutingGraph;
+          cubecl-hello = pkgs.callPackage ./nix/cubecl-hello.nix { inherit cudaToolkit; };
         };
 
         devShells.default = pkgs.mkShell {
@@ -63,8 +84,17 @@
             pkgs.just
             pkgs.pkg-config
             pkgs.libusb1
+            # CubeCL's HIP backend: build.rs reads the HIP version off
+            # `hipconfig`, and at runtime it dlopens libamdhip64/libhiprtc
+            # from $ROCM_PATH/lib.
+            pkgs.rocmPackages.clr
+            cudaToolkit
+            # experiments/cubecl-hello links with it, see its .cargo/config.toml.
+            pkgs.lld
           ]
           ++ flowTools;
+          ROCM_PATH = pkgs.rocmPackages.clr;
+          CUDA_PATH = cudaToolkit;
           # cyclone2-re's yosys flow, the oracle chipsmith's synthesis is
           # tested against (ADR-0004; tests, `de2_synth --yosys`). The
           # build doesn't read it.
@@ -77,6 +107,9 @@
           shellHook = ''
             export CHIPSMITH_CYCLONE2_GRAPH=$PWD/target/routing-graph.bin
             export CHIPSMITH_XC7_GRAPH=$PWD/target/xc7-routing-graph.bin
+            # cudarc dlopens libcuda by bare name; NixOS puts the driver's
+            # copy here rather than anywhere ld.so searches.
+            export LD_LIBRARY_PATH=/run/opengl-driver/lib:${cudaToolkit}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
           '';
         };
       }
