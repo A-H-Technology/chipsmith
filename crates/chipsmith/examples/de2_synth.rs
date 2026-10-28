@@ -8,7 +8,9 @@
 //! two; with `--yosys-rtl` yosys elaborates (`proc; flatten`) and chipsmith
 //! synthesizes.
 //!
-//! `de2_synth [--yosys | --yosys-rtl] <project dir> <scratch dir>`. Needs
+//! `de2_synth [--yosys | --yosys-rtl] <project dir> <scratch dir>`: the
+//! scratch dir gets the netlists, `routed.json`, the .rbf and, with a
+//! `[clocks]` entries, `top.sdc` (for `bench/quartus-timing.sh`). Needs
 //! the devshell for the comparisons (yosys, `CHIPSMITH_CYCLONE2_SYNTH`) and
 //! for VHDL (GHDL).
 
@@ -110,7 +112,12 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     let dir = std::fs::canonicalize(dir)?;
     let manifest = Manifest::load(&project)?;
-    let Target::Ep2c35f672c6 { pins, clock } = &manifest.target else {
+    let Target::Ep2c35f672c6 {
+        pins,
+        clocks,
+        unused_pins,
+    } = &manifest.target
+    else {
         bail!("not a DE2 project");
     };
     let files = verilog(&manifest, &dir)?;
@@ -180,7 +187,12 @@ fn main() -> Result<()> {
             }
             fe.elaborate(&manifest.top)?
         };
-        let out = synth::synthesize(design)?;
+        let registers = pins
+            .iter()
+            .filter(|a| a.io.registers.any())
+            .map(|a| (a.port.to_string(), a.io.registers))
+            .collect();
+        let out = synth::synthesize(design, &registers)?;
         eprintln!("    {:?}", out.stats);
         chipsmith_netlist::write_json(
             &out.design,
@@ -192,20 +204,45 @@ fn main() -> Result<()> {
     let packed = dir.join("packed.json");
     let p = pack::pack_file(&netlist, &packed)?;
     let graph = route::load_graph()?;
-    let pins: BTreeMap<String, String> = pins
+    let pins: BTreeMap<String, place::PinPlan> = pins
         .iter()
-        .map(|a| (a.port.to_string(), a.pin.as_str().to_string()))
+        .map(|a| {
+            let plan = place::PinPlan {
+                pin: a.pin.as_str().to_string(),
+                settings: a.io.settings,
+            };
+            (a.port.to_string(), plan)
+        })
         .collect();
     let placed = dir.join("placed.json");
-    let pl = place::place_file(&graph, &packed, &pins, &placed)?;
+    let pl = place::place_file(&graph, &packed, &pins, *unused_pins, &placed)?;
     let routed = dir.join("routed.json");
     let r = route::route_file(&graph, &placed, &routed)?;
     let db = bitstream::load_db()?;
     let rbf = dir.join(format!("{}.rbf", manifest.name));
     bitstream::pack_file(&db, &routed, &rbf)?;
+    // The manifest's clocks as Quartus' constraints, for bench/quartus-timing.sh.
+    let sdc = dir.join("top.sdc");
+    if clocks.is_empty() {
+        if sdc.exists() {
+            std::fs::remove_file(&sdc)?;
+        }
+    } else {
+        let text: String = clocks
+            .iter()
+            .map(|c| {
+                format!(
+                    "create_clock -name {{{0}}} -period {1} [get_ports {{{0}}}]\n",
+                    c.port,
+                    c.frequency.period_ns()
+                )
+            })
+            .collect();
+        std::fs::write(&sdc, text)?;
+    }
     let fmax = 1e6 / f64::from(r.critical);
-    let slack = clock
-        .as_ref()
+    let slack = clocks
+        .first()
         .map(|c| c.frequency.period_ns() - f64::from(r.critical) / 1000.0);
     println!(
         "{} ({}): synthesis {:.1} s; {} LUTs, {} registers, {} LEs, {} carry chains, {} M4Ks; critical path {:.2} ns, Fmax {:.1} MHz{}; {}",

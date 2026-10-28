@@ -30,6 +30,7 @@ pub mod m4k;
 pub mod mult;
 pub mod nextpnr;
 pub mod phys;
+pub mod pll;
 pub mod rbf;
 
 use std::collections::BTreeMap;

@@ -19,6 +19,7 @@ use serde_json::Value;
 use crate::hard;
 use crate::m4k::{self, AddrPort};
 use crate::mult;
+use crate::pin::PowerUp;
 
 pub type CellId = usize;
 pub type NetId = usize;
@@ -166,10 +167,17 @@ pub struct FfConfig {
 /// carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoeIn {
-    /// The port's net, inverted in the IOE or not.
-    Signal { invert: bool },
+    /// The port's net, inverted in the IOE or not, through the IOE's
+    /// register (output or OE register) or not.
+    Signal { invert: bool, reg: Option<PowerUp> },
     /// A constant (the port unconnected).
     Const(bool),
+}
+
+impl IoeIn {
+    pub fn signal(reg: Option<PowerUp>) -> Self {
+        IoeIn::Signal { invert: false, reg }
+    }
 }
 
 /// Which way a cell port or a top-level port points.
@@ -209,6 +217,8 @@ pub enum Kind {
     /// once pack_io has found it.
     Ibuf {
         port: Option<String>,
+        /// The input register (REGOUT, clocked by INCLK).
+        reg: Option<PowerUp>,
     },
     Obuf {
         port: Option<String>,
@@ -220,6 +230,7 @@ pub enum Kind {
         port: Option<String>,
         data: IoeIn,
         oe: IoeIn,
+        in_reg: Option<PowerUp>,
     },
     ClkCtrl,
     /// An M4K RAM block; its contents (`INIT`) pass through as a parameter.
@@ -249,7 +260,9 @@ impl Kind {
     /// The top-level port bit a pin buffer serves.
     pub fn pin_port(&mut self) -> Option<&mut Option<String>> {
         match self {
-            Kind::Ibuf { port } | Kind::Obuf { port, .. } | Kind::Iobuf { port, .. } => Some(port),
+            Kind::Ibuf { port, .. } | Kind::Obuf { port, .. } | Kind::Iobuf { port, .. } => {
+                Some(port)
+            }
             _ => None,
         }
     }
@@ -280,10 +293,10 @@ impl Kind {
         let out = match self {
             Kind::Lut { .. } => matches!(port, Port::Combout | Port::Cout),
             Kind::Ff(_) => port == Port::Regout,
-            Kind::Ibuf { .. } => port == Port::Combout,
+            Kind::Ibuf { .. } => matches!(port, Port::Combout | Port::Regout),
             Kind::Obuf { .. } => port == Port::Pad,
             Kind::Iobuf { .. } if port == Port::Pad => return Dir::InOut,
-            Kind::Iobuf { .. } => port == Port::Combout,
+            Kind::Iobuf { .. } => matches!(port, Port::Combout | Port::Regout),
             Kind::ClkCtrl => port == Port::Outclk,
             Kind::M4k(_) => matches!(port, Port::RamDataOut(_) | Port::M4k(m4k::Pin::Do(_))),
             Kind::Mult(_) => {

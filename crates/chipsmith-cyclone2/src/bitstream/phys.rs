@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use super::device::{Device, Node};
 
 use super::addr;
-use super::io::{IoBit, IoDb, PinUse, UnusedPins};
+use super::io::{IoBit, IoDb, PinUse, UnusedPins, Vccio};
 use super::lab::LabDb;
 use super::logic::Logic;
 use super::m4k::{M4k, M4kDb};
@@ -65,12 +65,16 @@ pub struct PhysDesign {
     pub pins: Vec<PinUse>,
     /// What every other user pin does.
     pub unused_pins: UnusedPins,
+    /// What the I/O banks are powered at.
+    pub vccio: Vccio,
     /// M4K RAM blocks in use.
     pub m4ks: Vec<M4k>,
     /// Embedded multipliers in use.
     pub mults: Vec<Mult>,
     /// The JTAG and serial-flash blocks, when the design uses them.
     pub hard: super::hard::Hard,
+    /// PLLs in use.
+    pub plls: Vec<super::pll::Pll>,
     pub nets: Vec<RoutedNet>,
 }
 
@@ -89,13 +93,15 @@ pub enum Source {
     Mult,
     /// ddb asmdb: the JTAG and serial-flash blocks' input muxes.
     Hard,
+    /// ddb asmdb: PLL input selects (its counters and loop are in `rep`).
+    Pll,
 }
 
 /// The CRAM a physical design fixes. Bits not listed keep the base image's
 /// value.
 pub struct Bits {
     pub core: Vec<(FrameBit, bool, Source)>,
-    /// IOE bits in the replicated frames (`Source::Io`).
+    /// IOE and PLL bits in the replicated frames.
     pub rep: Vec<(RepBit, bool)>,
     /// Option bits of the header's ID block to set: (byte, bit).
     pub options: Vec<(usize, u8)>,
@@ -124,6 +130,7 @@ pub struct Db {
     pub m4k: M4kDb,
     pub mult: MultDb,
     pub hard: super::hard::HardDb,
+    pub pll: super::pll::PllDb,
 }
 
 impl PhysDesign {
@@ -169,7 +176,18 @@ impl PhysDesign {
             Vec::new()
         };
         let mut rep = Vec::new();
-        for (b, v) in db.io.bits(&self.pins, self.unused_pins, serial_flash)? {
+        for p in &self.plls {
+            for (b, v) in db.pll.bits(p)? {
+                match b {
+                    super::pll::PllBit::Core(b) => core.push((addr::frame_bit(b), v, Source::Pll)),
+                    super::pll::PllBit::Rep(b) => rep.push((b, v)),
+                }
+            }
+        }
+        for (b, v) in db
+            .io
+            .bits(&self.pins, self.unused_pins, self.vccio, serial_flash)?
+        {
             match b {
                 IoBit::Core(b) => core.push((b, v, Source::Io)),
                 IoBit::Rep(b) => rep.push((b, v)),

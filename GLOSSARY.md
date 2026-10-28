@@ -62,6 +62,17 @@ Logic array block: 16 LEs that share clock, enable and clear signals.
 **M4K**:
 A 4,608-bit RAM block.
 
+**Global clock**:
+One of the Cyclone II's 16 clock networks, driven by a clock control from a clock pin, a PLL output or logic.
+_Avoid_: GCLK (except as Quartus' name)
+
+**Clock control**:
+The block in front of a global clock that picks its source and can gate it.
+_Avoid_: clkctrl (except as a cell or file name)
+
+**PLL**:
+Phase-locked loop: makes new clock frequencies from a clock pin's (four on the EP2C35).
+
 **RBF**:
 Raw binary file: a Cyclone II bitstream.
 

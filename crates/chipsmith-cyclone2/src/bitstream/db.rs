@@ -291,6 +291,7 @@ impl Db {
             m4k: M4kDb::new(&asmdb)?,
             mult: MultDb::new(&asmdb)?,
             hard: HardDb::new(&asmdb)?,
+            pll: super::pll::PllDb::new(&asmdb)?,
             dev,
             asmdb,
         })

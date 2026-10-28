@@ -20,17 +20,28 @@ endmodule
 module LCELL_FF (input DATAIN, input CLK, input ENA, input ACLR, input SCLR, output REGOUT);
 endmodule
 
+// Pin buffers. Each has its I/O cell's registers, rising-edge, no enable
+// or clear: INPUT_REGISTER samples the pad on INCLK into REGOUT;
+// OUTPUT_REGISTER samples DATAOUT and OE_REGISTER samples OE on OUTCLK, and
+// the pad takes what they hold. A register is used when its parameter is
+// "low" or "high", its power-up value; "none" (the default) bypasses it.
 (* blackbox *)
-module CY2_IBUF (input PAD, output COMBOUT);
+module CY2_IBUF (input PAD, input INCLK, output COMBOUT, output REGOUT);
+  parameter INPUT_REGISTER = "none";
 endmodule
 
 (* blackbox *)
-module CY2_OBUF (input DATAOUT, output PAD);
+module CY2_OBUF (input DATAOUT, input OUTCLK, output PAD);
+  parameter OUTPUT_REGISTER = "none";
 endmodule
 
 // Tri-state output or bidir: PAD = OE ? DATAOUT : 1'bz, COMBOUT = PAD.
 (* blackbox *)
-module CY2_IOBUF (input DATAOUT, input OE, output COMBOUT, inout PAD);
+module CY2_IOBUF (input DATAOUT, input OE, input INCLK, input OUTCLK,
+                  output COMBOUT, output REGOUT, inout PAD);
+  parameter INPUT_REGISTER = "none";
+  parameter OUTPUT_REGISTER = "none";
+  parameter OE_REGISTER = "none";
 endmodule
 
 // M4K RAM block (m4k.rs builds it from a memory). MODE "SINGLE": port A
@@ -48,12 +59,12 @@ module CY2_M4K (input CLK, input [11:0] A_ADDR, input [35:0] A_DATAIN, input A_W
   parameter [4607:0] INIT = 4608'b0;
 endmodule
 
-// An embedded multiplier (mult.rs builds it from a `$mul`):
-// P = A * B, each operand signed (two's complement) when its
-// *_SIGNED parameter is 1. Widths 1 to 18; one block of the 35.
+// An embedded multiplier (synth/mult.rs builds it from a `$mul`):
+// P = A * B over the low A_WIDTH / B_WIDTH bits, each operand two's
+// complement when its *_SIGNED parameter is 1; P's low A_WIDTH+B_WIDTH
+// bits are the product. Widths 1 to 18; one block of the 35.
 (* blackbox *)
-module CY2_MULT (input [A_WIDTH-1:0] A, input [B_WIDTH-1:0] B,
-                 output [A_WIDTH+B_WIDTH-1:0] P);
+module CY2_MULT (input [17:0] A, input [17:0] B, output [35:0] P);
   parameter A_WIDTH = 18;
   parameter B_WIDTH = 18;
   parameter A_SIGNED = 0;
@@ -74,4 +85,31 @@ endmodule
 // (cycloneii_asmiblock with oe tied low, the only mode modelled).
 (* blackbox *)
 module CY2_ASMI (input DCLKIN, input SCEIN, input SDOIN, output DATA0OUT);
+endmodule
+
+// A PLL (four per device, crate::pll): clocks CLK0-CLK2 at
+// f(INCLK) * CLKk_MULTIPLY_BY / CLKk_DIVIDE_BY, as altpll names it. INCLK
+// must come straight from a dedicated clock pin (CLOCK_50 feeds PLL_1).
+// INCLK0_INPUT_FREQUENCY is its period in ps; CLKk_PHASE_SHIFT is in ps,
+// CLKk_DUTY_CYCLE in percent. OPERATION_MODE "NORMAL" compensates the
+// global clock network's delay, "NO_COMPENSATION" doesn't. LOCKED goes high
+// once the loop is locked; ARESET (active high) resets it, PFDENA (active
+// high, default on) lets its phase detector run.
+(* blackbox *)
+module CY2_PLL (input INCLK, input ARESET, input PFDENA, output CLK0, output CLK1, output CLK2,
+                output LOCKED);
+  parameter INCLK0_INPUT_FREQUENCY = 20000;
+  parameter OPERATION_MODE = "NORMAL";
+  parameter CLK0_MULTIPLY_BY = 1;
+  parameter CLK0_DIVIDE_BY = 1;
+  parameter CLK0_PHASE_SHIFT = 0;
+  parameter CLK0_DUTY_CYCLE = 50;
+  parameter CLK1_MULTIPLY_BY = 1;
+  parameter CLK1_DIVIDE_BY = 1;
+  parameter CLK1_PHASE_SHIFT = 0;
+  parameter CLK1_DUTY_CYCLE = 50;
+  parameter CLK2_MULTIPLY_BY = 1;
+  parameter CLK2_DIVIDE_BY = 1;
+  parameter CLK2_PHASE_SHIFT = 0;
+  parameter CLK2_DUTY_CYCLE = 50;
 endmodule

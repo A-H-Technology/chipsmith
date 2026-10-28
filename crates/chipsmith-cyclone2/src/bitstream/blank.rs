@@ -12,7 +12,7 @@ use anyhow::{ensure, Context, Result};
 
 use super::asmdb::Asmdb;
 
-use super::io::{IoBit, IoDb, UnusedPins};
+use super::io::{IoBit, IoDb, UnusedPins, Vccio};
 use super::rbf::{self, Rbf};
 use super::{addr, le};
 
@@ -175,7 +175,7 @@ pub fn image(db: &Asmdb, io: &IoDb) -> Result<Rbf> {
             true,
         );
     }
-    for (b, v) in io.bits(&[], UnusedPins::InputTriStated, false)? {
+    for (b, v) in io.bits(&[], UnusedPins::InputTriStated, Vccio::FromPins, false)? {
         match b {
             IoBit::Core(b) => r.set(b, v),
             IoBit::Rep(b) => r.rep_set(b, v),

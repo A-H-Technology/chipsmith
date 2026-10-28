@@ -147,6 +147,21 @@ impl<'a, 'd> ModElab<'a, 'd> {
             edges.push((sig, it.edge.expect("filtered to edges"), &it.expr));
         }
         let mut stmt = unwrap_block(body);
+        // `begin : name integer i; if (!rst) ...`: the reset test inside a
+        // block of its own, which then scopes everything below.
+        let mut scope = scope;
+        if let StmtKind::Block {
+            name,
+            decls,
+            params,
+            stmts,
+        } = &stmt.kind
+        {
+            if let [only] = &stmts[..] {
+                scope = self.block_scope(name.as_ref(), decls, params, scope)?;
+                stmt = unwrap_block(only);
+            }
+        }
         let mut resets = Vec::new();
         let n_async = edges.len() - 1;
         while resets.len() < n_async {

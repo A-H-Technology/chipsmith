@@ -230,39 +230,42 @@ fn cell(a: &Factor, b: &Factor, dout: SigSpec) -> CellKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chipsmith_netlist::{Net, State};
+    use chipsmith_netlist::State;
 
-    fn nets(from: u32, n: usize) -> SigSpec {
-        (0..n as u32).map(|i| SigBit::Net(Net(from + i))).collect()
+    fn mul(m: &mut Module, a: usize, b: usize, signed: bool, width: usize) -> Binary {
+        let (a, b) = (m.new_sig(a), m.new_sig(b));
+        mul_of(m, a, b, signed, width)
     }
 
-    fn mul(a: SigSpec, b: SigSpec, signed: bool, width: usize) -> Binary {
+    fn mul_of(m: &mut Module, a: SigSpec, b: SigSpec, signed: bool, width: usize) -> Binary {
         Binary {
             op: BinaryOp::Mul,
             a: Operand { sig: a, signed },
             b: Operand { sig: b, signed },
-            y: nets(1000, width),
+            y: m.new_sig(width),
         }
     }
 
     #[test]
     fn operands_up_to_18_bits_take_one_block() {
-        let p = Plan::of(&mul(nets(0, 18), nets(100, 12), false, 30)).unwrap();
+        let m = &mut Module::new("t");
+        let p = Plan::of(&mul(m, 18, 12, false, 30)).unwrap();
         assert_eq!(p.blocks(), 1);
-        let p = Plan::of(&mul(nets(0, 18), nets(100, 18), true, 36)).unwrap();
+        let p = Plan::of(&mul(m, 18, 18, true, 36)).unwrap();
         assert_eq!((p.a[0].signed, p.b[0].signed), (true, true));
     }
 
     #[test]
     fn wide_operands_split_into_limbs_inside_the_result() {
+        let m = &mut Module::new("t");
         // 32 x 32 -> 64: 2 x 2 limbs, all four products reach the result.
-        let p = Plan::of(&mul(nets(0, 32), nets(100, 32), false, 64)).unwrap();
+        let p = Plan::of(&mul(m, 32, 32, false, 64)).unwrap();
         assert_eq!(p.blocks(), 4);
         // 32 x 32 -> 32 (C's `*`): the high x high product starts at bit 36.
-        let p = Plan::of(&mul(nets(0, 32), nets(100, 32), false, 32)).unwrap();
+        let p = Plan::of(&mul(m, 32, 32, false, 32)).unwrap();
         assert_eq!(p.blocks(), 3);
         // Signed: the top limb carries the sign, the low one doesn't.
-        let p = Plan::of(&mul(nets(0, 24), nets(100, 24), true, 48)).unwrap();
+        let p = Plan::of(&mul(m, 24, 24, true, 48)).unwrap();
         assert_eq!(
             p.a.iter().map(|f| (f.bits.len(), f.signed)).collect::<Vec<_>>(),
             [(18, false), (6, true)]
@@ -271,23 +274,28 @@ mod tests {
 
     #[test]
     fn constants_and_single_bits_stay_logic() {
+        let m = &mut Module::new("t");
         let k: SigSpec = [State::One, State::Zero, State::One]
             .map(SigBit::Const)
             .to_vec();
-        assert!(Plan::of(&mul(nets(0, 8), k, false, 11)).is_none());
-        assert!(Plan::of(&mul(nets(0, 8), nets(100, 1), false, 9)).is_none());
+        let a = m.new_sig(8);
+        assert!(Plan::of(&mul_of(m, a, k, false, 11)).is_none());
+        assert!(Plan::of(&mul(m, 8, 1, false, 9)).is_none());
     }
 
     #[test]
     fn redundant_top_bits_are_dropped() {
+        let m = &mut Module::new("t");
         // Unsigned: constant zeros on top; signed: copies of the sign bit.
-        let mut a = nets(0, 6);
+        let mut a = m.new_sig(6);
         a.extend([SigBit::ZERO; 4]);
-        let p = Plan::of(&mul(a, nets(100, 6), false, 16)).unwrap();
+        let b = m.new_sig(6);
+        let p = Plan::of(&mul_of(m, a, b, false, 16)).unwrap();
         assert_eq!(p.a[0].bits.len(), 6);
-        let mut a = nets(0, 6);
-        a.extend([SigBit::Net(Net(5)); 3]);
-        let p = Plan::of(&mul(a, nets(100, 6), true, 18)).unwrap();
+        let mut a = m.new_sig(6);
+        a.extend([a[5]; 3]);
+        let b = m.new_sig(6);
+        let p = Plan::of(&mul_of(m, a, b, true, 18)).unwrap();
         assert_eq!(p.a[0].bits.len(), 6);
     }
 }
