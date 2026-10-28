@@ -6,7 +6,7 @@
 //!
 //! Device facts come from cyclone2-re's shipped database (`db`); the rest
 //! of the module turns them into CRAM: `phys` is the design in device
-//! terms, `logic`, `io`, `m4k` and `hard` its blocks, `addr` and `rbf`
+//! terms, `logic`, `io`, `m4k`, `mult` and `hard` its blocks, `addr` and `rbf`
 //! where their bits land. `nextpnr` reads a routed design into `phys`;
 //! cyclone2-re has the other frontend, Quartus' post-fit netlist and
 //! routing, for its checks.
@@ -27,6 +27,7 @@ pub mod lab;
 pub mod le;
 pub mod logic;
 pub mod m4k;
+pub mod mult;
 pub mod nextpnr;
 pub mod phys;
 pub mod rbf;

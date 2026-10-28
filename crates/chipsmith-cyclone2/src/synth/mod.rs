@@ -1,17 +1,18 @@
 //! chipsmith's synthesis for the Cyclone II: a flat RTL netlist (yosys'
 //! `proc; flatten` level, or chipsmith's Verilog front end) to the cells
 //! cyclone2-re's `synth/cyclone2.ys` produces and [`crate::pack`] reads:
-//! `LCELL_COMB`, `LCELL_FF`, `CY2_M4K` and the pin buffers.
+//! `LCELL_COMB`, `LCELL_FF`, `CY2_M4K`, `CY2_MULT` and the pin buffers.
 //!
 //! The device-independent passes are chipsmith-synth's; this module runs
 //! them in yosys' order and adds what is the Cyclone II's own: carry
-//! chains, the LE register, M4K blocks and pins.
+//! chains, the LE register, M4K blocks, multipliers and pins.
 
 mod arith;
 pub mod cells;
 mod ff;
 mod io;
 mod m4k;
+mod mult;
 
 use anyhow::{bail, Context, Result};
 use chipsmith_netlist::{attr, is_set, CellKind, Design, Module};
@@ -36,6 +37,8 @@ pub struct Stats {
     /// Carry chains (adders, subtractors, comparisons).
     pub chains: usize,
     pub m4ks: usize,
+    /// Embedded multipliers.
+    pub mults: usize,
 }
 
 /// A synthesized design: its top module alone, in Cyclone II cells.
@@ -100,6 +103,10 @@ fn run(m: &mut Module, obs: &mut dyn Observer) -> Result<Stats> {
     while wreduce::wreduce(m) {
         opt::opt(m, removable);
     }
+    // Before alumacc: a product split over blocks sums its partial
+    // products with adders, which become carry chains like any other.
+    let mults = mult::map(m);
+    obs.stage("mult", m);
     alumacc::alumacc(m);
     opt::opt(m, removable);
     obs.stage("alumacc", m);
@@ -133,11 +140,12 @@ fn run(m: &mut Module, obs: &mut dyn Observer) -> Result<Stats> {
         registers,
         chains,
         m4ks,
+        mults,
     })
 }
 
 /// Device cells ([`cells::LIBRARY`]) a design may instantiate itself.
 fn is_device_cell(ty: &str) -> bool {
     crate::hard::Block::from_cell_type(ty).is_some()
-        || [cells::LCELL_COMB, cells::LCELL_FF, cells::M4K].contains(&ty)
+        || [cells::LCELL_COMB, cells::LCELL_FF, cells::M4K, cells::MULT].contains(&ty)
 }

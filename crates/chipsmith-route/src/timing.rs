@@ -31,6 +31,8 @@ pub fn wire_delay(wire_type: &str) -> Ps {
         // M4K read data onto the routing. One connection measured, not a
         // median: M4K_BUFFER, two R4s and a LAB line in 975 ps.
         "M4K_BUFFER" => 143.0,
+        // Multiplier product bits onto the routing: MULT_BUFFER_PLACEHOLDER
+        "DSP_BUFFER" => 143.0,
         "IO_DATAIN" => 66.0,
         "BLK_CLK_BUF" => 96.0,
         "LAB_CLK" => 363.0,
@@ -97,6 +99,10 @@ const M4K_TCO: Ps = 209.0 + 2993.0 + 124.0;
 /// address register and its -35 ps uTsu, less the same 124 ps of later
 /// clock.
 const M4K_TSU: Ps = 142.0 - 35.0 - 124.0;
+
+/// An embedded multiplier, data in to product out, unregistered:
+/// MULT_COMB_PLACEHOLDER
+const MULT_COMB: Ps = 5000.0;
 
 /// A delay from one timing node to another.
 #[derive(Debug, Clone, Copy)]
@@ -166,6 +172,19 @@ impl Graph {
                         self.launch[n as usize] = Some(M4K_TCO);
                     } else if p != "CLK0" {
                         self.setup[n as usize] = Some(M4K_TSU);
+                    }
+                }
+            }
+            "CY2_MULT" => {
+                let outs: Vec<&str> = ports.iter().copied().filter(|p| p.starts_with("MULTOUT")).collect();
+                for &i in ports.iter().filter(|p| !p.starts_with("MULTOUT")) {
+                    for &o in &outs {
+                        let (from, to) = (self.node(cell, i), self.node(cell, o));
+                        self.cell_arcs.push(Arc {
+                            from,
+                            to,
+                            delay: MULT_COMB,
+                        });
                     }
                 }
             }

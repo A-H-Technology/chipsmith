@@ -18,6 +18,7 @@ use serde_json::Value;
 
 use crate::hard;
 use crate::m4k::{self, AddrPort};
+use crate::mult;
 
 pub type CellId = usize;
 pub type NetId = usize;
@@ -60,6 +61,13 @@ pub enum Port {
     RamDataOut(u8),
     /// A pin of the M4K bel, from `pack_m4k` on.
     M4k(m4k::Pin),
+    /// CY2_MULT's logical ports (`A[i]`, `B[i]`, `P[i]`), until
+    /// `pack_mult` moves them onto the block's pins.
+    MultA(u8),
+    MultB(u8),
+    MultP(u8),
+    /// A pin of the multiplier bel, from `pack_mult` on.
+    Mult(mult::Pin),
     /// A pin of the JTAG or serial-flash block.
     Hard(hard::Pin),
 }
@@ -106,7 +114,11 @@ impl Port {
         }
         let (base, index) = name.strip_suffix(']')?.split_once('[')?;
         let i: u8 = index.parse().ok()?;
+        let operand = (i as usize) < mult::MAX_WIDTH;
         match base {
+            "A" if operand => Some(Port::MultA(i)),
+            "B" if operand => Some(Port::MultB(i)),
+            "P" if (i as usize) < 2 * mult::MAX_WIDTH => Some(Port::MultP(i)),
             "A_ADDR" if i < 12 => Some(Port::RamAddr(AddrPort::A, i)),
             "B_ADDR" if i < 12 => Some(Port::RamAddr(AddrPort::B, i)),
             "A_DATAIN" if i < 36 => Some(Port::RamDataIn(i)),
@@ -123,6 +135,10 @@ impl Port {
             Port::RamWe => "A_WE".into(),
             Port::RamDataOut(i) => format!("DATAOUT[{i}]").into(),
             Port::M4k(pin) => pin.to_string().into(),
+            Port::MultA(i) => format!("A[{i}]").into(),
+            Port::MultB(i) => format!("B[{i}]").into(),
+            Port::MultP(i) => format!("P[{i}]").into(),
+            Port::Mult(pin) => pin.to_string().into(),
             Port::Hard(pin) => pin.name().into(),
             fixed => Self::FIXED
                 .iter()
@@ -208,6 +224,8 @@ pub enum Kind {
     ClkCtrl,
     /// An M4K RAM block; its contents (`INIT`) pass through as a parameter.
     M4k(m4k::Shape),
+    /// An embedded multiplier.
+    Mult(mult::Shape),
     /// The JTAG or serial-flash block.
     Hard(hard::Block),
     /// GND / VCC: the frontend's driver of a constant bit.
@@ -268,6 +286,9 @@ impl Kind {
             Kind::Iobuf { .. } => port == Port::Combout,
             Kind::ClkCtrl => port == Port::Outclk,
             Kind::M4k(_) => matches!(port, Port::RamDataOut(_) | Port::M4k(m4k::Pin::Do(_))),
+            Kind::Mult(_) => {
+                matches!(port, Port::MultP(_)) || matches!(port, Port::Mult(p) if p.is_output())
+            }
             Kind::Hard(_) => matches!(port, Port::Hard(p) if p.is_output()),
             Kind::Const(_) => port == Port::Y,
             Kind::TopIn | Kind::TopInOut => port == Port::O,

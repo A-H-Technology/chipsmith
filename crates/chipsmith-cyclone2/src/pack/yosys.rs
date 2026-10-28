@@ -237,6 +237,20 @@ fn kind_of(ty: &str, params: &BTreeMap<String, Value>, name: &str) -> Result<Kin
             };
             Kind::M4k(m4k::Shape::parse(mode, width).with_context(|| format!("M4K {name}"))?)
         }
+        "CY2_MULT" => {
+            let get = |k: &str| {
+                params
+                    .get(k)
+                    .and_then(int)
+                    .with_context(|| format!("multiplier {name}: {k} missing"))
+            };
+            let shape = crate::mult::Shape::new(
+                get("A_WIDTH")? as usize,
+                get("B_WIDTH")? as usize,
+                [get("A_SIGNED")? != 0, get("B_SIGNED")? != 0],
+            );
+            Kind::Mult(shape.with_context(|| format!("multiplier {name}"))?)
+        }
         other => match crate::hard::Block::from_cell_type(other) {
             Some(b) => Kind::Hard(b),
             None => bail!("{name}: cell type {other} is not a Cyclone II cell the packer knows"),
@@ -245,7 +259,9 @@ fn kind_of(ty: &str, params: &BTreeMap<String, Value>, name: &str) -> Result<Kin
 }
 
 /// The parameters `Kind` holds; the rest pass through.
-const TYPED_PARAMS: [&str; 3] = ["LUT_MASK", "MODE", "WIDTH"];
+const TYPED_PARAMS: [&str; 7] = [
+    "LUT_MASK", "MODE", "WIDTH", "A_WIDTH", "B_WIDTH", "A_SIGNED", "B_SIGNED",
+];
 
 pub fn import(json: &Value) -> Result<Netlist> {
     let modules = json["modules"].as_object().context("no modules")?;

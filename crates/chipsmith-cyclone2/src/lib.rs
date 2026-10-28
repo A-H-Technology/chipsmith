@@ -5,6 +5,7 @@
 pub mod bitstream;
 pub mod hard;
 pub mod m4k;
+pub mod mult;
 pub mod pack;
 pub mod persist;
 pub mod place;

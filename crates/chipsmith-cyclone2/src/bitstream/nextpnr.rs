@@ -25,6 +25,8 @@ use super::logic::{
     Lut, Reg, Sload,
 };
 use super::m4k::{self, Content, Controls, CtlSrc, M4k, Mode, ReadPort, Sel, Width};
+use super::mult::{self as bmult, DataIn, DataPin, Mult, Sign};
+use crate::mult::{self as cmult, Operand};
 use super::phys::{PhysDesign, Pip, RoutedNet};
 
 /// A nextpnr wire, by what it is in the device.
@@ -68,6 +70,8 @@ pub enum Wire {
         y: u32,
         pin: M4kPin,
     },
+    /// An input of the multiplier at (X39, y), behind its source mux.
+    Mult { y: u32, pin: cmult::Pin },
     /// An input of the JTAG or serial-flash block.
     Hard(HardInput),
 }
@@ -111,6 +115,7 @@ pub enum Bel {
     Ioe { x: u32, y: u32, z: u32 },
     ClkCtrl { g: u32 },
     M4k { x: u32, y: u32 },
+    Mult { y: u32 },
     Jtag,
     Asmi,
 }
@@ -191,6 +196,15 @@ fn wire(dev: &Device, tx: u32, ty: u32, name: &str) -> Result<Wire> {
     if let Some(k) = num(name, "MB") {
         return Ok(Wire::Node(find(dev, x, y, 278, 0, k)?));
     }
+    if let Some(k) = num(name, "DB") {
+        return Ok(Wire::Node(find(dev, x, y, 280, 0, k)?));
+    }
+    if let Some(pin) = name.strip_prefix("MULT.") {
+        let pin = cmult::Pin::parse(pin)
+            .filter(|p| !p.is_output())
+            .with_context(|| format!("wire {name}"))?;
+        return Ok(Wire::Mult { y, pin });
+    }
     if let Some(pin) = name.strip_prefix("M4K.") {
         let pin = if let Some(k) = num(pin, "CTL") {
             M4kPin::Ctl(k as u8)
@@ -266,6 +280,10 @@ fn bel(tx: u32, ty: u32, name: &str) -> Result<Bel> {
     }
     if name == "M4K" {
         return Ok(Bel::M4k { x, y });
+    }
+    if name == "MULT" {
+        ensure!(x == bmult::X, "multiplier bel at X{x}");
+        return Ok(Bel::Mult { y });
     }
     if name == "JTAG" {
         return Ok(Bel::Jtag);
@@ -549,6 +567,7 @@ impl Routed {
         let mut ram_pia: HashMap<(u32, u32), [Option<u8>; 8]> = HashMap::new();
         let mut ram_ctl: HashMap<(u32, u32, u8), CtlSrc> = HashMap::new();
         let mut hard_in: HashMap<HardInput, hard::Line> = HashMap::new();
+        let mut mult_in: HashMap<(u32, cmult::Pin), bmult::Line> = HashMap::new();
         let mut nets = Vec::new();
         for n in self.nets.values() {
             let mut pips = Vec::new();
@@ -597,6 +616,19 @@ impl Routed {
                             }
                             M4kPin::Fast(_) => unreachable!(),
                         }
+                    }
+                    // Multiplier data and sign inputs: a LAB line of the
+                    // block through its source mux.
+                    (Wire::Node(s), Wire::Mult { y, pin }) => {
+                        let t = &dev.routing.templates
+                            [dev.routing.elements[s.0 as usize].template as usize];
+                        ensure!(
+                            t.element_enum == 276,
+                            "{}: multiplier input from {}",
+                            n.name,
+                            element_name(t.element_enum)
+                        );
+                        mult_in.insert((y, pin), bmult::Line::new(t.index as u32)?);
                     }
                     (Wire::Node(s), Wire::Hard(h)) => {
                         let t = &dev.routing.templates
@@ -786,6 +818,7 @@ impl Routed {
         let mut clkctrls = Vec::new();
         let mut pins = Vec::new();
         let mut m4ks = Vec::new();
+        let mut mults = Vec::new();
         let mut hard = Hard::default();
         let mut ff_domain: HashMap<(u32, u32, u32), Domain> = HashMap::new();
         let sdata: std::collections::HashSet<(u32, u32, u32)> = self
@@ -856,6 +889,9 @@ impl Routed {
                         inputs: ram_in.remove(&(x, y)).unwrap_or_default(),
                         content: shape.content,
                     });
+                }
+                ("CY2_MULT", Bel::Mult { y }) => {
+                    mults.push(mult_of(c, y, &mult_in).with_context(|| name.clone())?);
                 }
                 ("CY2_JTAG", Bel::Jtag) => {
                     hard.jtag = Some(Jtag {
@@ -1026,10 +1062,62 @@ impl Routed {
             pins,
             unused_pins: UnusedPins::InputTriStated,
             m4ks,
+            mults,
             hard,
             nets,
         })
     }
+}
+
+/// A placed `CY2_MULT`: its shape and `DATA_ZERO` mask (the packer's,
+/// `pack_mult`) and the lines routed into its pins.
+fn mult_of(c: &Cell, y: u32, lines: &HashMap<(u32, cmult::Pin), bmult::Line>) -> Result<Mult> {
+    let int = |k: &str| -> Result<u64> {
+        let v = c.params.get(k).with_context(|| format!("{k} missing"))?;
+        u64::from_str_radix(v.trim_end(), 2).with_context(|| format!("{k} = {v}"))
+    };
+    let shape = cmult::Shape::new(
+        int("A_WIDTH")? as usize,
+        int("B_WIDTH")? as usize,
+        [int("A_SIGNED")? != 0, int("B_SIGNED")? != 0],
+    )?;
+    let zero = int("DATA_ZERO")?;
+    let mut data = BTreeMap::new();
+    for k in 0..bmult::DATA as u32 {
+        if zero >> k & 1 == 1 {
+            data.insert(DataPin::new(k)?, DataIn::Zero);
+        }
+    }
+    let mut sign = [Sign::Signed; 2];
+    for (&(at, pin), &line) in lines.iter().filter(|((at, _), _)| *at == y) {
+        debug_assert_eq!(at, y);
+        match pin {
+            cmult::Pin::A(k) => {
+                data.insert(DataPin::new(k as u32)?, DataIn::Line(line));
+            }
+            cmult::Pin::B(k) => {
+                data.insert(
+                    DataPin::new((cmult::MAX_WIDTH + k as usize) as u32)?,
+                    DataIn::Line(line),
+                );
+            }
+            cmult::Pin::Sign(op) => sign[op as usize] = Sign::Line(line),
+            cmult::Pin::Out(_) => unreachable!("outputs aren't mux inputs"),
+        }
+    }
+    for op in [Operand::A, Operand::B] {
+        ensure!(
+            shape.signed[op as usize] || sign[op as usize] != Sign::Signed,
+            "unsigned operand {op:?} without a routed sign"
+        );
+    }
+    Ok(Mult {
+        y,
+        nine_bit: shape.nine_bit(),
+        data,
+        sign,
+        registers: None,
+    })
 }
 
 /// `name[3]` -> ("name", Some(3)).

@@ -816,7 +816,7 @@ fn synth(verilog: &[PathBuf], top: &str, netlist: &Path) -> Result<()> {
     let out = chipsmith_cyclone2::synth::synthesize(design)?;
     let s = out.stats;
     eprintln!(
-        "    {} gates ({} AIG ANDs) to {} LUTs, depth {}; {} registers, {} carry chains, {} M4Ks in {:.1} s",
+        "    {} gates ({} AIG ANDs) to {} LUTs, depth {}; {} registers, {} carry chains, {} M4Ks, {} multipliers in {:.1} s",
         s.lutmap.gates,
         s.lutmap.and_nodes,
         s.lutmap.luts,
@@ -824,6 +824,7 @@ fn synth(verilog: &[PathBuf], top: &str, netlist: &Path) -> Result<()> {
         s.registers,
         s.chains,
         s.m4ks,
+        s.mults,
         started.elapsed().as_secs_f64()
     );
     let file = std::fs::File::create(netlist)

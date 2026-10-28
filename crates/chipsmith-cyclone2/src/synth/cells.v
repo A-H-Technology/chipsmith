@@ -48,6 +48,18 @@ module CY2_M4K (input CLK, input [11:0] A_ADDR, input [35:0] A_DATAIN, input A_W
   parameter [4607:0] INIT = 4608'b0;
 endmodule
 
+// An embedded multiplier (mult.rs builds it from a `$mul`):
+// P = A * B, each operand signed (two's complement) when its
+// *_SIGNED parameter is 1. Widths 1 to 18; one block of the 35.
+(* blackbox *)
+module CY2_MULT (input [A_WIDTH-1:0] A, input [B_WIDTH-1:0] B,
+                 output [A_WIDTH+B_WIDTH-1:0] P);
+  parameter A_WIDTH = 18;
+  parameter B_WIDTH = 18;
+  parameter A_SIGNED = 0;
+  parameter B_SIGNED = 0;
+endmodule
+
 // The JTAG block (one per device): TAP signals out to the core during a
 // user instruction (USER0 IR 0x00c, USER1 0x00e), TDOUSER shifted out on TDO.
 // cycloneii_jtag minus the pin ports, which the device wires itself.

@@ -18,6 +18,7 @@ use super::io::{IoBit, IoDb, PinUse, UnusedPins};
 use super::lab::LabDb;
 use super::logic::Logic;
 use super::m4k::{M4k, M4kDb};
+use super::mult::{Mult, MultDb};
 use super::rbf::{FrameBit, RepBit};
 
 /// One routing-graph edge: fanout `edge` of `src`. Private fields: the only
@@ -66,6 +67,8 @@ pub struct PhysDesign {
     pub unused_pins: UnusedPins,
     /// M4K RAM blocks in use.
     pub m4ks: Vec<M4k>,
+    /// Embedded multipliers in use.
+    pub mults: Vec<Mult>,
     /// The JTAG and serial-flash blocks, when the design uses them.
     pub hard: super::hard::Hard,
     pub nets: Vec<RoutedNet>,
@@ -82,6 +85,8 @@ pub enum Source {
     Io,
     /// ddb asmdb: M4K RAM block configuration and contents.
     Ram,
+    /// ddb asmdb: embedded multiplier configuration.
+    Mult,
     /// ddb asmdb: the JTAG and serial-flash blocks' input muxes.
     Hard,
 }
@@ -117,6 +122,7 @@ pub struct Db {
     pub lab: LabDb,
     pub io: IoDb,
     pub m4k: M4kDb,
+    pub mult: MultDb,
     pub hard: super::hard::HardDb,
 }
 
@@ -143,6 +149,11 @@ impl PhysDesign {
         for m in &self.m4ks {
             for (flat, v) in m.bits(&db.m4k)? {
                 core.push((addr::frame_bit(flat), v, Source::Ram));
+            }
+        }
+        for m in &self.mults {
+            for (flat, v) in m.bits(&db.mult)? {
+                core.push((addr::frame_bit(flat), v, Source::Mult));
             }
         }
         for flat in db.hard.bits(&self.hard)? {

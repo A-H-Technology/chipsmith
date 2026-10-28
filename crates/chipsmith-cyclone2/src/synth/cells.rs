@@ -11,6 +11,7 @@ pub const IBUF: &str = "CY2_IBUF";
 pub const OBUF: &str = "CY2_OBUF";
 pub const IOBUF: &str = "CY2_IOBUF";
 pub const M4K: &str = "CY2_M4K";
+pub const MULT: &str = "CY2_MULT";
 
 /// Every device cell as a Verilog blackbox module, for the front end to
 /// read as a library (`Frontend::read_library_source`) before a design that
@@ -149,7 +150,7 @@ mod tests {
     /// blocks, no more, under the names the packer reads.
     #[test]
     fn the_library_declares_every_device_cell() {
-        let mut expected = vec![LCELL_COMB, LCELL_FF, IBUF, OBUF, IOBUF, M4K];
+        let mut expected = vec![LCELL_COMB, LCELL_FF, IBUF, OBUF, IOBUF, M4K, MULT];
         expected.extend(Block::ALL.map(Block::cell_type));
         let instances: String = expected
             .iter()
