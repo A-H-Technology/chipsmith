@@ -1,2 +1,2 @@
     Stats { lutmap: Stats { gates: 1651, and_nodes: 2029, luts: 704, depth: 5 }, registers: 427, latches: 0, emulated: 0, io_registers: 0, chains: 12, m4ks: 0, mults: 15 }
-mult-selftest (chipsmith): synthesis 1.2 s; 961 LUTs, 427 registers, 1014 LEs, 12 carry chains, 0 M4Ks; critical path 15.98 ns, Fmax 62.6 MHz, slack 4.02 ns; /pool/dev/chipsmith-wt/mult/examples/mult-selftest/build/mult-selftest.rbf
+mult-selftest (chipsmith): synthesis 3.8 s; 961 LUTs, 427 registers, 1014 LEs, 12 carry chains, 0 M4Ks; critical path 15.18 ns, Fmax 65.9 MHz, slack 4.82 ns; /pool/dev/chipsmith-wt/mult/examples/mult-selftest/build/mult-selftest.rbf
