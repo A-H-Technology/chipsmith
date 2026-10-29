@@ -197,6 +197,30 @@ struct Le {
     ff: Option<usize>,
 }
 
+/// A control signal with its polarity.
+type Ctl = (Option<NetId>, bool);
+
+/// What `lab_ok` needs of an LE, gathered once.
+#[derive(Debug, Clone, Copy)]
+struct Sig {
+    /// Nets the LE takes from its LAB's lines: the LUT's inputs, then the
+    /// register's SDATA, ENA, SCLR and ACLR, those that are connected.
+    inputs: [NetId; 8],
+    n_inputs: u8,
+    ff: Option<FfCtl>,
+}
+
+/// A register's LAB-wide controls.
+#[derive(Debug, Clone, Copy)]
+struct FfCtl {
+    clk: Option<NetId>,
+    ena: Ctl,
+    sclr: Ctl,
+    aclr: Option<NetId>,
+    /// Bit 0: uses SDATA, bit 1: SCLR; a LAB's registers agree on it.
+    sync_kind: u8,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Stats {
     pub les: usize,
@@ -214,6 +238,7 @@ type Xy = (i32, i32);
 struct Design {
     cells: Vec<Cell>,
     les: Vec<Le>,
+    sigs: Vec<Sig>,
     le_of: Vec<Option<usize>>,
     chains: Vec<Vec<usize>>,
     chain_of: Vec<Option<usize>>,
@@ -224,9 +249,14 @@ struct Design {
     /// Nets that count for wirelength: their cells. Clock nets (driven by
     /// a clock control) don't; they ride the global network.
     nets: Vec<Vec<usize>>,
-    nets_of_le: Vec<Vec<usize>>,
-    /// Driving cell of each net, for "is this LAB input local".
+    /// Each LE's nets, with how many of the LE's two cells are on each (a
+    /// LUT and its own register share their net), so a move can update a
+    /// net's bounding box once per member.
+    nets_of_le: Vec<Vec<(usize, u8)>>,
+    /// Driving cell of each net, and the LE it is in, for "is this LAB
+    /// input local".
     driver: Vec<Option<usize>>,
+    driver_le: Vec<Option<u32>>,
     /// Every driver-to-load connection, for timing.
     conns: Vec<Conn>,
     timing: timing::Graph,
@@ -456,17 +486,17 @@ fn read_design(json: &Value) -> Result<Design> {
     for (r, &c) in rams.iter().enumerate() {
         ram_of[c] = Some(r);
     }
-    let mut nets_of_le = vec![Vec::new(); les.len()];
+    let mut nets_of_le: Vec<Vec<(usize, u8)>> = vec![Vec::new(); les.len()];
     let mut nets_of_ram = vec![Vec::new(); rams.len()];
     for (n, members) in nets.iter().enumerate() {
         for &c in members {
-            let of = match (le_of[c], ram_of[c]) {
-                (Some(le), _) => &mut nets_of_le[le],
-                (_, Some(r)) => &mut nets_of_ram[r],
-                _ => continue,
-            };
-            if of.last() != Some(&n) {
-                of.push(n);
+            match (le_of[c], ram_of[c]) {
+                (Some(le), _) => match nets_of_le[le].last_mut() {
+                    Some((last, count)) if *last == n => *count += 1,
+                    _ => nets_of_le[le].push((n, 1)),
+                },
+                (_, Some(r)) => nets_of_ram[r].push(n),
+                _ => {}
             }
         }
     }
@@ -514,9 +544,51 @@ fn read_design(json: &Value) -> Result<Design> {
         }
     }
 
+    let sigs = les
+        .iter()
+        .map(|&Le { lut, ff }| {
+            let mut sig = Sig {
+                inputs: [0; 8],
+                n_inputs: 0,
+                ff: None,
+            };
+            let mut add = |net: Option<NetId>| {
+                if let Some(n) = net {
+                    sig.inputs[sig.n_inputs as usize] = n;
+                    sig.n_inputs += 1;
+                }
+            };
+            if let Some(l) = lut {
+                for p in LUT_INPUTS {
+                    add(cells[l].net(p));
+                }
+            }
+            if let Some(f) = ff {
+                let c = &cells[f];
+                for p in [Port::Sdata, Port::Ena, Port::Sclr, Port::Aclr] {
+                    add(c.net(p));
+                }
+                sig.ff = Some(FfCtl {
+                    clk: c.net(Port::Clk),
+                    ena: (c.net(Port::Ena), c.ena_inv),
+                    sclr: (c.net(Port::Sclr), c.sclr_inv),
+                    aclr: c.net(Port::Aclr),
+                    sync_kind: c.net(Port::Sdata).is_some() as u8
+                        | (c.net(Port::Sclr).is_some() as u8) << 1,
+                });
+            }
+            sig
+        })
+        .collect();
+    let driver_le = driver
+        .iter()
+        .map(|d| d.and_then(|c| le_of[c]).map(|le| le as u32))
+        .collect();
+
     Ok(Design {
         cells,
         les,
+        sigs,
         le_of,
         chains,
         chain_of,
@@ -526,6 +598,7 @@ fn read_design(json: &Value) -> Result<Design> {
         nets,
         nets_of_le,
         driver,
+        driver_le,
         conns,
         timing,
     })
@@ -536,7 +609,10 @@ struct Grid {
     /// LAB index -> its tile.
     tiles: Vec<u32>,
     xy: Vec<Xy>,
-    at: HashMap<Xy, usize>,
+    /// The LAB at each tile position, row-major; looked up on every move.
+    at: Vec<Option<usize>>,
+    width: i32,
+    height: i32,
     /// M4K site index -> its tile, and its position.
     ram_tiles: Vec<u32>,
     ram_xy: Vec<Xy>,
@@ -547,13 +623,15 @@ const M4K_BEL: &str = "M4K";
 
 impl Grid {
     fn new(db: &ChipDb) -> Self {
-        let (mut tiles, mut xy, mut at) = (Vec::new(), Vec::new(), HashMap::default());
+        let (width, height) = (db.width as i32, db.height as i32);
+        let (mut tiles, mut xy) = (Vec::new(), Vec::new());
+        let mut at = vec![None; (width * height) as usize];
         let (mut ram_tiles, mut ram_xy) = (Vec::new(), Vec::new());
         for tile in 0..db.width * db.height {
             let (x, y) = db.tile_xy(tile);
             let bels = &db.tile_type(tile).bels;
             if bels.contains_key("LE0.LUT") {
-                at.insert((x as i32, y as i32), tiles.len());
+                at[(y as i32 * width + x as i32) as usize] = Some(tiles.len());
                 xy.push((x as i32, y as i32));
                 tiles.push(tile);
             } else if bels.get(M4K_BEL).is_some_and(|b| b.ty == "M4K") {
@@ -565,17 +643,121 @@ impl Grid {
             tiles,
             xy,
             at,
+            width,
+            height,
             ram_tiles,
             ram_xy,
         }
+    }
+
+    fn lab_at(&self, (x, y): Xy) -> Option<usize> {
+        if x < 0 || y < 0 || x >= self.width || y >= self.height {
+            return None;
+        }
+        self.at[(y * self.width + x) as usize]
     }
 
     /// The LABs a chain of `len` LEs starting at `lab` occupies.
     fn chain_labs(&self, lab: usize, len: usize) -> Option<Vec<usize>> {
         let (x, y) = self.xy[lab];
         (0..len.div_ceil(LES_PER_LAB) as i32)
-            .map(|i| self.at.get(&(x, y - i)).copied())
+            .map(|i| self.lab_at((x, y - i)))
             .collect()
+    }
+}
+
+/// A net's bounding box, with how many of its cells sit on each edge, so
+/// a move inside the box or onto an edge updates it without a pass over
+/// the net (VPR's incremental bounding boxes). A count reaching zero means
+/// the edge moved inwards by an unknown amount: the box is then recomputed.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Bbox {
+    lx: i32,
+    hx: i32,
+    ly: i32,
+    hy: i32,
+    n_lx: u32,
+    n_hx: u32,
+    n_ly: u32,
+    n_hy: u32,
+}
+
+impl Bbox {
+    fn of(mut points: impl Iterator<Item = Xy>) -> Bbox {
+        let (x0, y0) = points.next().expect("a net has cells");
+        let mut b = Bbox {
+            lx: x0,
+            hx: x0,
+            ly: y0,
+            hy: y0,
+            n_lx: 1,
+            n_hx: 1,
+            n_ly: 1,
+            n_hy: 1,
+        };
+        for (x, y) in points {
+            Self::add(&mut b.lx, &mut b.hx, &mut b.n_lx, &mut b.n_hx, x);
+            Self::add(&mut b.ly, &mut b.hy, &mut b.n_ly, &mut b.n_hy, y);
+        }
+        b
+    }
+
+    fn add(lo: &mut i32, hi: &mut i32, n_lo: &mut u32, n_hi: &mut u32, v: i32) {
+        if v < *lo {
+            *lo = v;
+            *n_lo = 1;
+        } else if v == *lo {
+            *n_lo += 1;
+        }
+        if v > *hi {
+            *hi = v;
+            *n_hi = 1;
+        } else if v == *hi {
+            *n_hi += 1;
+        }
+    }
+
+    /// One cell of the net moved from `old` to `new`. False when an edge
+    /// count dropped to zero and the box has to be recomputed.
+    fn moved(&mut self, old: Xy, new: Xy) -> bool {
+        let mut ok = true;
+        for (lo, hi, n_lo, n_hi, o, n) in [
+            (
+                &mut self.lx,
+                &mut self.hx,
+                &mut self.n_lx,
+                &mut self.n_hx,
+                old.0,
+                new.0,
+            ),
+            (
+                &mut self.ly,
+                &mut self.hy,
+                &mut self.n_ly,
+                &mut self.n_hy,
+                old.1,
+                new.1,
+            ),
+        ] {
+            if o == n {
+                continue;
+            }
+            if o == *lo {
+                *n_lo -= 1;
+            }
+            if o == *hi {
+                *n_hi -= 1;
+            }
+            Self::add(lo, hi, n_lo, n_hi, n);
+            ok &= *n_lo > 0 && *n_hi > 0;
+        }
+        ok
+    }
+
+    /// Half-perimeter wirelength; x counts routing and logic columns
+    /// separately, so it is halved.
+    fn hpwl(&self) -> u32 {
+        ((self.hx - self.lx) / 2 + (self.hy - self.ly)) as u32
     }
 }
 
@@ -813,44 +995,37 @@ struct State<'a> {
     slots: Vec<[Option<usize>; LES_PER_LAB]>,
     /// (LAB, LE index) of each LE.
     pos: Vec<(usize, usize)>,
-    /// Position of each fixed cell (pins, clock controls).
-    fixed_xy: Vec<Option<Xy>>,
+    /// Position of every cell: LEs and M4Ks as placed, pins and clock
+    /// controls where they are fixed.
+    xy: Vec<Xy>,
     /// M4K site of each M4K, and the M4K at each site.
     ram_site: Vec<usize>,
     site_ram: Vec<Option<usize>>,
     /// Each net's weight: 1, plus more the more timing-critical it is.
     weight: Vec<f32>,
-    /// Each net's weighted wirelength.
+    /// Each net's bounding box and weighted wirelength.
+    bbox: Vec<Bbox>,
     net_cost: Vec<f32>,
+    /// The move being evaluated: the boxes it changed, as they were, so a
+    /// rejected move is undone without recomputing them; and nets that
+    /// need a full recompute (`touched_gen` marks a net already saved).
+    saved: Vec<(usize, Bbox)>,
+    dirty: Vec<usize>,
+    touched_gen: Vec<u32>,
+    generation: u32,
 }
 
 impl<'a> State<'a> {
     fn cell_xy(&self, cell: usize) -> Xy {
-        let d = self.design;
-        match (d.le_of[cell], d.ram_of[cell]) {
-            (Some(le), _) => self.grid.xy[self.pos[le].0],
-            (_, Some(r)) => self.grid.ram_xy[self.ram_site[r]],
-            _ => self.fixed_xy[cell].expect("every cell is an LE, an M4K or fixed"),
-        }
+        self.xy[cell]
     }
 
-    /// Half-perimeter wirelength; x counts routing and logic columns
-    /// separately, so it is halved.
     fn cost(&self, net: usize) -> f32 {
-        self.weight[net] * self.hpwl(net) as f32
+        self.weight[net] * self.bbox[net].hpwl() as f32
     }
 
-    fn hpwl(&self, net: usize) -> u32 {
-        let mut it = self.design.nets[net].iter().map(|&c| self.cell_xy(c));
-        let (x0, y0) = it.next().unwrap();
-        let (mut lx, mut hx, mut ly, mut hy) = (x0, x0, y0, y0);
-        for (x, y) in it {
-            lx = lx.min(x);
-            hx = hx.max(x);
-            ly = ly.min(y);
-            hy = hy.max(y);
-        }
-        ((hx - lx) / 2 + (hy - ly)) as u32
+    fn compute_bbox(&self, net: usize) -> Bbox {
+        Bbox::of(self.design.nets[net].iter().map(|&c| self.xy[c]))
     }
 
     fn total(&self) -> f64 {
@@ -859,9 +1034,83 @@ impl<'a> State<'a> {
 
     /// Unweighted wirelength, for reporting.
     fn wirelength(&self) -> u64 {
-        (0..self.design.nets.len())
-            .map(|n| self.hpwl(n) as u64)
-            .sum()
+        self.bbox.iter().map(|b| b.hpwl() as u64).sum()
+    }
+
+    /// Account for a move already applied to `slots`/`pos`/`xy`: update the
+    /// boxes of every net touched and return the change in cost. The old
+    /// boxes are kept for `revert_cost`; `commit_cost` makes the new costs
+    /// permanent.
+    fn apply_cost(&mut self, undo: &Undo) -> f64 {
+        let d = self.design;
+        self.generation += 1;
+        self.saved.clear();
+        self.dirty.clear();
+        let g = self.generation;
+        match undo {
+            Undo::Les(moved) => {
+                for &(le, old_lab, _) in moved {
+                    let (old, new) = (self.grid.xy[old_lab], self.grid.xy[self.pos[le].0]);
+                    for &(n, count) in &d.nets_of_le[le] {
+                        for _ in 0..count {
+                            self.net_moved(n, old, new, g);
+                        }
+                    }
+                }
+            }
+            Undo::Rams(moved) => {
+                for &(r, old_site) in moved {
+                    let (old, new) = (
+                        self.grid.ram_xy[old_site],
+                        self.grid.ram_xy[self.ram_site[r]],
+                    );
+                    for &n in &d.nets_of_ram[r] {
+                        self.net_moved(n, old, new, g);
+                    }
+                }
+            }
+        }
+        // A box an edge count emptied is recomputed once every cell has
+        // its final position.
+        for i in 0..self.dirty.len() {
+            let n = self.dirty[i];
+            self.bbox[n] = self.compute_bbox(n);
+        }
+        // Summed as the full recompute did (per net in index order, after
+        // minus before), so the same seed still makes the same decisions.
+        self.saved.sort_unstable_by_key(|&(n, _)| n);
+        let after: f64 = self.saved.iter().map(|&(n, _)| self.cost(n) as f64).sum();
+        let before: f64 = self
+            .saved
+            .iter()
+            .map(|&(n, _)| self.net_cost[n] as f64)
+            .sum();
+        after - before
+    }
+
+    fn net_moved(&mut self, n: usize, old: Xy, new: Xy, g: u32) {
+        if self.touched_gen[n] != g {
+            self.touched_gen[n] = g;
+            self.saved.push((n, self.bbox[n]));
+        } else if self.dirty.contains(&n) {
+            return;
+        }
+        if !self.bbox[n].moved(old, new) {
+            self.dirty.push(n);
+        }
+    }
+
+    fn revert_cost(&mut self) {
+        for &(n, b) in &self.saved {
+            self.bbox[n] = b;
+        }
+    }
+
+    fn commit_cost(&mut self) {
+        for i in 0..self.saved.len() {
+            let n = self.saved[i].0;
+            self.net_cost[n] = self.cost(n);
+        }
     }
 
     /// A connection's delay as the placement stands: nothing inside an LE
@@ -911,37 +1160,17 @@ impl<'a> State<'a> {
     }
 
     /// nextpnr's `isBelLocationValid` for one LAB. Hot: runs on every
-    /// move, so it allocates nothing.
+    /// move, so it allocates nothing and reads each LE's precomputed `Sig`.
     fn lab_ok(&self, lab: usize) -> bool {
         let d = self.design;
-        let cells = &d.cells;
-        type Ctl = (Option<NetId>, bool);
         // A third distinct domain already fails, so three slots suffice.
         let mut domains: [(Option<NetId>, Ctl); 3] = [(None, (None, false)); 3];
         let mut n_domains = 0;
         let (mut ena, mut aclr, mut sclr): (Option<Ctl>, Option<NetId>, Option<Ctl>) =
             (None, None, None);
         let mut sync_kind = 0;
-        let mut inputs = [0 as NetId; MAX_LAB_INPUTS + 1];
+        let mut inputs = [0 as NetId; MAX_LAB_INPUTS];
         let mut n_inputs = 0;
-        let here = |net: NetId| {
-            d.driver[net as usize]
-                .and_then(|c| d.le_of[c])
-                .is_some_and(|le| self.pos[le].0 == lab)
-        };
-        // False once the LAB has too many outside inputs.
-        let mut add = |net: Option<NetId>| -> bool {
-            let Some(n) = net else { return true };
-            if here(n) || inputs[..n_inputs].contains(&n) {
-                return true;
-            }
-            if n_inputs == MAX_LAB_INPUTS {
-                return false;
-            }
-            inputs[n_inputs] = n;
-            n_inputs += 1;
-            true
-        };
         let one = |slot: &mut Option<Ctl>, v: Ctl| match (v.0, *slot) {
             (None, _) => true,
             (Some(_), None) => {
@@ -951,29 +1180,25 @@ impl<'a> State<'a> {
             (Some(_), Some(s)) => s == v,
         };
         for le in self.slots[lab].iter().flatten() {
-            let Le { lut, ff } = d.les[*le];
-            if let Some(l) = lut {
-                for p in LUT_INPUTS {
-                    if !add(cells[l].net(p)) {
-                        return false;
-                    }
+            let sig = &d.sigs[*le];
+            for &n in &sig.inputs[..sig.n_inputs as usize] {
+                // Driven inside the LAB, or already counted: no new line.
+                let here = d.driver_le[n as usize].is_some_and(|le| self.pos[le as usize].0 == lab);
+                if here || inputs[..n_inputs].contains(&n) {
+                    continue;
                 }
-            }
-            let Some(f) = ff else { continue };
-            let c = &cells[f];
-            for p in [Port::Sdata, Port::Ena, Port::Sclr, Port::Aclr] {
-                if !add(c.net(p)) {
+                if n_inputs == MAX_LAB_INPUTS {
                     return false;
                 }
+                inputs[n_inputs] = n;
+                n_inputs += 1;
             }
-            let kind =
-                c.net(Port::Sdata).is_some() as u8 | (c.net(Port::Sclr).is_some() as u8) << 1;
-            if kind != 0 && sync_kind != 0 && kind != sync_kind {
+            let Some(ff) = &sig.ff else { continue };
+            if ff.sync_kind != 0 && sync_kind != 0 && ff.sync_kind != sync_kind {
                 return false;
             }
-            sync_kind |= kind;
-            let e: Ctl = (c.net(Port::Ena), c.ena_inv);
-            let domain = (c.net(Port::Clk), e);
+            sync_kind |= ff.sync_kind;
+            let domain = (ff.clk, ff.ena);
             // One clock net per LAB, though a LAB has two LAB clocks. Which
             // of them Quartus gives each of two clocks isn't predictable
             // from what we know (cyclone2-re README, "LAB clocks": no rule
@@ -991,10 +1216,10 @@ impl<'a> State<'a> {
                 domains[n_domains] = domain;
                 n_domains += 1;
             }
-            if !one(&mut ena, e) || !one(&mut sclr, (c.net(Port::Sclr), c.sclr_inv)) {
+            if !one(&mut ena, ff.ena) || !one(&mut sclr, ff.sclr) {
                 return false;
             }
-            if let Some(a) = c.net(Port::Aclr) {
+            if let Some(a) = ff.aclr {
                 if aclr.is_some_and(|x| x != a) {
                     return false;
                 }
@@ -1007,6 +1232,10 @@ impl<'a> State<'a> {
     fn put(&mut self, le: usize, lab: usize, k: usize) {
         self.slots[lab][k] = Some(le);
         self.pos[le] = (lab, k);
+        let Le { lut, ff } = self.design.les[le];
+        for c in [lut, ff].into_iter().flatten() {
+            self.xy[c] = self.grid.xy[lab];
+        }
     }
 }
 
@@ -1036,17 +1265,22 @@ enum Undo {
 }
 
 impl<'a> State<'a> {
-    fn initial(design: &'a Design, grid: &'a Grid, fixed_xy: Vec<Option<Xy>>) -> Result<Self> {
+    fn initial(design: &'a Design, grid: &'a Grid, fixed_xy: &[Option<Xy>]) -> Result<Self> {
         let mut s = State {
             design,
             grid,
             slots: vec![[None; LES_PER_LAB]; grid.tiles.len()],
             pos: vec![(usize::MAX, 0); design.les.len()],
-            fixed_xy,
+            xy: fixed_xy.iter().map(|p| p.unwrap_or((0, 0))).collect(),
             ram_site: vec![usize::MAX; design.rams.len()],
             site_ram: vec![None; grid.ram_tiles.len()],
             weight: vec![1.0; design.nets.len()],
+            bbox: vec![Bbox::default(); design.nets.len()],
             net_cost: vec![0.0; design.nets.len()],
+            saved: Vec::new(),
+            dirty: Vec::new(),
+            touched_gen: vec![0; design.nets.len()],
+            generation: 0,
         };
         // Centre outwards.
         let (cx, cy) = grid
@@ -1120,10 +1354,10 @@ impl<'a> State<'a> {
             ((x - centre.0).abs() / 2 + (y - centre.1).abs(), i)
         });
         for (r, &site) in sites.iter().take(design.rams.len()).enumerate() {
-            s.ram_site[r] = site;
-            s.site_ram[site] = Some(r);
+            s.put_ram(r, site);
         }
         for n in 0..design.nets.len() {
+            s.bbox[n] = s.compute_bbox(n);
             s.net_cost[n] = s.cost(n);
         }
         Ok(s)
@@ -1206,6 +1440,7 @@ impl<'a> State<'a> {
     fn put_ram(&mut self, r: usize, site: usize) {
         self.ram_site[r] = site;
         self.site_ram[site] = Some(r);
+        self.xy[self.design.rams[r]] = self.grid.ram_xy[site];
     }
 
     fn undo(&mut self, undo: &Undo) {
@@ -1233,23 +1468,6 @@ impl<'a> State<'a> {
                 }
             }
         }
-    }
-
-    fn nets_of(&self, undo: &Undo) -> Vec<usize> {
-        let d = self.design;
-        let mut nets: Vec<usize> = match undo {
-            Undo::Les(moved) => moved
-                .iter()
-                .flat_map(|&(le, _, _)| d.nets_of_le[le].iter().copied())
-                .collect(),
-            Undo::Rams(moved) => moved
-                .iter()
-                .flat_map(|&(r, _)| d.nets_of_ram[r].iter().copied())
-                .collect(),
-        };
-        nets.sort();
-        nets.dedup();
-        nets
     }
 }
 
@@ -1285,7 +1503,7 @@ fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
             let (x, y) = s.grid.xy[s.pos[le].0];
             let tx = x + 2 * (rng.below(2 * ri as usize + 1) as i32 - ri);
             let ty = y + rng.below(2 * ri as usize + 1) as i32 - ri;
-            let &lab = s.grid.at.get(&(tx, ty))?;
+            let lab = s.grid.lab_at((tx, ty))?;
             let k = if d.chain_of[le].is_some() {
                 0
             } else {
@@ -1306,16 +1524,12 @@ fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
             let site = near[rng.below(near.len())];
             s.try_move_ram(ram, site)?
         };
-        let nets = s.nets_of(&undo);
-        let before: f64 = nets.iter().map(|&n| s.net_cost[n] as f64).sum();
-        let after_costs: Vec<f32> = nets.iter().map(|&n| s.cost(n)).collect();
-        let delta = after_costs.iter().map(|&c| c as f64).sum::<f64>() - before;
+        let delta = s.apply_cost(&undo);
         if delta <= 0.0 || (t > 0.0 && rng.unit() < (-delta / t).exp()) {
-            for (&n, &c) in nets.iter().zip(&after_costs) {
-                s.net_cost[n] = c;
-            }
+            s.commit_cost();
             Some(delta)
         } else {
+            s.revert_cost();
             s.undo(&undo);
             None
         }
@@ -1393,7 +1607,7 @@ pub fn place_file(
         let (x, y) = db.tile_xy(tile);
         fixed_xy[c] = Some((x as i32, y as i32));
     }
-    let mut state = State::initial(&design, &grid, fixed_xy)?;
+    let mut state = State::initial(&design, &grid, &fixed_xy)?;
     let initial_cost = state.wirelength();
     let moves = anneal(&mut state, &mut Rng(0x9e37_79b9_7f4a_7c15));
     let critical = state.reweight();
