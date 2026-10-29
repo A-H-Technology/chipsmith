@@ -2276,14 +2276,15 @@ pub fn place_file(
             started.elapsed().as_secs_f64()
         );
     }
-    let chain_labs: usize = design.chains.iter().map(|c| c.len().div_ceil(LES_PER_LAB)).sum();
+    // More clusters than LABs can still fit: the legaliser puts small
+    // clusters into the free slots of carry chains' last LABs and of
+    // other small clusters when `lab_ok` accepts the union. Only more LEs
+    // than slots is hopeless up front.
     ensure!(
-        clusters.len() + chain_labs <= grid.tiles.len(),
-        "the design needs {} LABs ({} clusters of LEs that can share one, {} for carry chains), the chip has {}",
-        clusters.len() + chain_labs,
-        clusters.len(),
-        chain_labs,
-        grid.tiles.len()
+        design.les.len() <= grid.tiles.len() * LES_PER_LAB,
+        "the design needs {} LEs, the chip has {}",
+        design.les.len(),
+        grid.tiles.len() * LES_PER_LAB
     );
     let an = analytic_problem(&design, &grid, &fixed_xy, &clusters);
     let rounds = {
