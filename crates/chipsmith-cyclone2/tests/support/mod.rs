@@ -1030,11 +1030,14 @@ fn equiv_once(
     // inputs are proven equal (chipsmith-netlist's round-trip check does
     // the same). A pin buffer always on or always off is no tri-state:
     // its multiplexer with a constant select folds first.
-    // `opt_dff -nodffe -nosdff` only drops a register's constant enable or
-    // reset: a block model's register with its enable tied on and its
-    // clear tied off becomes the plain `$dff` the RTL has, so equiv_struct
-    // matches it instead of SAT proving through the multiplier behind it.
-    let prep = "hierarchy -top top\nproc -noopt\nflatten\nopt_expr t:$mux\nopt_dff -nodffe -nosdff\ntribuf\nchtype -set chipsmith_mem t:$mem_v2\n\
+    // `opt_dff -nodffe -nosdff` on the block models (`cy2_sim.v`) only drops
+    // a register's constant enable or reset: a model's register with its
+    // enable tied on and its clear tied off becomes the plain `$dff` the
+    // RTL has, so equiv_struct matches it instead of SAT proving through
+    // the multiplier behind it. Not on the design's own registers: it also
+    // folds their constant bits, which on serv's RTL leaves a constant
+    // with two init values and yosys stops.
+    let prep = "hierarchy -top top\nproc -noopt\nflatten\nopt_expr t:$mux\nopt_dff -nodffe -nosdff a:src=*cy2_sim.v*\ntribuf\nchtype -set chipsmith_mem t:$mem_v2\n\
                 chtype -set chipsmith_tribuf t:$tribuf t:$_TBUF_\nopt_clean";
     let script = format!(
         "read_json {gold}\nread_verilog -overwrite {sim}\n{prep}\nrename top gold\ndesign -stash gold\n\
