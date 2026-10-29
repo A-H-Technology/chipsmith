@@ -104,10 +104,13 @@
           CHIPSMITH_XC7_CHIPDB = xc7.chipdb;
           CHIPSMITH_PRJXRAY_DB = xc7.prjxray-db;
           # Written on first use (and whenever the format changes), so the
-          # shell doesn't depend on building chipsmith itself.
+          # shell doesn't depend on building chipsmith itself. Named after
+          # the database it is flattened from: the cache only checks its
+          # format, so a graph of an older database (one without the PLL
+          # pins, say) would otherwise outlive a flake.lock bump.
           shellHook = ''
-            export CHIPSMITH_CYCLONE2_GRAPH=$PWD/target/routing-graph.bin
-            export CHIPSMITH_XC7_GRAPH=$PWD/target/xc7-routing-graph.bin
+            export CHIPSMITH_CYCLONE2_GRAPH=$PWD/target/routing-graph-${builtins.baseNameOf open.db}.bin
+            export CHIPSMITH_XC7_GRAPH=$PWD/target/xc7-routing-graph-${builtins.baseNameOf xc7.prjxray-db}.bin
             # cudarc dlopens libcuda by bare name; NixOS puts the driver's
             # copy here rather than anywhere ld.so searches.
             export LD_LIBRARY_PATH=/run/opengl-driver/lib:${cudaToolkit}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}

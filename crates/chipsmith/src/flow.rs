@@ -780,6 +780,15 @@ impl Plan {
             std::fs::write(path, contents)
                 .with_context(|| format!("writing {}", path.display()))?;
         }
+        // The routing graph (0.5 s from its cache) and the bitstream's
+        // device database (3 s, most of it xz) load on threads of their
+        // own while the stages in front of them run; a small design used
+        // to spend most of its build waiting for them.
+        let needs = |f: fn(&Step) -> bool| self.steps.iter().any(f);
+        let mut graph = needs(|s| matches!(s, Step::PlaceRoute { .. }))
+            .then(|| Prefetch::spawn(chipsmith_cyclone2::route::load_graph));
+        let mut device_db = needs(|s| matches!(s, Step::Bitstream { .. }))
+            .then(|| Prefetch::spawn(bitstream::load_db));
         for step in &self.steps {
             eprintln!("  {}", step.label());
             match step {
@@ -798,8 +807,18 @@ impl Plan {
                     pins,
                     unused_pins,
                     clocks,
-                } => place_route(packed, placed, routed, pins, *unused_pins, clocks)?,
-                Step::Bitstream { routed, rbf } => bitstream(routed, rbf)?,
+                } => place_route(
+                    Prefetch::take(&mut graph, chipsmith_cyclone2::route::load_graph),
+                    packed,
+                    placed,
+                    routed,
+                    pins,
+                    *unused_pins,
+                    clocks,
+                )?,
+                Step::Bitstream { routed, rbf } => {
+                    bitstream(Prefetch::take(&mut device_db, bitstream::load_db), routed, rbf)?
+                }
                 Step::Svf { rbf, svf } => bitstream::svf_file(rbf, svf)?,
                 Step::NextpnrTiming(report) => nextpnr_timing(report)?,
                 Step::Xc7Place { packed, placement } => xc7_place(packed, placement)?,
@@ -906,7 +925,41 @@ fn pack(netlist: &Path, packed: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Something loading on a thread of its own until a step needs it.
+struct Prefetch<T>(std::thread::JoinHandle<Result<T>>);
+
+impl<T: Send + 'static> Prefetch<T> {
+    fn spawn(load: fn() -> Result<T>) -> Self {
+        Prefetch(std::thread::spawn(load))
+    }
+
+    /// What the thread loaded (waiting for it), or a load on the spot if
+    /// it was already taken: a plan has one step of each kind, but nothing
+    /// enforces that.
+    fn take(slot: &mut Option<Self>, load: fn() -> Result<T>) -> Timed<T> {
+        let started = Instant::now();
+        let value = match slot.take() {
+            Some(Prefetch(handle)) => match handle.join() {
+                Ok(r) => r,
+                Err(panic) => std::panic::resume_unwind(panic),
+            },
+            None => load(),
+        };
+        Timed {
+            value,
+            waited: started.elapsed().as_secs_f64(),
+        }
+    }
+}
+
+/// A prefetched value and how long the step had to wait for it.
+struct Timed<T> {
+    value: Result<T>,
+    waited: f64,
+}
+
 fn place_route(
+    graph: Timed<chipsmith_route::chipdb::ChipDb>,
     packed: &Path,
     placed: &Path,
     routed: &Path,
@@ -914,12 +967,9 @@ fn place_route(
     unused_pins: UnusedPins,
     clocks: &BTreeMap<String, Frequency>,
 ) -> Result<()> {
-    let started = Instant::now();
-    let graph = chipsmith_cyclone2::route::load_graph()?;
-    eprintln!(
-        "    routing graph in {:.1} s",
-        started.elapsed().as_secs_f64()
-    );
+    let waited = graph.waited;
+    let graph = graph.value?;
+    eprintln!("    routing graph in {waited:.1} s");
 
     let started = Instant::now();
     let p = chipsmith_cyclone2::place::place_file(&graph, packed, pins, unused_pins, placed)?;
@@ -1000,13 +1050,10 @@ fn clock_report(
     out
 }
 
-fn bitstream(routed: &Path, rbf: &Path) -> Result<()> {
-    let started = Instant::now();
-    let db = bitstream::load_db()?;
-    eprintln!(
-        "    device database in {:.1} s",
-        started.elapsed().as_secs_f64()
-    );
+fn bitstream(db: Timed<bitstream::phys::Db>, routed: &Path, rbf: &Path) -> Result<()> {
+    let waited = db.waited;
+    let db = db.value?;
+    eprintln!("    device database in {waited:.1} s");
     let started = Instant::now();
     let s = bitstream::pack_file(&db, routed, rbf)?;
     eprintln!(

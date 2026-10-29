@@ -11,6 +11,7 @@ chipsmith-jtag.workspace = true
 chipsmith-netlist.workspace = true
 chipsmith-synth.workspace = true
 chipsmith-route.workspace = true
+chipsmith-place.workspace = true
 anyhow.workspace = true
 lzma-rust2.workspace = true
 postcard.workspace = true

@@ -1,4 +1,5 @@
-//! chipsmith's placer: simulated annealing over LAB slots.
+//! chipsmith's placer: analytic global placement (`chipsmith_place`),
+//! legalised into LAB slots, then a short simulated anneal over them.
 //!
 //! Input is a packed design in nextpnr's JSON (`pack`, or `nextpnr-himbaechel
 //! --pack-only --write`): LUTs, registers, pin buffers and clock controls,
@@ -25,6 +26,7 @@ use serde_json::Value;
 use crate::hard;
 use crate::m4k;
 use crate::pin::{assignment, register_param, PinSettings, Pull, UnusedPins};
+use chipsmith_place::{Bins, Legalizer, Net, Object, Options, Pin, PinOf, Pos, Problem};
 use chipsmith_route::chipdb::{ChipDb, NodeId, Pad, PadIo};
 use chipsmith_route::timing::{self, Arc, Ps};
 
@@ -210,6 +212,21 @@ struct Sig {
     ff: Option<FfCtl>,
 }
 
+/// Why a LAB refuses its contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    /// More than `MAX_LAB_INPUTS` distinct signals from outside.
+    Inputs,
+    /// Registers with SDATA and others with SCLR.
+    SyncKind,
+    /// Two clocks.
+    Clock,
+    /// A third (clock, enable) domain.
+    Domains,
+    /// A second enable, synchronous clear or asynchronous clear.
+    Control,
+}
+
 /// A register's LAB-wide controls.
 #[derive(Debug, Clone, Copy)]
 struct FfCtl {
@@ -225,6 +242,9 @@ struct FfCtl {
 pub struct Stats {
     pub les: usize,
     pub chains: usize,
+    /// Rounds of analytic placement.
+    pub rounds: usize,
+    /// Wirelength after analytic placement, before the anneal.
     pub initial_cost: u64,
     pub cost: u64,
     pub moves: u64,
@@ -988,6 +1008,7 @@ fn fixed_cells(
 }
 
 /// The placement being annealed.
+#[derive(Clone)]
 struct State<'a> {
     design: &'a Design,
     grid: &'a Grid,
@@ -1159,9 +1180,13 @@ impl<'a> State<'a> {
         analysis.critical
     }
 
+    fn lab_ok(&self, lab: usize) -> bool {
+        self.lab_check(lab).is_ok()
+    }
+
     /// nextpnr's `isBelLocationValid` for one LAB. Hot: runs on every
     /// move, so it allocates nothing and reads each LE's precomputed `Sig`.
-    fn lab_ok(&self, lab: usize) -> bool {
+    fn lab_check(&self, lab: usize) -> Result<(), Refusal> {
         let d = self.design;
         // A third distinct domain already fails, so three slots suffice.
         let mut domains: [(Option<NetId>, Ctl); 3] = [(None, (None, false)); 3];
@@ -1188,14 +1213,14 @@ impl<'a> State<'a> {
                     continue;
                 }
                 if n_inputs == MAX_LAB_INPUTS {
-                    return false;
+                    return Err(Refusal::Inputs);
                 }
                 inputs[n_inputs] = n;
                 n_inputs += 1;
             }
             let Some(ff) = &sig.ff else { continue };
             if ff.sync_kind != 0 && sync_kind != 0 && ff.sync_kind != sync_kind {
-                return false;
+                return Err(Refusal::SyncKind);
             }
             sync_kind |= ff.sync_kind;
             let domain = (ff.clk, ff.ena);
@@ -1207,26 +1232,36 @@ impl<'a> State<'a> {
             // Remove once that choice is modelled; until then two domains
             // in a LAB share a clock and differ in their enable.
             if domains[..n_domains].iter().any(|d| d.0 != domain.0) {
-                return false;
+                return Err(Refusal::Clock);
             }
             if !domains[..n_domains].contains(&domain) {
                 if n_domains == 2 {
-                    return false;
+                    return Err(Refusal::Domains);
                 }
                 domains[n_domains] = domain;
                 n_domains += 1;
             }
             if !one(&mut ena, ff.ena) || !one(&mut sclr, ff.sclr) {
-                return false;
+                return Err(Refusal::Control);
             }
             if let Some(a) = ff.aclr {
                 if aclr.is_some_and(|x| x != a) {
-                    return false;
+                    return Err(Refusal::Control);
                 }
                 aclr = Some(a);
             }
         }
-        true
+        Ok(())
+    }
+
+    /// Take `le` off the chip again. `pos` must go too: `lab_ok` reads it
+    /// to tell a LAB's own signals from outside inputs.
+    fn unput(&mut self, le: usize) {
+        let (lab, k) = self.pos[le];
+        if lab != usize::MAX && self.slots[lab][k] == Some(le) {
+            self.slots[lab][k] = None;
+        }
+        self.pos[le] = (usize::MAX, 0);
     }
 
     fn put(&mut self, le: usize, lab: usize, k: usize) {
@@ -1265,8 +1300,10 @@ enum Undo {
 }
 
 impl<'a> State<'a> {
-    fn initial(design: &'a Design, grid: &'a Grid, fixed_xy: &[Option<Xy>]) -> Result<Self> {
-        let mut s = State {
+    /// An empty placement: pins and clock controls where they are fixed,
+    /// nothing else placed yet.
+    fn new(design: &'a Design, grid: &'a Grid, fixed_xy: &[Option<Xy>]) -> Self {
+        State {
             design,
             grid,
             slots: vec![[None; LES_PER_LAB]; grid.tiles.len()],
@@ -1281,86 +1318,24 @@ impl<'a> State<'a> {
             dirty: Vec::new(),
             touched_gen: vec![0; design.nets.len()],
             generation: 0,
-        };
-        // Centre outwards.
-        let (cx, cy) = grid
-            .xy
-            .iter()
-            .fold((0i64, 0i64), |(a, b), &(x, y)| (a + x as i64, b + y as i64));
-        let centre = (
-            (cx / grid.xy.len() as i64) as i32,
-            (cy / grid.xy.len() as i64) as i32,
-        );
-        let mut order: Vec<usize> = (0..grid.tiles.len()).collect();
-        order.sort_by_key(|&l| {
-            let (x, y) = grid.xy[l];
-            (x - centre.0).abs() / 2 + (y - centre.1).abs()
-        });
+        }
+    }
 
-        for chain in &design.chains {
-            let spot = order.iter().find_map(|&lab| {
-                let labs = grid.chain_labs(lab, chain.len())?;
-                let free = chain
-                    .iter()
-                    .enumerate()
-                    .all(|(i, _)| s.slots[labs[i / LES_PER_LAB]][i % LES_PER_LAB].is_none());
-                free.then_some(labs)
-            });
-            let labs = spot.context("no room for a carry chain")?;
-            for (i, &le) in chain.iter().enumerate() {
-                s.put(le, labs[i / LES_PER_LAB], i % LES_PER_LAB);
-            }
-            for &lab in &labs {
-                ensure!(
-                    s.lab_ok(lab),
-                    "a carry chain's registers don't fit one LAB's controls"
-                );
-            }
-        }
+    /// Take every LE and M4K off the chip.
+    fn clear(&mut self) {
+        self.slots.iter_mut().for_each(|s| *s = [None; LES_PER_LAB]);
+        self.pos.iter_mut().for_each(|p| *p = (usize::MAX, 0));
+        self.ram_site.iter_mut().for_each(|s| *s = usize::MAX);
+        self.site_ram.iter_mut().for_each(|s| *s = None);
+    }
 
-        let mut next = 0;
-        for le in 0..design.les.len() {
-            if design.chain_of[le].is_some() {
-                continue;
-            }
-            let mut placed = false;
-            for &lab in &order[next..] {
-                let Some(k) = s.slots[lab].iter().position(Option::is_none) else {
-                    continue;
-                };
-                s.put(le, lab, k);
-                if s.lab_ok(lab) {
-                    placed = true;
-                    break;
-                }
-                s.slots[lab][k] = None;
-            }
-            ensure!(placed, "the design doesn't fit");
-            // Skip LABs that are full for good.
-            while next < order.len() && s.slots[order[next]].iter().all(Option::is_some) {
-                next += 1;
-            }
+    /// Every box and cost from scratch, after a placement was built
+    /// rather than moved into.
+    fn recompute_costs(&mut self) {
+        for n in 0..self.design.nets.len() {
+            self.bbox[n] = self.compute_bbox(n);
+            self.net_cost[n] = self.cost(n);
         }
-
-        ensure!(
-            design.rams.len() <= grid.ram_tiles.len(),
-            "the design has {} M4K blocks, the chip {}",
-            design.rams.len(),
-            grid.ram_tiles.len()
-        );
-        let mut sites: Vec<usize> = (0..grid.ram_tiles.len()).collect();
-        sites.sort_by_key(|&i| {
-            let (x, y) = grid.ram_xy[i];
-            ((x - centre.0).abs() / 2 + (y - centre.1).abs(), i)
-        });
-        for (r, &site) in sites.iter().take(design.rams.len()).enumerate() {
-            s.put_ram(r, site);
-        }
-        for n in 0..design.nets.len() {
-            s.bbox[n] = s.compute_bbox(n);
-            s.net_cost[n] = s.cost(n);
-        }
-        Ok(s)
     }
 
     /// Try moving `le` (with its chain, if any) to `lab`/`k`. Returns the
@@ -1471,12 +1446,608 @@ impl<'a> State<'a> {
     }
 }
 
+/// What the analytic placer moves: a cluster of LEs that will share a
+/// LAB, a carry chain (by its head), or an M4K.
+#[derive(Debug, Clone, Copy)]
+enum Obj {
+    Cluster(usize),
+    Chain(usize),
+    Ram(usize),
+}
+
+/// Gather the LEs that are not in chains into LAB-sized clusters, as
+/// VPR's packer does before placing: a LAB holds one set of register
+/// controls and 34 outside inputs, so an LE-level analytic placement at
+/// LAB density has nowhere legal to go; clusters of compatible,
+/// connected LEs place at LAB granularity and always fit. Each cluster
+/// grows from a seed by the candidate sharing the most nets with it
+/// (high-fanout nets count little), as long as `lab_ok` accepts the
+/// cluster in a LAB; the anneal moves single LEs afterwards.
+fn cluster(d: &Design, grid: &Grid, fixed_xy: &[Option<Xy>]) -> Vec<Vec<usize>> {
+    let chain_labs: usize = d.chains.iter().map(|c| c.len().div_ceil(LES_PER_LAB)).sum();
+    let budget = grid.tiles.len().saturating_sub(chain_labs);
+    let mut scratch = State::new(d, grid, fixed_xy);
+    let clusters = cluster_with(d, &mut scratch, budget, false);
+    if clusters.len() <= budget {
+        return clusters;
+    }
+    cluster_with(d, &mut scratch, budget, true)
+}
+
+/// One clustering pass. With `fill`, a cluster whose connected
+/// candidates run out is topped up with unclustered LUT-only LEs (VPR's
+/// unrelated clustering): a LAB takes one enable, so on a design with
+/// hundreds of enables (picorv32x24: 674) the registers whose LUTs went
+/// into other clusters are otherwise left alone in a LAB each, and a
+/// near-full design doesn't fit. Unrelated LEs in a LAB cost wirelength,
+/// so this is the fallback, not the default.
+fn cluster_with(d: &Design, scratch: &mut State, budget: usize, fill: bool) -> Vec<Vec<usize>> {
+    // LUT-only LEs in index order (synthesis keeps related logic close
+    // in it), tried as fillers from a cursor that only moves forward.
+    let fillers: Vec<usize> = (0..d.les.len())
+        .filter(|&le| d.les[le].ff.is_none() && d.chain_of[le].is_none())
+        .collect();
+    let mut cursor = 0;
+    let mut clustered = vec![false; d.les.len()];
+    for ch in &d.chains {
+        for &le in ch {
+            clustered[le] = true;
+        }
+    }
+    // Registers first: they are what constrains a LAB.
+    let mut seeds: Vec<usize> = (0..d.les.len()).filter(|&le| !clustered[le]).collect();
+    seeds.sort_by_key(|&le| (d.les[le].ff.is_none(), le));
+    let mut clusters = Vec::new();
+    let mut gain: HashMap<usize, f32> = HashMap::default();
+    let mut refused: HashSet<usize> = HashSet::default();
+    for seed in seeds {
+        if clustered[seed] {
+            continue;
+        }
+        let mut members = vec![seed];
+        clustered[seed] = true;
+        scratch.put(seed, 0, 0);
+        gain.clear();
+        refused.clear();
+        let add_gains = |le: usize, gain: &mut HashMap<usize, f32>, clustered: &[bool]| {
+            for &(n, _) in &d.nets_of_le[le] {
+                let fanout = d.nets[n].len();
+                for &c in &d.nets[n] {
+                    if let Some(other) = d.le_of[c] {
+                        if !clustered[other] {
+                            *gain.entry(other).or_insert(0.0) += 1.0 / (fanout - 1) as f32;
+                        }
+                    }
+                }
+            }
+        };
+        add_gains(seed, &mut gain, &clustered);
+        while members.len() < LES_PER_LAB {
+            let best = gain
+                .iter()
+                .filter(|(le, _)| !clustered[**le] && !refused.contains(le))
+                .max_by(|a, b| a.1.total_cmp(b.1).then(b.0.cmp(a.0)))
+                .map(|(&le, _)| le);
+            let le = match best {
+                Some(le) => le,
+                None if fill => {
+                    while cursor < fillers.len() && clustered[fillers[cursor]] {
+                        cursor += 1;
+                    }
+                    // A few tries past the cursor, so one LE the LAB
+                    // refuses (too many inputs) doesn't end the search.
+                    let Some(&le) = fillers[cursor..]
+                        .iter()
+                        .filter(|&&le| !clustered[le] && !refused.contains(&le))
+                        .take(1)
+                        .next()
+                    else {
+                        break;
+                    };
+                    if refused.len() > 4 * LES_PER_LAB {
+                        break;
+                    }
+                    le
+                }
+                None => break,
+            };
+            let k = members.len();
+            scratch.put(le, 0, k);
+            if scratch.lab_ok(0) {
+                members.push(le);
+                clustered[le] = true;
+                add_gains(le, &mut gain, &clustered);
+            } else {
+                scratch.unput(le);
+                refused.insert(le);
+            }
+        }
+        for &le in &members {
+            scratch.unput(le);
+        }
+        clusters.push(members);
+    }
+    merge_clusters(d, scratch, &mut clusters);
+    clusters.retain(|c| !c.is_empty());
+    if clusters.len() > budget {
+        pack_clusters(scratch, &mut clusters, budget);
+    }
+    clusters
+}
+
+/// When the clusters still need more LABs than the chip has left after
+/// the carry chains: small clusters packed first-fit into any other
+/// cluster with room whose union a LAB accepts, connected or not, until
+/// they fit. Mostly registers with an enable of their own (picorv32x24:
+/// 203 singletons among 674 enables); a LAB takes two (clock, enable)
+/// domains, so they pair up. Unrelated logic in one LAB costs
+/// wirelength, so this runs only when the design wouldn't fit otherwise.
+fn pack_clusters(scratch: &mut State, clusters: &mut Vec<Vec<usize>>, budget: usize) {
+    let mut small: Vec<usize> = (0..clusters.len())
+        .filter(|&i| clusters[i].len() < LES_PER_LAB)
+        .collect();
+    small.sort_by_key(|&i| (clusters[i].len(), i));
+    let mut live = clusters.len();
+    for a in 0..small.len() {
+        if live <= budget {
+            break;
+        }
+        let i = small[a];
+        if clusters[i].is_empty() {
+            continue;
+        }
+        // Into the fullest one it fits, so LABs fill up.
+        for &j in small[a + 1..].iter().rev() {
+            if clusters[j].is_empty() || clusters[i].len() + clusters[j].len() > LES_PER_LAB {
+                continue;
+            }
+            for (k, &le) in clusters[j].iter().chain(&clusters[i]).enumerate() {
+                scratch.put(le, 0, k);
+            }
+            let ok = scratch.lab_ok(0);
+            for &le in clusters[j].iter().chain(&clusters[i]) {
+                scratch.unput(le);
+            }
+            if ok {
+                let moved = std::mem::take(&mut clusters[i]);
+                clusters[j].extend(moved);
+                live -= 1;
+                break;
+            }
+        }
+    }
+    clusters.retain(|c| !c.is_empty());
+}
+
+/// Clusters a seed's controls or the input limit closed early, merged
+/// into others whose union a LAB still accepts, smallest first, into the
+/// one they share most nets with. The analytic placer gives every
+/// cluster a LAB of its own, so a design near full (picorv32x24: 1,794
+/// clusters plus its chains against 2,076 LABs) only fits once the
+/// half-empty ones are combined.
+fn merge_clusters(d: &Design, scratch: &mut State, clusters: &mut [Vec<usize>]) {
+    let mut cluster_of = vec![usize::MAX; d.les.len()];
+    for (i, c) in clusters.iter().enumerate() {
+        for &le in c {
+            cluster_of[le] = i;
+        }
+    }
+    let mut order: Vec<usize> = (0..clusters.len()).collect();
+    order.sort_by_key(|&i| (clusters[i].len(), i));
+    let mut gain: HashMap<usize, f32> = HashMap::default();
+    for i in order {
+        let size = clusters[i].len();
+        if size == 0 || size >= LES_PER_LAB {
+            continue;
+        }
+        gain.clear();
+        for &le in &clusters[i] {
+            for &(n, _) in &d.nets_of_le[le] {
+                let fanout = d.nets[n].len();
+                // A clock or reset says nothing about where a cluster belongs.
+                if fanout > 2 * LES_PER_LAB {
+                    continue;
+                }
+                for &c in &d.nets[n] {
+                    let Some(j) = d.le_of[c].map(|o| cluster_of[o]) else {
+                        continue;
+                    };
+                    if j != usize::MAX && j != i && size + clusters[j].len() <= LES_PER_LAB {
+                        *gain.entry(j).or_insert(0.0) += 1.0 / (fanout - 1) as f32;
+                    }
+                }
+            }
+        }
+        let mut candidates: Vec<(usize, f32)> = gain.iter().map(|(&j, &g)| (j, g)).collect();
+        candidates.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        for (j, _) in candidates {
+            for (k, &le) in clusters[j].iter().chain(&clusters[i]).enumerate() {
+                scratch.put(le, 0, k);
+            }
+            let ok = scratch.lab_ok(0);
+            for &le in clusters[j].iter().chain(&clusters[i]) {
+                scratch.unput(le);
+            }
+            if ok {
+                let moved = std::mem::take(&mut clusters[i]);
+                for &le in &moved {
+                    cluster_of[le] = j;
+                }
+                clusters[j].extend(moved);
+                break;
+            }
+        }
+    }
+}
+
+/// The design as `chipsmith_place` sees it: positions in halved x (the
+/// wirelength's unit), one bin per LAB tile holding 16 LEs, M4Ks in a
+/// class of their own that only the legaliser places.
+struct Analytic {
+    problem: Problem,
+    objects: Vec<Obj>,
+    clusters: Vec<Vec<usize>>,
+}
+
+/// A tile position in placement units: the centre of its bin.
+fn unit((x, y): Xy) -> Pos {
+    ((x / 2) as f32 + 0.5, y as f32 + 0.5)
+}
+
+fn analytic_problem(
+    d: &Design,
+    grid: &Grid,
+    fixed_xy: &[Option<Xy>],
+    clusters: &[Vec<usize>],
+) -> Analytic {
+    let mut objects = Vec::new();
+    // Each LE's object and its row offset along a chain (LE k of a chain
+    // is in the LAB k / 16 below the head's).
+    let mut obj_of_le: Vec<Option<(u32, f32)>> = vec![None; d.les.len()];
+    for (i, members) in clusters.iter().enumerate() {
+        for &le in members {
+            obj_of_le[le] = Some((objects.len() as u32, 0.0));
+        }
+        objects.push(Obj::Cluster(i));
+    }
+    for (c, chain) in d.chains.iter().enumerate() {
+        let o = objects.len() as u32;
+        objects.push(Obj::Chain(c));
+        for (k, &x) in chain.iter().enumerate() {
+            obj_of_le[x] = Some((o, -((k / LES_PER_LAB) as f32)));
+        }
+    }
+    let ram_obj: Vec<u32> = (0..d.rams.len())
+        .map(|r| {
+            objects.push(Obj::Ram(r));
+            objects.len() as u32 - 1
+        })
+        .collect();
+    let mut fixed = Vec::new();
+    let mut fixed_index: Vec<Option<u32>> = vec![None; d.cells.len()];
+    for (c, xy) in fixed_xy.iter().enumerate() {
+        if let Some(xy) = xy {
+            fixed_index[c] = Some(fixed.len() as u32);
+            fixed.push(unit(*xy));
+        }
+    }
+    let nets = d
+        .nets
+        .iter()
+        .map(|members| {
+            // One pin per object and offset: a cluster's LEs on the same
+            // net are one point.
+            let mut pins: Vec<Pin> = Vec::new();
+            for &c in members {
+                let (of, dy) = match (d.le_of[c], d.ram_of[c]) {
+                    (Some(le), _) => {
+                        let (o, dy) = obj_of_le[le].expect("every LE has an object");
+                        (PinOf::Object(o), dy)
+                    }
+                    (_, Some(r)) => (PinOf::Object(ram_obj[r]), 0.0),
+                    _ => (
+                        PinOf::Fixed(fixed_index[c].expect("a cell is an LE, an M4K or fixed")),
+                        0.0,
+                    ),
+                };
+                let pin = Pin { of, dx: 0.0, dy };
+                if !pins.contains(&pin) {
+                    pins.push(pin);
+                }
+            }
+            Net { weight: 1.0, pins }
+        })
+        .collect();
+    let width = grid.width as usize / 2 + 1;
+    let height = grid.height as usize;
+    let mut capacity = vec![0.0; width * height];
+    for &(x, y) in &grid.xy {
+        // One LAB's worth; an LE is 1/16 of it.
+        capacity[y as usize * width + (x / 2) as usize] += 1.0;
+    }
+    let problem = Problem {
+        objects: objects
+            .iter()
+            .map(|o| match *o {
+                // A LAB each, however full: two clusters rarely agree on
+                // their controls, and the anneal merges those that do.
+                Obj::Cluster(_) => Object {
+                    class: 0,
+                    area: 1.0,
+                    height: 1,
+                },
+                Obj::Chain(c) => Object {
+                    class: 0,
+                    area: d.chains[c].len() as f32 / LES_PER_LAB as f32,
+                    height: d.chains[c].len().div_ceil(LES_PER_LAB) as u32,
+                },
+                Obj::Ram(_) => Object {
+                    class: 1,
+                    area: 1.0,
+                    height: 1,
+                },
+            })
+            .collect(),
+        fixed,
+        nets,
+        bins: Bins {
+            width,
+            height,
+            capacity,
+        },
+    };
+    Analytic {
+        problem,
+        objects,
+        clusters: clusters.to_vec(),
+    }
+}
+
+/// Snaps the analytic placement onto LAB slots and M4K sites: chains
+/// first (longest first), then LEs most critical first, each into the
+/// nearest LAB with a free slot that `lab_ok` accepts, searching outwards
+/// from its target.
+struct LabLegalizer<'s, 'a> {
+    state: &'s mut State<'a>,
+    an: &'s Analytic,
+    /// Bin offsets in order of distance.
+    spiral: Vec<(i32, i32)>,
+    /// Set when something found no LAB at all.
+    failed: bool,
+    /// Print each round's numbers to stderr (`CHIPSMITH_PLACE_TRACE`).
+    trace: bool,
+    round: usize,
+    started: std::time::Instant,
+    /// Trace counters: LABs skipped for being full, LABs refused by
+    /// reason (`Refusal` order).
+    full: usize,
+    refused: [usize; 5],
+}
+
+impl<'s, 'a> LabLegalizer<'s, 'a> {
+    fn new(state: &'s mut State<'a>, an: &'s Analytic) -> Self {
+        let (w, h) = (an.problem.bins.width as i32, an.problem.bins.height as i32);
+        let mut spiral: Vec<(i32, i32)> = (-h..=h)
+            .flat_map(|dy| (-w..=w).map(move |dx| (dx, dy)))
+            .collect();
+        spiral.sort_by_key(|&(dx, dy)| (dx.abs() + dy.abs(), dy, dx));
+        LabLegalizer {
+            state,
+            an,
+            spiral,
+            failed: false,
+            trace: false,
+            round: 0,
+            started: std::time::Instant::now(),
+            full: 0,
+            refused: [0; 5],
+        }
+    }
+
+    /// The LABs in a bin: tile columns 2b and 2b + 1.
+    fn labs_in(&self, bx: i32, by: i32) -> impl Iterator<Item = usize> + '_ {
+        let g = self.state.grid;
+        [2 * bx, 2 * bx + 1]
+            .into_iter()
+            .filter_map(move |x| g.lab_at((x, by)))
+    }
+
+    /// A cluster goes into the nearest LAB with room for all of it that
+    /// `lab_ok` accepts with what is already there.
+    fn place_cluster(&mut self, i: usize, (tx, ty): Pos) -> bool {
+        let members = &self.an.clusters[i];
+        let (bx, by) = (tx.floor() as i32, ty.floor() as i32);
+        for s in 0..self.spiral.len() {
+            let (dx, dy) = self.spiral[s];
+            let labs: Vec<usize> = self.labs_in(bx + dx, by + dy).collect();
+            for lab in labs {
+                let st = &mut *self.state;
+                let free: Vec<usize> = (0..LES_PER_LAB)
+                    .filter(|&k| st.slots[lab][k].is_none())
+                    .collect();
+                if free.len() < members.len() {
+                    self.full += 1;
+                    continue;
+                }
+                for (&le, &k) in members.iter().zip(&free) {
+                    st.put(le, lab, k);
+                }
+                match st.lab_check(lab) {
+                    Ok(()) => return true,
+                    Err(why) => {
+                        for &le in members {
+                            st.unput(le);
+                        }
+                        self.refused[why as usize] += 1;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn place_chain(&mut self, c: usize, (tx, ty): Pos) -> bool {
+        let chain = &self.state.design.chains[c];
+        let (bx, by) = (tx.floor() as i32, ty.floor() as i32);
+        for i in 0..self.spiral.len() {
+            let (dx, dy) = self.spiral[i];
+            let labs: Vec<usize> = self.labs_in(bx + dx, by + dy).collect();
+            for head in labs {
+                let s = &mut *self.state;
+                let Some(labs) = s.grid.chain_labs(head, chain.len()) else {
+                    continue;
+                };
+                let free = (0..chain.len())
+                    .all(|i| s.slots[labs[i / LES_PER_LAB]][i % LES_PER_LAB].is_none());
+                if !free {
+                    continue;
+                }
+                for (i, &le) in chain.iter().enumerate() {
+                    s.put(le, labs[i / LES_PER_LAB], i % LES_PER_LAB);
+                }
+                if labs.iter().all(|&l| s.lab_ok(l)) {
+                    return true;
+                }
+                for &le in chain {
+                    s.unput(le);
+                }
+            }
+        }
+        false
+    }
+
+    fn place_ram(&mut self, r: usize, (tx, ty): Pos) -> bool {
+        let s = &mut *self.state;
+        let site = (0..s.grid.ram_xy.len())
+            .filter(|&i| s.site_ram[i].is_none())
+            .min_by(|&a, &b| {
+                let dist = |i: usize| {
+                    let (x, y) = unit(s.grid.ram_xy[i]);
+                    (x - tx).abs() + (y - ty).abs()
+                };
+                dist(a).total_cmp(&dist(b)).then(a.cmp(&b))
+            });
+        match site {
+            Some(site) => {
+                s.put_ram(r, site);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+impl Legalizer for LabLegalizer<'_, '_> {
+    fn legalize(&mut self, targets: &[Pos]) -> Vec<Pos> {
+        let d = self.state.design;
+        let solved = std::time::Instant::now();
+        self.state.clear();
+        // Most constrained and most critical first.
+        let mut order: Vec<usize> = (0..self.an.objects.len()).collect();
+        // Chains, then the biggest clusters: the hardest to fit go first.
+        let key = |o: usize| -> (u8, i64, usize) {
+            match self.an.objects[o] {
+                Obj::Chain(c) => (0, -(d.chains[c].len() as i64), o),
+                Obj::Cluster(i) => (1, -(self.an.clusters[i].len() as i64), o),
+                Obj::Ram(_) => (2, 0, o),
+            }
+        };
+        order.sort_by_key(|&o| key(o));
+        let mut legal = targets.to_vec();
+        let mut displaced = (0.0f32, 0.0f32, 0usize);
+        let mut chain_displaced = 0.0f32;
+        self.full = 0;
+        self.refused = [0; 5];
+        for o in order {
+            let target = targets[o];
+            let ok = match self.an.objects[o] {
+                Obj::Cluster(i) => self.place_cluster(i, target),
+                Obj::Chain(c) => self.place_chain(c, target),
+                Obj::Ram(r) => self.place_ram(r, target),
+            };
+            if !ok {
+                self.failed = true;
+                if self.trace {
+                    eprintln!(
+                        "place: nowhere for {:?} (target {:?}; LABs full {}, refused {:?})",
+                        self.an.objects[o], target, self.full, self.refused
+                    );
+                }
+                return legal;
+            }
+            let s = &*self.state;
+            legal[o] = match self.an.objects[o] {
+                Obj::Cluster(i) => unit(s.grid.xy[s.pos[self.an.clusters[i][0]].0]),
+                Obj::Chain(c) => unit(s.grid.xy[s.pos[d.chains[c][0]].0]),
+                Obj::Ram(r) => unit(s.grid.ram_xy[s.ram_site[r]]),
+            };
+            let dist = (legal[o].0 - target.0).abs() + (legal[o].1 - target.1).abs();
+            displaced = (displaced.0 + dist, displaced.1.max(dist), displaced.2 + (dist > 2.0) as usize);
+            if matches!(self.an.objects[o], Obj::Chain(_)) {
+                chain_displaced += dist;
+            }
+        }
+        self.state.recompute_costs();
+        if self.trace {
+            eprintln!(
+                "place: displaced mean {:.2} max {:.1}, {} objects by more than 2; chains {:.0} in all; LABs full {}, refused {:?} (inputs, sync kind, clock, domains, control)",
+                displaced.0 / targets.len() as f32,
+                displaced.1,
+                displaced.2,
+                chain_displaced,
+                self.full,
+                self.refused
+            );
+        }
+        if self.trace {
+            self.round += 1;
+            eprintln!(
+                "place: round {} at {:.1} s: legalised in {:.2} s, wirelength {}",
+                self.round,
+                self.started.elapsed().as_secs_f64(),
+                solved.elapsed().as_secs_f64(),
+                self.state.wirelength()
+            );
+        }
+        legal
+    }
+
+    fn reweight(&mut self, _legal: &[Pos], weights: &mut [f32], _areas: &mut [f32]) {
+        if self.failed {
+            return;
+        }
+        self.state.reweight();
+        weights.copy_from_slice(&self.state.weight);
+    }
+}
+
 /// How much more a fully critical net's wirelength counts than an uncritical
 /// one's, and how sharply criticality is weighted (VPR's criticality_exp).
 const TIMING_WEIGHT: f32 = 8.0;
 const CRIT_EXP: f32 = 4.0;
 
-fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
+/// How hard the annealer works: from scratch, or to refine a placement
+/// the analytic placer made.
+#[derive(Debug, Clone, Copy)]
+struct Schedule {
+    /// Initial move range, in LABs.
+    range: f64,
+    /// Initial temperature, as a multiple of the standard deviation of
+    /// random moves' cost changes.
+    heat: f64,
+    /// Moves per temperature, as a multiple of N^(4/3) (VPR's inner_num).
+    moves: f64,
+}
+
+/// After analytic placement: moves within a few LABs, starting warm
+/// enough to accept small uphill swaps but not to scramble the placement.
+const REFINE: Schedule = Schedule {
+    range: 2.0,
+    heat: 0.1,
+    moves: 1.0,
+};
+
+fn anneal(s: &mut State, rng: &mut Rng, sched: Schedule) -> u64 {
     let d = s.design;
     let movable: Vec<usize> = (0..d.les.len())
         .filter(|&le| d.chain_of[le].is_none_or(|c| d.chains[c][0] == le))
@@ -1491,9 +2062,9 @@ fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
         .map(|&(x, y)| (x / 2).max(y))
         .max()
         .unwrap_or(1) as f64;
-    let mut r = max_r;
+    let mut r = sched.range.min(max_r);
     let objects = movable.len() + d.rams.len();
-    let moves_per_t = (2.0 * (objects as f64).powf(4.0 / 3.0)).max(200.0) as usize;
+    let moves_per_t = (sched.moves * (objects as f64).powf(4.0 / 3.0)).max(200.0) as usize;
     let mut total_moves = 0u64;
 
     let attempt = |s: &mut State, rng: &mut Rng, r: f64, t: f64| -> Option<f64> {
@@ -1525,6 +2096,13 @@ fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
             s.try_move_ram(ram, site)?
         };
         let delta = s.apply_cost(&undo);
+        // An infinite temperature only probes: the move is measured and
+        // taken back, so the placement being refined isn't scrambled.
+        if t.is_infinite() {
+            s.revert_cost();
+            s.undo(&undo);
+            return Some(delta);
+        }
         if delta <= 0.0 || (t > 0.0 && rng.unit() < (-delta / t).exp()) {
             s.commit_cost();
             Some(delta)
@@ -1535,7 +2113,8 @@ fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
         }
     };
 
-    // Starting temperature: 20 standard deviations of random moves' deltas.
+    // Starting temperature: so many standard deviations of random moves'
+    // deltas.
     let mut deltas = Vec::new();
     for _ in 0..movable.len().max(50) {
         if let Some(dc) = attempt(s, rng, r, f64::INFINITY) {
@@ -1544,7 +2123,7 @@ fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
     }
     let mean = deltas.iter().sum::<f64>() / deltas.len().max(1) as f64;
     let var = deltas.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / deltas.len().max(1) as f64;
-    let mut t = 20.0 * var.sqrt();
+    let mut t = sched.heat * var.sqrt();
 
     loop {
         s.reweight();
@@ -1564,6 +2143,12 @@ fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
         };
         r = (r * (1.0 - 0.44 + rate)).clamp(1.0, max_r);
         let cost = s.total();
+        if std::env::var_os("CHIPSMITH_PLACE_TRACE").is_some() {
+            eprintln!(
+                "place: t {t:.3} r {r:.1} accepted {rate:.2} cost {cost:.0} wirelength {}",
+                s.wirelength()
+            );
+        }
         if t < 0.005 * cost / d.nets.len().max(1) as f64 {
             break;
         }
@@ -1574,6 +2159,45 @@ fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
         attempt(s, rng, 1.0, 0.0);
     }
     total_moves
+}
+
+/// How many refining anneals run side by side, one thread each, from the
+/// same legal start with different seeds. Fixed rather than the machine's
+/// core count, so every machine places a design the same way.
+const SEEDS: usize = 8;
+
+/// Anneal copies of `start` in parallel; the one with the shortest
+/// estimated critical path wins (then the lowest cost, then the first
+/// seed), so the result doesn't depend on thread timing. A refining
+/// anneal lands in one of many nearby optima whose critical paths differ
+/// by several percent; taking the best of a few costs cores, not time.
+fn best_of<'a>(start: &State<'a>, seeds: usize, sched: Schedule) -> (State<'a>, u64) {
+    let results: Vec<(State<'a>, u64, Ps, f64)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..seeds)
+            .map(|i| {
+                let mut s = start.clone();
+                scope.spawn(move || {
+                    // Seed 0 is the one a single anneal always used.
+                    let seed = 0x9e37_79b9_7f4a_7c15 ^ (i as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                    let moves = anneal(&mut s, &mut Rng(seed), sched);
+                    let critical = s.reweight();
+                    let cost = s.total();
+                    (s, moves, critical, cost)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("anneal thread"))
+            .collect()
+    });
+    let moves = results.iter().map(|r| r.1).sum();
+    let best = results
+        .into_iter()
+        .min_by(|a, b| a.2.total_cmp(&b.2).then(a.3.total_cmp(&b.3)))
+        .expect("at least one seed")
+        .0;
+    (best, moves)
 }
 
 /// Where a top-level port bit goes and how its pin is set up.
@@ -1607,10 +2231,116 @@ pub fn place_file(
         let (x, y) = db.tile_xy(tile);
         fixed_xy[c] = Some((x as i32, y as i32));
     }
-    let mut state = State::initial(&design, &grid, &fixed_xy)?;
+    let mut state = State::new(&design, &grid, &fixed_xy);
+    let trace = std::env::var_os("CHIPSMITH_PLACE_TRACE").is_some();
+    if trace {
+        let xs: std::collections::BTreeSet<i32> = grid.xy.iter().map(|p| p.0).collect();
+        let ys: std::collections::BTreeSet<i32> = grid.xy.iter().map(|p| p.1).collect();
+        eprintln!(
+            "place: grid {}x{}, {} LABs at x {:?} y {:?}..{:?}; {} fixed cells at x {:?}..{:?}",
+            grid.width, grid.height, grid.xy.len(), xs, ys.first(), ys.last(),
+            fixed_xy.iter().flatten().count(),
+            fixed_xy.iter().flatten().map(|p| p.0).min(), fixed_xy.iter().flatten().map(|p| p.0).max()
+        );
+    }
+    let started = std::time::Instant::now();
+    let clusters = cluster(&design, &grid, &fixed_xy);
+    if trace {
+        let mut sizes = [0usize; LES_PER_LAB + 1];
+        for c in &clusters {
+            sizes[c.len()] += 1;
+        }
+        let controls: HashSet<_> = design
+            .sigs
+            .iter()
+            .filter_map(|s| s.ff.map(|f| (f.ena, f.sclr, f.aclr, f.sync_kind)))
+            .collect();
+        let distinct = |f: &dyn Fn(&FfCtl) -> Option<NetId>| {
+            design
+                .sigs
+                .iter()
+                .filter_map(|s| s.ff.and_then(|c| f(&c)))
+                .collect::<HashSet<_>>()
+                .len()
+        };
+        eprintln!(
+            "place: {} clusters of {} LEs (sizes 1..16: {:?}), {} register control sets ({} enable, {} sclr, {} aclr nets), {} chains, in {:.1} s",
+            clusters.len(),
+            clusters.iter().map(Vec::len).sum::<usize>(),
+            &sizes[1..],
+            controls.len(),
+            distinct(&|c| c.ena.0),
+            distinct(&|c| c.sclr.0),
+            distinct(&|c| c.aclr),
+            design.chains.len(),
+            started.elapsed().as_secs_f64()
+        );
+    }
+    let chain_labs: usize = design.chains.iter().map(|c| c.len().div_ceil(LES_PER_LAB)).sum();
+    ensure!(
+        clusters.len() + chain_labs <= grid.tiles.len(),
+        "the design needs {} LABs ({} clusters of LEs that can share one, {} for carry chains), the chip has {}",
+        clusters.len() + chain_labs,
+        clusters.len(),
+        chain_labs,
+        grid.tiles.len()
+    );
+    let an = analytic_problem(&design, &grid, &fixed_xy, &clusters);
+    let rounds = {
+        let mut legalizer = LabLegalizer::new(&mut state, &an);
+        legalizer.trace = trace;
+        let env = |name: &str, default: f32| -> f32 {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
+        let defaults = Options::default();
+        let options = Options {
+            trace,
+            // Objects are whole LABs' worth: no slack is needed for
+            // legalisation.
+            target_density: env("CHIPSMITH_PLACE_DENSITY", 1.0),
+            anchor: env("CHIPSMITH_PLACE_ANCHOR", defaults.anchor),
+            rounds: env("CHIPSMITH_PLACE_ROUNDS", defaults.rounds as f32) as usize,
+            patience: env("CHIPSMITH_PLACE_PATIENCE", defaults.patience as f32) as usize,
+        };
+        let outcome = chipsmith_place::place(&an.problem, &mut legalizer, options);
+        legalizer.legalize(&outcome.targets);
+        ensure!(!legalizer.failed, "the design doesn't fit");
+        outcome.rounds
+    };
     let initial_cost = state.wirelength();
-    let moves = anneal(&mut state, &mut Rng(0x9e37_79b9_7f4a_7c15));
+    if trace {
+        eprintln!(
+            "place: analytic {rounds} rounds, wirelength {initial_cost}, critical {:.2} ns, {:.1} s",
+            state.reweight() / 1000.0,
+            started.elapsed().as_secs_f64()
+        );
+    }
+    let started = std::time::Instant::now();
+    let env = |name: &str, default: f64| -> f64 {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    };
+    let sched = Schedule {
+        range: env("CHIPSMITH_PLACE_RANGE", REFINE.range),
+        heat: env("CHIPSMITH_PLACE_HEAT", REFINE.heat),
+        moves: env("CHIPSMITH_PLACE_MOVES", REFINE.moves),
+    };
+    let seeds = env("CHIPSMITH_PLACE_SEEDS", SEEDS as f64).max(1.0) as usize;
+    let (mut state, moves) = best_of(&state, seeds, sched);
     let critical = state.reweight();
+    if trace {
+        eprintln!(
+            "place: anneal {moves} moves, wirelength {}, critical {:.2} ns, {:.1} s",
+            state.wirelength(),
+            critical / 1000.0,
+            started.elapsed().as_secs_f64()
+        );
+    }
 
     let top = &mut json["modules"]["top"];
     if unused_pins != UnusedPins::default() {
@@ -1657,6 +2387,7 @@ pub fn place_file(
     Ok(Stats {
         les: design.les.len(),
         chains: design.chains.len(),
+        rounds,
         initial_cost,
         cost: state.wirelength(),
         moves,

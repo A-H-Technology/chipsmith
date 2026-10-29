@@ -1,0 +1,10 @@
+[package]
+name = "chipsmith-place"
+description = "Device-generic analytic global placement chipsmith's back ends share: bound-to-bound quadratic solve, cut spreading, a legaliser the device supplies"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rayon.workspace = true
