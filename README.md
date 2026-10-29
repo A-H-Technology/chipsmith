@@ -102,18 +102,64 @@ quartus_sta's on de2-io, where the critical path now ends at GPIO_0[4]'s
 OE register: 16.29 ns of slack estimated, 15.67 ns in Quartus.
 
 M4K RAM blocks (4,608 bits each, 105 on the EP2C35) come from chipsmith's
-synthesis (`crates/chipsmith-cyclone2/src/synth/m4k.rs`, the rules and costs
-of cyclone2-re's `synth/m4k.txt` for yosys' `memory_libmap`): memories with
-synchronous reads on one clock, single port x1 to x18 (read-during-write
-returns the new data), simple dual port x1 to x36 (one write port, one
-read port, old data), ROMs, initial contents. A memory has to fill its
-block at its width (e.g. 512 x 9, 256 x 18): shallower ones stay in logic,
-and so do asynchronous reads. Not yet: byte enables, clock enables, output
-registers, two clocks, true dual port, mixed widths, a single-port x36.
+synthesis (`crates/chipsmith-cyclone2/src/synth/m4k.rs`, yosys'
+`memory_libmap` as the reference for what a block takes;
+`crates/chipsmith-cyclone2/src/m4k.rs` is the block's configuration as one
+type the synthesis, packer, bitstream and Quartus export share). Every
+memory with synchronous reads that a block can hold goes into blocks, as
+Quartus does, unless its declaration says `ramstyle`/`ram_style` "logic":
+
+- single port x1 to x18 (a read of the word being written returns the new
+  data), simple dual port x1 to x36 (old data), true dual port up to x18
+  (each port sees its own write, the other's old data; written as Quartus'
+  template, `q <= we ? d : mem[a]`), ROMs, initial contents;
+- mixed widths: a port reading or writing several words at once (Verilog's
+  `{mem[{a, 2'd1}], mem[{a, 2'd0}]}`), any pair of widths;
+- byte enables (`mem[a][15:8] <= d` under its own condition), packed eight
+  bits per nine columns as Quartus packs them;
+- clock enables: a read enable the block's clock enable can carry (the
+  write under it too, or the read on clock 1 of the same clock); one it
+  can't (a write outside it) holds the read data in LE registers;
+- a second register on the read data, with an asynchronous clear and an
+  enable of its own: the block's output register (clock 0 or 1, clear 0
+  or 1);
+- two clocks: written on one, read on another, as Quartus builds it (a
+  true dual port reading on port A, writing on port B; Quartus 13.0 has no
+  simple dual port on two clocks, so up to x18 a block, wider ones split);
+- memories deeper than a block (blocks in rows, the write enable decoded
+  and the read data multiplexed by the registered top address bits) and
+  wider (blocks side by side), and shallower: their top address bit is
+  repeated on the block's unused address pins, so every word has an
+  address of its own;
+- a synchronous reset on the read data (LE logic after the block);
+- both ports writing one word on one edge (a true dual port's write
+  collision): the block writes neither reliably, so the netlist has one
+  port write each bit, the data yosys gives priority (as `memory_map`
+  has it). Where the losing port's word fits in the winner's, the loser's
+  write enable is masked; where the winner's fits in the loser's wider
+  word, the winner's is masked and the loser writes the winner's data
+  there. A port that reads its own write's new data then reads something
+  else from the block on that edge, so LE registers put its write data
+  back on those bits. A collision neither way covers (byte enables on the
+  port that would be masked by one signal) leaves the memory in logic.
+  Where one port's write enable already requires the two addresses to
+  differ (`web & (ab != aa)`, as Quartus' template has it), there are no
+  collisions and no such logic: Quartus would find it dead and sweep it.
+
+Not taken: asynchronous reads (logic), a read register that powers up to
+anything but 0, a write enable tied high (an unconnected write enable reads
+as no write), Quartus' packed single port x32/x36 (two x18 blocks
+instead), a same-port read of the old data in a true dual port, more
+than two ports per block (no duplication of a memory per read port).
 The packer moves a `CY2_M4K` onto the block's physical pins (some address
 bits enter on data pins), the placer swaps blocks between M4K sites, and
-the router reaches their inputs through the block's LAB lines, the clock
-through a row clock and the read data from the M4K buffers.
+the router reaches their inputs through the block's LAB lines, the clocks
+through row clocks, clock enables and clears through the block's control
+inputs, and the read data from the M4K buffers. A data input written as a
+constant gets an LE driving it (the block doesn't read an unconnected one
+as 0); a yosys-flow `CY2_M4K` doesn't say which columns are memory bits
+(the flow pads with 0), so there it is the columns whose read data is
+used.
 
 - `examples/ram`: one memory of each shape (7 blocks), written from a
   counter and the switches, read data folded onto the LEDs.
@@ -124,6 +170,157 @@ through a row clock and the read data from the M4K buffers.
   KEY[0] writes SW[8:0] at the address shown, KEY[1] holds the step so the
   value can be seen coming back. Runs on the DE2, from JTAG and from the
   EPCS.
+
+- `examples/m4k-bytes`, `m4k-enables`, `m4k-outreg`, `m4k-tdp`,
+  `m4k-mixed`, `m4k-dualclock`, `m4k-deep`, `m4k-shallow`: one mode each
+  (the file heads say which memory is which block shape), written from a
+  counter and the switches, read data folded onto the LEDs. Not run on the
+  board yet.
+- `examples/m4k-selftest`: a hardware test read back over JTAG like
+  de2-jtag-counter. Eight memories (simple and true dual port, four blocks
+  deep, byte enables, mixed widths, an output register, a ROM under a read
+  enable, a shallow one, 11 blocks) are written with a pattern of the pass
+  number and read back, over and over; USER1 holds `"M4K!"`, the passes and
+  the reads that differed, so `de2_user1` prints them as its count (passes
+  in the top 16 bits, errors in the bottom 16: 0 on a good board);
+  LEDR[3:1] show the pass count's top bits, LEDR[0] lights on an error.
+  Run on the DE2 2026-10-28 (chipsmith bfdfb93, 358 LEs, 11 M4Ks, loaded
+  over JTAG): `"M4K!"`, the passes rising about 6,100 a second, 0 errors
+  over tens of thousands of passes (`de2_user1` can't see bit 0 of the
+  low word, so it reads 0 or 1; a real mismatch recurs every pass), and
+  LEDR[3:1] counting with LEDR[0] off. Since then a ninth memory, a true
+  dual port whose ports write one word on every write edge (the
+  collision above), checks each port reads back its own write and the
+  word holds port B's. Run with it on the DE2 2026-10-29 (chipsmith
+  816ddd5, 12 M4Ks, loaded over JTAG): `"M4K!"`, the passes rising,
+  0 errors.
+
+How the M4K mapping is checked (2026-10-28, after merging `open` 5b22b89;
+`crates/chipsmith-cyclone2/tests/synth.rs`, times on luna with two checks
+at a time):
+
+- **Proven, one block per configuration** (`m4k_shape_*`,
+  `tests/support/m4k_shapes.rs`): a memory alone in a design, its ports on
+  the design's, for each class: single port x1, x2, x18, simple dual port
+  x4, x9, x36, ROM x36, ROM under a read enable, byte enables x16 and x32,
+  mixed widths (write x32 read x8, write x8 read x32), true dual port x9
+  and x16/x4 (collisions masked in the RTL), the same two with both ports
+  writing one word on one edge, two write ports beside one read (the
+  idiom `if (a) m[x] <= d1; if (b) m[y] <= d2; q <= a ? d1 : m[x];`), two
+  clocks, a clock enable over the whole port, a read enable
+  on its own clock, one held in LEs, an output register with a clear and
+  an enable, a synchronous reset, a shallow memory. yosys proves the
+  netlist equivalent to the RTL with the memory as words on both sides: the
+  RTL's through `memory_map`, the block through a model of it
+  (`tests/support/mod.rs`, `model_blocks`: contents as registers named after
+  the memory words they hold, the block's read and write behaviour, its
+  INIT checked against the memory's contents). 3.5 to 7 minutes each
+  (ROMs and the shallow memory 8 to 10 s), the true dual ports and
+  collisions 20 to 40 minutes; all 24 pass.
+- **Proven around the blocks, every design** (`check_staged`): the RTL
+  against synthesis' last stage before the M4K mapping, memories compared
+  at their ports (read registers outside on both sides, `memory_nordff`),
+  and the stage right after the mapping against the final netlist, the
+  blocks compared at their pins and parameters. What this leaves out is
+  the mapping itself: the blocks and the soft logic between them (row
+  decoding, read multiplexers, held read data), which the per-configuration
+  proofs cover for one block and co-simulation for several.
+- **Co-simulated** (`support::cosim`, iverilog): the RTL against the final
+  netlist with the blocks as the same model, 10,000 cycles of random inputs
+  (a fixed seed per design, printed on a difference), every output bit the
+  RTL defines compared every cycle. Run on the eight examples, the 16
+  random designs as built for the DE2, the same 16 with their memory's
+  ports on the design's (every address reached every cycle), and the
+  examples' large memories alone (2048 x 9 over four blocks, 8192 x 2 over
+  four, 256 x 40 over three, the three mixed-width ones). It catches a
+  wrong mapping: two address pins of a block swapped, or the write enables
+  of two block rows swapped, fail within 200 cycles
+  (`m4k_cosim_catches_wrong_blocks`). The three collision shapes are
+  co-simulated too (`m4k_cosim_collisions`); before the collision fix,
+  one port's read of its own write failed on them. The "ports direct"
+  runs and the large memories are separate syntheses of separate designs:
+  they check the same mapping code, not the netlist an example ships.
+- **What the checks can't see.** yosys' induction has no base case here:
+  it proves the step from any state alike on both sides, so power-up
+  values (the blocks' 0 output registers, INIT against `initial`) are
+  checked only by co-simulation from cycle 0 and by Quartus building the
+  same bits. It also steps every register on one edge, so a second
+  clock (a write on one clock, a read on another) is co-simulated, not
+  proven; and write priority between two ports is proven only in the
+  three collision shapes, elsewhere co-simulated.
+- **Quartus byte-identical**: `cram quartus-export` of chipsmith's placement
+  and routing, assembled by Quartus 13.0sp1, compared with chipsmith's RBF
+  (cyclone2-re `tools/validate.sh`).
+
+The earlier check proved whole designs with every memory as words; it took
+15 to 70 minutes a design, didn't finish on m4k-deep in 22 hours, and one
+run grew to 7 GB.
+
+Results:
+
+All 88 tests of the cyclone2 synthesis suite passed on one binary, 85
+minutes under a 20 GB memory cap, two at a time. The collision fix then
+changed the true dual ports only; re-run on its final binary: the five
+true dual port and collision shape proofs, the collision co-simulation,
+m4k-tdp, m4k-random-1 and -5 (both now writing colliding words) with
+their direct co-simulations, and the yosys-flow cells. Every other DE2
+design built to the same RBF before and after it; m4k-tdp, m4k-random-1,
+-5 and m4k-selftest changed and are Quartus byte-identical. Per design, below: the
+check around the blocks (time of the proof), the co-simulation (output
+bits compared, time with the build), and for the random designs the
+co-simulation with the memory's ports on the design's. A low bit count
+means the RTL leaves most outputs x (memories read before they are
+written). Weakly covered by co-simulation as shipped: `ram` (108 bits),
+m4k-mixed (60), m4k-random-4 (1,080), m4k-dualclock (1,512) and m4k-bytes
+(2,136); their memories' shapes are co-simulated well only in separate
+designs (the large memories: 2048 x 9 over four blocks 56,142 bits,
+8192 x 2 20,000, 256 x 40 389,680, write x32 read x8 78,096, write x8
+read x32 286,968, write x2 read x1 6,254; and the ports-direct column). serv, m4k-selftest and every design below are
+Quartus byte-identical.
+
+| design | memories | M4Ks | Quartus | proven around the blocks | co-simulated | co-simulated, ports direct |
+|---|---|---|---|---|---|---|
+| m4k-bytes | byte enables: 256 x 16 (2), 128 x 32 (4) | 2 | byte-identical | 1356 $equiv, 5s | 2,136 bits, 15s |  |
+| m4k-deep | 2048 x 9 over 4 blocks, 8192 x 2 ROM over 4, 256 x 40 over 3 | 11 | byte-identical | 1804 $equiv, 27s | 179,982 bits, 37s |  |
+| m4k-dualclock | written on CLOCK_50, read on CLOCK_27 (x9; x36 as two x18) | 3 | byte-identical | 1104 $equiv, 4s | 1,512 bits, 16s |  |
+| m4k-enables | clock enable, read enables on ENA0/ENA1, one held in LEs | 4 | byte-identical | 990 $equiv, 7s | 80,562 bits, 13s |  |
+| m4k-mixed | write x32 read x8, write x8 read x32, write x2 read x1 | 3 | byte-identical | 1080 $equiv, 5s | 60 bits, 14s |  |
+| m4k-outreg | output registers: plain, cleared, own enable; a synchronous reset | 4 | byte-identical | 1102 $equiv, 6s | 67,356 bits, 19s |  |
+| m4k-shallow | 64 x 8, 32 x 36, 16 x 4 ROM | 3 | byte-identical | 912 $equiv, 4s | 7,776 bits, 15s |  |
+| m4k-tdp | true dual port x9/x9 and x4/x18 | 2 | byte-identical | 994 $equiv, 6s | 247,662 bits, 13s |  |
+| m4k-random-1 | TrueDual 600 x 5, colliding writes | 2 | byte-identical | 720 $equiv, 7s | 257,015 bits, 14s | 76,425 bits |
+| m4k-random-2 | SimpleDual 16 x 24, byte enables, two clocks | 2 | byte-identical | 957 $equiv, 4s | 44,600 bits, 12s | 237,824 bits |
+| m4k-random-3 | SimpleDual 16 x 5, write x1 read x4 words | 1 | byte-identical | 497 $equiv, 3s | 82,545 bits, 8s | 199,515 bits |
+| m4k-random-4 | SimpleDual 1024 x 32, byte enables, output register (plain) | 8 | byte-identical | 1915 $equiv, 7s | 1,080 bits, 21s | 201,472 bits |
+| m4k-random-5 | TrueDual 2048 x 2, colliding writes | 1 | byte-identical | 564 $equiv, 7s | 268,536 bits, 9s | 35,982 bits |
+| m4k-random-6 | Rom 1024 x 32, contents, output register (cleared) | 8 | byte-identical | 1072 $equiv, 6s | 269,973 bits, 22s | 320,000 bits |
+| m4k-random-7 | SimpleDual 1024 x 36, read enable, write under it, sync reset | 8 | byte-identical | 1481 $equiv, 10s | 67,635 bits, 23s | 292,536 bits |
+| m4k-random-8 | SingleNew 1024 x 36, contents | 8 | byte-identical | 1344 $equiv, 8s | 270,000 bits, 24s | 360,000 bits |
+| m4k-random-9 | SingleNew 64 x 32 | 2 | byte-identical | 680 $equiv, 3s | 269,892 bits, 11s | 318,592 bits |
+| m4k-random-10 | SimpleDual 512 x 4, write x2 read x1 words, output register (cleared) | 1 | byte-identical | 534 $equiv, 5s | 244,912 bits, 8s | 39,560 bits |
+| m4k-random-11 | SimpleDual 4096 x 9, contents | 8 | byte-identical | 1238 $equiv, 19s | 270,000 bits, 26s | 90,000 bits |
+| m4k-random-12 | SingleNew 600 x 36, contents | 6 | byte-identical | 1148 $equiv, 8s | 203,148 bits, 25s | 208,692 bits |
+| m4k-random-13 | SingleNew 4096 x 8 | 8 | byte-identical | 1117 $equiv, 4s | 269,712 bits, 17s | 56,576 bits |
+| m4k-random-14 | SingleNew 16 x 4 | 1 | byte-identical | 349 $equiv, 3s | 269,984 bits, 6s | 39,900 bits |
+| m4k-random-15 | SingleOld 2048 x 18, read enable, write under it, output register (plain) | 8 | byte-identical | 1317 $equiv, 6s | 268,956 bits, 23s | 77,058 bits |
+| m4k-random-16 | SimpleDual 512 x 5, write x2 read x1 words, output register (plain) | 1 | byte-identical | 548 $equiv, 3s | 220,410 bits, 7s | 47,285 bits |
+
+A memory bit written as a constant gets an LE driving the block's data
+input: the block doesn't read an unconnected data input as 0, and Quartus
+routes its GND there (found on m4k-selftest, which writes a 32-bit pattern
+whose top bit was always 0). Quartus replaces that LE by its own GND
+elsewhere, so a design that writes a constant bit builds correctly but not
+byte-identical; the examples don't. An inverter alone in front of a write
+enable is the other such case (below).
+
+The random designs are `crates/chipsmith-cyclone2/tests/support/m4k_random.rs`,
+seeds 1-16 (`cargo run --release -p chipsmith-cyclone2 --example
+m4k_random -- <dir> 1 16` writes them as projects): one memory each, its
+kind, widths, depth, byte enables, read enable, output register, reset,
+clocks and contents drawn from the seed. Every existing DE2 example builds
+to the same RBF as on `open` but serv, whose register file is now an M4K
+(Quartus byte-identical; it was LE registers). de2-io and de2-pll-counter
+don't build here and don't on `open` either.
 
 Quartus assembles chipsmith's placement and routing into the same RBF bit
 for bit (`bench/quartus-timing.sh`): checked 2026-10-24 on blinky-verilog
@@ -177,8 +374,8 @@ designs itself, the RBFs no longer match the
 [cyclone2-re](https://github.com/cramt/cyclone2-re) examples built with
 nextpnr's placement.
 
-The Cyclone II limits come from cyclone2-re's open flow: M4K RAM only in
-the shapes above, no multipliers, PLLs without their external clock
+The Cyclone II limits come from cyclone2-re's open flow: M4K RAM as
+above, no multipliers, PLLs without their external clock
 output, clock switchover or reconfiguration, I/O registers without clock
 enables or clears, 3.3-V LVCMOS at its default current only.
 The timing model covers LE and register delays exactly and routing by
@@ -488,7 +685,7 @@ share chipsmith's own netlist IR, not Verilog.
      loop (constants and merging on gates, `$mux`/`$pmux` folding,
      `opt_muxtree`, `opt_dff`), registers stuck at their power-up value
      found as a fixed point (`opt::seqconst`), `wreduce`, `alumacc`, M4Ks
-     (`m4k.txt`'s rules and costs, `m4k_map.v`), the other memories to
+     (`synth/m4k.rs`, above), the other memories to
      registers, carry chains (`arith_map.v`), lowering to gates, the LE
      register (`dfflegalize` to the six types, `cells_map.v`), the LUT
      mapper on the IR (same LUTs and depth as on yosys' JSON), pin buffers
@@ -506,8 +703,8 @@ share chipsmith's own netlist IR, not Verilog.
      | blinky-verilog, blinky-vhdl | 26 (26) | 26 (26) | 26 (26) | 1 (1) | 0 | 296.5 MHz (296.5) |
      | persist loader | 3 (3) | 0 (0) | 3 (3) | 0 | 0 | no clock |
 
-     The M4K cells (mode, width, contents, which pins are tied) are the
-     yosys flow's, cell for cell. picorv32 synthesizes in 1 s (yosys 14 s).
+     The M4K cells of ram, ram_widths and ram-leds (mode, width, contents,
+     which pins are tied) are the yosys flow's, cell for cell. picorv32 synthesizes in 1 s (yosys 14 s).
      `crates/chipsmith-cyclone2/tests/synth.rs` proves every example, the
      loader and five specimens sequentially equivalent to yosys' RTL of the
      same Verilog, every stage on three of them, and that a flipped LUT
@@ -515,8 +712,9 @@ share chipsmith's own netlist IR, not Verilog.
      script in two steps (ADR-0007): the RTL against the netlist with x
      resolved, then that against the result, with the registers synthesis
      made constant (989 on picorv32) and its state registers' value sets
-     first proven invariant by `sat -tempinduct`, and M4Ks compared at
-     their ports. All 174 plain-Verilog cyclone2-re specimens pass it and
+     first proven invariant by `sat -tempinduct`; memories in M4Ks are
+     compared at their ports in the first step and word by word in the
+     second (the blocks through a model of the block). All 174 plain-Verilog cyclone2-re specimens pass it and
      the packer.
    - In the build (2026-10-25): one `synthesis` step (front end, the cell
      library `crates/chipsmith-cyclone2/src/synth/cells.v`, synthesis,

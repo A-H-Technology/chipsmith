@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::Value;
 
 use crate::hard;
-use crate::m4k::{self, AddrPort};
+use crate::m4k::{self, CellPort};
 use crate::mult;
 use crate::pin::PowerUp;
 
@@ -54,12 +54,9 @@ pub enum Port {
     /// Top-level port cells: input port's output, output port's input.
     O,
     I,
-    /// CY2_M4K's logical ports (synth/m4k_map.v), until `pack_m4k` moves
-    /// them onto the block's pins. Its clock is `Clk`.
-    RamAddr(AddrPort, u8),
-    RamDataIn(u8),
-    RamWe,
-    RamDataOut(u8),
+    /// CY2_M4K's logical ports, until `pack_m4k` moves them onto the
+    /// block's pins. Its clock 0 (`CLK`) is `Clk`.
+    Ram(CellPort),
     /// A pin of the M4K bel, from `pack_m4k` on.
     M4k(m4k::Pin),
     /// CY2_MULT's logical ports (`A[i]`, `B[i]`, `P[i]`), until
@@ -107,34 +104,18 @@ impl Port {
         if let Some(&(p, _)) = Self::FIXED.iter().find(|(_, n)| *n == name) {
             return Some(p);
         }
-        if name == "A_WE" {
-            return Some(Port::RamWe);
-        }
         if let Some(p) = hard::Pin::parse(name) {
             return Some(Port::Hard(p));
         }
-        let (base, index) = name.strip_suffix(']')?.split_once('[')?;
-        let i: u8 = index.parse().ok()?;
-        let operand = (i as usize) < mult::MAX_WIDTH;
-        match base {
-            "A" if operand => Some(Port::MultA(i)),
-            "B" if operand => Some(Port::MultB(i)),
-            "P" if (i as usize) < 2 * mult::MAX_WIDTH => Some(Port::MultP(i)),
-            "A_ADDR" if i < 12 => Some(Port::RamAddr(AddrPort::A, i)),
-            "B_ADDR" if i < 12 => Some(Port::RamAddr(AddrPort::B, i)),
-            "A_DATAIN" if i < 36 => Some(Port::RamDataIn(i)),
-            "DATAOUT" if i < 36 => Some(Port::RamDataOut(i)),
-            _ => None,
+        if let Some(p) = mult_port(name) {
+            return Some(p);
         }
+        CellPort::parse(name).map(Port::Ram)
     }
 
     pub fn name(self) -> Cow<'static, str> {
         match self {
-            Port::RamAddr(AddrPort::A, i) => format!("A_ADDR[{i}]").into(),
-            Port::RamAddr(AddrPort::B, i) => format!("B_ADDR[{i}]").into(),
-            Port::RamDataIn(i) => format!("A_DATAIN[{i}]").into(),
-            Port::RamWe => "A_WE".into(),
-            Port::RamDataOut(i) => format!("DATAOUT[{i}]").into(),
+            Port::Ram(p) => p.to_string().into(),
             Port::M4k(pin) => pin.to_string().into(),
             Port::MultA(i) => format!("A[{i}]").into(),
             Port::MultB(i) => format!("B[{i}]").into(),
@@ -186,6 +167,19 @@ pub enum Dir {
     In,
     Out,
     InOut,
+}
+
+/// CY2_MULT's logical bus ports (`A[3]`, `B[0]`, `P[35]`).
+fn mult_port(name: &str) -> Option<Port> {
+    let (base, index) = name.strip_suffix(']')?.split_once('[')?;
+    let i: u8 = index.parse().ok()?;
+    let operand = (i as usize) < mult::MAX_WIDTH;
+    match base {
+        "A" if operand => Some(Port::MultA(i)),
+        "B" if operand => Some(Port::MultB(i)),
+        "P" if (i as usize) < 2 * mult::MAX_WIDTH => Some(Port::MultP(i)),
+        _ => None,
+    }
 }
 
 impl Dir {
@@ -298,7 +292,11 @@ impl Kind {
             Kind::Iobuf { .. } if port == Port::Pad => return Dir::InOut,
             Kind::Iobuf { .. } => matches!(port, Port::Combout | Port::Regout),
             Kind::ClkCtrl => port == Port::Outclk,
-            Kind::M4k(_) => matches!(port, Port::RamDataOut(_) | Port::M4k(m4k::Pin::Do(_))),
+            Kind::M4k(_) => match port {
+                Port::Ram(p) => p.is_output(),
+                Port::M4k(p) => p.is_output(),
+                _ => false,
+            },
             Kind::Mult(..) => {
                 matches!(port, Port::MultP(_)) || matches!(port, Port::Mult(p) if p.is_output())
             }

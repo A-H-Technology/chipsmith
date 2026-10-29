@@ -1,0 +1,1 @@
+mult-selftest: DIFFERS (validate: 2464 differing bits in the whole file; 1207 in frame data {"core": 1207, "replicated frames": 0}; header/check-word/tail bits 1257; frames with a bad check word in ours: 0; see /pool/dev/chipsmith-wt/mult/examples/mult-selftest/build/quartus/validate.log)

@@ -24,7 +24,7 @@ use super::logic::{
     clock_slots, Aclr, ClkCtrl, Ctl, Domain, GlobalClock, LabConfig, LeConfig, LeSource, Logic,
     Lut, Reg, Sload, BLOCK_INPUT_MUX, CORE_INPUT,
 };
-use super::m4k::{self, Content, Controls, CtlSrc, M4k, Mode, ReadPort, Sel, Width};
+use super::m4k::{self, Content, Controls, CtlSrc, M4k, Mode, Width};
 use super::mult::{self as bmult, DataIn, DataPin, Mult, Sign};
 use crate::mult::{self as cmult, Operand};
 use super::phys::{PhysDesign, Pip, RoutedNet};
@@ -472,86 +472,66 @@ pub fn lut_mask(c: &Cell) -> Result<u16> {
     Ok(u16::from_str_radix(s, 2)?)
 }
 
-/// What a packed CY2_M4K cell (nextpnr/cyclone2 `pack_m4k`: physical pin
-/// names, MODE, WIDTH, INIT) configures, before routing.
+/// What a packed CY2_M4K cell (`pack::pack_m4k`, or nextpnr/cyclone2's:
+/// physical pin names, the shape's parameters, INIT) configures, before
+/// routing.
 pub struct M4kShape {
-    /// Simple dual port (port A writes, port B reads), else single port.
-    pub dual: bool,
-    pub width: Width,
-    /// Data bits the design uses: the physical width, less the top P/9
-    /// columns of a x9/x18/x36 port when no data pin there is connected. That
-    /// is the atom width Quartus is given (x8, x16, x32 are physically x9,
-    /// x18, x36 with bit k in column k, VQM experiment q1).
-    pub bits: u32,
-    pub writes: bool,
+    pub shape: crate::m4k::Shape,
+    /// Whether port A (WE) and port B (RE) write.
+    pub writes: [bool; 2],
     pub content: Content,
 }
 
 impl M4kShape {
     pub fn of(c: &Cell) -> Result<M4kShape> {
         let p = |k: &str| c.params.get(k).with_context(|| format!("M4K without {k}"));
-        let dual = match p("MODE")?.trim() {
-            "SINGLE" => false,
-            "SIMPLE_DUAL" => true,
-            m => bail!("M4K mode {m}"),
-        };
-        let w = u32::from_str_radix(p("WIDTH")?.trim(), 2)?;
-        let width = match w {
-            1 => Width::X1,
-            2 => Width::X2,
-            4 => Width::X4,
-            9 => Width::X9,
-            18 => Width::X18,
-            36 => Width::X36,
-            _ => bail!("M4K width {w}"),
-        };
         let used = |col: u32| {
             c.conns.contains_key(&format!("DI{col}")) || c.conns.contains_key(&format!("DO{col}"))
         };
-        let bits = if w >= 9 && (w - w / 9..w).all(|col| !used(col)) {
-            w - w / 9
-        } else {
-            w
+        // A cell from the yosys flow: the data bits it uses are the
+        // physical width, less the top P/9 columns of a x9/x18/x36 port when
+        // no data pin there is connected. That is the atom width Quartus is
+        // given (x8, x16, x32 are physically x9, x18, x36 with bit k in
+        // column k, VQM experiment q1).
+        let legacy_bits = |w: Width| {
+            let w = w.bits() as u32;
+            let bits = if w >= 9 && (w - w / 9..w).all(|col| !used(col)) {
+                w - w / 9
+            } else {
+                w
+            };
+            bits as u8
         };
-        // INIT: MSB first, bit l = linear position l (libmap's layout, which
-        // skips every ninth position for x1/x2/x4 as the block does). Bits
-        // the ports can't see stay 0, as in Quartus' contents.
+        let shape = crate::m4k::Shape::parse(
+            |k| c.params.get(k).map(|v| v.trim_end().to_owned()),
+            |k| {
+                c.params
+                    .get(k)
+                    .and_then(|v| u64::from_str_radix(v.trim(), 2).ok())
+            },
+            legacy_bits,
+        )?;
+        let writes = [c.conns.contains_key("WE"), c.conns.contains_key("RE")];
+        // INIT: MSB first, bit l = linear position l (skipping every ninth
+        // position for x1/x2/x4, as the block does). Bits no port sees stay
+        // 0, as in Quartus' contents.
         let init = p("INIT")?.trim().as_bytes();
         ensure!(init.len() == m4k::BITS, "M4K INIT has {} bits", init.len());
         let mut content = Content::default();
         for l in 0..m4k::BITS {
-            let seen = if w < 9 {
-                l % 9 != 8
-            } else {
-                (width.column(l) as u32) < bits
-            };
-            if init[init.len() - 1 - l] == b'1' && seen {
+            if init[init.len() - 1 - l] == b'1' && shape.holds(l) {
                 content.set_linear(l);
             }
         }
         Ok(M4kShape {
-            dual,
-            width,
-            bits,
-            writes: c.conns.contains_key("WE"),
+            shape,
+            writes,
             content,
         })
     }
 
-    pub fn mode(&self) -> Mode {
-        let port = ReadPort {
-            width: self.width,
-            out_reg: None,
-        };
-        if self.dual {
-            Mode::SimpleDual {
-                write: self.writes.then_some(self.width),
-                read: port,
-                read_clock: Sel::Zero,
-            }
-        } else {
-            Mode::Single { a: port }
-        }
+    pub fn mode(&self) -> Result<Mode> {
+        self.shape.mode(self.writes[0])
     }
 }
 
@@ -998,26 +978,33 @@ impl Routed {
                         let f = m4k::CONTROL_PINS.iter().position(|p| p.0 == pin)? as u8;
                         ram_ctl.get(&(x, y, f)).copied()
                     };
-                    for (i, (pin, _, _)) in m4k::CONTROL_PINS.iter().enumerate() {
-                        if !["CLK0", "WE"].contains(pin) && ram_ctl.contains_key(&(x, y, i as u8)) {
-                            bail!("{name}: M4K {pin} not modelled in the open flow");
-                        }
-                    }
-                    let mut controls = Controls {
+                    let controls = Controls {
                         pia: ram_pia.get(&(x, y)).copied().unwrap_or_default(),
+                        clock: [ctl("CLK0"), ctl("CLK1")],
+                        enable: [ctl("ENA0"), ctl("ENA1")],
+                        clear: [ctl("CLR0"), ctl("CLR1")],
+                        write_enable: ctl("WE"),
+                        b_write_enable: ctl("RE"),
                         ..Default::default()
                     };
-                    controls.clock[0] =
-                        Some(ctl("CLK0").with_context(|| format!("{name}: clock not routed"))?);
-                    controls.write_enable = ctl("WE");
-                    ensure!(
-                        controls.write_enable.is_some() == shape.writes,
-                        "{name}: write enable not routed"
-                    );
+                    ensure!(controls.clock[0].is_some(), "{name}: clock not routed");
+                    for (pin, routed, wanted) in [
+                        ("WE", controls.write_enable.is_some(), shape.writes[0]),
+                        ("RE", controls.b_write_enable.is_some(), shape.writes[1]),
+                    ] {
+                        ensure!(routed == wanted, "{name}: {pin} not routed");
+                    }
+                    for k in 0..2 {
+                        let pin = format!("ENA{k}");
+                        ensure!(
+                            controls.enable[k].is_some() == c.conns.contains_key(&pin),
+                            "{name}: {pin} not routed"
+                        );
+                    }
                     m4ks.push(M4k {
                         x,
                         y,
-                        mode: shape.mode(),
+                        mode: shape.mode().with_context(|| name.clone())?,
                         controls,
                         inputs: ram_in.remove(&(x, y)).unwrap_or_default(),
                         content: shape.content,
@@ -1286,7 +1273,7 @@ impl Routed {
     }
 }
 
-/// A placed `CY2_MULT`: its shape and `DATA_ZERO` mask (the packer's,
+/// A placed `CY2_MULT`: its shape and `DATA_INVERT` mask (the packer's,
 /// `pack_mult`) and the lines routed into its pins.
 /// A placed `CY2_MULT`'s shape, from the packer's parameters (32-bit
 /// binary strings, as yosys writes integers).
@@ -1297,6 +1284,13 @@ pub fn mult_shape(c: &Cell) -> Result<cmult::Shape> {
         int("B_WIDTH")? as usize,
         [int("A_SIGNED")? != 0, int("B_SIGNED")? != 0],
     )
+}
+
+/// The packer's `DATA_INVERT` mask over the 36 data inputs (A's 0-17, B's
+/// 18-35): the pins the block inverts, driven (a folded inverter) or not
+/// (a 0).
+pub fn mult_inverted(c: &Cell) -> Result<u64> {
+    mult_param(c, "DATA_INVERT")
 }
 
 fn mult_param(c: &Cell, k: &str) -> Result<u64> {
@@ -1321,13 +1315,19 @@ fn mult_of(
 ) -> Result<Mult> {
     let shape = mult_shape(c)?;
     let regs = mult_regs(c)?;
-    let zero = mult_param(c, "DATA_ZERO")?;
+    let inverted = mult_inverted(c)?;
     let mut data = BTreeMap::new();
+    // Inverted pins no line drives read 0; the lines routed below
+    // replace the entry of a pin that has one.
     for k in 0..bmult::DATA as u32 {
-        if zero >> k & 1 == 1 {
+        if inverted >> k & 1 == 1 {
             data.insert(DataPin::new(k)?, DataIn::Zero);
         }
     }
+    let line_in = |k: u32, line: bmult::Line| DataIn::Line {
+        line,
+        inverted: inverted >> k & 1 == 1,
+    };
     let mut sign = [Sign::Signed; 2];
     let mut enable = None;
     for (&(at, pin), &line) in lines.iter().filter(|((at, _), _)| *at == y) {
@@ -1336,13 +1336,11 @@ fn mult_of(
             cmult::Pin::Ena => enable = Some(line),
             cmult::Pin::Clk | cmult::Pin::Aclr => unreachable!("fast-muxed pins aren't lines"),
             cmult::Pin::A(k) => {
-                data.insert(DataPin::new(k as u32)?, DataIn::Line(line));
+                data.insert(DataPin::new(k as u32)?, line_in(k as u32, line));
             }
             cmult::Pin::B(k) => {
-                data.insert(
-                    DataPin::new((cmult::MAX_WIDTH + k as usize) as u32)?,
-                    DataIn::Line(line),
-                );
+                let k = (cmult::MAX_WIDTH + k as usize) as u32;
+                data.insert(DataPin::new(k)?, line_in(k, line));
             }
             cmult::Pin::Sign(op) => sign[op as usize] = Sign::Line(line),
             cmult::Pin::Out(_) => unreachable!("outputs aren't mux inputs"),

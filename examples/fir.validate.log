@@ -1,0 +1,1 @@
+fir: DIFFERS (validate: 5768 differing bits in the whole file; 3242 in frame data {"core": 3242, "replicated frames": 0}; header/check-word/tail bits 2526; frames with a bad check word in ours: 0; see /pool/dev/chipsmith-wt/mult/examples/fir/build/quartus/validate.log)

@@ -1,0 +1,2 @@
+    Stats { lutmap: Stats { gates: 183, and_nodes: 108, luts: 154, depth: 1 }, registers: 307, latches: 0, emulated: 0, io_registers: 0, chains: 7, m4ks: 0, mults: 8 }
+fir (chipsmith): synthesis 0.2 s; 381 LUTs, 307 registers, 534 LEs, 7 carry chains, 0 M4Ks; critical path 13.45 ns, Fmax 74.3 MHz, slack 6.55 ns; /pool/dev/chipsmith-wt/mult/examples/fir/build/fir.rbf

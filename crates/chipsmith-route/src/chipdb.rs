@@ -18,7 +18,7 @@ pub type NodeId = u32;
 
 /// Bump when `ChipDb`'s layout changes, or the chip database gains
 /// something the router needs (a stale cache would silently lack it).
-const CACHE_MAGIC: &[u8] = b"chipsmith-routing-graph-12\n";
+const CACHE_MAGIC: &[u8] = b"chipsmith-routing-graph-13\n";
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TileType {

@@ -395,7 +395,15 @@ impl Plan {
         let single = pairs.len() == 1;
         let mut sum: Option<SigSpec> = None;
         for (i, j) in pairs {
-            let (a, b) = (&self.a[i], &self.b[j]);
+            // The wider limb on operand A: quartus_map swaps a mac_mult's
+            // operands to have it so (u32, s24: 14 x 18 and 6 x 18 came back
+            // as 18 x 14 and 18 x 6), and the design assembles the same only
+            // when the block is built that way.
+            let (a, b) = if self.a[i].bits.len() < self.b[j].bits.len() {
+                (&self.b[j], &self.a[i])
+            } else {
+                (&self.a[i], &self.b[j])
+            };
             let dout = m.new_sig(a.bits.len() + b.bits.len());
             // The partial product, extended (it's signed if either limb is)
             // and shifted into place.

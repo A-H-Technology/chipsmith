@@ -80,6 +80,49 @@ endmodule
         );
         v.push((name, verilog, blocks));
     }
+    // Registers that move into the block: on the operands (read by the
+    // product alone), on the product, both, with an enable, with a clear;
+    // and ones that can't: an operand register read elsewhere too, a
+    // product register with a different clock enable than the operands'.
+    let regs = |name: &'static str, body: &str, blocks: usize| {
+        (
+            name,
+            format!(
+                "module top(input clk, input en, input clr, input [8:0] a, input [8:0] b, output [17:0] p, output [8:0] o);\n{body}\nendmodule\n"
+            ),
+            blocks,
+        )
+    };
+    v.push(regs(
+        "reg_in",
+        "  reg [8:0] ra, rb; always @(posedge clk) begin ra <= a; rb <= b; end\n  assign p = ra * rb; assign o = a;",
+        1,
+    ));
+    v.push(regs(
+        "reg_out",
+        "  reg [17:0] q; always @(posedge clk) q <= a * b;\n  assign p = q; assign o = a;",
+        1,
+    ));
+    v.push(regs(
+        "reg_in_out",
+        "  reg [8:0] ra, rb; reg [17:0] q; always @(posedge clk) begin ra <= a; rb <= b; q <= ra * rb; end\n  assign p = q; assign o = a;",
+        1,
+    ));
+    v.push(regs(
+        "reg_enable_clear",
+        "  reg [8:0] ra, rb; reg [17:0] q;\n  always @(posedge clk or posedge clr) if (clr) begin ra <= 0; rb <= 0; q <= 0; end else if (en) begin ra <= a; rb <= b; q <= ra * rb; end\n  assign p = q; assign o = a;",
+        1,
+    ));
+    v.push(regs(
+        "reg_in_shared",
+        "  reg [8:0] ra, rb; always @(posedge clk) begin ra <= a; rb <= b; end\n  assign p = ra * rb; assign o = ra;",
+        1,
+    ));
+    v.push(regs(
+        "reg_out_other_enable",
+        "  reg [8:0] ra, rb; reg [17:0] q; always @(posedge clk) begin ra <= a; rb <= b; if (en) q <= ra * rb; end\n  assign p = q; assign o = a;",
+        1,
+    ));
     // Mixed signedness: Verilog's rule makes the product unsigned when
     // either operand is, so a signed operand is extended by hand.
     v.push((

@@ -94,7 +94,9 @@ impl DataPin {
 /// What a data input reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataIn {
-    Line(Line),
+    /// A LAB line, inverted on the way in if so (`MAC_ROW_DATA_INVERT`,
+    /// which quartus_map folds a lone inverter into).
+    Line { line: Line, inverted: bool },
     /// Undriven and inverted: 0.
     Zero,
 }
@@ -231,13 +233,16 @@ impl Mult {
         for (&pin, &d) in &self.data {
             let k = pin.index() as i32;
             match d {
-                DataIn::Line(l) => {
+                DataIn::Line { line: l, inverted } => {
                     for b in db
                         .feature(arch::MAC_ROW_DATA_INPUT, k)?
                         .source_bits(0, l.index())
                         .with_context(|| format!("data input {k} from line {}", l.0))?
                     {
                         put(b, true)?;
+                    }
+                    if inverted {
+                        put(one(arch::MAC_ROW_DATA_INVERT, k)?, true)?;
                     }
                 }
                 DataIn::Zero => put(one(arch::MAC_ROW_DATA_INVERT, k)?, true)?,

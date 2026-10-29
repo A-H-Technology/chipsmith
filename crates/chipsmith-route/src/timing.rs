@@ -203,7 +203,7 @@ impl Graph {
                     let n = self.node(cell, p);
                     if p.starts_with("DO") {
                         self.launch[n as usize] = Some(M4K_TCO);
-                    } else if p != "CLK0" {
+                    } else if !matches!(p, "CLK0" | "CLK1") {
                         self.setup[n as usize] = Some(M4K_TSU);
                     }
                 }

@@ -1,0 +1,31 @@
+# M4K mixed widths: simple dual ports writing wider than they read, and narrower.
+[project]
+name = "m4k-mixed"
+top = "top"
+sources = ["src/*.v"]
+
+[target]
+device = "EP2C35F672C6"
+
+# Terasic DE2 user manual: tables 4.1 (switches, keys), 4.3 and 4.6 (LEDs)
+[pins]
+CLOCK_50 = "PIN_N2"
+SW = [
+    "PIN_N25", "PIN_N26", "PIN_P25", "PIN_AE14", "PIN_AF14", "PIN_AD13",
+    "PIN_AC13", "PIN_C13", "PIN_B13", "PIN_A13", "PIN_N1", "PIN_P1",
+    "PIN_P2", "PIN_T7", "PIN_U3", "PIN_U4", "PIN_V1", "PIN_V2",
+]
+KEY = ["PIN_G26", "PIN_N23", "PIN_P23", "PIN_W26"]
+LEDR = [
+    "PIN_AE23", "PIN_AF23", "PIN_AB21", "PIN_AC22", "PIN_AD22", "PIN_AD23",
+    "PIN_AD21", "PIN_AC21", "PIN_AA14", "PIN_Y13", "PIN_AA13", "PIN_AC14",
+    "PIN_AD15", "PIN_AE15", "PIN_AF13", "PIN_AE13", "PIN_AE12", "PIN_AD12",
+]
+LEDG = [
+    "PIN_AE22", "PIN_AF22", "PIN_W19", "PIN_V18", "PIN_U18", "PIN_U17",
+    "PIN_AA20", "PIN_Y18", "PIN_Y12",
+]
+
+# The DE2's 50 MHz oscillator; slack is reported against it.
+[clocks]
+CLOCK_50 = "50 MHz"
