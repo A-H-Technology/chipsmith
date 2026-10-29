@@ -1232,3 +1232,76 @@ m4k_shape_tests!(
     m4k_shape_sync_reset_x18 = "sync_reset_x18",
     m4k_shape_shallow_x8 = "shallow_x8"
 );
+
+/// The multiplier examples. fir (eight 16 x 16 products, one block each)
+/// is proven against the RTL with the blocks as `SIM_MODELS`' CY2_MULT;
+/// mult-selftest has products over several blocks, which SAT can't prove
+/// (ADR-0010), so both are co-simulated: mult-selftest long enough for
+/// every slot to run many times, its error flag (LEDR[0]) and pass count
+/// compared every cycle.
+fn mult_design(name: &str, proof: bool, cycles: usize) {
+    let t = std::time::Instant::now();
+    let s = synthesize(name, "top", &example(name));
+    let cells = s.stages.cells.as_ref().unwrap();
+    let mults = cells.modules[0]
+        .cells
+        .iter()
+        .filter(|c| c.kind.type_name() == "CY2_MULT")
+        .count();
+    assert!(mults > 0, "{name}: no multiplier");
+    if proof {
+        let p = prove(name, &s);
+        eprintln!("{name}: {mults} multipliers, {} $equiv proven in {:.0?}", p.equivalences, t.elapsed());
+    }
+    let t = std::time::Instant::now();
+    let sim = support::cosim(&s.dir, &s.rtl, s.stages.refined.as_ref().unwrap(), cells, cycles, 1)
+        .unwrap_or_else(|e| panic!("{name}: co-simulation: {e}"));
+    eprintln!(
+        "{name}: co-simulated {} cycles, {} output bits compared, in {:.0?}",
+        sim.cycles,
+        sim.compared,
+        t.elapsed()
+    );
+    pack(&s.dir, name, &s.netlist);
+}
+
+#[test]
+fn mult_fir() {
+    mult_design("fir", true, COSIM_CYCLES);
+}
+
+/// 9 slots of 128 cycles a pass: 120,000 cycles are 104 passes.
+#[test]
+fn mult_selftest() {
+    mult_design("mult-selftest", false, 120_000);
+}
+
+/// The self-test's co-simulation has teeth: one block's operand made
+/// unsigned, and the error flag rises in the netlist but not the RTL.
+#[test]
+fn mult_selftest_catches_a_wrong_sign() {
+    let s = synthesize("mult-selftest-mutated", "top", &example("mult-selftest"));
+    let mut d = s.stages.cells.clone().unwrap();
+    let g = d.modules[0]
+        .cells
+        .iter_mut()
+        .find_map(|c| match &mut c.kind {
+            CellKind::Other(g)
+                if g.ty == "CY2_MULT"
+                    && g.params.get("A_SIGNED").and_then(ParamValue::bits).is_some_and(|c| c.as_bool()) =>
+            {
+                Some(g)
+            }
+            _ => None,
+        })
+        .expect("a signed multiplier");
+    g.params.insert("A_SIGNED".into(), ParamValue::int(0));
+    let dir = scratch("mult-selftest-mutated-sim");
+    match support::cosim(&dir, &s.rtl, s.stages.refined.as_ref().unwrap(), &d, 120_000, 1) {
+        Ok(_) => panic!("a wrong sign not caught"),
+        Err(e) => {
+            assert!(e.starts_with("MISMATCH"), "{e}");
+            eprintln!("mult-selftest, one block's A unsigned: caught ({e})");
+        }
+    }
+}

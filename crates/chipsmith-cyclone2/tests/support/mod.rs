@@ -1986,6 +1986,15 @@ module CY2_M4K (input CLK, input CLK1, input ENA0, input ENA1, input CLR0, input
   wire [35:0] ob = B_OUTREG == "NONE" ? qb : pb;
   assign DATAOUT = TDP ? {ob[17:0], oa[17:0]} : SDP ? ob : oa;
 endmodule
+
+// The JTAG block with no cable: TCK and the user-instruction outputs stay
+// low, so a USER1 register (the self-tests') only ever loads, on neither
+// side; the outputs compared are the design's own.
+module CY2_JTAG (input TDOUSER, output TMSUTAP, output TCKUTAP, output TDIUTAP,
+                 output SHIFTUSER, output CLKDRUSER, output UPDATEUSER,
+                 output RUNIDLEUSER, output USR1USER);
+  assign {TMSUTAP, TCKUTAP, TDIUTAP, SHIFTUSER, CLKDRUSER, UPDATEUSER, RUNIDLEUSER, USR1USER} = 0;
+endmodule
 "#;
 
 /// What a co-simulation found.
