@@ -298,7 +298,9 @@ const TYPED_PARAMS: [&str; 6] = [
 /// A multiplier's parameters, all in its `Kind`. Only a multiplier's: an
 /// M4K's `B_WIDTH` passes through (its `Kind` writes back only `MODE` and
 /// `WIDTH`).
-const MULT_PARAMS: [&str; 7] = ["A_WIDTH", "B_WIDTH", "A_SIGNED", "B_SIGNED", "A_REG", "B_REG", "P_REG"];
+const MULT_PARAMS: [&str; 7] = [
+    "A_WIDTH", "B_WIDTH", "A_SIGNED", "B_SIGNED", "A_REG", "B_REG", "P_REG",
+];
 
 pub fn import(json: &Value) -> Result<Netlist> {
     let modules = json["modules"].as_object().context("no modules")?;
@@ -418,7 +420,9 @@ pub fn import(json: &Value) -> Result<Netlist> {
             fe.nl.ids.intern(k);
         }
         let mult = ty == "CY2_MULT";
-        params.retain(|k, _| !TYPED_PARAMS.contains(&k.as_str()) && !(mult && MULT_PARAMS.contains(&k.as_str())));
+        params.retain(|k, _| {
+            !TYPED_PARAMS.contains(&k.as_str()) && !(mult && MULT_PARAMS.contains(&k.as_str()))
+        });
         let cell = fe.nl.cell_mut(c);
         cell.attrs = attrs;
         cell.params = params;

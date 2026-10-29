@@ -26,8 +26,8 @@ use super::logic::{
 };
 use super::m4k::{self, Content, Controls, CtlSrc, M4k, Mode, Width};
 use super::mult::{self as bmult, DataIn, DataPin, Mult, Sign};
-use crate::mult::{self as cmult, Operand};
 use super::phys::{PhysDesign, Pip, RoutedNet};
+use crate::mult::{self as cmult, Operand};
 use crate::pin::{assignment, register_of, register_param, PinSettings, Pull};
 
 /// A nextpnr wire, by what it is in the device.
@@ -73,10 +73,16 @@ pub enum Wire {
     },
     /// An input of the multiplier at (X39, y), behind its source mux
     /// (data, signs, enable) or its fast mux (clock, clear).
-    Mult { y: u32, pin: cmult::Pin },
+    Mult {
+        y: u32,
+        pin: cmult::Pin,
+    },
     /// Control input k (0 clock, 2 clear) of the multiplier at (X39, y): a
     /// LAB line into the fast mux.
-    MultCtl { y: u32, k: u8 },
+    MultCtl {
+        y: u32,
+        k: u8,
+    },
     /// An input of the JTAG or serial-flash block.
     Hard(HardInput),
     /// A control input of the PLL in tile (x, y).
@@ -658,7 +664,13 @@ impl Routed {
                     }
                     // Multiplier clock and clear from a row clock (their
                     // fast mux) or from a control input fed by a line.
-                    (Wire::Node(s), Wire::Mult { y, pin: pin @ (cmult::Pin::Clk | cmult::Pin::Aclr) }) => {
+                    (
+                        Wire::Node(s),
+                        Wire::Mult {
+                            y,
+                            pin: pin @ (cmult::Pin::Clk | cmult::Pin::Aclr),
+                        },
+                    ) => {
                         ensure!(
                             dev.element_enum(s) == 560,
                             "{}: multiplier {pin} from {}",
@@ -668,9 +680,9 @@ impl Routed {
                         mult_ctl.insert((y, pin), bmult::Ctl::global(dev.index(s) as u32)?);
                     }
                     (Wire::MultCtl { y, k }, Wire::Mult { pin, .. }) => {
-                        let line = *mult_ctl_line
-                            .get(&(y, k))
-                            .with_context(|| format!("{}: multiplier control input {k} not fed", n.name))?;
+                        let line = *mult_ctl_line.get(&(y, k)).with_context(|| {
+                            format!("{}: multiplier control input {k} not fed", n.name)
+                        })?;
                         mult_ctl.insert((y, pin), bmult::Ctl::Line(line));
                     }
                     (Wire::Node(s), Wire::MultCtl { y, k }) => {

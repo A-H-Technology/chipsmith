@@ -260,13 +260,18 @@ impl Mult {
             }
         }
         if let Some(r) = &self.registers {
-            let put_line = |t: i32, l: Line, put: &mut dyn FnMut(i32, bool) -> Result<()>| -> Result<()> {
-                for b in db.feature(t, 0)?.source_bits(0, l.index())? {
-                    put(b, true)?;
-                }
-                Ok(())
-            };
-            let fast = |t: i32, pia: i32, c: Ctl, put: &mut dyn FnMut(i32, bool) -> Result<()>| -> Result<()> {
+            let put_line =
+                |t: i32, l: Line, put: &mut dyn FnMut(i32, bool) -> Result<()>| -> Result<()> {
+                    for b in db.feature(t, 0)?.source_bits(0, l.index())? {
+                        put(b, true)?;
+                    }
+                    Ok(())
+                };
+            let fast = |t: i32,
+                        pia: i32,
+                        c: Ctl,
+                        put: &mut dyn FnMut(i32, bool) -> Result<()>|
+             -> Result<()> {
                 let bits = &db.feature(t, 0)?.paths[0][0];
                 let k = match c {
                     Ctl::Line(l) => {
@@ -277,7 +282,12 @@ impl Mult {
                 };
                 put(*bits.get(k).context("fast mux input")?, true)
             };
-            fast(arch::MAC_CLK_FAST_MUX, arch::MAC_PIA_TO_CLK, r.clock, &mut put)?;
+            fast(
+                arch::MAC_CLK_FAST_MUX,
+                arch::MAC_PIA_TO_CLK,
+                r.clock,
+                &mut put,
+            )?;
             if let Some(c) = r.clear {
                 fast(arch::MAC_CLR_FAST_MUX, arch::MAC_PIA_TO_CLR, c, &mut put)?;
                 // Set for an active-high clear (fck, fcl, t1).
@@ -286,7 +296,10 @@ impl Mult {
             if let Some(l) = r.enable {
                 put_line(arch::MAC_PIA_TO_CE, l, &mut put)?;
             }
-            for (row, t) in [arch::MAC_ROW_IREG_LOWER_DATA, arch::MAC_ROW_IREG_UPPER_DATA].into_iter().enumerate() {
+            for (row, t) in [arch::MAC_ROW_IREG_LOWER_DATA, arch::MAC_ROW_IREG_UPPER_DATA]
+                .into_iter()
+                .enumerate()
+            {
                 for op in 0..2 {
                     put(one(t, op as i32)?, r.input[row][op])?;
                 }

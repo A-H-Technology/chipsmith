@@ -209,8 +209,14 @@ impl Graph {
                 }
             }
             "CY2_MULT" => {
-                let outs: Vec<&str> = ports.iter().copied().filter(|p| p.starts_with("MULTOUT")).collect();
-                let data = |p: &&&str| p.starts_with("MULTA") || p.starts_with("MULTB") || p.starts_with("SIGN");
+                let outs: Vec<&str> = ports
+                    .iter()
+                    .copied()
+                    .filter(|p| p.starts_with("MULTOUT"))
+                    .collect();
+                let data = |p: &&&str| {
+                    p.starts_with("MULTA") || p.starts_with("MULTB") || p.starts_with("SIGN")
+                };
                 for &i in ports.iter().filter(data) {
                     for &o in &outs {
                         let (from, to) = (self.node(cell, i), self.node(cell, o));
@@ -238,9 +244,8 @@ impl Graph {
             .filter(|((c, _), _)| c == cell)
             .map(|((_, port), &n)| (port.clone(), n))
             .collect();
-        let registered_in = |port: &str| {
-            (a && port.starts_with("MULTA")) || (b && port.starts_with("MULTB"))
-        };
+        let registered_in =
+            |port: &str| (a && port.starts_with("MULTA")) || (b && port.starts_with("MULTB"));
         for (port, n) in &nodes {
             let n = *n as usize;
             if port.starts_with("MULTOUT") {
@@ -251,7 +256,10 @@ impl Graph {
                 }
             } else if registered_in(port) {
                 self.setup[n] = Some(MULT_TSU);
-            } else if p && !port.starts_with("SIGN") && !matches!(port.as_str(), "CLK" | "ENA" | "ACLR") {
+            } else if p
+                && !port.starts_with("SIGN")
+                && !matches!(port.as_str(), "CLK" | "ENA" | "ACLR")
+            {
                 self.setup[n] = Some(MULT_TSU + MULT_COMB);
             }
         }

@@ -138,7 +138,11 @@ fn chain(g: &mut Gates, subst: &mut Subst, alu: &Alu) {
     }
     let mut y: SigSpec = Vec::with_capacity(w);
     for i in 0..lo {
-        let cv = SigBit::Const(if ci == Some(true) { State::One } else { State::Zero });
+        let cv = SigBit::Const(if ci == Some(true) {
+            State::One
+        } else {
+            State::Zero
+        });
         let bx = if invert_b { g.not(b[i]) } else { bb[i] };
         let s = g.xor(a[i], bx);
         y.push(g.xor(s, cv));

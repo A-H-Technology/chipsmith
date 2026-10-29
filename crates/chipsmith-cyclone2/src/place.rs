@@ -331,7 +331,9 @@ fn read_design(json: &Value) -> Result<Design> {
                 let id = *net_ids.entry(net).or_insert(next);
                 match (p.index(), p) {
                     (Some(i), _) => ports[i] = Some(id),
-                    (None, _) if matches!(kind, Kind::Block(b) if b.has_pin(p)) => pins.push((p, id)),
+                    (None, _) if matches!(kind, Kind::Block(b) if b.has_pin(p)) => {
+                        pins.push((p, id))
+                    }
                     (None, Port::Hard(pin)) if matches!(kind, Kind::Hard(b) if b.pins().contains(&pin)) => {
                         pins.push((p, id))
                     }
@@ -1480,7 +1482,10 @@ pub fn place_file(
             }
             (_, Some(r)) => {
                 let site = state.block_site[r];
-                (grid.site_tiles[site], grid.site_block[site].bel().to_string())
+                (
+                    grid.site_tiles[site],
+                    grid.site_block[site].bel().to_string(),
+                )
             }
             _ => fixed[&i].clone(),
         };

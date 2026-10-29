@@ -23,8 +23,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chipsmith_netlist::{
-    Binary, BinaryOp, Cell, CellId, CellKind, Connectivity, Dir, Endpoint, DffControl, Ff, FfKind, Generic,
-    GenericPort, Module, Net, Operand, ParamValue, Polarity, SigBit, SigSpec, State, Word,
+    Binary, BinaryOp, Cell, CellId, CellKind, Connectivity, DffControl, Dir, Endpoint, Ff, FfKind,
+    Generic, GenericPort, Module, Net, Operand, ParamValue, Polarity, SigBit, SigSpec, State, Word,
 };
 use chipsmith_synth::rewrite::{inits, Subst};
 
@@ -137,7 +137,8 @@ impl Registers {
             if clk.polarity != Polarity::Pos {
                 continue;
             }
-            let positive = |c: &chipsmith_netlist::Ctrl| (c.polarity == Polarity::Pos).then_some(c.sig);
+            let positive =
+                |c: &chipsmith_netlist::Ctrl| (c.polarity == Polarity::Pos).then_some(c.sig);
             let (en, clr) = match control {
                 DffControl::Plain { en } => (en.map(|e| positive(&e)), None),
                 DffControl::Async { arst, value, en }
@@ -384,13 +385,7 @@ impl Plan {
     }
 
     /// The blocks and adders; returns the `width` product bits.
-    fn build(
-        &self,
-        m: &mut Module,
-        name: &str,
-        cx: Context,
-        out: &mut Vec<Cell>,
-    ) -> SigSpec {
+    fn build(&self, m: &mut Module, name: &str, cx: Context, out: &mut Vec<Cell>) -> SigSpec {
         let pairs = self.pairs();
         let single = pairs.len() == 1;
         let mut sum: Option<SigSpec> = None;
@@ -539,10 +534,7 @@ fn cell(
     for (k, v) in Regs::PARAMS.iter().zip(regs.flags()) {
         params.insert(k.to_string(), flag(v));
     }
-    let mut ports = vec![
-        port("A", Dir::In, a.clone()),
-        port("B", Dir::In, b.clone()),
-    ];
+    let mut ports = vec![port("A", Dir::In, a.clone()), port("B", Dir::In, b.clone())];
     if let Some(c) = controls {
         debug_assert!(regs.any());
         ports.push(port("CLK", Dir::In, vec![c.clk]));
@@ -596,7 +588,9 @@ mod tests {
         // Signed: the top limb carries the sign, the low one doesn't.
         let p = Plan::of(&mul(m, 24, 24, true, 48)).unwrap();
         assert_eq!(
-            p.a.iter().map(|f| (f.bits.len(), f.signed)).collect::<Vec<_>>(),
+            p.a.iter()
+                .map(|f| (f.bits.len(), f.signed))
+                .collect::<Vec<_>>(),
             [(18, false), (6, true)]
         );
     }

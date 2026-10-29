@@ -483,10 +483,11 @@ fn pack_mult(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
                 _ => None,
             };
             let constant = |n: Option<NetId>| {
-                n.and_then(|n| nl.net(n).driver).and_then(|(d, _)| match nl.cell(d).kind {
-                    Kind::Const(v) => Some(v),
-                    _ => None,
-                })
+                n.and_then(|n| nl.net(n).driver)
+                    .and_then(|(d, _)| match nl.cell(d).kind {
+                        Kind::Const(v) => Some(v),
+                        _ => None,
+                    })
             };
             match (port, operand) {
                 (Port::Clk | Port::Ena | Port::Aclr, _) if !regs.any() => {
@@ -539,7 +540,11 @@ fn pack_mult(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
             nl.add_port(c, port);
             nl.connect(c, port, n);
         }
-        let mask: String = zero.iter().rev().map(|&z| if z { '1' } else { '0' }).collect();
+        let mask: String = zero
+            .iter()
+            .rev()
+            .map(|&z| if z { '1' } else { '0' })
+            .collect();
         nl.cell_mut(c)
             .params
             .insert("DATA_INVERT".into(), Value::String(mask));
@@ -562,7 +567,10 @@ fn invert_mult_pin(nl: &mut Netlist, c: CellId, pin: crate::mult::Pin) {
         .collect();
     let i = mask.len() - 1 - k;
     mask[i] = if mask[i] == '1' { '0' } else { '1' };
-    params.insert("DATA_INVERT".into(), Value::String(mask.into_iter().collect()));
+    params.insert(
+        "DATA_INVERT".into(),
+        Value::String(mask.into_iter().collect()),
+    );
 }
 
 /// An unsigned operand needs a 0 on its sign input, which reads 1 undriven:
@@ -576,7 +584,10 @@ fn unsigned_signs(nl: &mut Netlist) {
         let Kind::Mult(shape, _) = nl.cell(c).kind else {
             continue;
         };
-        for op in [Operand::A, Operand::B].into_iter().filter(|&op| !shape.signed[op as usize]) {
+        for op in [Operand::A, Operand::B]
+            .into_iter()
+            .filter(|&op| !shape.signed[op as usize])
+        {
             let net = *gnd.get_or_insert_with(|| {
                 let cell = nl.create_cell("~GND".to_string(), Kind::Lut { mask: 0 });
                 let net = nl.create_net("~GND".to_string());
@@ -872,7 +883,12 @@ fn pack_lut1(nl: &mut Netlist, stats: &mut Stats) {
                 // And into a multiplier's operands, where an inverter
                 // folds into the pin's inversion bit (quartus_map does the
                 // same, so the design assembles the same).
-                (Kind::Mult(..), _) if matches!(p, Port::Mult(crate::mult::Pin::A(_) | crate::mult::Pin::B(_))) => {
+                (Kind::Mult(..), _)
+                    if matches!(
+                        p,
+                        Port::Mult(crate::mult::Pin::A(_) | crate::mult::Pin::B(_))
+                    ) =>
+                {
                     nl.reconnect(u, p, input);
                     if inv {
                         let Port::Mult(pin) = p else { unreachable!() };

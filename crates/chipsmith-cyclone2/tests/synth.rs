@@ -5,9 +5,9 @@
 //! the yosys flow's; M4K blocks come out as the yosys flow's do, cell for
 //! cell. Needs yosys (and GHDL for the VHDL example): run in the devshell.
 
-mod support;
 #[path = "support/mult.rs"]
 mod mult;
+mod support;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -59,10 +59,17 @@ impl Observer for Stages {
 fn prove(name: &str, s: &Synthesized) -> support::Proof {
     let st = &s.stages;
     let cells = st.cells.as_ref().expect("a cells stage");
-    let has = |ty: &str| cells.modules[0].cells.iter().any(|c| c.kind.type_name() == ty);
+    let has = |ty: &str| {
+        cells.modules[0]
+            .cells
+            .iter()
+            .any(|c| c.kind.type_name() == ty)
+    };
     let refined = st.refined.as_ref().expect("a refined stage");
     let r = match (has("CY2_M4K"), has("CY2_MULT")) {
-        (true, true) => panic!("{name}: M4Ks and multipliers in one design: no staged check for both yet"),
+        (true, true) => {
+            panic!("{name}: M4Ks and multipliers in one design: no staged check for both yet")
+        }
         (true, false) => support::check_staged(
             &s.dir,
             &s.rtl,
@@ -711,7 +718,11 @@ fn mult_shape(name: &str) {
         for c in &cells.modules[0].cells {
             if let CellKind::Other(g) = &c.kind {
                 for k in ["A_REG", "B_REG", "P_REG"] {
-                    let set = g.params.get(k).and_then(ParamValue::bits).is_some_and(|b| b.as_bool());
+                    let set = g
+                        .params
+                        .get(k)
+                        .and_then(ParamValue::bits)
+                        .is_some_and(|b| b.as_bool());
                     assert!(!set, "{name}: {k} set on {}", c.name);
                 }
             }
@@ -720,8 +731,15 @@ fn mult_shape(name: &str) {
     // Co-simulation first: it is seconds, and a wrong netlist shows as a
     // mismatch on a vector rather than as an unproven equivalence.
     let started = std::time::Instant::now();
-    let sim = support::cosim(&s.dir, &s.rtl, s.stages.refined.as_ref().unwrap(), cells, 2000, 1)
-        .unwrap_or_else(|e| panic!("{name}: {e}"));
+    let sim = support::cosim(
+        &s.dir,
+        &s.rtl,
+        s.stages.refined.as_ref().unwrap(),
+        cells,
+        2000,
+        1,
+    )
+    .unwrap_or_else(|e| panic!("{name}: {e}"));
     eprintln!(
         "mult {name}: co-simulated {} cycles, {} output bits compared in {:.1} s",
         sim.cycles,
@@ -775,13 +793,24 @@ endmodule
         ),
     )
     .unwrap();
-    let s = synthesize(&format!("mult-dense-{name}"), "top", std::slice::from_ref(&v));
+    let s = synthesize(
+        &format!("mult-dense-{name}"),
+        "top",
+        std::slice::from_ref(&v),
+    );
     let cells = s.stages.cells.as_ref().expect("a cells stage");
     let stats = pack(&s.dir, "chipsmith", &s.netlist);
     assert_eq!(stats.mults, blocks, "{name}: packed multipliers");
     let started = std::time::Instant::now();
-    let sim = support::cosim(&s.dir, &s.rtl, s.stages.refined.as_ref().unwrap(), cells, 5000, 7)
-        .unwrap_or_else(|e| panic!("{name}: {e}"));
+    let sim = support::cosim(
+        &s.dir,
+        &s.rtl,
+        s.stages.refined.as_ref().unwrap(),
+        cells,
+        5000,
+        7,
+    )
+    .unwrap_or_else(|e| panic!("{name}: {e}"));
     eprintln!(
         "mult dense {name}: {blocks} blocks, co-simulated {} cycles, {} output bits compared in {:.1} s",
         sim.cycles,
@@ -927,7 +956,11 @@ fn mult_registers_move_in_only_where_legal() {
         let dir = scratch(&format!("mult-regs-{name}"));
         let v = dir.join("top.v");
         std::fs::write(&v, verilog).unwrap();
-        let s = synthesize(&format!("mult-regs-{name}"), "top", std::slice::from_ref(&v));
+        let s = synthesize(
+            &format!("mult-regs-{name}"),
+            "top",
+            std::slice::from_ref(&v),
+        );
         let cells = &s.stages.cells.as_ref().unwrap().modules[0].cells;
         let m = cells
             .iter()
@@ -938,7 +971,10 @@ fn mult_registers_move_in_only_where_legal() {
             .unwrap();
         let got = ["A_REG", "B_REG", "P_REG"].map(|k| m.params[k] == ParamValue::int(1));
         assert_eq!(got, want, "{name}: registers in the block");
-        let ffs = cells.iter().filter(|c| c.kind.type_name() == "LCELL_FF").count();
+        let ffs = cells
+            .iter()
+            .filter(|c| c.kind.type_name() == "LCELL_FF")
+            .count();
         assert_eq!(ffs, left, "{name}: LE registers left");
     }
 }
@@ -1279,11 +1315,22 @@ fn mult_design(name: &str, proof: bool, cycles: usize) {
     assert!(mults > 0, "{name}: no multiplier");
     if proof {
         let p = prove(name, &s);
-        eprintln!("{name}: {mults} multipliers, {} $equiv proven in {:.0?}", p.equivalences, t.elapsed());
+        eprintln!(
+            "{name}: {mults} multipliers, {} $equiv proven in {:.0?}",
+            p.equivalences,
+            t.elapsed()
+        );
     }
     let t = std::time::Instant::now();
-    let sim = support::cosim(&s.dir, &s.rtl, s.stages.refined.as_ref().unwrap(), cells, cycles, 1)
-        .unwrap_or_else(|e| panic!("{name}: co-simulation: {e}"));
+    let sim = support::cosim(
+        &s.dir,
+        &s.rtl,
+        s.stages.refined.as_ref().unwrap(),
+        cells,
+        cycles,
+        1,
+    )
+    .unwrap_or_else(|e| panic!("{name}: co-simulation: {e}"));
     eprintln!(
         "{name}: co-simulated {} cycles, {} output bits compared, in {:.0?}",
         sim.cycles,
@@ -1316,7 +1363,10 @@ fn mult_selftest_catches_a_wrong_sign() {
         .find_map(|c| match &mut c.kind {
             CellKind::Other(g)
                 if g.ty == "CY2_MULT"
-                    && g.params.get("A_SIGNED").and_then(ParamValue::bits).is_some_and(|c| c.as_bool()) =>
+                    && g.params
+                        .get("A_SIGNED")
+                        .and_then(ParamValue::bits)
+                        .is_some_and(|c| c.as_bool()) =>
             {
                 Some(g)
             }
@@ -1325,7 +1375,14 @@ fn mult_selftest_catches_a_wrong_sign() {
         .expect("a signed multiplier");
     g.params.insert("A_SIGNED".into(), ParamValue::int(0));
     let dir = scratch("mult-selftest-mutated-sim");
-    match support::cosim(&dir, &s.rtl, s.stages.refined.as_ref().unwrap(), &d, 120_000, 1) {
+    match support::cosim(
+        &dir,
+        &s.rtl,
+        s.stages.refined.as_ref().unwrap(),
+        &d,
+        120_000,
+        1,
+    ) {
         Ok(_) => panic!("a wrong sign not caught"),
         Err(e) => {
             assert!(e.starts_with("MISMATCH"), "{e}");
