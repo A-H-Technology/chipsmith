@@ -25,8 +25,8 @@ compilation, quality table in the README).
 - Clustering fallbacks for near-full designs: `merge_clusters` (connected
   small clusters) always runs; `pack_clusters` (first-fit) and
   `cluster_with(.., fill = true)` (top clusters up with unrelated LUT-only
-  LEs) run only when the clusters don't fit. **The fill/pack code was
-  written but its build was interrupted: it has not been compiled.**
+  LEs) run only when the clusters don't fit. The fill/pack code compiles
+  (release, no warnings) but has not been run.
 - `crates/chipsmith/src/flow.rs`: the routing graph and the bitstream
   device database load on threads of their own (`Prefetch`) while
   synthesis and placement run. The device database alone took 3-6 s,
