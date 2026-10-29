@@ -3,7 +3,11 @@
 //! check (the mapping of a `$mul` onto blocks, against the RTL's `$mul`).
 //! Operands are registered first so the proof has a clock (a product of
 //! bare inputs is a one-cycle combinational check, which `equiv_induct`
-//! does not do).
+//! does not do). The operand registers are read by an output too and the
+//! product isn't registered, so no register moves into a block: a block's
+//! register has no RTL net to be matched to, and a proof through it is
+//! SAT on the whole product (a 9 x 9 takes minutes, 12 x 7 didn't finish
+//! in 40). Moving registers in is the `reg_*` shapes' (9 x 9).
 
 /// (name, Verilog, blocks it maps to).
 pub fn shapes() -> Vec<(&'static str, String, usize)> {
@@ -25,9 +29,11 @@ pub fn shapes() -> Vec<(&'static str, String, usize)> {
     ] {
         let sg = if signed { "signed " } else { "" };
         let verilog = format!(
-            "module top(input clk, input [{wa1}:0] a, input [{wb1}:0] b, output reg [{wp1}:0] p);
+            "module top(input clk, input [{wa1}:0] a, input [{wb1}:0] b, output [{wp1}:0] p,
+           output [{wa1}:0] oa, output [{wb1}:0] ob);
   reg {sg}[{wa1}:0] ra; reg {sg}[{wb1}:0] rb;
-  always @(posedge clk) begin ra <= a; rb <= b; p <= ra * rb; end
+  always @(posedge clk) begin ra <= a; rb <= b; end
+  assign p = ra * rb; assign oa = ra; assign ob = rb;
 endmodule
 ",
             wa1 = wa - 1,
@@ -65,11 +71,13 @@ endmodule
             }
         };
         let verilog = format!(
-            "module top(input clk, input [7:0] a, input [7:0] b, output reg [{wp1}:0] p);
+            "module top(input clk, input [7:0] a, input [7:0] b, output [{wp1}:0] p,
+           output [7:0] oa, output [7:0] ob);
   reg [7:0] ia, ib;
   wire {sg}[{wa1}:0] ra = {sa};
   wire {sg}[{wb1}:0] rb = {sb};
-  always @(posedge clk) begin ia <= a; ib <= b; p <= ra * rb; end
+  always @(posedge clk) begin ia <= a; ib <= b; end
+  assign p = ra * rb; assign oa = ia; assign ob = ib;
 endmodule
 ",
             wa1 = wa - 1,
@@ -127,9 +135,11 @@ endmodule
     // either operand is, so a signed operand is extended by hand.
     v.push((
         "s12xu8",
-        "module top(input clk, input [11:0] a, input [7:0] b, output reg [19:0] p);
+        "module top(input clk, input [11:0] a, input [7:0] b, output [19:0] p,
+           output [11:0] oa, output [7:0] ob);
   reg signed [11:0] ra; reg [7:0] rb;
-  always @(posedge clk) begin ra <= a; rb <= b; p <= ra * $signed({1'b0, rb}); end
+  always @(posedge clk) begin ra <= a; rb <= b; end
+  assign p = ra * $signed({1'b0, rb}); assign oa = ra; assign ob = rb;
 endmodule
 "
         .into(),
@@ -160,9 +170,11 @@ endmodule
     // adders around the blocks map as any other.
     v.push((
         "two_products",
-        "module top(input clk, input [8:0] a, input [8:0] b, input [8:0] c, output reg [18:0] p);
+        "module top(input clk, input [8:0] a, input [8:0] b, input [8:0] c, output [18:0] p,
+           output [8:0] oa, output [8:0] ob, output [8:0] oc);
   reg [8:0] ra, rb, rc;
-  always @(posedge clk) begin ra <= a; rb <= b; rc <= c; p <= ra * rb + ra * rc; end
+  always @(posedge clk) begin ra <= a; rb <= b; rc <= c; end
+  assign p = ra * rb + ra * rc; assign oa = ra; assign ob = rb; assign oc = rc;
 endmodule
 "
         .into(),

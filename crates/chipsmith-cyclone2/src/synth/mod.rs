@@ -145,6 +145,7 @@ fn run(
     while wreduce::wreduce(m) {
         opt::opt(m, removable);
     }
+    obs.stage("wreduce", m);
     // Before alumacc: a product split over blocks sums its partial
     // products with adders, which become carry chains like any other.
     let mults = mult::map(m);

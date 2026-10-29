@@ -1437,26 +1437,27 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
     check_impl(dir, Some(rtl), refined, gate, false)
 }
 
-/// Synthesis with M4Ks checked around the blocks, never through them: the
-/// RTL against the stage before the M4K mapping (memories compared at
-/// their ports), and the stage right after it against the result (the
-/// blocks compared at their pins, their parameters equal). The mapping
-/// itself is `m4k_shape_*`'s (one block per configuration, proven) and
-/// the co-simulation's (several blocks and the logic between).
+/// Synthesis with blocks (M4Ks or multipliers) checked around them, never
+/// through them: the RTL against the stage before the mapping (memories
+/// compared at their ports, products as `$mul`), and the stage right
+/// after it against the result (the blocks compared at their pins, their
+/// parameters equal). The mapping itself is the per-shape proofs'
+/// (`m4k_shape_*`, `mult_*`: one block per configuration) and the
+/// co-simulation's (several blocks and the logic between).
 pub fn check_staged(
     dir: &Path,
     rtl: &Path,
     refined: &Design,
-    before_m4k: &Design,
-    after_m4k: &Design,
+    before: &Design,
+    after: &Design,
     gate: &Design,
 ) -> Result<Proof, String> {
     let pre = dir.join("pre");
     let post = dir.join("post");
     std::fs::create_dir_all(&pre).unwrap();
     std::fs::create_dir_all(&post).unwrap();
-    let a = check_impl(&pre, Some(rtl), refined, before_m4k, false)?;
-    let b = check_impl(&post, None, after_m4k, gate, true)?;
+    let a = check_impl(&pre, Some(rtl), refined, before, false)?;
+    let b = check_impl(&post, None, after, gate, true)?;
     Ok(Proof {
         constant_registers: a.constant_registers + b.constant_registers,
         equivalences: a.equivalences + b.equivalences,
@@ -1469,9 +1470,9 @@ pub fn check_after_m4k(dir: &Path, after_m4k: &Design, gate: &Design) -> Result<
     check_impl(dir, None, after_m4k, gate, true)
 }
 
-/// Replaces every CY2_M4K by ports: its inputs out, its read data in
-/// (`__blk_<cell>_<port>`), so two netlists with the same blocks are
-/// compared around them. Returns each block's parameters.
+/// Replaces every CY2_M4K and CY2_MULT by ports: its inputs out, its
+/// outputs in (`__blk_<cell>_<port>`), so two netlists with the same
+/// blocks are compared around them. Returns each block's parameters.
 fn cut_block_cells(
     m: &mut Module,
 ) -> BTreeMap<String, BTreeMap<String, chipsmith_netlist::ParamValue>> {
@@ -1485,7 +1486,7 @@ fn cut_block_cells(
             keep.push(c);
             continue;
         };
-        if g.ty != "CY2_M4K" {
+        if g.ty != "CY2_M4K" && g.ty != "CY2_MULT" {
             keep.push(c);
             continue;
         }
@@ -1672,7 +1673,7 @@ fn check_impl(
             let theirs = cut_block_cells(gt);
             let ours = cut_block_cells(top_mut(&mut mid));
             if theirs != ours {
-                return Err("the M4K blocks' names or parameters differ between the stages".into());
+                return Err("the blocks' names or parameters differ between the stages".into());
             }
         } else {
             model_blocks(gt, &mem_infos(refined))?;

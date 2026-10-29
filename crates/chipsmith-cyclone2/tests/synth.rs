@@ -27,6 +27,8 @@ fn scratch(name: &str) -> PathBuf {
 #[derive(Default)]
 struct Stages {
     refined: Option<Design>,
+    wreduce: Option<Design>,
+    mult: Option<Design>,
     alumacc: Option<Design>,
     m4k: Option<Design>,
     cells: Option<Design>,
@@ -39,6 +41,8 @@ impl Observer for Stages {
         });
         match name {
             "refined" => self.refined = d,
+            "wreduce" => self.wreduce = d,
+            "mult" => self.mult = d,
             "alumacc" => self.alumacc = d,
             "m4k" => self.m4k = d,
             "cells" => self.cells = d,
@@ -47,31 +51,35 @@ impl Observer for Stages {
     }
 }
 
-/// The equivalence check for a synthesized design: with M4Ks, around the
-/// blocks (`support::check_staged`), else straight.
+/// The equivalence check for a synthesized design: with M4Ks or
+/// multipliers, around the blocks (`support::check_staged`), else
+/// straight. The mappings into blocks are the per-shape proofs'
+/// (`m4k_shape_*`, `mult_*`): through a block whose registers took one of
+/// the design's, a proof is SAT on a whole product and doesn't finish.
 fn prove(name: &str, s: &Synthesized) -> support::Proof {
     let st = &s.stages;
     let cells = st.cells.as_ref().expect("a cells stage");
-    let blocks = cells.modules[0]
-        .cells
-        .iter()
-        .any(|c| c.kind.type_name() == "CY2_M4K");
-    let r = if blocks {
-        support::check_staged(
+    let has = |ty: &str| cells.modules[0].cells.iter().any(|c| c.kind.type_name() == ty);
+    let refined = st.refined.as_ref().expect("a refined stage");
+    let r = match (has("CY2_M4K"), has("CY2_MULT")) {
+        (true, true) => panic!("{name}: M4Ks and multipliers in one design: no staged check for both yet"),
+        (true, false) => support::check_staged(
             &s.dir,
             &s.rtl,
-            st.refined.as_ref().expect("a refined stage"),
+            refined,
             st.alumacc.as_ref().expect("an alumacc stage"),
             st.m4k.as_ref().expect("an m4k stage"),
             cells,
-        )
-    } else {
-        support::check(
+        ),
+        (false, true) => support::check_staged(
             &s.dir,
             &s.rtl,
-            st.refined.as_ref().expect("a refined stage"),
+            refined,
+            st.wreduce.as_ref().expect("a wreduce stage"),
+            st.mult.as_ref().expect("a mult stage"),
             cells,
-        )
+        ),
+        (false, false) => support::check(&s.dir, &s.rtl, refined, cells),
     };
     r.unwrap_or_else(|e| panic!("{name}: {e}"))
 }
@@ -697,6 +705,18 @@ fn mult_shape(name: &str) {
         .filter(|c| matches!(&c.kind, CellKind::Other(g) if g.ty == "CY2_MULT"))
         .count();
     assert_eq!(mults, blocks, "{name}: multiplier blocks");
+    // Only the `reg_*` shapes move registers in (`support::mult`: through a
+    // block's register a proof is SAT on the whole product).
+    if !name.starts_with("reg_") {
+        for c in &cells.modules[0].cells {
+            if let CellKind::Other(g) = &c.kind {
+                for k in ["A_REG", "B_REG", "P_REG"] {
+                    let set = g.params.get(k).and_then(ParamValue::bits).is_some_and(|b| b.as_bool());
+                    assert!(!set, "{name}: {k} set on {}", c.name);
+                }
+            }
+        }
+    }
     // Co-simulation first: it is seconds, and a wrong netlist shows as a
     // mismatch on a vector rather than as an unproven equivalence.
     let started = std::time::Instant::now();
@@ -768,6 +788,13 @@ endmodule
         sim.compared,
         started.elapsed().as_secs_f64()
     );
+}
+
+/// One block with every register in it (operands and product): the
+/// per-shape proofs keep their registers out of the block.
+#[test]
+fn mult_dense_s18x18() {
+    mult_dense("s18x18", 18, 18, true, 36, 1);
 }
 
 #[test]
@@ -1233,12 +1260,13 @@ m4k_shape_tests!(
     m4k_shape_shallow_x8 = "shallow_x8"
 );
 
-/// The multiplier examples. fir (eight 16 x 16 products, one block each)
-/// is proven against the RTL with the blocks as `SIM_MODELS`' CY2_MULT;
-/// mult-selftest has products over several blocks, which SAT can't prove
-/// (ADR-0010), so both are co-simulated: mult-selftest long enough for
-/// every slot to run many times, its error flag (LEDR[0]) and pass count
-/// compared every cycle.
+/// The multiplier examples, co-simulated through the blocks (as
+/// `SIM_MODELS`' CY2_MULT) and fir proven against the RTL around them
+/// (`prove`). mult-selftest isn't proven: the RTL against its own refined
+/// stage, before any block, didn't finish its induction in 30 minutes (a
+/// serial reference multiplier against nine products). It is co-simulated
+/// long enough for every slot to run many times, its error flag (LEDR[0])
+/// and pass count compared every cycle.
 fn mult_design(name: &str, proof: bool, cycles: usize) {
     let t = std::time::Instant::now();
     let s = synthesize(name, "top", &example(name));

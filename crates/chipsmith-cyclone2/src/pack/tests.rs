@@ -522,6 +522,25 @@ fn an_m4k_moves_onto_its_physical_pins() {
     );
 }
 
+/// The parameters an M4K's `Kind` doesn't write back pass through: a
+/// mixed-width simple dual port keeps its read width (`B_WIDTH`, which a
+/// multiplier's `Kind` holds and an M4K's doesn't).
+#[test]
+fn an_m4k_keeps_its_read_width() {
+    let mut d = single_port_ram(2);
+    let ram = &mut d["modules"]["top"]["cells"]["ram"];
+    ram["parameters"]["MODE"] = json!("SIMPLE_DUAL");
+    ram["parameters"]["B_WIDTH"] = json!(format!("{:032b}", 1));
+    ram["parameters"]["SLICE"] = json!(format!("{:032b}", 1));
+    ram["connections"]["B_ADDR"] = json!(vec![json!(12); 12]);
+    let mut nl = yosys::import(&d).unwrap();
+    pack(&mut nl).unwrap();
+    let out = to_json(&nl).unwrap();
+    let params = &out["modules"]["top"]["cells"]["ram"]["parameters"];
+    assert_eq!(params["B_WIDTH"], json!(format!("{:032b}", 1)), "{params}");
+    assert_eq!(params["WIDTH"], json!(format!("{:032b}", 2)), "{params}");
+}
+
 #[test]
 fn unsupported_m4k_shapes_are_refused() {
     let mut x36 = single_port_ram(18);
