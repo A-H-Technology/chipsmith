@@ -67,6 +67,32 @@ prints counter 1 at 2.000000 and counter 2 at 0.800000 times counter 0
 and routing of it byte-identically (setup slack 6.21 ns at 100 MHz in
 quartus_sta, 6.20 ns estimated).
 
+A PLL clock leaves the chip on its PLL's clock output pin only: CLK2
+(counter 2) through that pin's own clock control, PLL_1's being PIN_AA7,
+the DE2's DRAM_CLK (cyclone2-re README, "PLLs"). chipsmith packs a
+`CY2_PLL` CLK2 driving an output pin that way, and says so when a design
+asks for CLK0/CLK1 on a pin or a pin that isn't the PLL's (PLL_2: F21,
+PLL_3: E5, PLL_4: V21). Quartus assembles it byte-identically. Negative
+phase shifts are an error (ask for the period minus the shift): Quartus
+makes them by delaying the feedback counter, which isn't modelled.
+
+`examples/sdram-selftest` runs the DE2's 8 MB SDRAM (IS42S16400): a
+100 MHz controller on PLL_1's CLK0, the SDRAM clocked from CLK2 on
+DRAM_CLK leading by 3 ns (+7 ns), every SDRAM pin through its I/O-cell
+registers, 8-word bursts with auto precharge at CAS latency 3. Each pass
+writes all 4M words with a 32-bit LFSR seeded from the pass number and
+reads them back. USER1 holds `"SDR!"`, the passes, the words that read
+back wrong and a CLOCK_50 counter (`de2_user1 -- --words 4`: counter 1 is
+the errors, counter 2 the passes). On the DE2 2026-10-30 (loaded over
+JTAG, 776 LEs, 65 registers in I/O cells): 1,823 passes, 0 errors (14.6
+GB written and checked), 5.88 passes a second, 98.7 MB/s of SDRAM
+traffic, half the bus's 200 MB/s (16 cycles per 8-word burst). Quartus
+assembles chipsmith's placement and routing byte-identically. The read
+latency (`RD_LAT`, 4 FPGA clocks from the controller's READ to the input
+registers holding the first word) was found on the board: a build
+checking latencies 4-7 side by side read 0 errors at 4 and every word
+wrong at 5-7.
+
 `examples/bidir` is cyclone2-re's tri-state test: expansion-header and
 SRAM data pins driven with their output enable from a switch, an
 inverted switch, logic or a register, one open drain, all read back onto
