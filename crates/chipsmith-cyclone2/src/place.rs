@@ -2172,13 +2172,21 @@ const SEEDS: usize = 8;
 /// anneal lands in one of many nearby optima whose critical paths differ
 /// by several percent; taking the best of a few costs cores, not time.
 fn best_of<'a>(start: &State<'a>, seeds: usize, sched: Schedule) -> (State<'a>, u64) {
+    // Another set of seeds, for measuring how much a design's result
+    // depends on them.
+    let base: u64 = std::env::var("CHIPSMITH_PLACE_SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let results: Vec<(State<'a>, u64, Ps, f64)> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..seeds)
             .map(|i| {
                 let mut s = start.clone();
                 scope.spawn(move || {
                     // Seed 0 is the one a single anneal always used.
-                    let seed = 0x9e37_79b9_7f4a_7c15 ^ (i as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                    let seed = 0x9e37_79b9_7f4a_7c15
+                        ^ (i as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9)
+                        ^ base.wrapping_mul(0x94d0_49bb_1331_11eb);
                     let moves = anneal(&mut s, &mut Rng(seed), sched);
                     let critical = s.reweight();
                     let cost = s.total();

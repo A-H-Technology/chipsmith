@@ -123,10 +123,8 @@ impl Stamp {
                 if hash_file(Path::new(path)) != Some(hash) {
                     return None;
                 }
-            } else if let Some(said) = line.strip_prefix("said ") {
-                report.push(said.to_string());
             } else {
-                return None;
+                report.push(line.strip_prefix("said ")?.to_string());
             }
         }
         Some(report)

@@ -201,6 +201,37 @@ impl Box {
         self.y1 = self.y1.max(y);
     }
 
+    /// Every tile there is.
+    pub const EVERYWHERE: Box = Box {
+        x0: 0,
+        y0: 0,
+        x1: u8::MAX,
+        y1: u8::MAX,
+    };
+
+    pub fn union(self, o: Box) -> Box {
+        Box {
+            x0: self.x0.min(o.x0),
+            y0: self.y0.min(o.y0),
+            x1: self.x1.max(o.x1),
+            y1: self.y1.max(o.y1),
+        }
+    }
+
+    /// `by` more tiles on every side.
+    pub fn grow(self, by: u8) -> Box {
+        Box {
+            x0: self.x0.saturating_sub(by),
+            y0: self.y0.saturating_sub(by),
+            x1: self.x1.saturating_add(by),
+            y1: self.y1.saturating_add(by),
+        }
+    }
+
+    pub fn overlaps(self, o: Box) -> bool {
+        self.x0 <= o.x1 && o.x0 <= self.x1 && self.y0 <= o.y1 && o.y0 <= self.y1
+    }
+
     /// Tiles between the two boxes, per axis (0 where they overlap).
     pub fn gap(self, o: Box) -> (u8, u8) {
         let gap = |a0: u8, a1: u8, b0: u8, b1: u8| b0.saturating_sub(a1).max(a0.saturating_sub(b1));
