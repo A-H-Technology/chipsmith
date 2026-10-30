@@ -229,7 +229,10 @@ fn kind_of(ty: &str, params: &BTreeMap<String, Value>, name: &str) -> Result<Kin
             ensure!(mask <= 0xFFFF, "{name}: LUT_MASK is wider than 16 bits");
             Kind::Lut { mask: mask as u16 }
         }
-        "LCELL_FF" => Kind::Ff(FfConfig::default()),
+        "LCELL_FF" => Kind::Ff(FfConfig {
+            clk_inv: params.get("CLK_INV").and_then(int).unwrap_or(0) != 0,
+            ..FfConfig::default()
+        }),
         "CY2_IBUF" => Kind::Ibuf {
             port: None,
             reg: register(register_param::INPUT)?,
@@ -286,7 +289,8 @@ fn kind_of(ty: &str, params: &BTreeMap<String, Value>, name: &str) -> Result<Kin
 }
 
 /// The parameters `Kind` holds; the rest pass through.
-const TYPED_PARAMS: [&str; 6] = [
+const TYPED_PARAMS: [&str; 7] = [
+    "CLK_INV",
     "LUT_MASK",
     "MODE",
     "WIDTH",

@@ -179,6 +179,7 @@ fn an_inverter_folds_into_lut_masks_and_the_pin() {
     assert_eq!(
         cell(&nl, "ff").kind,
         Kind::Ff(netlist::FfConfig {
+            clk_inv: false,
             ena_inv: true,
             sclr_inv: false
         })
@@ -278,6 +279,24 @@ fn a_register_loading_a_constant_one_gets_a_lut_for_it() {
         net_name(&nl, "ff", Port::Datain).as_deref(),
         Some("ff$const_net")
     );
+}
+
+/// Data equal to the enable is a 1 whenever the register loads: a LUT
+/// outputs it, as for a constant 1, and the enable stays.
+#[test]
+fn a_register_loading_its_enable_loads_a_one() {
+    let (nl, _) = packed(&[(
+        "ff",
+        "LCELL_FF",
+        None,
+        json!({"DATAIN": [12], "CLK": [10], "ENA": [12], "ACLR": ["0"], "SCLR": ["0"], "REGOUT": [11]}),
+    )]);
+    assert_eq!(cell(&nl, "ff$const").mask(), 0xFFFF);
+    assert_eq!(
+        net_name(&nl, "ff", Port::Datain).as_deref(),
+        Some("ff$const_net")
+    );
+    assert_eq!(net_name(&nl, "ff", Port::Ena).as_deref(), Some("sw"));
 }
 
 #[test]

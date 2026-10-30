@@ -481,6 +481,32 @@ impl<'a, 'd> ModElab<'a, 'd> {
                         bits: (0, w),
                     });
                 }
+                // A word of an array in a function, or a bit of one.
+                if let Some((slot, dim)) = self.local_word(lhs, scope, env)? {
+                    return Ok(Target::Bits {
+                        slot,
+                        positions: (0..dim.width()).map(Some).collect(),
+                    });
+                }
+                if let Some((slot, dim)) = self.local_word(base, scope, env)? {
+                    let (idx, t) = self.lower_self(index, scope, env)?;
+                    let i = as_const(&idx)
+                        .and_then(|c| {
+                            ConstVal {
+                                bits: c,
+                                signed: t.signed,
+                                string: false,
+                            }
+                            .as_i64()
+                        })
+                        .ok_or_else(|| {
+                            Diag::new(index.span, "a bit of an array word in a function must be selected by a constant")
+                        })?;
+                    return Ok(Target::Bits {
+                        slot,
+                        positions: vec![dim.pos(i)],
+                    });
+                }
                 {
                     if let Some((mem, indices)) = self.mem_word(base, scope)? {
                         // mem[a][b] = ...
@@ -527,6 +553,13 @@ impl<'a, 'd> ModElab<'a, 'd> {
             ExprKind::Slice { base, msb, lsb } => {
                 let m = self.eval_i64(msb, scope)?;
                 let l = self.eval_i64(lsb, scope)?;
+                if let Some((slot, dim)) = self.local_word(base, scope, env)? {
+                    let (a, b) = (dim.pos_unchecked(l), dim.pos_unchecked(m));
+                    let positions = (a.min(b)..=a.max(b))
+                        .map(|p| (0..dim.width() as i64).contains(&p).then_some(p as usize))
+                        .collect();
+                    return Ok(Target::Bits { slot, positions });
+                }
                 {
                     if let Some((mem, indices)) = self.mem_word(base, scope)? {
                         let addr = self.mem_addr(mem, &indices, scope, env, base.span)?;
@@ -621,6 +654,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
             Sym::Var(v) => Ok((Slot::Var(*v), self.vars[*v].dim)),
             Sym::Local(l) => Ok((Slot::Local(*l), self.locals[*l].dim)),
             Sym::Mem(_) => bail!(span, "a memory can only be assigned a word at a time"),
+            Sym::LocalArray(_) => bail!(span, "an array can only be assigned a word at a time"),
             Sym::Param(_) => bail!(span, "a parameter can't be assigned"),
             Sym::Func(..) | Sym::Task(..) => bail!(span, "a function or task can't be assigned"),
         }

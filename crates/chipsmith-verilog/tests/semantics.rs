@@ -673,3 +673,63 @@ endmodule
 "#,
     );
 }
+
+/// IEEE 1364-2005 §10.3: a function's local variables include arrays,
+/// which live only while it runs. Written and read a word and a bit at a
+/// time with constant (loop) indices, over constant and over variable
+/// arguments. (yosys refuses arrays in a function used as a constant
+/// expression, so the constant case is a continuous assignment of a
+/// call with constant arguments, which both front ends fold.)
+#[test]
+fn arrays_in_functions() {
+    equiv(
+        "function-arrays",
+        r#"
+module top(input [7:0] a, input [2:0] k, output [7:0] y, output [15:0] z, output [7:0] w);
+  // A constant function with arrays: the i-th mask has bit i set and
+  // the bits below it as the function sums them.
+  function [7:0] mask(input [31:0] index);
+    reg [7:0] m [0:7];
+    reg [7:0] acc [0:1];
+    integer i;
+    begin
+      for (i = 0; i < 8; i = i + 1) begin
+        m[i] = 0;
+        m[i][i] = 1'b1;
+      end
+      acc[0] = 0;
+      acc[1] = 8'hff;
+      for (i = 0; i < 8; i = i + 1)
+        if (i <= index) acc[0] = acc[0] | m[i];
+      mask = acc[0] ^ acc[1][3:0];
+    end
+  endfunction
+  wire [7:0] m3 = mask(3);
+  assign y = a & m3;
+  // Over a non-constant input: the array words carry logic.
+  function [15:0] spread(input [7:0] v);
+    reg [7:0] t [0:1];
+    begin
+      t[0] = v;
+      t[1] = {v[3:0], v[7:4]};
+      t[1][0] = t[0][7];
+      spread = {t[1], t[0]};
+    end
+  endfunction
+  assign z = spread(a);
+  // A two-dimensional array, indexed by constants in a loop.
+  function [7:0] grid(input [7:0] v);
+    reg [1:0] g [0:1][0:3];
+    integer i, j;
+    begin
+      for (i = 0; i < 2; i = i + 1)
+        for (j = 0; j < 4; j = j + 1)
+          g[i][j] = v[2*j +: 2] ^ {2{i[0]}};
+      grid = {g[1][3], g[1][2], g[1][1], g[1][0]} ^ {g[0][0], g[0][1], g[0][2], g[0][3]};
+    end
+  endfunction
+  assign w = grid(a) ^ {5'b0, k};
+endmodule
+"#,
+    );
+}

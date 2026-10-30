@@ -205,6 +205,7 @@ struct Cell {
     ports: [Option<NetId>; Port::FIXED.len()],
     /// A block's or hard block's connected pins.
     pins: Vec<(Port, NetId)>,
+    clk_inv: bool,
     ena_inv: bool,
     sclr_inv: bool,
     /// A multiplier's A_REG, B_REG, P_REG.
@@ -351,6 +352,7 @@ fn read_design(json: &Value) -> Result<Design> {
             kind,
             ports,
             pins,
+            clk_inv: flag("CLK_INV"),
             ena_inv: flag("ENA_INV"),
             sclr_inv: flag("SCLR_INV"),
             mult_regs: mult::Regs::PARAMS.map(flag),
@@ -970,7 +972,7 @@ impl<'a> State<'a> {
         let cells = &d.cells;
         type Ctl = (Option<NetId>, bool);
         // A third distinct domain already fails, so three slots suffice.
-        let mut domains: [(Option<NetId>, Ctl); 3] = [(None, (None, false)); 3];
+        let mut domains: [((Option<NetId>, bool), Ctl); 3] = [((None, false), (None, false)); 3];
         let mut n_domains = 0;
         let (mut ena, mut aclr, mut sclr): (Option<Ctl>, Option<NetId>, Option<Ctl>) =
             (None, None, None);
@@ -1026,14 +1028,18 @@ impl<'a> State<'a> {
             }
             sync_kind |= kind;
             let e: Ctl = (c.net(Port::Ena), c.ena_inv);
-            let domain = (c.net(Port::Clk), e);
-            // One clock net per LAB, though a LAB has two LAB clocks. Which
-            // of them Quartus gives each of two clocks isn't predictable
-            // from what we know (cyclone2-re README, "LAB clocks": no rule
-            // fits all 15 measured LABs), and the bitstream has to say, so
-            // a LAB mixing clocks wouldn't assemble the same in Quartus.
-            // Remove once that choice is modelled; until then two domains
-            // in a LAB share a clock and differ in their enable.
+            // The clock's inversion is part of the domain (each LAB clock
+            // has its own invert bit) and of the clock: one clock net and
+            // one edge per LAB, though a LAB has two LAB clocks. Which of
+            // them Quartus gives each of two clocks isn't predictable from
+            // what we know (cyclone2-re README, "LAB clocks": no rule fits
+            // all 15 measured LABs; for one net on both edges, chipsmith
+            // examples/negedge-selftest's ten LABs fit no rule either), and
+            // the bitstream has to say, so a LAB mixing clocks or edges
+            // wouldn't assemble the same in Quartus. Remove once that
+            // choice is modelled; until then two domains in a LAB share a
+            // clock and an edge and differ in their enable.
+            let domain = ((c.net(Port::Clk), c.clk_inv), e);
             if domains[..n_domains].iter().any(|d| d.0 != domain.0) {
                 return false;
             }

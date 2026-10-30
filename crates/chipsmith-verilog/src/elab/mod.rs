@@ -216,6 +216,25 @@ pub(crate) struct Local {
     pub signed: bool,
 }
 
+/// An array declared in a function or task: its words are `count`
+/// consecutive locals from `first`, addressed by `dims` (outermost first)
+/// with each index counted from its dimension's left bound, as a
+/// memory's are. The indices must be constant where it is used: it lives
+/// only while the function runs, so there is nothing to multiplex.
+#[derive(Debug, Clone)]
+pub(crate) struct LocalArray {
+    pub first: LocalId,
+    pub dims: Vec<Dim>,
+    pub word: Dim,
+    pub signed: bool,
+}
+
+impl LocalArray {
+    pub fn count(&self) -> usize {
+        self.dims.iter().map(|d| d.width()).product()
+    }
+}
+
 impl Local {
     pub fn ty(&self) -> Ty {
         Ty {
@@ -279,6 +298,7 @@ pub(crate) enum Sym<'a> {
     Mem(MemId),
     Param(ConstVal),
     Local(LocalId),
+    LocalArray(usize),
     Func(&'a ast::Subroutine, ScopeId),
     Task(&'a ast::Subroutine, ScopeId),
 }

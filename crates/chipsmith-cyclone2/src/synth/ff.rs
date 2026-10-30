@@ -159,7 +159,7 @@ fn emulate(
     g: &mut Gates,
     subst: &mut Subst,
     q: Net,
-    clk: SigBit,
+    clk: Ctrl,
     d: SigBit,
     ena: SigBit,
     load: &Load,
@@ -178,7 +178,8 @@ fn emulate(
     g.add(
         Reg {
             d: din,
-            clk,
+            clk: clk.sig,
+            clk_inv: clk.polarity == Polarity::Neg,
             ena,
             aclr: active,
             sclr: SigBit::ZERO,
@@ -261,7 +262,6 @@ fn legalize(
             return Ok(Mapped::Latch);
         }
     };
-    let clk = active_high(g, clk);
     let mut d = d;
     let (mut ena, mut aclr, mut sclr) = (SigBit::ONE, SigBit::ZERO, SigBit::ZERO);
     let enable = |g: &mut Gates, en: Option<Ctrl>| en.map_or(SigBit::ONE, |e| active_high(g, e));
@@ -379,7 +379,8 @@ fn legalize(
     g.add(
         Reg {
             d,
-            clk,
+            clk: clk.sig,
+            clk_inv: clk.polarity == Polarity::Neg,
             ena,
             aclr,
             sclr,

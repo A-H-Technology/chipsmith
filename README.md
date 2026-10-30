@@ -429,6 +429,8 @@ estimate's critical path against Quartus'):
 | sha256 | 24.18 ns | 26.02 ns | -7.1% | yes |
 | fir | 13.45 ns | 13.66 ns | -1.5% | yes |
 | mult-selftest | 15.58 ns | 15.86 ns | -1.8% | yes |
+| crc32 | 3.35 ns | 3.62 ns | -7.4% | yes |
+| negedge-selftest | 5.53 ns, half a period | 6.04 ns, half a period | -8.4% | yes |
 
 Most small designs are within 2% (spi-master is 10% under); the larger
 ones run 2 to 11% slower in Quartus than estimated. Over the 355 connections of the 300 worst
@@ -831,6 +833,51 @@ share chipsmith's own netlist IR, not Verilog.
      it now cuts every pin into an outside input and `EN ? A : outside` on
      both sides.
 
+   - Gaps closed (2026-10-30):
+     - Falling-edge registers take their LAB clock's inversion
+       (`LCELL_FF`'s `CLK_INV`) instead of a LUT inverting the clock
+       into a clock from logic. A LAB holds one clock net on one edge:
+       which of its two LAB clocks Quartus gives each edge isn't
+       predictable (examples/negedge-selftest's ten mixed LABs fit no
+       rule), so falling- and rising-edge registers don't share a LAB
+       until that is modelled. The timing report times a path from one
+       edge to the other against half a period. Proven (`negedge`, 40
+       `$equiv`) and co-simulated (199,996 output bits; with the inversion
+       dropped the co-simulation fails at cycle 0, which the proof,
+       stepping every register on one edge, can't see).
+     - Arrays declared inside functions, written and read a word and a
+       bit at a time with constant indices, one- and two-dimensional
+       (`chipsmith-verilog`'s `arrays_in_functions`, proven against
+       yosys). That brings Forencich's `lfsr.v` back: examples/crc32,
+       Ethernet's CRC-32 through its mask function. Its elaboration is
+       proven against a textbook bitwise CRC-32 with the same top (187
+       `$equiv`; yosys' own front end takes over 20 minutes on `lfsr.v`,
+       so the reference is the oracle's RTL; a wrong polynomial in the
+       reference fails it), and the netlist is co-simulated against it
+       (270,000 output bits). Synthesis on it isn't proven: the CRC
+       register powers up all ones, synthesis keeps it inverted in an
+       unnamed register, the display register loads from that directly,
+       and the induction leaves those 27 bits open. Quartus
+       byte-identical.
+     - A register whose data is its own enable loads a 1 (quartus_map
+       folds it so and drops the sync-load route the data would take,
+       found on negedge-selftest's `if (p[0]) n2 <= p`); no other DE2
+       example changes RBF.
+
+     `examples/negedge-selftest` checks falling-edge registers on the
+     board over JTAG: a rising-edge counter, a falling-edge register
+     taking it half a cycle later and a rising-edge one taking that, and
+     a falling-edge register with an enable. Every rising edge compares
+     them with what the edges imply and counts mismatches. USER1 holds
+     `"NEG!"`, the error count and the counter, both Gray-coded (`de2_user1
+     -- --words 3`). On the DE2 (2026-10-30, loaded over JTAG): the counter
+     at 50.00 MHz, 0 errors after 17 minutes (about 51 billion checked
+     cycles). With the first falling-edge
+     register made rising-edge, the error count climbs at 50.00 MHz, one
+     per cycle. Quartus byte-identical; quartus_sta's worst path is a
+     falling-to-rising one, 6.04 ns of data against half a period (the
+     estimate 5.53 ns).
+
      A corpus of open-source cores, unmodified behind DE2 wrappers
      (`examples/<name>`, upstream and commit in each manifest), each proven
      equivalent to yosys' RTL. LEs and Fmax, chipsmith's synthesis against
@@ -848,6 +895,7 @@ share chipsmith's own netlist IR, not Verilog.
      | serv | 3,091 LEs, 84.3 MHz | 3,111 LEs, 78.6 MHz | 336 LEs + 1 M4K, 108.6 MHz |
      | sha256 (secworks) | 6,046 LEs, 41.3 MHz | can't build (as spi-master) | 3,303 LEs, 63.7 MHz |
      | picorv32 | 1,171 LEs, 123.4 MHz | 1,175 LEs, 114.4 MHz | |
+     | crc32 (Forencich's lfsr.v) | 118 LEs, 298.9 MHz | not run: yosys' front end takes over 20 minutes on it | |
 
      chipsmith's uart, spi-master, i2c-master and sha256 are as of
      2026-10-29: a carry chain's low cells whose carry out is forced now
@@ -859,9 +907,8 @@ share chipsmith's own netlist IR, not Verilog.
      shapes yet) and wide multiplexers: sha256's 16-word schedule read maps
      to about 20 LUTs a bit, against Quartus' 11 (the mapper, not the
      netlist: the same read as a `$bmux` tree maps no better). Still
-     rejected: arrays declared inside functions (Forencich's `lfsr.v`,
-     dropped from the corpus), `$pow` with a non-constant base, the yosys
-     flow's own limits above.
+     rejected: `$pow` with a non-constant base, the yosys flow's own
+     limits above.
 5. **Own Verilog frontend** (done for the DE2, in the build since
    2026-10-25): the synthesizable subset that GHDL and HDL generators emit.
    - Elaboration (done, 2026-10-25, the DE2 build's front end since then): `crates/chipsmith-verilog`
