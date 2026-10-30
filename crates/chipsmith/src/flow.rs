@@ -854,7 +854,7 @@ fn synth(
     let out = chipsmith_cyclone2::synth::synthesize(design, io_registers)?;
     let s = out.stats;
     eprintln!(
-        "    {} gates ({} AIG ANDs) to {} LUTs, depth {}; {} registers ({} in I/O cells), {} carry chains, {} M4Ks in {:.1} s",
+        "    {} gates ({} AIG ANDs) to {} LUTs, depth {}; {} registers ({} in I/O cells), {} carry chains, {} M4Ks, {} multipliers in {:.1} s",
         s.lutmap.gates,
         s.lutmap.and_nodes,
         s.lutmap.luts,
@@ -863,6 +863,7 @@ fn synth(
         s.io_registers,
         s.chains,
         s.m4ks,
+        s.mults,
         started.elapsed().as_secs_f64()
     );
     // Quartus warns the same (10240, 13004): the LE has neither, so both

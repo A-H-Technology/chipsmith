@@ -18,6 +18,7 @@ use serde_json::Value;
 
 use crate::hard;
 use crate::m4k::{self, CellPort};
+use crate::mult;
 use crate::pin::PowerUp;
 
 pub type CellId = usize;
@@ -58,6 +59,13 @@ pub enum Port {
     Ram(CellPort),
     /// A pin of the M4K bel, from `pack_m4k` on.
     M4k(m4k::Pin),
+    /// CY2_MULT's logical ports (`A[i]`, `B[i]`, `P[i]`), until
+    /// `pack_mult` moves them onto the block's pins.
+    MultA(u8),
+    MultB(u8),
+    MultP(u8),
+    /// A pin of the multiplier bel, from `pack_mult` on.
+    Mult(mult::Pin),
     /// A pin of the JTAG or serial-flash block.
     Hard(hard::Pin),
 }
@@ -99,6 +107,9 @@ impl Port {
         if let Some(p) = hard::Pin::parse(name) {
             return Some(Port::Hard(p));
         }
+        if let Some(p) = mult_port(name) {
+            return Some(p);
+        }
         CellPort::parse(name).map(Port::Ram)
     }
 
@@ -106,6 +117,10 @@ impl Port {
         match self {
             Port::Ram(p) => p.to_string().into(),
             Port::M4k(pin) => pin.to_string().into(),
+            Port::MultA(i) => format!("A[{i}]").into(),
+            Port::MultB(i) => format!("B[{i}]").into(),
+            Port::MultP(i) => format!("P[{i}]").into(),
+            Port::Mult(pin) => pin.to_string().into(),
             Port::Hard(pin) => pin.name().into(),
             fixed => Self::FIXED
                 .iter()
@@ -152,6 +167,19 @@ pub enum Dir {
     In,
     Out,
     InOut,
+}
+
+/// CY2_MULT's logical bus ports (`A[3]`, `B[0]`, `P[35]`).
+fn mult_port(name: &str) -> Option<Port> {
+    let (base, index) = name.strip_suffix(']')?.split_once('[')?;
+    let i: u8 = index.parse().ok()?;
+    let operand = (i as usize) < mult::MAX_WIDTH;
+    match base {
+        "A" if operand => Some(Port::MultA(i)),
+        "B" if operand => Some(Port::MultB(i)),
+        "P" if (i as usize) < 2 * mult::MAX_WIDTH => Some(Port::MultP(i)),
+        _ => None,
+    }
 }
 
 impl Dir {
@@ -201,6 +229,8 @@ pub enum Kind {
     ClkCtrl,
     /// An M4K RAM block; its contents (`INIT`) pass through as a parameter.
     M4k(m4k::Shape),
+    /// An embedded multiplier, and which of its registers are in use.
+    Mult(mult::Shape, mult::Regs),
     /// The JTAG or serial-flash block.
     Hard(hard::Block),
     /// GND / VCC: the frontend's driver of a constant bit.
@@ -267,6 +297,9 @@ impl Kind {
                 Port::M4k(p) => p.is_output(),
                 _ => false,
             },
+            Kind::Mult(..) => {
+                matches!(port, Port::MultP(_)) || matches!(port, Port::Mult(p) if p.is_output())
+            }
             Kind::Hard(_) => matches!(port, Port::Hard(p) if p.is_output()),
             Kind::Const(_) => port == Port::Y,
             Kind::TopIn | Kind::TopInOut => port == Port::O,

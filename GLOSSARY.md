@@ -62,6 +62,10 @@ Logic array block: 16 LEs that share clock, enable and clear signals.
 **M4K**:
 A 4,608-bit RAM block.
 
+**Embedded multiplier**:
+One of the 35 blocks that multiply 18 x 18 (or two 9 x 9) with optional operand and product registers; `CY2_MULT` as a cell.
+_Avoid_: DSP block (the Cyclone II's has no adder), mac (except as Quartus' atom names)
+
 **Global clock**:
 One of the Cyclone II's 16 clock networks, driven by a clock control from a clock pin, a PLL output or logic.
 _Avoid_: GCLK (except as Quartus' name)

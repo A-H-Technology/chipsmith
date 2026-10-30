@@ -81,6 +81,49 @@ module CY2_IOBUF (input DATAOUT, input OE, input INCLK, input OUTCLK, input EXT,
   assign COMBOUT = PAD;
   assign REGOUT = qi;
 endmodule
+// The embedded multiplier (cells.v): the product of the low A_WIDTH and
+// B_WIDTH bits, each two's complement when its *_SIGNED is set, with the
+// operand and product registers *_REG ask for (rising edge of CLK, enable
+// active high, clear asynchronous to 0). Each signedness case is written
+// so yosys makes one `$mul` of the operands' own widths and signs (as the
+// RTL's is), which the proof then matches structurally rather than by
+// SAT.
+module CY2_MULT (input [17:0] A, input [17:0] B, input CLK, input ENA, input ACLR,
+                 output [35:0] P);
+  parameter A_WIDTH = 18;
+  parameter B_WIDTH = 18;
+  parameter A_SIGNED = 0;
+  parameter B_SIGNED = 0;
+  parameter A_REG = 0;
+  parameter B_REG = 0;
+  parameter P_REG = 0;
+  reg [A_WIDTH-1:0] qa = 0;
+  reg [B_WIDTH-1:0] qb = 0;
+  reg [A_WIDTH+B_WIDTH-1:0] qp = 0;
+  always @(posedge CLK, posedge ACLR)
+    if (ACLR) begin qa <= 0; qb <= 0; qp <= 0; end
+    else if (ENA) begin qa <= A[A_WIDTH-1:0]; qb <= B[B_WIDTH-1:0]; qp <= p; end
+  // Generate, not `?:`: a multiplexer with a constant select in front of
+  // the `$mul` stops equiv_struct matching it and sends the proof to SAT.
+  wire [A_WIDTH-1:0] a;
+  wire [B_WIDTH-1:0] b;
+  wire [A_WIDTH+B_WIDTH-1:0] p;
+  generate
+    if (A_REG) assign a = qa; else assign a = A[A_WIDTH-1:0];
+    if (B_REG) assign b = qb; else assign b = B[B_WIDTH-1:0];
+  endgenerate
+  generate
+    if (A_SIGNED && B_SIGNED) assign p = $signed(a) * $signed(b);
+    else if (A_SIGNED) assign p = $signed(a) * $signed({1'b0, b});
+    else if (B_SIGNED) assign p = $signed({1'b0, a}) * $signed(b);
+    else assign p = a * b;
+  endgenerate
+  wire [A_WIDTH+B_WIDTH-1:0] out;
+  generate
+    if (P_REG) assign out = qp; else assign out = p;
+  endgenerate
+  assign P = {{(36-A_WIDTH-B_WIDTH){1'bx}}, out};
+endmodule
 "#;
 
 /// A scratch directory under `base` (tests pass `CARGO_TARGET_TMPDIR`).
@@ -222,7 +265,7 @@ pub fn read(path: &Path) -> Design {
     read_json(&std::fs::read(path).unwrap()).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
-fn top(d: &Design) -> &Module {
+pub fn top(d: &Design) -> &Module {
     d.modules
         .iter()
         .find(|m| !m.is_blackbox() && m.name == "top")
@@ -986,7 +1029,14 @@ fn equiv_once(
     // inputs are proven equal (chipsmith-netlist's round-trip check does
     // the same). A pin buffer always on or always off is no tri-state:
     // its multiplexer with a constant select folds first.
-    let prep = "hierarchy -top top\nproc -noopt\nflatten\nopt_expr t:$mux\ntribuf\nchtype -set chipsmith_mem t:$mem_v2\n\
+    // `opt_dff -nodffe -nosdff` on the block models (`cy2_sim.v`) only drops
+    // a register's constant enable or reset: a model's register with its
+    // enable tied on and its clear tied off becomes the plain `$dff` the
+    // RTL has, so equiv_struct matches it instead of SAT proving through
+    // the multiplier behind it. Not on the design's own registers: it also
+    // folds their constant bits, which on serv's RTL leaves a constant
+    // with two init values and yosys stops.
+    let prep = "hierarchy -top top\nproc -noopt\nflatten\nopt_expr t:$mux\nopt_dff -nodffe -nosdff a:src=*cy2_sim.v*\ntribuf\nchtype -set chipsmith_mem t:$mem_v2\n\
                 chtype -set chipsmith_tribuf t:$tribuf t:$_TBUF_\nopt_clean";
     let script = format!(
         "read_json {gold}\nread_verilog -overwrite {sim}\n{prep}\nrename top gold\ndesign -stash gold\n\
@@ -1389,26 +1439,27 @@ pub fn check(dir: &Path, rtl: &Path, refined: &Design, gate: &Design) -> Result<
     check_impl(dir, Some(rtl), refined, gate, false)
 }
 
-/// Synthesis with M4Ks checked around the blocks, never through them: the
-/// RTL against the stage before the M4K mapping (memories compared at
-/// their ports), and the stage right after it against the result (the
-/// blocks compared at their pins, their parameters equal). The mapping
-/// itself is `m4k_shape_*`'s (one block per configuration, proven) and
-/// the co-simulation's (several blocks and the logic between).
+/// Synthesis with blocks (M4Ks or multipliers) checked around them, never
+/// through them: the RTL against the stage before the mapping (memories
+/// compared at their ports, products as `$mul`), and the stage right
+/// after it against the result (the blocks compared at their pins, their
+/// parameters equal). The mapping itself is the per-shape proofs'
+/// (`m4k_shape_*`, `mult_*`: one block per configuration) and the
+/// co-simulation's (several blocks and the logic between).
 pub fn check_staged(
     dir: &Path,
     rtl: &Path,
     refined: &Design,
-    before_m4k: &Design,
-    after_m4k: &Design,
+    before: &Design,
+    after: &Design,
     gate: &Design,
 ) -> Result<Proof, String> {
     let pre = dir.join("pre");
     let post = dir.join("post");
     std::fs::create_dir_all(&pre).unwrap();
     std::fs::create_dir_all(&post).unwrap();
-    let a = check_impl(&pre, Some(rtl), refined, before_m4k, false)?;
-    let b = check_impl(&post, None, after_m4k, gate, true)?;
+    let a = check_impl(&pre, Some(rtl), refined, before, false)?;
+    let b = check_impl(&post, None, after, gate, true)?;
     Ok(Proof {
         constant_registers: a.constant_registers + b.constant_registers,
         equivalences: a.equivalences + b.equivalences,
@@ -1421,9 +1472,9 @@ pub fn check_after_m4k(dir: &Path, after_m4k: &Design, gate: &Design) -> Result<
     check_impl(dir, None, after_m4k, gate, true)
 }
 
-/// Replaces every CY2_M4K by ports: its inputs out, its read data in
-/// (`__blk_<cell>_<port>`), so two netlists with the same blocks are
-/// compared around them. Returns each block's parameters.
+/// Replaces every CY2_M4K and CY2_MULT by ports: its inputs out, its
+/// outputs in (`__blk_<cell>_<port>`), so two netlists with the same
+/// blocks are compared around them. Returns each block's parameters.
 fn cut_block_cells(
     m: &mut Module,
 ) -> BTreeMap<String, BTreeMap<String, chipsmith_netlist::ParamValue>> {
@@ -1437,7 +1488,7 @@ fn cut_block_cells(
             keep.push(c);
             continue;
         };
-        if g.ty != "CY2_M4K" {
+        if g.ty != "CY2_M4K" && g.ty != "CY2_MULT" {
             keep.push(c);
             continue;
         }
@@ -1624,7 +1675,7 @@ fn check_impl(
             let theirs = cut_block_cells(gt);
             let ours = cut_block_cells(top_mut(&mut mid));
             if theirs != ours {
-                return Err("the M4K blocks' names or parameters differ between the stages".into());
+                return Err("the blocks' names or parameters differ between the stages".into());
             }
         } else {
             model_blocks(gt, &mem_infos(refined))?;
@@ -1938,6 +1989,15 @@ module CY2_M4K (input CLK, input CLK1, input ENA0, input ENA1, input CLR0, input
   wire [35:0] ob = B_OUTREG == "NONE" ? qb : pb;
   assign DATAOUT = TDP ? {ob[17:0], oa[17:0]} : SDP ? ob : oa;
 endmodule
+
+// The JTAG block with no cable: TCK and the user-instruction outputs stay
+// low, so a USER1 register (the self-tests') only ever loads, on neither
+// side; the outputs compared are the design's own.
+module CY2_JTAG (input TDOUSER, output TMSUTAP, output TCKUTAP, output TDIUTAP,
+                 output SHIFTUSER, output CLKDRUSER, output UPDATEUSER,
+                 output RUNIDLEUSER, output USR1USER);
+  assign {TMSUTAP, TCKUTAP, TDIUTAP, SHIFTUSER, CLKDRUSER, UPDATEUSER, RUNIDLEUSER, USR1USER} = 0;
+endmodule
 "#;
 
 /// What a co-simulation found.
@@ -2032,12 +2092,23 @@ pub fn cosim(
     };
     tb += &format!("  gold g({});\n  gate t({});\n", conns("g"), conns("t"));
     tb += &format!("  integer seed = {seed}, cyc = 0, i;\n  reg [63:0] compared = 0;\n");
+    // Each input: for the first 16 cycles an extreme (all ones, all
+    // zeros, the top bit alone, the top bit clear; input k uses pattern
+    // (cyc + k) % 4 so the pairs vary), so a sign or a carry at the end
+    // of a multiplier operand is seen; random after.
     let draw: String = inputs
         .iter()
-        .map(|(n, w)| {
+        .enumerate()
+        .map(|(k, (n, w))| {
             let words = w.div_ceil(32);
             let parts: Vec<String> = (0..words).map(|_| "$random(seed)".to_string()).collect();
-            format!("    {n} = {{{}}};\n", parts.join(", "))
+            let top = w - 1;
+            format!(
+                "    if (cyc < 16) case ((cyc + {k}) % 4)\n      0: {n} = {{{w}{{1'b1}}}};\n      1: {n} = 0;\n      \
+                 2: begin {n} = 0; {n}[{top}] = 1'b1; end\n      3: begin {n} = {{{w}{{1'b1}}}}; {n}[{top}] = 1'b0; end\n    endcase\n    \
+                 else {n} = {{{}}};\n",
+                parts.join(", ")
+            )
         })
         .collect();
     tb += &format!("  initial begin\n{draw}  end\n");
@@ -2049,7 +2120,7 @@ pub fn cosim(
         );
     }
     tb += &format!(
-        "  always @(negedge {main}) begin\n    #1;\n{check}{draw}    cyc = cyc + 1;\n    if (cyc == {cycles}) begin\n      $display(\"PASS %0d\", compared);\n      $finish;\n    end\n  end\nendmodule\n"
+        "  always @(negedge {main}) begin\n    #1;\n{check}    cyc = cyc + 1;\n{draw}    if (cyc == {cycles}) begin\n      $display(\"PASS %0d\", compared);\n      $finish;\n    end\n  end\nendmodule\n"
     );
     let tb_v = dir.join("cosim_tb.v");
     std::fs::write(&tb_v, tb).unwrap();
