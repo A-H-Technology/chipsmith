@@ -156,6 +156,8 @@ enum Kind {
     /// Tri-state output or bidir.
     Iobuf,
     ClkCtrl,
+    /// A PLL's external clock output (`PLLOUT`).
+    PllOut,
     Block(Block),
     Hard(hard::Block),
 }
@@ -354,6 +356,7 @@ fn read_design(json: &Value) -> Result<Design> {
             "CY2_OBUF" => Kind::Obuf,
             "CY2_IOBUF" => Kind::Iobuf,
             "CLKCTRL" => Kind::ClkCtrl,
+            "PLLOUT" => Kind::PllOut,
             other => match Block::ALL.into_iter().find(|b| b.cell_type() == other) {
                 Some(b) => Kind::Block(b),
                 None => match hard::Block::from_cell_type(other) {
@@ -428,7 +431,7 @@ fn read_design(json: &Value) -> Result<Design> {
                 (Kind::Lut, Port::Combout | Port::Cout)
                     | (Kind::Ff, Port::Regout)
                     | (Kind::Ibuf | Kind::Iobuf, Port::Combout | Port::Regout)
-                    | (Kind::ClkCtrl, Port::Outclk)
+                    | (Kind::ClkCtrl | Kind::PllOut, Port::Outclk)
             ) || matches!(port, Port::M4k(pin) if pin.is_output())
                 || matches!(port, Port::Mult(pin) if pin.is_output())
                 || matches!(port, Port::Hard(pin) if pin.is_output());
@@ -859,7 +862,7 @@ fn fixed_cells(
         let drives = match c.kind {
             Kind::Ibuf => false,
             Kind::Obuf | Kind::Iobuf => true,
-            Kind::Lut | Kind::Ff | Kind::ClkCtrl | Kind::Block(_) => continue,
+            Kind::Lut | Kind::Ff | Kind::ClkCtrl | Kind::PllOut | Kind::Block(_) => continue,
             // One of each per device, at a fixed bel; PLLs come below.
             Kind::Hard(b) => {
                 let Some(((x, y), bel)) = b.bel() else {
@@ -925,11 +928,13 @@ fn fixed_cells(
     // INCLK node of every clock control, and of every PLL.
     let mut inclk: HashMap<NodeId, (u32, String)> = HashMap::default();
     let mut pll_inclk: HashMap<NodeId, (u32, String)> = HashMap::default();
+    let mut pllout_inclk: HashMap<NodeId, (u32, String)> = HashMap::default();
     for tile in 0..db.width * db.height {
         for (name, bel) in &db.tile_type(tile).bels {
             let to = match bel.ty.as_str() {
                 "CLKCTRL" => &mut inclk,
                 "PLL" => &mut pll_inclk,
+                "PLLOUT" => &mut pllout_inclk,
                 _ => continue,
             };
             if let Some(&w) = bel.pins.get("INCLK") {
@@ -1002,6 +1007,68 @@ fn fixed_cells(
                 c.name, design.cells[pin].name
             )
         })?;
+        out.insert(i, site);
+    }
+    // A PLL's external clock output: the one its counter 2 reaches, which
+    // must be wired to the pin it drives.
+    for (i, c) in design
+        .cells
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.kind == Kind::PllOut)
+    {
+        let net = c
+            .net(Port::Inclk)
+            .with_context(|| format!("{}: INCLK unconnected", c.name))?;
+        let d =
+            design.driver[net as usize].with_context(|| format!("{}: input undriven", c.name))?;
+        let port = design.cells[d]
+            .connections()
+            .find(|&(_, n)| n == net)
+            .map(|(p, _)| p)
+            .context("external clock output input")?;
+        let site = nearest(&out, &pllout_inclk, out_node(&out, d, port)?).with_context(|| {
+            format!(
+                "{}: no external clock output reachable",
+                design.cells[d].name
+            )
+        })?;
+        let o = c
+            .net(Port::Outclk)
+            .with_context(|| format!("{}: OUTCLK unconnected", c.name))?;
+        let pin = design
+            .cells
+            .iter()
+            .position(|p| p.kind == Kind::Obuf && p.net(Port::Dataout) == Some(o))
+            .with_context(|| format!("{}: drives no output pin", c.name))?;
+        let node = |(tile, bel): &(u32, String), p: &str| {
+            db.node(*tile, db.tile_type(*tile).bels[bel].pins[p])
+        };
+        let (from, to) = (node(&site, "OUTCLK"), node(&out[&pin], "DATAOUT"));
+        let pad_at = |n: NodeId| {
+            db.pads
+                .iter()
+                .find(|p| node(&(p.tile, p.bel.clone()), "DATAOUT") == n)
+                .map_or("unknown".into(), |p| format!("PIN_{}", p.pin))
+        };
+        let reached: Vec<NodeId> = db
+            .downhill(from)
+            .iter()
+            .flat_map(|e| db.downhill(e.dst))
+            .map(|e| e.dst)
+            .collect();
+        ensure!(
+            reached.contains(&to),
+            "{}: {} drives {}, but the PLL's clock output pin is {}",
+            design.cells[d].name,
+            design.cells[pin].name,
+            pad_at(to),
+            reached
+                .iter()
+                .map(|&n| pad_at(n))
+                .find(|p| p != "unknown")
+                .unwrap_or_else(|| "unknown".into())
+        );
         out.insert(i, site);
     }
     // Clocks from pins first: each takes the nearest free clock control
@@ -2054,7 +2121,11 @@ impl Legalizer for LabLegalizer<'_, '_> {
                 Obj::Block(r) => unit(s.grid.site_xy[s.block_site[r]]),
             };
             let dist = (legal[o].0 - target.0).abs() + (legal[o].1 - target.1).abs();
-            displaced = (displaced.0 + dist, displaced.1.max(dist), displaced.2 + (dist > 2.0) as usize);
+            displaced = (
+                displaced.0 + dist,
+                displaced.1.max(dist),
+                displaced.2 + (dist > 2.0) as usize,
+            );
             if matches!(self.an.objects[o], Obj::Chain(_)) {
                 chain_displaced += dist;
             }
@@ -2328,9 +2399,15 @@ pub fn place_file(
         let ys: std::collections::BTreeSet<i32> = grid.xy.iter().map(|p| p.1).collect();
         eprintln!(
             "place: grid {}x{}, {} LABs at x {:?} y {:?}..{:?}; {} fixed cells at x {:?}..{:?}",
-            grid.width, grid.height, grid.xy.len(), xs, ys.first(), ys.last(),
+            grid.width,
+            grid.height,
+            grid.xy.len(),
+            xs,
+            ys.first(),
+            ys.last(),
             fixed_xy.iter().flatten().count(),
-            fixed_xy.iter().flatten().map(|p| p.0).min(), fixed_xy.iter().flatten().map(|p| p.0).max()
+            fixed_xy.iter().flatten().map(|p| p.0).min(),
+            fixed_xy.iter().flatten().map(|p| p.0).max()
         );
     }
     let started = std::time::Instant::now();
@@ -2367,7 +2444,9 @@ pub fn place_file(
         );
     }
     for b in Block::ALL {
-        let used = (0..design.blocks.len()).filter(|&r| design.block_kind(r) == b).count();
+        let used = (0..design.blocks.len())
+            .filter(|&r| design.block_kind(r) == b)
+            .count();
         let sites = grid.site_block.iter().filter(|&&s| s == b).count();
         ensure!(
             used <= sites,

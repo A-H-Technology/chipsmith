@@ -43,6 +43,7 @@ mod arch {
     pub const IO_INREG_CLK_FAST_MUX: i32 = 89;
     pub const IO_OUTREG_CLK_FAST_MUX: i32 = 93;
     pub const IO_DATA_INVERT: i32 = 118;
+    pub const IO_CORE_PLL_SELECT: i32 = 146;
     pub const IO_USE_CLR_INREG: i32 = 164;
     pub const IO_USE_CLR_OEREG: i32 = 165;
     pub const IO_USE_CLR_OUTREG: i32 = 166;
@@ -337,8 +338,8 @@ pub struct IoReg {
 }
 
 /// An output's data: a LAB-local line into the IOE's data mux (optionally
-/// inverted in the IOE, optionally through the output register), or a
-/// constant.
+/// inverted in the IOE, optionally through the output register), a
+/// constant, or a PLL's clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutData {
     Line {
@@ -347,6 +348,11 @@ pub enum OutData {
         reg: Option<IoReg>,
     },
     Const(bool),
+    /// A PLL's counter 2 through its external clock output's clock control
+    /// (rcf `IO_RAW_DATAOUT`), on that PLL's PLL<n>_OUT pin only. It
+    /// bypasses the data mux, the inverter and the register
+    /// (`IO_CORE_PLL_SELECT`; observed on PLL_1's, PIN_AA7).
+    PllClock,
 }
 
 /// When the output buffer drives the pad.
@@ -386,7 +392,7 @@ impl Output {
     pub fn clock(&self) -> Result<Option<u32>> {
         let d = match self.data {
             OutData::Line { reg, .. } => reg.map(|r| r.clock),
-            OutData::Const(_) => None,
+            OutData::Const(_) | OutData::PllClock => None,
         };
         let e = match self.enable {
             OutputEnable::Line { reg, .. } => reg.map(|r| r.clock),
@@ -635,6 +641,7 @@ fn used_settings(block: i32, u: &PinUse) -> Result<Vec<Setting>> {
                         v.push((IO_DATA_INVERT, -1, &[1]));
                     }
                 }
+                OutData::PllClock => v.push((IO_CORE_PLL_SELECT, -1, &[1])),
             }
         }
         // Each pad-to-core path the input drives turns on its delay
@@ -805,7 +812,7 @@ impl IoDb {
             if let Some(o) = u.and_then(|u| u.dir.output()) {
                 let data_line = match o.data {
                     OutData::Line { line, .. } => Some(line),
-                    OutData::Const(_) => None,
+                    OutData::Const(_) | OutData::PllClock => None,
                 };
                 let oe_line = match o.enable {
                     OutputEnable::Line { line, .. } => Some(line),

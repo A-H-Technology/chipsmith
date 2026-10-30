@@ -26,6 +26,7 @@ use mask::{fix, invert_input, normalise_carry, substitute, BUFFERS};
 use netlist::{CellId, IoeIn, Kind, NetId, Netlist, Port, LUT_INPUTS};
 pub use yosys::bit_name;
 
+use crate::hard;
 use crate::m4k::{CellPort, Param, Pin, Ports, Sel, Side};
 use crate::pin::{register_param, PowerUp};
 
@@ -73,6 +74,7 @@ fn pack(nl: &mut Netlist) -> Result<Stats> {
     pack_lut_ff(nl, &mut stats)?;
     pack_carry(nl, &mut stats)?;
     pack_clocks(nl, &mut stats)?;
+    pack_pll_outputs(nl)?;
     // Last, so no constant folding takes these LUTs away again.
     unsigned_signs(nl);
     for c in nl.cells() {
@@ -1084,6 +1086,56 @@ fn pack_clocks(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
     Ok(())
 }
 
+/// A PLL output driving a pin goes through that PLL's external clock
+/// output: counter 2 (CY2_PLL's CLK2) through the clock control of its
+/// PLL<n>_OUT pin, the only way a PLL clock leaves the chip. The pin buffer
+/// can't invert or register it: the clock bypasses the IOE's output path
+/// (`IO_CORE_PLL_SELECT`).
+fn pack_pll_outputs(nl: &mut Netlist) -> Result<()> {
+    for ni in nl.nets() {
+        let Some((d, Port::Hard(pin))) = nl.net(ni).driver else {
+            continue;
+        };
+        use hard::Pin::{Clk0, Clk1, Clk2};
+        if nl.cell(d).kind != Kind::Hard(hard::Block::Pll) || !matches!(pin, Clk0 | Clk1 | Clk2) {
+            continue;
+        }
+        let pins: Vec<CellId> = nl
+            .users(ni)
+            .into_iter()
+            .filter(|&(u, p)| {
+                matches!(nl.cell(u).kind, Kind::Obuf { .. } | Kind::Iobuf { .. })
+                    && p == Port::Dataout
+            })
+            .map(|(u, _)| u)
+            .collect();
+        if pins.is_empty() {
+            continue;
+        }
+        let name = nl.net(ni).name.clone();
+        ensure!(
+            pin == Clk2,
+            "{name}: a PLL clock reaches a pin only from CLK2 (the counter wired to the PLL's PLL<n>_OUT pin), not {pin}"
+        );
+        let &[obuf] = pins.as_slice() else {
+            bail!("{name}: a PLL drives one pin at most (its PLL<n>_OUT pin)");
+        };
+        ensure!(
+            matches!(nl.cell(obuf).kind, Kind::Obuf { data: IoeIn::Signal { invert: false, reg: None }, .. }),
+            "{}: a PLL clock output pin is a plain output, neither inverted, registered nor tri-stated",
+            nl.cell(obuf).name
+        );
+        let cc = nl.create_cell(format!("{name}$pllout"), Kind::PllOut);
+        nl.add_port(cc, Port::Inclk);
+        nl.add_port(cc, Port::Outclk);
+        let o = nl.create_net(format!("{name}$pllout"));
+        nl.reconnect(obuf, Port::Dataout, o);
+        nl.connect(cc, Port::Inclk, ni);
+        nl.connect(cc, Port::Outclk, o);
+    }
+    Ok(())
+}
+
 fn hide_name(name: &str) -> u8 {
     name.starts_with('$') as u8
 }
@@ -1164,6 +1216,7 @@ fn to_json(nl: &Netlist) -> Result<Value> {
                 }
             }
             Kind::ClkCtrl => "CLKCTRL",
+            Kind::PllOut => "PLLOUT",
             Kind::Hard(b) => b.cell_type(),
             Kind::Mult(shape, regs) => {
                 use crate::mult::{Operand, Regs};

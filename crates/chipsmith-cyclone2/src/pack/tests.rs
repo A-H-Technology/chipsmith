@@ -30,7 +30,9 @@ fn design(cells: &[(&str, &str, Option<u16>, Value)]) -> Value {
         ),
     ];
     for (name, ty, mask, conns) in pins.iter().chain(cells) {
-        let outputs = ["COMBOUT", "COUT", "REGOUT"];
+        let outputs = [
+            "COMBOUT", "COUT", "REGOUT", "CLK0", "CLK1", "CLK2", "LOCKED",
+        ];
         let dirs: Map<String, Value> = conns
             .as_object()
             .unwrap()
@@ -644,4 +646,36 @@ fn a_constant_data_bit_gets_an_le() {
         .expect("DI1 driven");
     let (drv, _) = nl.net(n).driver.unwrap();
     assert_eq!(nl.cell(drv).kind, Kind::Lut { mask: 0 });
+}
+
+#[test]
+fn a_pll_clock_on_a_pin_goes_through_its_clock_output() {
+    let (nl, _) = packed(&[("pll", "CY2_PLL", None, json!({"INCLK": [10], "CLK2": [11]}))]);
+    let po = nl
+        .cells()
+        .into_iter()
+        .find(|&c| nl.cell(c).kind == Kind::PllOut)
+        .map(|c| nl.cell(c).name.clone())
+        .expect("a PLLOUT cell");
+    assert_eq!(
+        net_name(&nl, &po, Port::Inclk),
+        net_name(&nl, "pll", Port::Hard(hard::Pin::Clk2))
+    );
+    assert_eq!(
+        net_name(&nl, "led_buf", Port::Dataout),
+        net_name(&nl, &po, Port::Outclk)
+    );
+}
+
+#[test]
+fn only_clk2_reaches_a_pin() {
+    let mut nl = yosys::import(&design(&[(
+        "pll",
+        "CY2_PLL",
+        None,
+        json!({"INCLK": [10], "CLK0": [11]}),
+    )]))
+    .unwrap();
+    let e = pack(&mut nl).unwrap_err().to_string();
+    assert!(e.contains("only from CLK2"), "{e}");
 }

@@ -183,6 +183,7 @@ pub fn element_name(e: i16) -> String {
         294 => "LAB_CLK",
         298 => "TB_IO_CLK",
         301 => "IO_DATAIN",
+        303 => "IO_RAW_DATAOUT",
         513 => "CLKBUF_IN",
         515 => "CLKBUF_OUT",
         532 => "BLOCK_INPUT_MUX",
