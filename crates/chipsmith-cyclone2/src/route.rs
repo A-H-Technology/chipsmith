@@ -80,12 +80,22 @@ pub enum ClockSource {
     Core,
 }
 
-/// The critical path from registers on `Stats::clocks[from]` to registers
-/// on `Stats::clocks[to]`.
+/// The clock edge a register takes: falling for a register with the LAB's
+/// clock inversion (`CLK_INV`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    Rising,
+    Falling,
+}
+
+/// The critical path from registers on `Stats::clocks[from]`'s `from_edge`
+/// to registers on `Stats::clocks[to]`'s `to_edge`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClockPair {
     pub from: usize,
+    pub from_edge: Edge,
     pub to: usize,
+    pub to_edge: Edge,
     pub critical: Ps,
 }
 
@@ -125,7 +135,20 @@ pub fn route_file(db: &ChipDb, placed: &Path, routed: &Path) -> Result<Stats> {
     std::fs::write(routed, serde_json::to_string(&json)?)
         .with_context(|| format!("writing {}", routed.display()))?;
     let clocks = clocks(&json)?;
-    let index = |net: u32| clocks.iter().position(|(id, _)| *id == u64::from(net));
+    // The timing graph's clocks are `domain`s (`read_design`): the net and
+    // the edge.
+    let index = |domain: u32| {
+        clocks
+            .iter()
+            .position(|(id, _)| *id == u64::from(domain / 2))
+    };
+    let edge = |domain: u32| {
+        if domain % 2 == 1 {
+            Edge::Falling
+        } else {
+            Edge::Rising
+        }
+    };
     let pairs = design
         .timing
         .clock_pairs(&Router::net_arcs(&design.nets, &trees))
@@ -133,7 +156,9 @@ pub fn route_file(db: &ChipDb, placed: &Path, routed: &Path) -> Result<Stats> {
         .filter_map(|p| {
             Some(ClockPair {
                 from: index(p.from)?,
+                from_edge: edge(p.from),
                 to: index(p.to)?,
+                to_edge: edge(p.to),
                 critical: p.critical,
             })
         })
@@ -389,6 +414,14 @@ fn read_design(db: &ChipDb, json: &Value) -> Result<Design> {
             .unwrap_or(0);
         let ty = cell["type"].as_str().unwrap_or("");
         timing.add_cell(name, ty, &connected, le);
+        if ty == "CY2_MULT" {
+            let flag = |p: &str| {
+                cell["parameters"][p]
+                    .as_str()
+                    .is_some_and(|v| v.trim_end().contains('1'))
+            };
+            timing.add_mult_registers(name, flag("A_REG"), flag("B_REG"), flag("P_REG"));
+        }
         if matches!(ty, "CY2_IBUF" | "CY2_OBUF" | "CY2_IOBUF") {
             let reg = |p: &str| cell["parameters"][p].is_string();
             timing.add_ioe_registers(
@@ -398,9 +431,20 @@ fn read_design(db: &ChipDb, json: &Value) -> Result<Design> {
                 reg(register_param::OE),
             );
         }
+        // A clock domain is a clock net and an edge (`route_file` takes
+        // them apart again): a falling-edge register (CLK_INV) is its own
+        // domain, so a path between the two edges of one net is a pair of
+        // its own, which has half a period.
+        let domain = |net: u64, inverted: bool| net * 2 + u64::from(inverted);
         let clock = match ty {
-            "LCELL_FF" => net_of(cell, "CLK"),
-            "CY2_M4K" => net_of(cell, "CLK0"),
+            "LCELL_FF" => net_of(cell, "CLK").map(|n| {
+                let inv = cell["parameters"]["CLK_INV"]
+                    .as_str()
+                    .is_some_and(|v| v.chars().any(|ch| ch == '1'));
+                domain(n, inv)
+            }),
+            "CY2_M4K" => net_of(cell, "CLK0").map(|n| domain(n, false)),
+            "CY2_MULT" => net_of(cell, "CLK").map(|n| domain(n, false)),
             _ => None,
         };
         if let Some(clock) = clock {
@@ -414,6 +458,7 @@ fn read_design(db: &ChipDb, json: &Value) -> Result<Design> {
                         Sel::Zero => net_of(cell, "CLK0"),
                         Sel::One => net_of(cell, "CLK1"),
                     })
+                    .map(|n| domain(n, false))
                     .unwrap_or(clock);
                 timing.set_clock(n, c as u32);
             }

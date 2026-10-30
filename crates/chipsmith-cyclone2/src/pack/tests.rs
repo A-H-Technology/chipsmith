@@ -179,6 +179,7 @@ fn an_inverter_folds_into_lut_masks_and_the_pin() {
     assert_eq!(
         cell(&nl, "ff").kind,
         Kind::Ff(netlist::FfConfig {
+            clk_inv: false,
             ena_inv: true,
             sclr_inv: false
         })
@@ -278,6 +279,24 @@ fn a_register_loading_a_constant_one_gets_a_lut_for_it() {
         net_name(&nl, "ff", Port::Datain).as_deref(),
         Some("ff$const_net")
     );
+}
+
+/// Data equal to the enable is a 1 whenever the register loads: a LUT
+/// outputs it, as for a constant 1, and the enable stays.
+#[test]
+fn a_register_loading_its_enable_loads_a_one() {
+    let (nl, _) = packed(&[(
+        "ff",
+        "LCELL_FF",
+        None,
+        json!({"DATAIN": [12], "CLK": [10], "ENA": [12], "ACLR": ["0"], "SCLR": ["0"], "REGOUT": [11]}),
+    )]);
+    assert_eq!(cell(&nl, "ff$const").mask(), 0xFFFF);
+    assert_eq!(
+        net_name(&nl, "ff", Port::Datain).as_deref(),
+        Some("ff$const_net")
+    );
+    assert_eq!(net_name(&nl, "ff", Port::Ena).as_deref(), Some("sw"));
 }
 
 #[test]
@@ -520,6 +539,25 @@ fn an_m4k_moves_onto_its_physical_pins() {
         net_name(&nl, "ram", Port::M4k(Pin::Do(0))).as_deref(),
         Some("led")
     );
+}
+
+/// The parameters an M4K's `Kind` doesn't write back pass through: a
+/// mixed-width simple dual port keeps its read width (`B_WIDTH`, which a
+/// multiplier's `Kind` holds and an M4K's doesn't).
+#[test]
+fn an_m4k_keeps_its_read_width() {
+    let mut d = single_port_ram(2);
+    let ram = &mut d["modules"]["top"]["cells"]["ram"];
+    ram["parameters"]["MODE"] = json!("SIMPLE_DUAL");
+    ram["parameters"]["B_WIDTH"] = json!(format!("{:032b}", 1));
+    ram["parameters"]["SLICE"] = json!(format!("{:032b}", 1));
+    ram["connections"]["B_ADDR"] = json!(vec![json!(12); 12]);
+    let mut nl = yosys::import(&d).unwrap();
+    pack(&mut nl).unwrap();
+    let out = to_json(&nl).unwrap();
+    let params = &out["modules"]["top"]["cells"]["ram"]["parameters"];
+    assert_eq!(params["B_WIDTH"], json!(format!("{:032b}", 1)), "{params}");
+    assert_eq!(params["WIDTH"], json!(format!("{:032b}", 2)), "{params}");
 }
 
 #[test]

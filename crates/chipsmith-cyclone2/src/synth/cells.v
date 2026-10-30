@@ -18,6 +18,8 @@ endmodule
 // Unconnected (synthesis ties them so): ENA 1, ACLR and SCLR 0.
 (* blackbox *)
 module LCELL_FF (input DATAIN, input CLK, input ENA, input ACLR, input SCLR, output REGOUT);
+  // 1: clocked on CLK's falling edge (the LAB inverts the clock).
+  parameter CLK_INV = 0;
 endmodule
 
 // Pin buffers. Each has its I/O cell's registers, rising-edge, no enable
@@ -74,6 +76,25 @@ module CY2_M4K (input CLK, input CLK1, input ENA0, input ENA1, input CLR0, input
   parameter SLICE = 1;
   parameter PACKING = "DENSE";
   parameter [4607:0] INIT = 4608'b0;
+endmodule
+
+// An embedded multiplier (synth/mult.rs builds it from a `$mul`):
+// P = A * B over the low A_WIDTH / B_WIDTH bits, each operand two's
+// complement when its *_SIGNED parameter is 1; P's low A_WIDTH+B_WIDTH
+// bits are the product. Widths 1 to 18; one block of the 35. With A_REG
+// or B_REG the operand is registered on CLK's rising edge, with P_REG the
+// product is; the registers share CLK, the enable (active high, on when
+// unconnected) and the asynchronous clear (active high, to 0).
+(* blackbox *)
+module CY2_MULT (input [17:0] A, input [17:0] B, input CLK, input ENA, input ACLR,
+                 output [35:0] P);
+  parameter A_WIDTH = 18;
+  parameter B_WIDTH = 18;
+  parameter A_SIGNED = 0;
+  parameter B_SIGNED = 0;
+  parameter A_REG = 0;
+  parameter B_REG = 0;
+  parameter P_REG = 0;
 endmodule
 
 // The JTAG block (one per device): TAP signals out to the core during a

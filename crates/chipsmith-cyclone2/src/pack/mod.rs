@@ -18,7 +18,7 @@ mod yosys;
 use std::collections::HashSet;
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use serde_json::{json, Map, Value};
 
 pub use diff::diff_files;
@@ -45,6 +45,7 @@ pub struct Stats {
     pub folded: usize,
     pub removed_luts: usize,
     pub m4ks: usize,
+    pub mults: usize,
 }
 
 /// Pack `netlist` (yosys JSON), write `packed`.
@@ -64,12 +65,16 @@ fn pack(nl: &mut Netlist) -> Result<Stats> {
     let mut stats = Stats::default();
     pack_io(nl)?;
     let tied_data = pack_m4k(nl, &mut stats)?;
+    pack_mult(nl, &mut stats)?;
+    load_enable_as_one(nl);
     pack_constants(nl, &mut stats)?;
     drive_tied_data(nl, tied_data);
     pack_lut1(nl, &mut stats);
     pack_lut_ff(nl, &mut stats)?;
     pack_carry(nl, &mut stats)?;
     pack_clocks(nl, &mut stats)?;
+    // Last, so no constant folding takes these LUTs away again.
+    unsigned_signs(nl);
     for c in nl.cells() {
         match nl.cell(c).kind {
             Kind::Lut { .. } => stats.luts += 1,
@@ -439,11 +444,195 @@ fn drive_tied_data(nl: &mut Netlist, tied: Vec<(CellId, Pin, bool)>) {
     }
 }
 
+/// Multipliers: a CY2_MULT's operands move onto the block's data inputs,
+/// MSB-aligned in their row (`mult::Shape::pin`), product bit k onto
+/// `Shape::out(k)`; unread product bits are dropped. An undriven data input
+/// reads 1, so operand bits tied to 1 are left off. Bits tied to 0 and the
+/// unused low pins of the row read 0 through the block's input inversion:
+/// `DATA_INVERT`, a mask over the 36 data inputs (operand A's 0-17, B's
+/// 18-35), which `pack_lut1` also sets for an inverter it folds into a
+/// driven pin. The sign inputs get theirs in `unsigned_signs`. The registers'
+/// clock, enable and clear move onto the block's control pins; an enable
+/// tied on or a clear tied off is left unconnected, which reads the same.
+fn pack_mult(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
+    use crate::mult::{Operand, Pin as MPin};
+    for c in nl.cells() {
+        let Kind::Mult(shape, regs) = nl.cell(c).kind else {
+            continue;
+        };
+        stats.mults += 1;
+        let name = nl.cell(c).name.clone();
+        let mut zero = [false; 2 * crate::mult::MAX_WIDTH];
+        let index = |pin: MPin| match pin {
+            MPin::A(k) => k as usize,
+            MPin::B(k) => crate::mult::MAX_WIDTH + k as usize,
+            _ => unreachable!("data pins only"),
+        };
+        for op in [Operand::A, Operand::B] {
+            for k in 0..shape.pad(op) {
+                zero[index(shape.pin(op, 0)) - shape.pad(op) + k] = true;
+            }
+        }
+        let old: Vec<(Port, Option<NetId>)> = nl.cell(c).ports().collect();
+        let mut pins: Vec<(MPin, NetId)> = Vec::new();
+        for &(port, net) in old.iter().rev() {
+            nl.disconnect(c, port);
+            nl.remove_port(c, port);
+            let operand = match port {
+                Port::MultA(i) => Some((Operand::A, i)),
+                Port::MultB(i) => Some((Operand::B, i)),
+                _ => None,
+            };
+            let constant = |n: Option<NetId>| {
+                n.and_then(|n| nl.net(n).driver)
+                    .and_then(|(d, _)| match nl.cell(d).kind {
+                        Kind::Const(v) => Some(v),
+                        _ => None,
+                    })
+            };
+            match (port, operand) {
+                (Port::Clk | Port::Ena | Port::Aclr, _) if !regs.any() => {
+                    bail!("multiplier {name}: {} without a register", port.name())
+                }
+                (Port::Clk, _) => {
+                    let Some(n) = net.filter(|&n| constant(Some(n)).is_none()) else {
+                        bail!("multiplier {name}: clock not driven");
+                    };
+                    pins.push((MPin::Clk, n));
+                }
+                (Port::Ena, _) => match (net, constant(net)) {
+                    (_, Some(true)) | (None, _) => {}
+                    (_, Some(false)) => bail!("multiplier {name}: registers never enabled"),
+                    (Some(n), None) => pins.push((MPin::Ena, n)),
+                },
+                (Port::Aclr, _) => match (net, constant(net)) {
+                    (_, Some(false)) | (None, _) => {}
+                    (_, Some(true)) => bail!("multiplier {name}: registers always cleared"),
+                    (Some(n), None) => pins.push((MPin::Aclr, n)),
+                },
+                (Port::MultP(k), _) => {
+                    if (k as usize) < shape.width(Operand::A) + shape.width(Operand::B)
+                        && nl.has_users(net)
+                    {
+                        pins.push((shape.out(k as usize), net.unwrap()));
+                    }
+                }
+                (_, Some((op, i))) => {
+                    ensure!(
+                        (i as usize) < shape.width(op),
+                        "multiplier {name}: operand bit {} past its width",
+                        port.name()
+                    );
+                    let Some(n) = net else {
+                        bail!("multiplier {name}: {} not driven", port.name());
+                    };
+                    let pin = shape.pin(op, i as usize);
+                    match nl.net(n).driver.map(|(d, _)| &nl.cell(d).kind) {
+                        Some(Kind::Const(true)) => {}
+                        Some(Kind::Const(false)) => zero[index(pin)] = true,
+                        _ => pins.push((pin, n)),
+                    }
+                }
+                (other, _) => bail!("multiplier {name}: unknown port {}", other.name()),
+            }
+        }
+        for (pin, n) in pins {
+            let port = Port::Mult(pin);
+            nl.add_port(c, port);
+            nl.connect(c, port, n);
+        }
+        let mask: String = zero
+            .iter()
+            .rev()
+            .map(|&z| if z { '1' } else { '0' })
+            .collect();
+        nl.cell_mut(c)
+            .params
+            .insert("DATA_INVERT".into(), Value::String(mask));
+    }
+    Ok(())
+}
+
+/// Flips a data pin's bit in a multiplier's `DATA_INVERT` mask.
+fn invert_mult_pin(nl: &mut Netlist, c: CellId, pin: crate::mult::Pin) {
+    let k = match pin {
+        crate::mult::Pin::A(k) => k as usize,
+        crate::mult::Pin::B(k) => crate::mult::MAX_WIDTH + k as usize,
+        _ => unreachable!("data pins only"),
+    };
+    let params = &mut nl.cell_mut(c).params;
+    let mut mask: Vec<char> = params["DATA_INVERT"]
+        .as_str()
+        .expect("pack_mult wrote the mask")
+        .chars()
+        .collect();
+    let i = mask.len() - 1 - k;
+    mask[i] = if mask[i] == '1' { '0' } else { '1' };
+    params.insert(
+        "DATA_INVERT".into(),
+        Value::String(mask.into_iter().collect()),
+    );
+}
+
+/// An unsigned operand needs a 0 on its sign input, which reads 1 undriven:
+/// a LUT with no inputs and an all-zero mask drives it, one for the whole
+/// design, as Quartus' `~GND` cell does (one cell; cyclone2-re's export
+/// names it `~GND` so Quartus keeps it where it is placed).
+fn unsigned_signs(nl: &mut Netlist) {
+    use crate::mult::{Operand, Pin as MPin};
+    let mut gnd = None;
+    for c in nl.cells() {
+        let Kind::Mult(shape, _) = nl.cell(c).kind else {
+            continue;
+        };
+        for op in [Operand::A, Operand::B]
+            .into_iter()
+            .filter(|&op| !shape.signed[op as usize])
+        {
+            let net = *gnd.get_or_insert_with(|| {
+                let cell = nl.create_cell("~GND".to_string(), Kind::Lut { mask: 0 });
+                let net = nl.create_net("~GND".to_string());
+                nl.add_port(cell, Port::Combout);
+                nl.connect(cell, Port::Combout, net);
+                net
+            });
+            let port = Port::Mult(MPin::Sign(op));
+            nl.add_port(c, port);
+            nl.connect(c, port, net);
+        }
+    }
+}
+
 /// Constants have no driver in the fabric: LUT inputs are folded into the
 /// mask, output pins get a constant output setting. Registers that can
 /// never leave their power-up 0 (data, enable or clock stuck, clear stuck
 /// on) are constants too, as quartus_map treats them ("stuck at GND"), and
 /// so are LUTs left with no inputs; both propagate.
+/// A register whose data is its own enable loads a 1 whenever it loads,
+/// so its data becomes that constant (and an LE outputting it, below).
+/// quartus_map folds it so: left as it is, the data would take the sync
+/// load path, which Quartus then drops with its route (found on
+/// examples/negedge-selftest, `if (p[0]) n2 <= p` for bit 0).
+fn load_enable_as_one(nl: &mut Netlist) {
+    for c in nl.cells() {
+        let cell = nl.cell(c);
+        let Kind::Ff(cfg) = cell.kind else { continue };
+        let (Some(d), Some(e)) = (cell.net(Port::Datain), cell.net(Port::Ena)) else {
+            continue;
+        };
+        if d != e || cfg.ena_inv {
+            continue;
+        }
+        let name = format!("{}$ena_data", cell.name);
+        let one = nl.create_cell(name.clone(), Kind::Const(true));
+        nl.add_port(one, Port::Y);
+        let n = nl.create_net(name);
+        nl.connect(one, Port::Y, n);
+        nl.disconnect(c, Port::Datain);
+        nl.connect(c, Port::Datain, n);
+    }
+}
+
 fn pack_constants(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
     let const_driver = |nl: &Netlist, n: NetId| match nl.net(n).driver {
         Some((d, _)) => match nl.cell(d).kind {
@@ -717,12 +906,36 @@ fn pack_lut1(nl: &mut Netlist, stats: &mut Stats) {
                 // source straight from its LAB line. An inverter stays: the
                 // block inverts no data or address pin.
                 (Kind::M4k(_), _) if !inv => nl.reconnect(u, p, input),
+                // And into a multiplier's operands, where an inverter
+                // folds into the pin's inversion bit (quartus_map does the
+                // same, so the design assembles the same).
+                (Kind::Mult(..), _)
+                    if matches!(
+                        p,
+                        Port::Mult(crate::mult::Pin::A(_) | crate::mult::Pin::B(_))
+                    ) =>
+                {
+                    nl.reconnect(u, p, input);
+                    if inv {
+                        let Port::Mult(pin) = p else { unreachable!() };
+                        invert_mult_pin(nl, u, pin);
+                    }
+                }
+                (Kind::Mult(..), _) if !inv => nl.reconnect(u, p, input),
                 // Likewise into the JTAG and serial-flash blocks, which
                 // invert nothing either.
                 (Kind::Hard(_), _) if !inv => nl.reconnect(u, p, input),
-                // A buffer in front of a clock: the clock control takes the
-                // source.
-                (Kind::Ff(_), _) if p == Port::Clk && !inv => nl.reconnect(u, p, input),
+                // A buffer or inverter in front of a clock: the clock
+                // control takes the source, an inversion goes into the
+                // LAB's clock invert bit.
+                (Kind::Ff(_), _) if p == Port::Clk => {
+                    nl.reconnect(u, p, input);
+                    if inv {
+                        if let Kind::Ff(cfg) = &mut nl.cell_mut(u).kind {
+                            cfg.clk_inv = !cfg.clk_inv;
+                        }
+                    }
+                }
                 (Kind::Ff(_), _) if matches!(p, Port::Ena | Port::Sclr) => {
                     nl.reconnect(u, p, input);
                     if let Kind::Ff(cfg) = &mut nl.cell_mut(u).kind {
@@ -839,6 +1052,7 @@ fn pack_clocks(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
     let is_clock = |nl: &Netlist, (u, p): (CellId, Port)| match nl.cell(u).kind {
         Kind::Ff(_) => p == Port::Clk,
         Kind::M4k(_) => matches!(p, Port::M4k(pin) if pin.is_clock()),
+        Kind::Mult(..) => p == Port::Mult(crate::mult::Pin::Clk),
         Kind::Ibuf { .. } | Kind::Obuf { .. } | Kind::Iobuf { .. } => {
             matches!(p, Port::Inclk | Port::Outclk)
         }
@@ -892,6 +1106,9 @@ fn to_json(nl: &Netlist) -> Result<Value> {
                 "LCELL_COMB"
             }
             Kind::Ff(cfg) => {
+                if cfg.clk_inv {
+                    params.insert("CLK_INV".into(), bit(true));
+                }
                 if cfg.ena_inv {
                     params.insert("ENA_INV".into(), bit(true));
                 }
@@ -948,6 +1165,21 @@ fn to_json(nl: &Netlist) -> Result<Value> {
             }
             Kind::ClkCtrl => "CLKCTRL",
             Kind::Hard(b) => b.cell_type(),
+            Kind::Mult(shape, regs) => {
+                use crate::mult::{Operand, Regs};
+                for (k, v) in [
+                    ("A_WIDTH", shape.width(Operand::A)),
+                    ("B_WIDTH", shape.width(Operand::B)),
+                    ("A_SIGNED", usize::from(shape.signed[0])),
+                    ("B_SIGNED", usize::from(shape.signed[1])),
+                ]
+                .into_iter()
+                .chain(Regs::PARAMS.into_iter().zip(regs.flags().map(usize::from)))
+                {
+                    params.insert(k.into(), Value::String(format!("{v:032b}")));
+                }
+                "CY2_MULT"
+            }
             Kind::M4k(shape) => {
                 // As yosys wrote them: a string and a 32-bit binary number.
                 // The rest of the shape's parameters passed through.

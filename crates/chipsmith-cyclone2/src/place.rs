@@ -12,7 +12,8 @@
 //! LE k -> k+1, LE 15 -> LE 0 of the LAB below. A LAB holds 16 LEs and has
 //! to satisfy the rules `lab_ok` checks; pins sit where the pin assignments
 //! say, clock controls are the nearest free one the clock pin reaches. M4K
-//! RAM blocks move between the chip's M4K sites, swapping with each other.
+//! RAM blocks and multipliers move between the chip's sites of their kind,
+//! swapping with each other.
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -25,6 +26,7 @@ use serde_json::Value;
 
 use crate::hard;
 use crate::m4k;
+use crate::mult;
 use crate::pin::{assignment, register_param, PinSettings, Pull, UnusedPins};
 use chipsmith_place::{Bins, Legalizer, Net, Object, Options, Pin, PinOf, Pos, Problem};
 use chipsmith_route::chipdb::{ChipDb, NodeId, Pad, PadIo};
@@ -39,8 +41,8 @@ const LUT_INPUTS: [Port; 4] = [Port::DataA, Port::DataB, Port::DataC, Port::Data
 
 /// Every cell port the packed netlist uses: a closed set, so cells keep
 /// their nets in an array indexed by it rather than a map keyed by name.
-/// M4K pins, of which there are many but only on a few cells, are kept
-/// apart (`Cell::m4k`).
+/// Block pins (M4K, multiplier, hard block), of which there are many but
+/// only on a few cells, are kept apart (`Cell::pins`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Port {
     DataA,
@@ -62,6 +64,7 @@ enum Port {
     Dataout,
     Oe,
     M4k(m4k::Pin),
+    Mult(mult::Pin),
     Hard(hard::Pin),
 }
 
@@ -98,11 +101,12 @@ impl Port {
             Some(i) => Some(Self::FIXED[i]),
             None => m4k::Pin::parse(name)
                 .map(Port::M4k)
+                .or_else(|| mult::Pin::parse(name).map(Port::Mult))
                 .or_else(|| hard::Pin::parse(name).map(Port::Hard)),
         }
     }
 
-    /// Slot in `Cell::ports`; None for an M4K pin.
+    /// Slot in `Cell::ports`; None for a block pin.
     fn index(self) -> Option<usize> {
         Some(match self {
             Port::DataA => 0,
@@ -123,7 +127,7 @@ impl Port {
             Port::Outclk => 15,
             Port::Dataout => 16,
             Port::Oe => 17,
-            Port::M4k(_) | Port::Hard(_) => return None,
+            Port::M4k(_) | Port::Mult(_) | Port::Hard(_) => return None,
         })
     }
 
@@ -132,8 +136,9 @@ impl Port {
             Some(i) => Self::NAMES[i].into(),
             None => match self {
                 Port::M4k(pin) => pin.to_string().into(),
+                Port::Mult(pin) => pin.to_string().into(),
                 Port::Hard(pin) => pin.name().into(),
-                _ => unreachable!("only M4K and hard-block pins have no slot"),
+                _ => unreachable!("only block pins have no slot"),
             },
         }
     }
@@ -151,8 +156,48 @@ enum Kind {
     /// Tri-state output or bidir.
     Iobuf,
     ClkCtrl,
-    M4k,
+    Block(Block),
     Hard(hard::Block),
+}
+
+/// A block that moves between the chip's sites of its kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Block {
+    M4k,
+    Mult,
+}
+
+impl Block {
+    const ALL: [Block; 2] = [Block::M4k, Block::Mult];
+
+    /// The bel's name and type in its tile.
+    fn bel(self) -> &'static str {
+        match self {
+            Block::M4k => "M4K",
+            Block::Mult => "MULT",
+        }
+    }
+
+    fn cell_type(self) -> &'static str {
+        match self {
+            Block::M4k => "CY2_M4K",
+            Block::Mult => "CY2_MULT",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Block::M4k => "M4K blocks",
+            Block::Mult => "multipliers",
+        }
+    }
+
+    fn has_pin(self, port: Port) -> bool {
+        matches!(
+            (self, port),
+            (Block::M4k, Port::M4k(_)) | (Block::Mult, Port::Mult(_))
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -160,12 +205,13 @@ struct Cell {
     name: String,
     kind: Kind,
     ports: [Option<NetId>; Port::FIXED.len()],
-    /// An M4K's connected pins.
-    m4k: Vec<(m4k::Pin, NetId)>,
-    /// A hard block's connected pins.
-    hard: Vec<(hard::Pin, NetId)>,
+    /// A block's or hard block's connected pins.
+    pins: Vec<(Port, NetId)>,
+    clk_inv: bool,
     ena_inv: bool,
     sclr_inv: bool,
+    /// A multiplier's A_REG, B_REG, P_REG.
+    mult_regs: [bool; 3],
     /// Pin buffers: the top-level port they serve (`LEDR[0]`).
     port: Option<String>,
     /// Pin buffers: which of their I/O-cell registers they use (input,
@@ -177,9 +223,7 @@ impl Cell {
     fn net(&self, port: Port) -> Option<NetId> {
         match (port.index(), port) {
             (Some(i), _) => self.ports[i],
-            (None, Port::M4k(pin)) => self.m4k.iter().find(|(p, _)| *p == pin).map(|&(_, n)| n),
-            (None, Port::Hard(pin)) => self.hard.iter().find(|(p, _)| *p == pin).map(|&(_, n)| n),
-            (None, _) => None,
+            (None, _) => self.pins.iter().find(|(p, _)| *p == port).map(|&(_, n)| n),
         }
     }
 
@@ -187,8 +231,7 @@ impl Cell {
         Port::FIXED
             .into_iter()
             .filter_map(|p| Some((p, self.net(p)?)))
-            .chain(self.m4k.iter().map(|&(pin, n)| (Port::M4k(pin), n)))
-            .chain(self.hard.iter().map(|&(pin, n)| (Port::Hard(pin), n)))
+            .chain(self.pins.iter().copied())
     }
 }
 
@@ -230,7 +273,8 @@ enum Refusal {
 /// A register's LAB-wide controls.
 #[derive(Debug, Clone, Copy)]
 struct FfCtl {
-    clk: Option<NetId>,
+    /// The clock net and whether it is inverted (the falling edge).
+    clk: Ctl,
     ena: Ctl,
     sclr: Ctl,
     aclr: Option<NetId>,
@@ -262,10 +306,10 @@ struct Design {
     le_of: Vec<Option<usize>>,
     chains: Vec<Vec<usize>>,
     chain_of: Vec<Option<usize>>,
-    /// M4K cells, and each cell's index among them.
-    rams: Vec<usize>,
-    ram_of: Vec<Option<usize>>,
-    nets_of_ram: Vec<Vec<usize>>,
+    /// Block cells (M4Ks, multipliers), and each cell's index among them.
+    blocks: Vec<usize>,
+    block_of: Vec<Option<usize>>,
+    nets_of_block: Vec<Vec<usize>>,
     /// Nets that count for wirelength: their cells. Clock nets (driven by
     /// a clock control) don't; they ride the global network.
     nets: Vec<Vec<usize>>,
@@ -310,15 +354,16 @@ fn read_design(json: &Value) -> Result<Design> {
             "CY2_OBUF" => Kind::Obuf,
             "CY2_IOBUF" => Kind::Iobuf,
             "CLKCTRL" => Kind::ClkCtrl,
-            "CY2_M4K" => Kind::M4k,
-            other => match hard::Block::from_cell_type(other) {
-                Some(b) => Kind::Hard(b),
-                None => bail!("{name}: cell type {other} has nowhere to go"),
+            other => match Block::ALL.into_iter().find(|b| b.cell_type() == other) {
+                Some(b) => Kind::Block(b),
+                None => match hard::Block::from_cell_type(other) {
+                    Some(b) => Kind::Hard(b),
+                    None => bail!("{name}: cell type {other} has nowhere to go"),
+                },
             },
         };
         let mut ports = [None; Port::FIXED.len()];
-        let mut m4k = Vec::new();
-        let mut hard = Vec::new();
+        let mut pins = Vec::new();
         for (port, bits) in c["connections"].as_object().context("connections")? {
             if let Some(net) = bits
                 .as_array()
@@ -338,9 +383,11 @@ fn read_design(json: &Value) -> Result<Design> {
                 let id = *net_ids.entry(net).or_insert(next);
                 match (p.index(), p) {
                     (Some(i), _) => ports[i] = Some(id),
-                    (None, Port::M4k(pin)) if kind == Kind::M4k => m4k.push((pin, id)),
+                    (None, _) if matches!(kind, Kind::Block(b) if b.has_pin(p)) => {
+                        pins.push((p, id))
+                    }
                     (None, Port::Hard(pin)) if matches!(kind, Kind::Hard(b) if b.pins().contains(&pin)) => {
-                        hard.push((pin, id))
+                        pins.push((p, id))
                     }
                     _ => bail!("{name}: port {port} on a {kind:?}"),
                 }
@@ -355,10 +402,11 @@ fn read_design(json: &Value) -> Result<Design> {
             name: name.clone(),
             kind,
             ports,
-            m4k,
-            hard,
+            pins,
+            clk_inv: flag("CLK_INV"),
             ena_inv: flag("ENA_INV"),
             sclr_inv: flag("SCLR_INV"),
+            mult_regs: mult::Regs::PARAMS.map(flag),
             port: c["attributes"]["PORT"].as_str().map(str::to_string),
             io_regs: [
                 register_param::INPUT,
@@ -382,6 +430,7 @@ fn read_design(json: &Value) -> Result<Design> {
                     | (Kind::Ibuf | Kind::Iobuf, Port::Combout | Port::Regout)
                     | (Kind::ClkCtrl, Port::Outclk)
             ) || matches!(port, Port::M4k(pin) if pin.is_output())
+                || matches!(port, Port::Mult(pin) if pin.is_output())
                 || matches!(port, Port::Hard(pin) if pin.is_output());
             if output {
                 ensure!(
@@ -499,23 +548,23 @@ fn read_design(json: &Value) -> Result<Design> {
         net_index[*id as usize] = Some(i);
     }
     let nets: Vec<Vec<usize>> = keyed.into_iter().map(|(v, _)| v).collect();
-    let rams: Vec<usize> = (0..cells.len())
-        .filter(|&i| cells[i].kind == Kind::M4k)
+    let blocks: Vec<usize> = (0..cells.len())
+        .filter(|&i| matches!(cells[i].kind, Kind::Block(_)))
         .collect();
-    let mut ram_of = vec![None; cells.len()];
-    for (r, &c) in rams.iter().enumerate() {
-        ram_of[c] = Some(r);
+    let mut block_of = vec![None; cells.len()];
+    for (r, &c) in blocks.iter().enumerate() {
+        block_of[c] = Some(r);
     }
     let mut nets_of_le: Vec<Vec<(usize, u8)>> = vec![Vec::new(); les.len()];
-    let mut nets_of_ram = vec![Vec::new(); rams.len()];
+    let mut nets_of_block = vec![Vec::new(); blocks.len()];
     for (n, members) in nets.iter().enumerate() {
         for &c in members {
-            match (le_of[c], ram_of[c]) {
+            match (le_of[c], block_of[c]) {
                 (Some(le), _) => match nets_of_le[le].last_mut() {
                     Some((last, count)) if *last == n => *count += 1,
                     _ => nets_of_le[le].push((n, 1)),
                 },
-                (_, Some(r)) => nets_of_ram[r].push(n),
+                (_, Some(r)) => nets_of_block[r].push(n),
                 _ => {}
             }
         }
@@ -529,7 +578,7 @@ fn read_design(json: &Value) -> Result<Design> {
         let ty = match c.kind {
             Kind::Lut => "LCELL_COMB",
             Kind::Ff => "LCELL_FF",
-            Kind::M4k => "CY2_M4K",
+            Kind::Block(b) => b.cell_type(),
             Kind::Ibuf | Kind::Obuf | Kind::Iobuf => {
                 let [i, o, e] = c.io_regs;
                 timing.add_ioe_registers(&c.name, i, o, e);
@@ -545,6 +594,10 @@ fn read_design(json: &Value) -> Result<Design> {
         let ports: Vec<Cow<str>> = c.connections().map(|(p, _)| p.name()).collect();
         let ports: Vec<&str> = ports.iter().map(|p| p.as_ref()).collect();
         timing.add_cell(&c.name, ty, &ports, le as u8);
+        if c.kind == Kind::Block(Block::Mult) {
+            let [a, b, p] = c.mult_regs;
+            timing.add_mult_registers(&c.name, a, b, p);
+        }
     }
     let mut conns = Vec::new();
     for (net, loads) in users.iter().enumerate() {
@@ -589,7 +642,7 @@ fn read_design(json: &Value) -> Result<Design> {
                     add(c.net(p));
                 }
                 sig.ff = Some(FfCtl {
-                    clk: c.net(Port::Clk),
+                    clk: (c.net(Port::Clk), c.clk_inv),
                     ena: (c.net(Port::Ena), c.ena_inv),
                     sclr: (c.net(Port::Sclr), c.sclr_inv),
                     aclr: c.net(Port::Aclr),
@@ -612,9 +665,9 @@ fn read_design(json: &Value) -> Result<Design> {
         le_of,
         chains,
         chain_of,
-        rams,
-        ram_of,
-        nets_of_ram,
+        blocks,
+        block_of,
+        nets_of_block,
         nets,
         nets_of_le,
         driver,
@@ -624,7 +677,17 @@ fn read_design(json: &Value) -> Result<Design> {
     })
 }
 
-/// The LABs and M4K sites of the chip.
+impl Design {
+    /// What block `r` is (an M4K, a multiplier).
+    fn block_kind(&self, r: usize) -> Block {
+        match self.cells[self.blocks[r]].kind {
+            Kind::Block(b) => b,
+            _ => unreachable!("blocks are block cells"),
+        }
+    }
+}
+
+/// The LABs and block sites of the chip.
 struct Grid {
     /// LAB index -> its tile.
     tiles: Vec<u32>,
@@ -633,20 +696,18 @@ struct Grid {
     at: Vec<Option<usize>>,
     width: i32,
     height: i32,
-    /// M4K site index -> its tile, and its position.
-    ram_tiles: Vec<u32>,
-    ram_xy: Vec<Xy>,
+    /// Block site index -> its tile, its position and what it holds.
+    site_tiles: Vec<u32>,
+    site_xy: Vec<Xy>,
+    site_block: Vec<Block>,
 }
-
-/// The M4K bel's name in its tile.
-const M4K_BEL: &str = "M4K";
 
 impl Grid {
     fn new(db: &ChipDb) -> Self {
         let (width, height) = (db.width as i32, db.height as i32);
         let (mut tiles, mut xy) = (Vec::new(), Vec::new());
         let mut at = vec![None; (width * height) as usize];
-        let (mut ram_tiles, mut ram_xy) = (Vec::new(), Vec::new());
+        let (mut site_tiles, mut site_xy, mut site_block) = (Vec::new(), Vec::new(), Vec::new());
         for tile in 0..db.width * db.height {
             let (x, y) = db.tile_xy(tile);
             let bels = &db.tile_type(tile).bels;
@@ -654,9 +715,13 @@ impl Grid {
                 at[(y as i32 * width + x as i32) as usize] = Some(tiles.len());
                 xy.push((x as i32, y as i32));
                 tiles.push(tile);
-            } else if bels.get(M4K_BEL).is_some_and(|b| b.ty == "M4K") {
-                ram_xy.push((x as i32, y as i32));
-                ram_tiles.push(tile);
+            } else if let Some(b) = Block::ALL
+                .into_iter()
+                .find(|b| bels.get(b.bel()).is_some_and(|bel| bel.ty == b.bel()))
+            {
+                site_xy.push((x as i32, y as i32));
+                site_tiles.push(tile);
+                site_block.push(b);
             }
         }
         Grid {
@@ -665,8 +730,9 @@ impl Grid {
             at,
             width,
             height,
-            ram_tiles,
-            ram_xy,
+            site_tiles,
+            site_xy,
+            site_block,
         }
     }
 
@@ -793,7 +859,7 @@ fn fixed_cells(
         let drives = match c.kind {
             Kind::Ibuf => false,
             Kind::Obuf | Kind::Iobuf => true,
-            Kind::Lut | Kind::Ff | Kind::ClkCtrl | Kind::M4k => continue,
+            Kind::Lut | Kind::Ff | Kind::ClkCtrl | Kind::Block(_) => continue,
             // One of each per device, at a fixed bel; PLLs come below.
             Kind::Hard(b) => {
                 let Some(((x, y), bel)) = b.bel() else {
@@ -1016,12 +1082,12 @@ struct State<'a> {
     slots: Vec<[Option<usize>; LES_PER_LAB]>,
     /// (LAB, LE index) of each LE.
     pos: Vec<(usize, usize)>,
-    /// Position of every cell: LEs and M4Ks as placed, pins and clock
+    /// Position of every cell: LEs and blocks as placed, pins and clock
     /// controls where they are fixed.
     xy: Vec<Xy>,
-    /// M4K site of each M4K, and the M4K at each site.
-    ram_site: Vec<usize>,
-    site_ram: Vec<Option<usize>>,
+    /// Site of each block, and the block at each site.
+    block_site: Vec<usize>,
+    site_of: Vec<Option<usize>>,
     /// Each net's weight: 1, plus more the more timing-critical it is.
     weight: Vec<f32>,
     /// Each net's bounding box and weighted wirelength.
@@ -1079,13 +1145,13 @@ impl<'a> State<'a> {
                     }
                 }
             }
-            Undo::Rams(moved) => {
+            Undo::Blocks(moved) => {
                 for &(r, old_site) in moved {
                     let (old, new) = (
-                        self.grid.ram_xy[old_site],
-                        self.grid.ram_xy[self.ram_site[r]],
+                        self.grid.site_xy[old_site],
+                        self.grid.site_xy[self.block_site[r]],
                     );
-                    for &n in &d.nets_of_ram[r] {
+                    for &n in &d.nets_of_block[r] {
                         self.net_moved(n, old, new, g);
                     }
                 }
@@ -1189,7 +1255,7 @@ impl<'a> State<'a> {
     fn lab_check(&self, lab: usize) -> Result<(), Refusal> {
         let d = self.design;
         // A third distinct domain already fails, so three slots suffice.
-        let mut domains: [(Option<NetId>, Ctl); 3] = [(None, (None, false)); 3];
+        let mut domains: [((Option<NetId>, bool), Ctl); 3] = [((None, false), (None, false)); 3];
         let mut n_domains = 0;
         let (mut ena, mut aclr, mut sclr): (Option<Ctl>, Option<NetId>, Option<Ctl>) =
             (None, None, None);
@@ -1223,14 +1289,18 @@ impl<'a> State<'a> {
                 return Err(Refusal::SyncKind);
             }
             sync_kind |= ff.sync_kind;
+            // The clock's inversion is part of the domain (each LAB clock
+            // has its own invert bit) and of the clock: one clock net and
+            // one edge per LAB, though a LAB has two LAB clocks. Which of
+            // them Quartus gives each of two clocks isn't predictable from
+            // what we know (cyclone2-re README, "LAB clocks": no rule fits
+            // all 15 measured LABs; for one net on both edges, chipsmith
+            // examples/negedge-selftest's ten LABs fit no rule either), and
+            // the bitstream has to say, so a LAB mixing clocks or edges
+            // wouldn't assemble the same in Quartus. Remove once that
+            // choice is modelled; until then two domains in a LAB share a
+            // clock and an edge and differ in their enable.
             let domain = (ff.clk, ff.ena);
-            // One clock net per LAB, though a LAB has two LAB clocks. Which
-            // of them Quartus gives each of two clocks isn't predictable
-            // from what we know (cyclone2-re README, "LAB clocks": no rule
-            // fits all 15 measured LABs), and the bitstream has to say, so
-            // a LAB mixing clocks wouldn't assemble the same in Quartus.
-            // Remove once that choice is modelled; until then two domains
-            // in a LAB share a clock and differ in their enable.
             if domains[..n_domains].iter().any(|d| d.0 != domain.0) {
                 return Err(Refusal::Clock);
             }
@@ -1295,8 +1365,8 @@ impl Rng {
 enum Undo {
     /// Every LE that moved, and the LAB and slot it was in.
     Les(Vec<(usize, usize, usize)>),
-    /// Every M4K that moved, and the site it was on.
-    Rams(Vec<(usize, usize)>),
+    /// Every block that moved, and the site it was on.
+    Blocks(Vec<(usize, usize)>),
 }
 
 impl<'a> State<'a> {
@@ -1309,8 +1379,8 @@ impl<'a> State<'a> {
             slots: vec![[None; LES_PER_LAB]; grid.tiles.len()],
             pos: vec![(usize::MAX, 0); design.les.len()],
             xy: fixed_xy.iter().map(|p| p.unwrap_or((0, 0))).collect(),
-            ram_site: vec![usize::MAX; design.rams.len()],
-            site_ram: vec![None; grid.ram_tiles.len()],
+            block_site: vec![usize::MAX; design.blocks.len()],
+            site_of: vec![None; grid.site_tiles.len()],
             weight: vec![1.0; design.nets.len()],
             bbox: vec![Bbox::default(); design.nets.len()],
             net_cost: vec![0.0; design.nets.len()],
@@ -1325,8 +1395,8 @@ impl<'a> State<'a> {
     fn clear(&mut self) {
         self.slots.iter_mut().for_each(|s| *s = [None; LES_PER_LAB]);
         self.pos.iter_mut().for_each(|p| *p = (usize::MAX, 0));
-        self.ram_site.iter_mut().for_each(|s| *s = usize::MAX);
-        self.site_ram.iter_mut().for_each(|s| *s = None);
+        self.block_site.iter_mut().for_each(|s| *s = usize::MAX);
+        self.site_of.iter_mut().for_each(|s| *s = None);
     }
 
     /// Every box and cost from scratch, after a placement was built
@@ -1395,27 +1465,28 @@ impl<'a> State<'a> {
         None
     }
 
-    /// Move M4K `r` to `site`, swapping with the one there.
-    fn try_move_ram(&mut self, r: usize, site: usize) -> Option<Undo> {
-        let from = self.ram_site[r];
+    /// Move block `r` to `site` (one of its kind), swapping with the one
+    /// there.
+    fn try_move_block(&mut self, r: usize, site: usize) -> Option<Undo> {
+        let from = self.block_site[r];
         if from == site {
             return None;
         }
         let mut moved = vec![(r, from)];
-        if let Some(o) = self.site_ram[site] {
+        if let Some(o) = self.site_of[site] {
             moved.push((o, site));
-            self.put_ram(o, from);
+            self.put_block(o, from);
         } else {
-            self.site_ram[from] = None;
+            self.site_of[from] = None;
         }
-        self.put_ram(r, site);
-        Some(Undo::Rams(moved))
+        self.put_block(r, site);
+        Some(Undo::Blocks(moved))
     }
 
-    fn put_ram(&mut self, r: usize, site: usize) {
-        self.ram_site[r] = site;
-        self.site_ram[site] = Some(r);
-        self.xy[self.design.rams[r]] = self.grid.ram_xy[site];
+    fn put_block(&mut self, r: usize, site: usize) {
+        self.block_site[r] = site;
+        self.site_of[site] = Some(r);
+        self.xy[self.design.blocks[r]] = self.grid.site_xy[site];
     }
 
     fn undo(&mut self, undo: &Undo) {
@@ -1431,15 +1502,15 @@ impl<'a> State<'a> {
                     self.put(le, l, k);
                 }
             }
-            Undo::Rams(moved) => {
+            Undo::Blocks(moved) => {
                 for &(r, _) in moved {
-                    let site = self.ram_site[r];
-                    if self.site_ram[site] == Some(r) {
-                        self.site_ram[site] = None;
+                    let site = self.block_site[r];
+                    if self.site_of[site] == Some(r) {
+                        self.site_of[site] = None;
                     }
                 }
                 for &(r, site) in moved {
-                    self.put_ram(r, site);
+                    self.put_block(r, site);
                 }
             }
         }
@@ -1452,7 +1523,7 @@ impl<'a> State<'a> {
 enum Obj {
     Cluster(usize),
     Chain(usize),
-    Ram(usize),
+    Block(usize),
 }
 
 /// Gather the LEs that are not in chains into LAB-sized clusters, as
@@ -1717,9 +1788,9 @@ fn analytic_problem(
             obj_of_le[x] = Some((o, -((k / LES_PER_LAB) as f32)));
         }
     }
-    let ram_obj: Vec<u32> = (0..d.rams.len())
+    let block_obj: Vec<u32> = (0..d.blocks.len())
         .map(|r| {
-            objects.push(Obj::Ram(r));
+            objects.push(Obj::Block(r));
             objects.len() as u32 - 1
         })
         .collect();
@@ -1739,12 +1810,12 @@ fn analytic_problem(
             // net are one point.
             let mut pins: Vec<Pin> = Vec::new();
             for &c in members {
-                let (of, dy) = match (d.le_of[c], d.ram_of[c]) {
+                let (of, dy) = match (d.le_of[c], d.block_of[c]) {
                     (Some(le), _) => {
                         let (o, dy) = obj_of_le[le].expect("every LE has an object");
                         (PinOf::Object(o), dy)
                     }
-                    (_, Some(r)) => (PinOf::Object(ram_obj[r]), 0.0),
+                    (_, Some(r)) => (PinOf::Object(block_obj[r]), 0.0),
                     _ => (
                         PinOf::Fixed(fixed_index[c].expect("a cell is an LE, an M4K or fixed")),
                         0.0,
@@ -1781,7 +1852,7 @@ fn analytic_problem(
                     area: d.chains[c].len() as f32 / LES_PER_LAB as f32,
                     height: d.chains[c].len().div_ceil(LES_PER_LAB) as u32,
                 },
-                Obj::Ram(_) => Object {
+                Obj::Block(_) => Object {
                     class: 1,
                     area: 1.0,
                     height: 1,
@@ -1916,20 +1987,21 @@ impl<'s, 'a> LabLegalizer<'s, 'a> {
         false
     }
 
-    fn place_ram(&mut self, r: usize, (tx, ty): Pos) -> bool {
+    fn place_block(&mut self, r: usize, (tx, ty): Pos) -> bool {
         let s = &mut *self.state;
-        let site = (0..s.grid.ram_xy.len())
-            .filter(|&i| s.site_ram[i].is_none())
+        let kind = s.design.block_kind(r);
+        let site = (0..s.grid.site_xy.len())
+            .filter(|&i| s.grid.site_block[i] == kind && s.site_of[i].is_none())
             .min_by(|&a, &b| {
                 let dist = |i: usize| {
-                    let (x, y) = unit(s.grid.ram_xy[i]);
+                    let (x, y) = unit(s.grid.site_xy[i]);
                     (x - tx).abs() + (y - ty).abs()
                 };
                 dist(a).total_cmp(&dist(b)).then(a.cmp(&b))
             });
         match site {
             Some(site) => {
-                s.put_ram(r, site);
+                s.put_block(r, site);
                 true
             }
             None => false,
@@ -1949,7 +2021,7 @@ impl Legalizer for LabLegalizer<'_, '_> {
             match self.an.objects[o] {
                 Obj::Chain(c) => (0, -(d.chains[c].len() as i64), o),
                 Obj::Cluster(i) => (1, -(self.an.clusters[i].len() as i64), o),
-                Obj::Ram(_) => (2, 0, o),
+                Obj::Block(_) => (2, 0, o),
             }
         };
         order.sort_by_key(|&o| key(o));
@@ -1963,7 +2035,7 @@ impl Legalizer for LabLegalizer<'_, '_> {
             let ok = match self.an.objects[o] {
                 Obj::Cluster(i) => self.place_cluster(i, target),
                 Obj::Chain(c) => self.place_chain(c, target),
-                Obj::Ram(r) => self.place_ram(r, target),
+                Obj::Block(r) => self.place_block(r, target),
             };
             if !ok {
                 self.failed = true;
@@ -1979,7 +2051,7 @@ impl Legalizer for LabLegalizer<'_, '_> {
             legal[o] = match self.an.objects[o] {
                 Obj::Cluster(i) => unit(s.grid.xy[s.pos[self.an.clusters[i][0]].0]),
                 Obj::Chain(c) => unit(s.grid.xy[s.pos[d.chains[c][0]].0]),
-                Obj::Ram(r) => unit(s.grid.ram_xy[s.ram_site[r]]),
+                Obj::Block(r) => unit(s.grid.site_xy[s.block_site[r]]),
             };
             let dist = (legal[o].0 - target.0).abs() + (legal[o].1 - target.1).abs();
             displaced = (displaced.0 + dist, displaced.1.max(dist), displaced.2 + (dist > 2.0) as usize);
@@ -2058,7 +2130,7 @@ fn anneal(s: &mut State, rng: &mut Rng, sched: Schedule) -> u64 {
     let movable: Vec<usize> = (0..d.les.len())
         .filter(|&le| d.chain_of[le].is_none_or(|c| d.chains[c][0] == le))
         .collect();
-    if movable.is_empty() && d.rams.is_empty() {
+    if movable.is_empty() && d.blocks.is_empty() {
         return 0;
     }
     let max_r = s
@@ -2069,7 +2141,7 @@ fn anneal(s: &mut State, rng: &mut Rng, sched: Schedule) -> u64 {
         .max()
         .unwrap_or(1) as f64;
     let mut r = sched.range.min(max_r);
-    let objects = movable.len() + d.rams.len();
+    let objects = movable.len() + d.blocks.len();
     let moves_per_t = (sched.moves * (objects as f64).powf(4.0 / 3.0)).max(200.0) as usize;
     let mut total_moves = 0u64;
 
@@ -2088,18 +2160,22 @@ fn anneal(s: &mut State, rng: &mut Rng, sched: Schedule) -> u64 {
             };
             s.try_move(le, lab, k)?
         } else {
-            // M4K columns are far apart: pick among the sites in range
-            // rather than a point that is almost never one.
-            let ram = pick - movable.len();
-            let (x, y) = s.grid.ram_xy[s.ram_site[ram]];
-            let near: Vec<usize> = (0..s.grid.ram_xy.len())
+            // Block columns are far apart: pick among the sites of the
+            // block's kind in range rather than a point that is almost never
+            // one.
+            let block = pick - movable.len();
+            let here = s.block_site[block];
+            let (x, y) = s.grid.site_xy[here];
+            let near: Vec<usize> = (0..s.grid.site_xy.len())
                 .filter(|&i| {
-                    let (sx, sy) = s.grid.ram_xy[i];
-                    (sx - x).abs() / 2 <= ri && (sy - y).abs() <= ri
+                    let (sx, sy) = s.grid.site_xy[i];
+                    s.grid.site_block[i] == s.grid.site_block[here]
+                        && (sx - x).abs() / 2 <= ri
+                        && (sy - y).abs() <= ri
                 })
                 .collect();
             let site = near[rng.below(near.len())];
-            s.try_move_ram(ram, site)?
+            s.try_move_block(block, site)?
         };
         let delta = s.apply_cost(&undo);
         // An infinite temperature only probes: the move is measured and
@@ -2290,6 +2366,15 @@ pub fn place_file(
             started.elapsed().as_secs_f64()
         );
     }
+    for b in Block::ALL {
+        let used = (0..design.blocks.len()).filter(|&r| design.block_kind(r) == b).count();
+        let sites = grid.site_block.iter().filter(|&&s| s == b).count();
+        ensure!(
+            used <= sites,
+            "the design has {used} {}, the chip {sites}",
+            b.name()
+        );
+    }
     // More clusters than LABs can still fit: the legaliser puts small
     // clusters into the free slots of carry chains' last LABs and of
     // other small clusters when `lab_ok` accepts the union. Only more LEs
@@ -2367,13 +2452,19 @@ pub fn place_file(
     }
     let cells = top["cells"].as_object_mut().context("no cells")?;
     for (i, c) in design.cells.iter().enumerate() {
-        let (tile, bel) = match (design.le_of[i], design.ram_of[i]) {
+        let (tile, bel) = match (design.le_of[i], design.block_of[i]) {
             (Some(le), _) => {
                 let (lab, k) = state.pos[le];
                 let half = if c.kind == Kind::Lut { "LUT" } else { "FF" };
                 (grid.tiles[lab], format!("LE{k}.{half}"))
             }
-            (_, Some(r)) => (grid.ram_tiles[state.ram_site[r]], M4K_BEL.to_string()),
+            (_, Some(r)) => {
+                let site = state.block_site[r];
+                (
+                    grid.site_tiles[site],
+                    grid.site_block[site].bel().to_string(),
+                )
+            }
             _ => fixed[&i].clone(),
         };
         let (x, y) = db.tile_xy(tile);

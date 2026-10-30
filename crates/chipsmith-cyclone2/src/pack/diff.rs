@@ -13,7 +13,7 @@ use serde_json::Value;
 
 /// Flags written only when set by one side and as `0` by the other mean
 /// the same.
-const FLAGS: [&str; 4] = ["ENA_INV", "SCLR_INV", "DATA_INVERT", "OE_INVERT"];
+const FLAGS: [&str; 5] = ["CLK_INV", "ENA_INV", "SCLR_INV", "DATA_INVERT", "OE_INVERT"];
 
 #[derive(Debug, PartialEq, Eq)]
 struct Cell {

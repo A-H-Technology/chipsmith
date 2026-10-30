@@ -229,7 +229,10 @@ fn kind_of(ty: &str, params: &BTreeMap<String, Value>, name: &str) -> Result<Kin
             ensure!(mask <= 0xFFFF, "{name}: LUT_MASK is wider than 16 bits");
             Kind::Lut { mask: mask as u16 }
         }
-        "LCELL_FF" => Kind::Ff(FfConfig::default()),
+        "LCELL_FF" => Kind::Ff(FfConfig {
+            clk_inv: params.get("CLK_INV").and_then(int).unwrap_or(0) != 0,
+            ..FfConfig::default()
+        }),
         "CY2_IBUF" => Kind::Ibuf {
             port: None,
             reg: register(register_param::INPUT)?,
@@ -255,6 +258,29 @@ fn kind_of(ty: &str, params: &BTreeMap<String, Value>, name: &str) -> Result<Kin
             );
             Kind::M4k(shape.with_context(|| format!("M4K {name}"))?)
         }
+        "CY2_MULT" => {
+            let get = |k: &str| {
+                params
+                    .get(k)
+                    .and_then(int)
+                    .with_context(|| format!("multiplier {name}: {k} missing"))
+            };
+            let shape = crate::mult::Shape::new(
+                get("A_WIDTH")? as usize,
+                get("B_WIDTH")? as usize,
+                [get("A_SIGNED")? != 0, get("B_SIGNED")? != 0],
+            );
+            // Registers are optional: an instantiated CY2_MULT may leave
+            // them out.
+            let mut flags = [false; 3];
+            for (f, k) in flags.iter_mut().zip(crate::mult::Regs::PARAMS) {
+                *f = params.get(k).and_then(int).unwrap_or(0) != 0;
+            }
+            Kind::Mult(
+                shape.with_context(|| format!("multiplier {name}"))?,
+                crate::mult::Regs::from_flags(flags),
+            )
+        }
         other => match crate::hard::Block::from_cell_type(other) {
             Some(b) => Kind::Hard(b),
             None => bail!("{name}: cell type {other} is not a Cyclone II cell the packer knows"),
@@ -263,13 +289,21 @@ fn kind_of(ty: &str, params: &BTreeMap<String, Value>, name: &str) -> Result<Kin
 }
 
 /// The parameters `Kind` holds; the rest pass through.
-const TYPED_PARAMS: [&str; 6] = [
+const TYPED_PARAMS: [&str; 7] = [
+    "CLK_INV",
     "LUT_MASK",
     "MODE",
     "WIDTH",
     register_param::INPUT,
     register_param::OUTPUT,
     register_param::OE,
+];
+
+/// A multiplier's parameters, all in its `Kind`. Only a multiplier's: an
+/// M4K's `B_WIDTH` passes through (its `Kind` writes back only `MODE` and
+/// `WIDTH`).
+const MULT_PARAMS: [&str; 7] = [
+    "A_WIDTH", "B_WIDTH", "A_SIGNED", "B_SIGNED", "A_REG", "B_REG", "P_REG",
 ];
 
 pub fn import(json: &Value) -> Result<Netlist> {
@@ -389,7 +423,10 @@ pub fn import(json: &Value) -> Result<Netlist> {
         for k in attrs.keys().chain(params.keys()) {
             fe.nl.ids.intern(k);
         }
-        params.retain(|k, _| !TYPED_PARAMS.contains(&k.as_str()));
+        let mult = ty == "CY2_MULT";
+        params.retain(|k, _| {
+            !TYPED_PARAMS.contains(&k.as_str()) && !(mult && MULT_PARAMS.contains(&k.as_str()))
+        });
         let cell = fe.nl.cell_mut(c);
         cell.attrs = attrs;
         cell.params = params;

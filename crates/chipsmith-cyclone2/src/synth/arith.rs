@@ -1,7 +1,8 @@
 //! `$alu` onto the LE's arithmetic mode, as cyclone2-re's `arith_map.v`:
 //! each LE adds one bit (DATAA = A, DATAB = B, CIN = carry in); the upper
 //! half of its mask (DATAD tied 1) is the sum, the lower half (what COUT
-//! always uses, DATAD = 0) the carry. A constant carry-in folds into bit 0,
+//! always uses, DATAD = 0) the carry. A constant carry-in folds into the
+//! chain's lowest bit (low bits whose carry out it forces get no LE),
 //! whose mask then ignores C, so the chain head's hardware carry-in doesn't
 //! matter; a signal carry-in gets one extra LE in front. The carry out of
 //! the top bit leaves the chain through one extra LE (COMBOUT = CIN); the
@@ -101,6 +102,22 @@ fn chain(g: &mut Gates, subst: &mut Subst, alu: &Alu) {
     };
     let ci = const_bit(alu.ci);
 
+    // Low bits whose carry out is forced: the carry into them is a constant
+    // and one operand's bit (as the adder sees it) equals it, so the carry
+    // passes on unchanged whatever the other bit is (a compare against a
+    // constant with low zeros, `step <= 64`). They are no chain cells, just
+    // their sums, and the chain starts above them with that constant carry.
+    // quartus_map sweeps such cells out of a VQM carry chain, so keeping
+    // them made the design's RBF differ from Quartus' (mult-selftest).
+    let mut lo = 0;
+    if let (Some(inv), Some(cv)) = (bi, ci) {
+        while lo < w
+            && (const_bit(a[lo]) == Some(cv) || const_bit(b[lo]).map(|v| v ^ inv) == Some(cv))
+        {
+            lo += 1;
+        }
+    }
+
     // The carry into each bit, and out of the top one.
     let mut carry: SigSpec = Vec::with_capacity(w + 1);
     if ci.is_none() {
@@ -119,11 +136,24 @@ fn chain(g: &mut Gates, subst: &mut Subst, alu: &Alu) {
     } else {
         carry.push(SigBit::ONE);
     }
-    let y: SigSpec = (0..w).map(|_| SigBit::Net(g.m.new_net())).collect();
-    for i in 0..w {
+    let mut y: SigSpec = Vec::with_capacity(w);
+    for i in 0..lo {
+        let cv = SigBit::Const(if ci == Some(true) {
+            State::One
+        } else {
+            State::Zero
+        });
+        let bx = if invert_b { g.not(b[i]) } else { bb[i] };
+        let s = g.xor(a[i], bx);
+        y.push(g.xor(s, cv));
+        carry.push(cv);
+    }
+    for i in lo..w {
+        let yi = SigBit::Net(g.m.new_net());
+        y.push(yi);
         let next = SigBit::Net(g.m.new_net());
         let (carry_in, cin) = match ci {
-            Some(v) if i == 0 => (CarryIn::Const(v), SigBit::ONE),
+            Some(v) if i == lo => (CarryIn::Const(v), SigBit::ONE),
             _ => (CarryIn::Chain, carry[i]),
         };
         g.add(
@@ -131,24 +161,29 @@ fn chain(g: &mut Gates, subst: &mut Subst, alu: &Alu) {
                 mask: mask(carry_in, invert_b),
                 data: [a[i], bb[i], SigBit::ONE, SigBit::ONE],
                 cin,
-                combout: Some(y[i]),
+                combout: Some(yi),
                 cout: Some(next),
             }
             .cell(),
         );
         carry.push(next);
     }
-    let top = SigBit::Net(g.m.new_net());
-    g.add(
-        Comb {
-            mask: 0xF000,
-            data: [SigBit::ONE; 4],
-            cin: carry[w],
-            combout: Some(top),
-            cout: None,
-        }
-        .cell(),
-    );
+    let top = if lo == w {
+        carry[w]
+    } else {
+        let top = SigBit::Net(g.m.new_net());
+        g.add(
+            Comb {
+                mask: 0xF000,
+                data: [SigBit::ONE; 4],
+                cin: carry[w],
+                combout: Some(top),
+                cout: None,
+            }
+            .cell(),
+        );
+        top
+    };
 
     // X = A ^ B as the adder sees it; CO from the sums.
     let x: SigSpec = (0..w)
@@ -157,7 +192,10 @@ fn chain(g: &mut Gates, subst: &mut Subst, alu: &Alu) {
             g.xor(a[i], bx)
         })
         .collect();
-    let mut co: SigSpec = (1..w).map(|i| g.xor(y[i], x[i])).collect();
+    // Below the chain the carry is the constant itself.
+    let mut co: SigSpec = (1..w)
+        .map(|i| if i <= lo { carry[i] } else { g.xor(y[i], x[i]) })
+        .collect();
     co.push(top);
     for (outs, vals) in [(&alu.y, &y), (&alu.x, &x), (&alu.co, &co)] {
         for (o, v) in outs.iter().zip(vals.iter()) {

@@ -25,6 +25,7 @@ use super::hard::HardDb;
 use super::io::{IoDb, Pin};
 use super::lab::LabDb;
 use super::m4k::M4kDb;
+use super::mult::MultDb;
 use super::phys::Db;
 
 /// The one device there is a database for.
@@ -288,6 +289,7 @@ impl Db {
             lab: LabDb::new(&asmdb)?,
             io: IoDb::new(pins, &asmdb)?,
             m4k: M4kDb::new(&asmdb)?,
+            mult: MultDb::new(&asmdb)?,
             hard: HardDb::new(&asmdb)?,
             pll: super::pll::PllDb::new(&asmdb)?,
             dev,

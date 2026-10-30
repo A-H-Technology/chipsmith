@@ -13,6 +13,7 @@ pub const IBUF: &str = "CY2_IBUF";
 pub const OBUF: &str = "CY2_OBUF";
 pub const IOBUF: &str = "CY2_IOBUF";
 pub const M4K: &str = "CY2_M4K";
+pub const MULT: &str = "CY2_MULT";
 
 /// Every device cell as a Verilog blackbox module, for the front end to
 /// read as a library (`Frontend::read_library_source`) before a design that
@@ -84,6 +85,9 @@ impl Comb {
 pub struct Reg {
     pub d: SigBit,
     pub clk: SigBit,
+    /// Clocked on the falling edge: the LAB clock's inversion bit, not an
+    /// inverter (which would make a clock from logic).
+    pub clk_inv: bool,
     pub ena: SigBit,
     pub aclr: SigBit,
     pub sclr: SigBit,
@@ -92,9 +96,13 @@ pub struct Reg {
 
 impl Reg {
     pub fn cell(self) -> CellKind {
+        let mut params = BTreeMap::new();
+        if self.clk_inv {
+            params.insert("CLK_INV".to_string(), ParamValue::int(1));
+        }
         generic(
             LCELL_FF,
-            BTreeMap::new(),
+            params,
             vec![
                 port("DATAIN", Dir::In, vec![self.d]),
                 port("CLK", Dir::In, vec![self.clk]),
@@ -200,7 +208,7 @@ mod tests {
     /// blocks, no more, under the names the packer reads.
     #[test]
     fn the_library_declares_every_device_cell() {
-        let mut expected = vec![LCELL_COMB, LCELL_FF, IBUF, OBUF, IOBUF, M4K];
+        let mut expected = vec![LCELL_COMB, LCELL_FF, IBUF, OBUF, IOBUF, M4K, MULT];
         expected.extend(Block::ALL.map(Block::cell_type));
         let instances: String = expected
             .iter()

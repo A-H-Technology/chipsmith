@@ -5,6 +5,8 @@
 //! the yosys flow's; M4K blocks come out as the yosys flow's do, cell for
 //! cell. Needs yosys (and GHDL for the VHDL example): run in the devshell.
 
+#[path = "support/mult.rs"]
+mod mult;
 mod support;
 
 use std::collections::BTreeMap;
@@ -25,6 +27,8 @@ fn scratch(name: &str) -> PathBuf {
 #[derive(Default)]
 struct Stages {
     refined: Option<Design>,
+    wreduce: Option<Design>,
+    mult: Option<Design>,
     alumacc: Option<Design>,
     m4k: Option<Design>,
     cells: Option<Design>,
@@ -37,6 +41,8 @@ impl Observer for Stages {
         });
         match name {
             "refined" => self.refined = d,
+            "wreduce" => self.wreduce = d,
+            "mult" => self.mult = d,
             "alumacc" => self.alumacc = d,
             "m4k" => self.m4k = d,
             "cells" => self.cells = d,
@@ -45,31 +51,42 @@ impl Observer for Stages {
     }
 }
 
-/// The equivalence check for a synthesized design: with M4Ks, around the
-/// blocks (`support::check_staged`), else straight.
+/// The equivalence check for a synthesized design: with M4Ks or
+/// multipliers, around the blocks (`support::check_staged`), else
+/// straight. The mappings into blocks are the per-shape proofs'
+/// (`m4k_shape_*`, `mult_*`): through a block whose registers took one of
+/// the design's, a proof is SAT on a whole product and doesn't finish.
 fn prove(name: &str, s: &Synthesized) -> support::Proof {
     let st = &s.stages;
     let cells = st.cells.as_ref().expect("a cells stage");
-    let blocks = cells.modules[0]
-        .cells
-        .iter()
-        .any(|c| c.kind.type_name() == "CY2_M4K");
-    let r = if blocks {
-        support::check_staged(
+    let has = |ty: &str| {
+        cells.modules[0]
+            .cells
+            .iter()
+            .any(|c| c.kind.type_name() == ty)
+    };
+    let refined = st.refined.as_ref().expect("a refined stage");
+    let r = match (has("CY2_M4K"), has("CY2_MULT")) {
+        (true, true) => {
+            panic!("{name}: M4Ks and multipliers in one design: no staged check for both yet")
+        }
+        (true, false) => support::check_staged(
             &s.dir,
             &s.rtl,
-            st.refined.as_ref().expect("a refined stage"),
+            refined,
             st.alumacc.as_ref().expect("an alumacc stage"),
             st.m4k.as_ref().expect("an m4k stage"),
             cells,
-        )
-    } else {
-        support::check(
+        ),
+        (false, true) => support::check_staged(
             &s.dir,
             &s.rtl,
-            st.refined.as_ref().expect("a refined stage"),
+            refined,
+            st.wreduce.as_ref().expect("a wreduce stage"),
+            st.mult.as_ref().expect("a mult stage"),
             cells,
-        )
+        ),
+        (false, false) => support::check(&s.dir, &s.rtl, refined, cells),
     };
     r.unwrap_or_else(|e| panic!("{name}: {e}"))
 }
@@ -91,8 +108,30 @@ fn synthesize_with(
     files: &[PathBuf],
     io_registers: &BTreeMap<String, IoRegisters>,
 ) -> Synthesized {
+    synthesize_inner(name, top, files, files, io_registers)
+}
+
+/// [`synthesize`], the RTL it is checked against read from `reference`
+/// (with the same top and register names) instead of the design's own
+/// sources.
+fn synthesize_against(
+    name: &str,
+    top: &str,
+    files: &[PathBuf],
+    reference: &[PathBuf],
+) -> Synthesized {
+    synthesize_inner(name, top, files, reference, &BTreeMap::new())
+}
+
+fn synthesize_inner(
+    name: &str,
+    top: &str,
+    files: &[PathBuf],
+    reference: &[PathBuf],
+    io_registers: &BTreeMap<String, IoRegisters>,
+) -> Synthesized {
     let dir = scratch(name);
-    let rtl = support::rtl(&dir, top, files);
+    let rtl = support::rtl(&dir, top, reference);
     let mut stages = Stages::default();
     let out = synthesize_observed(support::frontend(top, files), io_registers, &mut stages)
         .unwrap_or_else(|e| panic!("{name}: {e:#}"))
@@ -465,6 +504,109 @@ fn async_load() {
     feature("async_load");
 }
 
+/// Falling-edge registers: the LAB clock's inversion (CLK_INV), not an
+/// inverter in front of the clock. The proof steps every register on one
+/// edge, so it can't tell the edges apart; the co-simulation does, and
+/// fails with the inversion dropped.
+#[test]
+fn negedge() {
+    let f = Path::new(ROOT).join("crates/chipsmith-cyclone2/tests/designs/negedge.v");
+    let s = synthesize("negedge", "top", std::slice::from_ref(&f));
+    let proof = prove("negedge", &s);
+    eprintln!("negedge: {} $equiv proven", proof.equivalences);
+    let refined = s.stages.refined.as_ref().unwrap();
+    let gate = s.stages.cells.as_ref().unwrap();
+    let sim = support::cosim(&s.dir, &s.rtl, refined, gate, COSIM_CYCLES, 1)
+        .unwrap_or_else(|e| panic!("negedge: co-simulation: {e}"));
+    eprintln!(
+        "negedge: co-simulated {} cycles, {} output bits compared",
+        sim.cycles, sim.compared
+    );
+    let cells = &gate.modules[0].cells;
+    let inverted = |c: &chipsmith_netlist::Cell| matches!(&c.kind, CellKind::Other(g) if g.ty == "LCELL_FF" && g.params.get("CLK_INV") == Some(&ParamValue::int(1)));
+    // n (8) and ne (4) on the falling edge.
+    assert_eq!(cells.iter().filter(|c| inverted(c)).count(), 12);
+    // No LUT reads the clock: an inverter in front of a register would.
+    let ff_clk = |c: &chipsmith_netlist::Cell| match &c.kind {
+        CellKind::Other(g) if g.ty == "LCELL_FF" => g.port("CLK").map(|p| p.sig[0]),
+        _ => None,
+    };
+    let clk = cells.iter().find_map(ff_clk).expect("a register");
+    assert!(
+        cells.iter().filter_map(ff_clk).all(|c| c == clk),
+        "one clock net"
+    );
+    for c in cells {
+        if let CellKind::Other(g) = &c.kind {
+            if g.ty == "LCELL_COMB" {
+                assert!(
+                    g.ports.iter().all(|p| !p.sig.contains(&clk)),
+                    "{} reads the clock",
+                    c.name
+                );
+            }
+        }
+    }
+    let mut rising = gate.clone();
+    for c in rising.modules[0].cells.iter_mut() {
+        if let CellKind::Other(g) = &mut c.kind {
+            g.params.remove("CLK_INV");
+        }
+    }
+    let dir = scratch("negedge-rising");
+    match support::cosim(&dir, &s.rtl, refined, &rising, COSIM_CYCLES, 1) {
+        Ok(_) => panic!("negedge: every register on the rising edge, not caught"),
+        Err(e) => {
+            assert!(e.starts_with("MISMATCH"), "{e}");
+            eprintln!("negedge, inversion dropped: caught ({e})");
+        }
+    }
+    pack(&s.dir, "chipsmith", &s.netlist);
+}
+
+/// Forencich's lfsr.v (examples/crc32), which declares arrays inside its
+/// mask function, as Ethernet's CRC-32: its elaboration proven against a
+/// textbook bitwise CRC-32 with the same top (`designs/crc32_ref.v`; the
+/// RTL against the refined stage), and the netlist co-simulated against
+/// that reference. yosys' own front end takes over 20 minutes on lfsr.v's
+/// constant functions, so the oracle's RTL is the reference's. The refined
+/// stage against the netlist isn't proven: `crc` powers up all ones, so
+/// synthesis keeps it inverted in an unnamed register, `shown` loads from
+/// that register directly, and equiv_induct leaves `shown`'s 27 bits
+/// unproven (the co-simulation compares them every cycle). Remove the
+/// split once the check proves that step.
+#[test]
+fn crc32() {
+    let reference = Path::new(ROOT).join("crates/chipsmith-cyclone2/tests/designs/crc32_ref.v");
+    let s = synthesize_against(
+        "crc32",
+        "top",
+        &example("crc32"),
+        std::slice::from_ref(&reference),
+    );
+    let refined = s.stages.refined.as_ref().unwrap();
+    let proof = support::check(&s.dir, &s.rtl, refined, refined)
+        .unwrap_or_else(|e| panic!("crc32: elaboration against the reference: {e}"));
+    eprintln!(
+        "crc32: elaboration, {} $equiv proven against the reference",
+        proof.equivalences
+    );
+    let sim = support::cosim(
+        &s.dir,
+        &s.rtl,
+        refined,
+        s.stages.cells.as_ref().unwrap(),
+        COSIM_CYCLES,
+        1,
+    )
+    .unwrap_or_else(|e| panic!("crc32: co-simulation: {e}"));
+    eprintln!(
+        "crc32: co-simulated {} cycles, {} output bits compared",
+        sim.cycles, sim.compared
+    );
+    pack(&s.dir, "chipsmith", &s.netlist);
+}
+
 #[test]
 fn divmod() {
     feature("divmod");
@@ -674,6 +816,292 @@ fn a_wrong_lut_bit_is_caught() {
     let dir = scratch("blinky-broken-check");
     let err = support::check(&dir, &s.rtl, refined, &gate).expect_err("a changed LUT bit");
     assert!(err.contains("not proven equivalent"), "{err}");
+}
+
+/// One multiplier configuration per test (`support::mult::shapes`): the
+/// `$mul` maps to the expected number of blocks and the netlist is proven
+/// against the RTL, the blocks modelled by `SIM_MODELS`' CY2_MULT.
+fn mult_shape(name: &str) {
+    let (_, verilog, blocks) = mult::shapes()
+        .into_iter()
+        .find(|(n, _, _)| *n == name)
+        .unwrap_or_else(|| panic!("no multiplier shape {name}"));
+    let dir = scratch(&format!("mult-{name}"));
+    let v = dir.join("top.v");
+    std::fs::write(&v, verilog).unwrap();
+    let s = synthesize(&format!("mult-{name}"), "top", std::slice::from_ref(&v));
+    let cells = s.stages.cells.as_ref().expect("a cells stage");
+    let mults = cells.modules[0]
+        .cells
+        .iter()
+        .filter(|c| matches!(&c.kind, CellKind::Other(g) if g.ty == "CY2_MULT"))
+        .count();
+    assert_eq!(mults, blocks, "{name}: multiplier blocks");
+    // Only the `reg_*` shapes move registers in (`support::mult`: through a
+    // block's register a proof is SAT on the whole product).
+    if !name.starts_with("reg_") {
+        for c in &cells.modules[0].cells {
+            if let CellKind::Other(g) = &c.kind {
+                for k in ["A_REG", "B_REG", "P_REG"] {
+                    let set = g
+                        .params
+                        .get(k)
+                        .and_then(ParamValue::bits)
+                        .is_some_and(|b| b.as_bool());
+                    assert!(!set, "{name}: {k} set on {}", c.name);
+                }
+            }
+        }
+    }
+    // Co-simulation first: it is seconds, and a wrong netlist shows as a
+    // mismatch on a vector rather than as an unproven equivalence.
+    let started = std::time::Instant::now();
+    let sim = support::cosim(
+        &s.dir,
+        &s.rtl,
+        s.stages.refined.as_ref().unwrap(),
+        cells,
+        2000,
+        1,
+    )
+    .unwrap_or_else(|e| panic!("{name}: {e}"));
+    eprintln!(
+        "mult {name}: co-simulated {} cycles, {} output bits compared in {:.1} s",
+        sim.cycles,
+        sim.compared,
+        started.elapsed().as_secs_f64()
+    );
+    // Registers in the block with an asynchronous clear and an enable:
+    // equiv_induct finds no invariant between the RTL's registers and the
+    // model's (the block's registers have no RTL wire to be matched to,
+    // and the induction can't relate them), and a bounded check through
+    // the multiplier doesn't finish; the co-simulation above is the check.
+    const COSIM_ONLY: [&str; 1] = ["reg_enable_clear"];
+    if COSIM_ONLY.contains(&name) {
+        eprintln!("mult {name}: co-simulated only (no proof)");
+    } else {
+        let started = std::time::Instant::now();
+        let proof = support::check(
+            &s.dir,
+            &s.rtl,
+            s.stages.refined.as_ref().expect("a refined stage"),
+            cells,
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+        eprintln!(
+            "mult {name}: {blocks} blocks, {} $equiv proven in {:.1} s",
+            proof.equivalences,
+            started.elapsed().as_secs_f64()
+        );
+    }
+    let stats = pack(&s.dir, "chipsmith", &s.netlist);
+    assert_eq!(stats.mults, blocks, "{name}: packed multipliers");
+}
+
+/// Dense products over several blocks, which the proofs can't do: the
+/// RTL against the netlist on thousands of random operand pairs.
+fn mult_dense(name: &str, wa: usize, wb: usize, signed: bool, wp: usize, blocks: usize) {
+    let sg = if signed { "signed " } else { "" };
+    let dir = scratch(&format!("mult-dense-{name}"));
+    let v = dir.join("top.v");
+    std::fs::write(
+        &v,
+        format!(
+            "module top(input clk, input [{wa1}:0] a, input [{wb1}:0] b, output reg [{wp1}:0] p);
+  reg {sg}[{wa1}:0] ra; reg {sg}[{wb1}:0] rb;
+  always @(posedge clk) begin ra <= a; rb <= b; p <= ra * rb; end
+endmodule
+",
+            wa1 = wa - 1,
+            wb1 = wb - 1,
+            wp1 = wp - 1
+        ),
+    )
+    .unwrap();
+    let s = synthesize(
+        &format!("mult-dense-{name}"),
+        "top",
+        std::slice::from_ref(&v),
+    );
+    let cells = s.stages.cells.as_ref().expect("a cells stage");
+    let stats = pack(&s.dir, "chipsmith", &s.netlist);
+    assert_eq!(stats.mults, blocks, "{name}: packed multipliers");
+    let started = std::time::Instant::now();
+    let sim = support::cosim(
+        &s.dir,
+        &s.rtl,
+        s.stages.refined.as_ref().unwrap(),
+        cells,
+        5000,
+        7,
+    )
+    .unwrap_or_else(|e| panic!("{name}: {e}"));
+    eprintln!(
+        "mult dense {name}: {blocks} blocks, co-simulated {} cycles, {} output bits compared in {:.1} s",
+        sim.cycles,
+        sim.compared,
+        started.elapsed().as_secs_f64()
+    );
+}
+
+/// One block with every register in it (operands and product): the
+/// per-shape proofs keep their registers out of the block.
+#[test]
+fn mult_dense_s18x18() {
+    mult_dense("s18x18", 18, 18, true, 36, 1);
+}
+
+#[test]
+fn mult_dense_u20x20() {
+    mult_dense("u20x20", 20, 20, false, 40, 4);
+}
+
+#[test]
+fn mult_dense_s24x24() {
+    mult_dense("s24x24", 24, 24, true, 48, 4);
+}
+
+#[test]
+fn mult_dense_u32x32_32() {
+    mult_dense("u32x32_32", 32, 32, false, 32, 3);
+}
+
+#[test]
+fn mult_dense_s32x32() {
+    mult_dense("s32x32", 32, 32, true, 64, 4);
+}
+
+#[test]
+fn mult_dense_u36x18() {
+    mult_dense("u36x18", 36, 18, false, 54, 2);
+}
+
+/// The co-simulation has teeth: two bits of one operand swapped, or one
+/// operand's sign wrong, and it fails.
+#[test]
+fn mult_cosim_catches_a_swapped_bit_and_a_wrong_sign() {
+    let (_, verilog, _) = mult::shapes()
+        .into_iter()
+        .find(|(n, _, _)| *n == "s12x7")
+        .unwrap();
+    let dir = scratch("mult-mutations");
+    let v = dir.join("top.v");
+    std::fs::write(&v, verilog).unwrap();
+    let s = synthesize("mult-mutations", "top", std::slice::from_ref(&v));
+    let cells = s.stages.cells.as_ref().expect("a cells stage");
+    let mutate = |what: &str, slug: &str, f: &dyn Fn(&mut chipsmith_netlist::Generic)| {
+        let mut d = cells.clone();
+        let m = d
+            .modules
+            .iter_mut()
+            .find(|m| !m.is_blackbox())
+            .unwrap()
+            .cells
+            .iter_mut()
+            .find_map(|c| match &mut c.kind {
+                CellKind::Other(g) if g.ty == "CY2_MULT" => Some(g),
+                _ => None,
+            })
+            .expect("a multiplier");
+        f(m);
+        let dir = scratch(&format!("mult-mutations-{slug}"));
+        match support::cosim(&dir, &s.rtl, s.stages.refined.as_ref().unwrap(), &d, 500, 3) {
+            Ok(_) => panic!("{what}: not caught"),
+            Err(e) => {
+                assert!(e.starts_with("MISMATCH"), "{what}: {e}");
+                eprintln!("{what}: caught ({e})");
+            }
+        }
+    };
+    mutate("swapped operand bits", "swap", &|g| {
+        let a = g.ports.iter_mut().find(|p| p.name == "A").unwrap();
+        a.sig.swap(2, 5);
+    });
+    mutate("wrong sign", "sign", &|g| {
+        g.params.insert("B_SIGNED".into(), ParamValue::int(0));
+    });
+}
+
+macro_rules! mult_shapes {
+    ($($name:ident),* $(,)?) => {
+        $(
+            #[test]
+            fn $name() {
+                mult_shape(&stringify!($name)["mult_".len()..]);
+            }
+        )*
+    };
+}
+
+mult_shapes!(
+    mult_u9x9,
+    mult_s9x9,
+    mult_s9x3,
+    mult_u4x7,
+    mult_u18x18,
+    mult_s18x18,
+    mult_s12x7,
+    mult_u18x10,
+    mult_u16x16_16,
+    mult_u22x22_sparse,
+    mult_s22x22_sparse,
+    mult_u32x32_32_sparse,
+    mult_u40x18_sparse,
+    mult_s40x18_sparse,
+    mult_s12xu8,
+    mult_const_k,
+    mult_one_bit,
+    mult_two_products,
+    mult_reg_in,
+    mult_reg_out,
+    mult_reg_in_out,
+    mult_reg_enable_clear,
+    mult_reg_in_shared,
+    mult_reg_out_other_enable,
+);
+
+/// Which registers moved into the block, per shape: (A_REG, B_REG, P_REG)
+/// of its one CY2_MULT, and the LE registers left.
+#[test]
+fn mult_registers_move_in_only_where_legal() {
+    for (name, want, left) in [
+        ("reg_in", [true, true, false], 0),
+        ("reg_out", [false, false, true], 0),
+        ("reg_in_out", [true, true, true], 0),
+        ("reg_enable_clear", [true, true, true], 0),
+        // ra also drives the output o: it stays, rb moves in.
+        ("reg_in_shared", [false, true, false], 9),
+        // q's enable differs from the operands' (none): q stays.
+        ("reg_out_other_enable", [true, true, false], 18),
+    ] {
+        let (_, verilog, _) = mult::shapes()
+            .into_iter()
+            .find(|(n, _, _)| *n == name)
+            .unwrap();
+        let dir = scratch(&format!("mult-regs-{name}"));
+        let v = dir.join("top.v");
+        std::fs::write(&v, verilog).unwrap();
+        let s = synthesize(
+            &format!("mult-regs-{name}"),
+            "top",
+            std::slice::from_ref(&v),
+        );
+        let cells = &s.stages.cells.as_ref().unwrap().modules[0].cells;
+        let m = cells
+            .iter()
+            .find_map(|c| match &c.kind {
+                CellKind::Other(g) if g.ty == "CY2_MULT" => Some(g),
+                _ => None,
+            })
+            .unwrap();
+        let got = ["A_REG", "B_REG", "P_REG"].map(|k| m.params[k] == ParamValue::int(1));
+        assert_eq!(got, want, "{name}: registers in the block");
+        let ffs = cells
+            .iter()
+            .filter(|c| c.kind.type_name() == "LCELL_FF")
+            .count();
+        assert_eq!(ffs, left, "{name}: LE registers left");
+    }
 }
 
 /// Co-simulation cycles per design.
@@ -992,3 +1420,98 @@ m4k_shape_tests!(
     m4k_shape_sync_reset_x18 = "sync_reset_x18",
     m4k_shape_shallow_x8 = "shallow_x8"
 );
+
+/// The multiplier examples, co-simulated through the blocks (as
+/// `SIM_MODELS`' CY2_MULT) and fir proven against the RTL around them
+/// (`prove`). mult-selftest isn't proven: the RTL against its own refined
+/// stage, before any block, didn't finish its induction in 30 minutes (a
+/// serial reference multiplier against nine products). It is co-simulated
+/// long enough for every slot to run many times, its error flag (LEDR[0])
+/// and pass count compared every cycle.
+fn mult_design(name: &str, proof: bool, cycles: usize) {
+    let t = std::time::Instant::now();
+    let s = synthesize(name, "top", &example(name));
+    let cells = s.stages.cells.as_ref().unwrap();
+    let mults = cells.modules[0]
+        .cells
+        .iter()
+        .filter(|c| c.kind.type_name() == "CY2_MULT")
+        .count();
+    assert!(mults > 0, "{name}: no multiplier");
+    if proof {
+        let p = prove(name, &s);
+        eprintln!(
+            "{name}: {mults} multipliers, {} $equiv proven in {:.0?}",
+            p.equivalences,
+            t.elapsed()
+        );
+    }
+    let t = std::time::Instant::now();
+    let sim = support::cosim(
+        &s.dir,
+        &s.rtl,
+        s.stages.refined.as_ref().unwrap(),
+        cells,
+        cycles,
+        1,
+    )
+    .unwrap_or_else(|e| panic!("{name}: co-simulation: {e}"));
+    eprintln!(
+        "{name}: co-simulated {} cycles, {} output bits compared, in {:.0?}",
+        sim.cycles,
+        sim.compared,
+        t.elapsed()
+    );
+    pack(&s.dir, name, &s.netlist);
+}
+
+#[test]
+fn mult_fir() {
+    mult_design("fir", true, COSIM_CYCLES);
+}
+
+/// 9 slots of 128 cycles a pass: 120,000 cycles are 104 passes.
+#[test]
+fn mult_selftest() {
+    mult_design("mult-selftest", false, 120_000);
+}
+
+/// The self-test's co-simulation has teeth: one block's operand made
+/// unsigned, and the error flag rises in the netlist but not the RTL.
+#[test]
+fn mult_selftest_catches_a_wrong_sign() {
+    let s = synthesize("mult-selftest-mutated", "top", &example("mult-selftest"));
+    let mut d = s.stages.cells.clone().unwrap();
+    let g = d.modules[0]
+        .cells
+        .iter_mut()
+        .find_map(|c| match &mut c.kind {
+            CellKind::Other(g)
+                if g.ty == "CY2_MULT"
+                    && g.params
+                        .get("A_SIGNED")
+                        .and_then(ParamValue::bits)
+                        .is_some_and(|c| c.as_bool()) =>
+            {
+                Some(g)
+            }
+            _ => None,
+        })
+        .expect("a signed multiplier");
+    g.params.insert("A_SIGNED".into(), ParamValue::int(0));
+    let dir = scratch("mult-selftest-mutated-sim");
+    match support::cosim(
+        &dir,
+        &s.rtl,
+        s.stages.refined.as_ref().unwrap(),
+        &d,
+        120_000,
+        1,
+    ) {
+        Ok(_) => panic!("a wrong sign not caught"),
+        Err(e) => {
+            assert!(e.starts_with("MISMATCH"), "{e}");
+            eprintln!("mult-selftest, one block's A unsigned: caught ({e})");
+        }
+    }
+}
