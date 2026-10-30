@@ -2040,10 +2040,16 @@ struct Schedule {
 }
 
 /// After analytic placement: moves within a few LABs, starting warm
-/// enough to accept small uphill swaps but not to scramble the placement.
+/// enough to reshape the critical paths the wirelength-driven analytic
+/// placement left long, not to scramble it. Picked on routed critical
+/// paths over every DE2 example, three placement seeds each, against the
+/// annealer from scratch it replaced (docs/fast-pnr-status.md): colder
+/// (heat 0.1, range 2) left picorv32 12% and m4k-tdp 14% slower than
+/// that, hotter (heat 1, range 4, twice the moves) is as good for twice
+/// the time.
 const REFINE: Schedule = Schedule {
-    range: 2.0,
-    heat: 0.1,
+    range: 3.0,
+    heat: 0.5,
     moves: 1.0,
 };
 
