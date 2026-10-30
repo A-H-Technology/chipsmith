@@ -317,6 +317,75 @@ fn io_registers() {
     assert_eq!(registered, 16);
 }
 
+/// Output and OE registers with clock enables and synchronous resets
+/// (every order `$sdffe`/`$sdffce` has, either polarity, powering up 0 and
+/// 1, one register on two pins): the I/O cell's plain register samples
+/// the LE register's next state. Proven against the RTL with the
+/// registers in the pin buffers' models, and co-simulated.
+#[test]
+fn io_registers_with_enables_and_resets() {
+    let dir = scratch("io-register-gated-src");
+    let v = dir.join("top.v");
+    std::fs::write(
+        &v,
+        "module top(input clk, input en, input en_n, input rst, input [5:0] a,\n\
+                    output [6:0] y, output [1:0] t);\n\
+         reg q0 = 0; always @(posedge clk) if (en) q0 <= a[0];\n\
+         reg q1 = 1; always @(posedge clk) if (!en_n) q1 <= a[1];\n\
+         reg q2 = 0; always @(posedge clk) if (rst) q2 <= 1'b1; else q2 <= a[2];\n\
+         reg q3 = 1; always @(posedge clk) if (rst) q3 <= 1'b0; else if (en) q3 <= a[3];\n\
+         reg q4 = 0; always @(posedge clk) if (en) begin if (rst) q4 <= 1'b1; else q4 <= a[4]; end\n\
+         reg [1:0] st = 0;\n\
+         always @(posedge clk) case (st) 0: if (en) st <= 1; 1: st <= a[5] ? 2 : 0; default: st <= 0; endcase\n\
+         reg oe = 0; always @(posedge clk) if (rst) oe <= 0; else if (en) oe <= a[5];\n\
+         reg [1:0] tq = 0; always @(posedge clk) if (en_n) tq <= a[1:0];\n\
+         assign y = {st[1], st[0], q4, q3, q2, q1, q0};\n\
+         assign t[0] = oe ? tq[0] : 1'bz; assign t[1] = oe ? tq[1] : 1'bz;\nendmodule\n",
+    )
+    .unwrap();
+    let out = IoRegisters {
+        output: true,
+        ..Default::default()
+    };
+    let mut regs: BTreeMap<String, IoRegisters> =
+        (0..7).map(|i| (format!("y[{i}]"), out)).collect();
+    for i in 0..2 {
+        regs.insert(
+            format!("t[{i}]"),
+            IoRegisters {
+                output: true,
+                output_enable: true,
+                ..Default::default()
+            },
+        );
+    }
+    let files = [v];
+    design_with("io-register-gated", "top", &files, false, &regs);
+    let s = synthesize_with("io-register-gated-cosim", "top", &files, &regs);
+    let sim = support::cosim(
+        &s.dir,
+        &s.rtl,
+        s.stages.refined.as_ref().unwrap(),
+        s.stages.cells.as_ref().unwrap(),
+        COSIM_CYCLES,
+        1,
+    )
+    .unwrap_or_else(|e| panic!("co-simulation: {e}"));
+    assert!(sim.compared > 0);
+    let cells = s.stages.cells.expect("a cells stage");
+    let registered = cells.modules[0]
+        .cells
+        .iter()
+        .filter(|c| match &c.kind {
+            CellKind::Other(g) => {
+                g.ty.starts_with("CY2_") && g.params.keys().any(|k| k.ends_with("_REGISTER"))
+            }
+            _ => false,
+        })
+        .count();
+    assert_eq!(registered, 9);
+}
+
 /// What an I/O register can't be is an error, not a register left behind.
 #[test]
 fn io_registers_that_cant_be_are_errors() {
@@ -324,10 +393,12 @@ fn io_registers_that_cant_be_are_errors() {
     let v = dir.join("top.v");
     std::fs::write(
         &v,
-        "module top(input clk, input en, input a, output y, output z, output w);\n\
-         reg q; always @(posedge clk) if (en) q <= a;\n\
+        "module top(input clk, input en, input rst, input a, input b, output y, output z, \
+                    output w, output e);\n\
+         reg q; always @(posedge clk or posedge rst) if (rst) q <= 0; else q <= a;\n\
          reg n; always @(negedge clk) n <= a;\n\
-         assign y = q; assign z = n; assign w = a;\nendmodule\n",
+         reg s; always @(posedge clk) if (en) s <= b;\n\
+         assign y = q; assign z = n; assign w = a; assign e = s;\nendmodule\n",
     )
     .unwrap();
     for (port, want, says) in [
@@ -337,7 +408,15 @@ fn io_registers_that_cant_be_are_errors() {
                 output: true,
                 ..Default::default()
             },
-            "clock enable",
+            "make the reset synchronous",
+        ),
+        (
+            "b",
+            IoRegisters {
+                input: true,
+                ..Default::default()
+            },
+            "sample the pin in a plain register",
         ),
         (
             "z",
@@ -356,7 +435,7 @@ fn io_registers_that_cant_be_are_errors() {
             "no register drives",
         ),
         (
-            "a",
+            "en",
             IoRegisters {
                 input: true,
                 ..Default::default()

@@ -9,10 +9,10 @@ use std::collections::BTreeMap;
 
 use anyhow::{bail, ensure, Context, Result};
 use chipsmith_netlist::{
-    Bit, CellKind, DffControl, Dir, Ff, FfKind, Generic, GenericPort, Module, ParamValue, Polarity,
-    SigBit, State, Tribuf,
+    Bit, CellKind, Ctrl, DffControl, Dir, Ff, FfKind, Generic, GenericPort, Module, ParamValue,
+    Polarity, SigBit, State, SyncEnable, Tribuf,
 };
-use chipsmith_synth::rewrite::{inits, Namer, Subst};
+use chipsmith_synth::rewrite::{inits, Gates, Namer, Subst};
 
 use super::cells::{ibuf, iobuf, obuf, Comb, IoRegs, OutRegs};
 use crate::pin::{IoRegisters, PowerUp};
@@ -79,24 +79,81 @@ fn bit_name(w: &chipsmith_netlist::Wire, i: usize) -> String {
 }
 
 /// A rising-edge register with no enable and no reset: what an I/O cell
-/// register is. `Err` says why another one isn't.
+/// register is, and all an input register can be. `Err` says why another
+/// one isn't.
 fn plain(ff: &Ff<Bit>) -> Result<(SigBit, SigBit), &'static str> {
     match &ff.kind {
         FfKind::Dff {
-            clk,
-            d,
-            control: DffControl::Plain { en: None },
-        } if clk.polarity == Polarity::Pos => Ok((clk.sig, *d)),
-        FfKind::Dff {
             control: DffControl::Plain { en: None },
             ..
-        } => Err("it is clocked on the falling edge"),
+        } => rising(ff),
         FfKind::Dff {
             control: DffControl::Plain { en: Some(_) },
             ..
         } => Err("it has a clock enable"),
-        FfKind::Dff { .. } => Err("it has a reset"),
-        _ => Err("it isn't an edge-triggered register"),
+        _ => rising(ff).and(Err("it has a reset")),
+    }
+}
+
+/// What an output or OE register's copy can be: a rising-edge register
+/// whose enable and synchronous reset, if any, [`next_state`] makes into
+/// logic on a plain register's D. Clock and D (before that logic); `Err`
+/// says why another one isn't, and what to write instead.
+fn rising(ff: &Ff<Bit>) -> Result<(SigBit, SigBit), &'static str> {
+    let FfKind::Dff { clk, d, control } = &ff.kind else {
+        return Err("it isn't an edge-triggered register");
+    };
+    if clk.polarity != Polarity::Pos {
+        return Err("it is clocked on the falling edge, and an I/O cell register is \
+                    clocked on the rising one: clock it on the rising edge");
+    }
+    match control {
+        DffControl::Plain { .. } | DffControl::Sync { .. } => Ok((clk.sig, *d)),
+        // A mux on D acts only on an edge; these act between edges.
+        DffControl::Async { .. } | DffControl::SetClr { .. } => Err(
+            "it has an asynchronous reset, which acts between clock edges, and the I/O cell's \
+             clear isn't modelled: make the reset synchronous (`always @(posedge clk) \
+             if (rst) q <= 0; else ...`), or put a plain register after this one",
+        ),
+        DffControl::Load { .. } => Err(
+            "it has an asynchronous load, which acts between clock edges: \
+             put a plain register after this one",
+        ),
+    }
+}
+
+/// The register's next state on a rising edge, from its D, enable,
+/// synchronous reset and its own Q: what a plain register sampling it
+/// holds, edge for edge, given the same power-up value. That's how an
+/// output or OE register with an enable or reset goes into an I/O cell
+/// whose register has neither: the LE register stays and feeds the logic
+/// its Q.
+fn next_state(g: &mut Gates, ff: &Ff<Bit>) -> SigBit {
+    let FfKind::Dff { d, control, .. } = &ff.kind else {
+        unreachable!("checked by `rising`")
+    };
+    // `c` active picks `on`.
+    let pick = |g: &mut Gates, c: &Ctrl, on: SigBit, off: SigBit| match c.polarity {
+        Polarity::Pos => g.mux(off, on, c.sig),
+        Polarity::Neg => g.mux(on, off, c.sig),
+    };
+    let hold = |g: &mut Gates, en: &Ctrl, d: SigBit| pick(g, en, d, ff.q);
+    let value = |v: &bool| if *v { SigBit::ONE } else { SigBit::ZERO };
+    match control {
+        DffControl::Plain { en: None } => *d,
+        DffControl::Plain { en: Some(en) } => hold(g, en, *d),
+        DffControl::Sync { srst, value: v, en } => match en {
+            SyncEnable::Always => pick(g, srst, value(v), *d),
+            SyncEnable::ResetOverEnable(en) => {
+                let held = hold(g, en, *d);
+                pick(g, srst, value(v), held)
+            }
+            SyncEnable::EnableOverReset(en) => {
+                let reset = pick(g, srst, value(v), *d);
+                hold(g, en, reset)
+            }
+        },
+        _ => unreachable!("checked by `rising`"),
     }
 }
 
@@ -108,8 +165,12 @@ fn plain(ff: &Ff<Bit>) -> Result<(SigBit, SigBit), &'static str> {
 /// An input register is the register sampling the pin, moved. An output
 /// or OE register is a copy of the register driving the pin's data or
 /// enable: the original stays for whatever else reads it (several pins
-/// often share one enable) and goes if nothing does. Either way the
-/// register must be one an I/O cell has: rising edge, no enable, no reset.
+/// often share one enable) and goes if nothing does. An input register
+/// must be one an I/O cell has: rising edge, no enable, no reset. An
+/// output or OE register may also have an enable and a synchronous reset:
+/// the copy samples the original's next state ([`next_state`]), and the
+/// original stays to feed it its Q. Every request is the manifest's, so
+/// one that can't be met is an error, not a register left in the core.
 /// Returns how many registers went into I/O cells.
 pub fn registers(m: &mut Module, requests: &BTreeMap<String, IoRegisters>) -> Result<usize> {
     if requests.is_empty() {
@@ -166,15 +227,26 @@ pub fn registers(m: &mut Module, requests: &BTreeMap<String, IoRegisters>) -> Re
             let CellKind::FfGate(ff) = &m.cells[ci].kind else {
                 unreachable!("indexed registers")
             };
-            let (_, d) = plain(ff).map_err(|why| {
+            let legal = match role {
+                Role::Input => plain(ff),
+                Role::Output | Role::OutputEnable => rising(ff),
+            };
+            let (_, d) = legal.map_err(|why| {
                 anyhow::anyhow!(
                     "{port}: its {} register {} can't go into the I/O cell: {why}",
                     role.name(),
                     m.cells[ci].name
                 )
             })?;
+            let plain_ff = matches!(
+                &ff.kind,
+                FfKind::Dff {
+                    control: DffControl::Plain { en: None },
+                    ..
+                }
+            );
             ensure!(
-                !matches!(d, SigBit::Const(_)),
+                !(plain_ff && matches!(d, SigBit::Const(_))),
                 "{port}: its {} register {} has constant data",
                 role.name(),
                 m.cells[ci].name
@@ -205,10 +277,30 @@ pub fn registers(m: &mut Module, requests: &BTreeMap<String, IoRegisters>) -> Re
             let ci = (0..m.cells.len())
                 .find(|&ci| samples(ci) && !chosen.iter().any(|c| c.2 == ci))
                 .with_context(|| {
-                    format!(
-                        "{port}: an input register is asked for, but no register \
-                         (rising edge, no enable or reset) samples the pin"
-                    )
+                    let gated = (0..m.cells.len()).any(|ci| match &m.cells[ci].kind {
+                        CellKind::FfGate(ff) => {
+                            matches!(&ff.kind, FfKind::Dff { d, .. } if *d == b)
+                        }
+                        _ => false,
+                    });
+                    if gated {
+                        // An enable or reset after the I/O register would
+                        // have to be retimed over it (the controls
+                        // registered too, the held value in an LE, a LUT
+                        // after the pin's register): sound, but not done.
+                        format!(
+                            "{port}: an input register is asked for, but the register sampling \
+                             the pin has an enable, a reset or a falling-edge clock, and the I/O \
+                             cell's clock enable and clear aren't modelled: sample the pin in a \
+                             plain register (`always @(posedge clk) pin_q <= PIN;`) and give \
+                             the next register the enable or reset"
+                        )
+                    } else {
+                        format!(
+                            "{port}: an input register is asked for, but no register \
+                             (rising edge, no enable or reset) samples the pin"
+                        )
+                    }
                 })?;
             chosen.push((port.clone(), Role::Input, ci, true));
         }
@@ -233,7 +325,7 @@ pub fn registers(m: &mut Module, requests: &BTreeMap<String, IoRegisters>) -> Re
             let ci = driver(en, Role::OutputEnable, "output enable")?;
             if let Some(o) = out_clk {
                 let clk = |ci: usize| match &m.cells[ci].kind {
-                    CellKind::FfGate(ff) => plain(ff).ok().map(|(c, _)| c),
+                    CellKind::FfGate(ff) => rising(ff).ok().map(|(c, _)| c),
                     _ => None,
                 };
                 ensure!(
@@ -248,27 +340,32 @@ pub fn registers(m: &mut Module, requests: &BTreeMap<String, IoRegisters>) -> Re
 
     let mut gone = vec![false; m.cells.len()];
     let mut new_cells = Vec::new();
+    let mut gates = Gates::new(m, "ioreg_next");
     for (port, role, ci, moves) in &chosen {
-        let CellKind::FfGate(ff) = &m.cells[*ci].kind else {
+        let CellKind::FfGate(ff) = &gates.m.cells[*ci].kind else {
             unreachable!("chosen registers")
         };
-        let (clk, d) = plain(ff).expect("checked");
-        let ff_q = ff.q;
+        let ff = ff.clone();
+        let (clk, _) = rising(&ff).expect("checked");
+        let d = next_state(&mut gates, &ff);
         let q = if *moves {
             gone[*ci] = true;
-            ff_q
+            ff.q
         } else {
             // The copy's output only marks it; `pads` reads its D.
-            SigBit::Net(m.new_net())
+            SigBit::Net(gates.m.new_net())
         };
         let r = IoReg {
             d,
             clk,
             q,
-            power_up: power_up(ff_q),
+            power_up: power_up(ff.q),
         };
         new_cells.push(ioreg_cell(port, *role, r));
     }
+    drop(gates);
+    // The next-state gates are kept.
+    gone.resize(m.cells.len(), false);
     let mut keep = gone.into_iter();
     m.cells.retain(|_| !keep.next().expect("one flag per cell"));
     let mut namer = Namer::new(m, "ioreg");

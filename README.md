@@ -507,8 +507,10 @@ The Cyclone II limits come from cyclone2-re's open flow: M4K RAM as
 above, multipliers as above, PLLs without negative phase shifts, clock
 switchover or reconfiguration (a PLL clock reaches a pin only through its
 clock output pin, and no global clock feeds logic as data), I/O registers
-without clock enables or clears (a register synthesis finds a reset or
-enable in can't go into an I/O cell), 3.3-V LVCMOS at its default current only.
+without clock enables or clears (an output or OE register's enable and
+synchronous reset become logic on the I/O register's D; an input register
+with either, or any register with an asynchronous reset, can't go into an
+I/O cell), 3.3-V LVCMOS at its default current only.
 The timing model covers LE and register delays exactly and routing by
 per-element-type averages. M4K clock-to-output (3.33 ns) and setup are
 from one quartus_sta path each, and so is the M4K buffer's routing delay.
@@ -1356,12 +1358,19 @@ pins (`OPTIMIZE_IOC_REGISTER_PLACEMENT_FOR_TIMING`); chipsmith has no pin
 timing constraints, so it can't tell. A register in the I/O cell fixes the
 pin's clock-to-output or setup time but moves the register to the chip's
 edge, which lengthens the path from the logic that feeds it; only the
-designer knows which side matters. A register moves when it is a plain
-rising-edge register (no enable, no reset): an input register is the one
-sampling the pin, moved; an output or OE register is a copy of the one
-driving the pin's data or enable, so a register several pins share (a
-bus's enable) gets one copy per pin, and the original stays if logic reads
-it. Its power-up value goes with it. A request synthesis can't satisfy is
+designer knows which side matters. An input register is the one sampling
+the pin, moved, and must be a plain rising-edge register (no enable, no
+reset). An output or OE register is a copy of the one driving the pin's
+data or enable, so a register several pins share (a bus's enable) gets one
+copy per pin, and the original stays if logic reads it. Its power-up value
+goes with it. That register may also have a clock enable and a synchronous
+reset, which synthesis finds in ordinary RTL (`q <= c ? x : 0`, a state
+machine that holds a value): the I/O cell's plain register then samples
+the original's next state, a mux on its D that reads the original's Q, so
+the two hold the same value on every edge (`io_registers_with_enables_and_resets`
+proves it against the RTL and co-simulates it). The original stays, and
+the mux costs a LUT input or a LUT per pin. An asynchronous reset or load,
+or a falling-edge clock, can't be made that way. A request synthesis can't satisfy is
 an error that says why. The timing report then times the paths into and
 out of those registers; a pin without them stays untimed.
 
