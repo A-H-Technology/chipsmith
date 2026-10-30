@@ -66,6 +66,7 @@ fn pack(nl: &mut Netlist) -> Result<Stats> {
     pack_io(nl)?;
     let tied_data = pack_m4k(nl, &mut stats)?;
     pack_mult(nl, &mut stats)?;
+    load_enable_as_one(nl);
     pack_constants(nl, &mut stats)?;
     drive_tied_data(nl, tied_data);
     pack_lut1(nl, &mut stats);
@@ -607,6 +608,31 @@ fn unsigned_signs(nl: &mut Netlist) {
 /// never leave their power-up 0 (data, enable or clock stuck, clear stuck
 /// on) are constants too, as quartus_map treats them ("stuck at GND"), and
 /// so are LUTs left with no inputs; both propagate.
+/// A register whose data is its own enable loads a 1 whenever it loads,
+/// so its data becomes that constant (and an LE outputting it, below).
+/// quartus_map folds it so: left as it is, the data would take the sync
+/// load path, which Quartus then drops with its route (found on
+/// examples/negedge-selftest, `if (p[0]) n2 <= p` for bit 0).
+fn load_enable_as_one(nl: &mut Netlist) {
+    for c in nl.cells() {
+        let cell = nl.cell(c);
+        let Kind::Ff(cfg) = cell.kind else { continue };
+        let (Some(d), Some(e)) = (cell.net(Port::Datain), cell.net(Port::Ena)) else {
+            continue;
+        };
+        if d != e || cfg.ena_inv {
+            continue;
+        }
+        let name = format!("{}$ena_data", cell.name);
+        let one = nl.create_cell(name.clone(), Kind::Const(true));
+        nl.add_port(one, Port::Y);
+        let n = nl.create_net(name);
+        nl.connect(one, Port::Y, n);
+        nl.disconnect(c, Port::Datain);
+        nl.connect(c, Port::Datain, n);
+    }
+}
+
 fn pack_constants(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
     let const_driver = |nl: &Netlist, n: NetId| match nl.net(n).driver {
         Some((d, _)) => match nl.cell(d).kind {
@@ -899,9 +925,17 @@ fn pack_lut1(nl: &mut Netlist, stats: &mut Stats) {
                 // Likewise into the JTAG and serial-flash blocks, which
                 // invert nothing either.
                 (Kind::Hard(_), _) if !inv => nl.reconnect(u, p, input),
-                // A buffer in front of a clock: the clock control takes the
-                // source.
-                (Kind::Ff(_), _) if p == Port::Clk && !inv => nl.reconnect(u, p, input),
+                // A buffer or inverter in front of a clock: the clock
+                // control takes the source, an inversion goes into the
+                // LAB's clock invert bit.
+                (Kind::Ff(_), _) if p == Port::Clk => {
+                    nl.reconnect(u, p, input);
+                    if inv {
+                        if let Kind::Ff(cfg) = &mut nl.cell_mut(u).kind {
+                            cfg.clk_inv = !cfg.clk_inv;
+                        }
+                    }
+                }
                 (Kind::Ff(_), _) if matches!(p, Port::Ena | Port::Sclr) => {
                     nl.reconnect(u, p, input);
                     if let Kind::Ff(cfg) = &mut nl.cell_mut(u).kind {
@@ -1072,6 +1106,9 @@ fn to_json(nl: &Netlist) -> Result<Value> {
                 "LCELL_COMB"
             }
             Kind::Ff(cfg) => {
+                if cfg.clk_inv {
+                    params.insert("CLK_INV".into(), bit(true));
+                }
                 if cfg.ena_inv {
                     params.insert("ENA_INV".into(), bit(true));
                 }

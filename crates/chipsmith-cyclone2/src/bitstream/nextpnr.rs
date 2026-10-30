@@ -982,7 +982,7 @@ impl Routed {
                         line,
                         inverted: flag(c, "ENA_INV"),
                     });
-                    ff_domain.insert((x, y, k), (b, false, e));
+                    ff_domain.insert((x, y, k), (b, flag(c, "CLK_INV"), e));
                 }
                 ("CY2_M4K", Bel::M4k { x, y }) => {
                     let shape = M4kShape::of(c).with_context(|| name.clone())?;

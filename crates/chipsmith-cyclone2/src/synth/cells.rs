@@ -85,6 +85,9 @@ impl Comb {
 pub struct Reg {
     pub d: SigBit,
     pub clk: SigBit,
+    /// Clocked on the falling edge: the LAB clock's inversion bit, not an
+    /// inverter (which would make a clock from logic).
+    pub clk_inv: bool,
     pub ena: SigBit,
     pub aclr: SigBit,
     pub sclr: SigBit,
@@ -93,9 +96,13 @@ pub struct Reg {
 
 impl Reg {
     pub fn cell(self) -> CellKind {
+        let mut params = BTreeMap::new();
+        if self.clk_inv {
+            params.insert("CLK_INV".to_string(), ParamValue::int(1));
+        }
         generic(
             LCELL_FF,
-            BTreeMap::new(),
+            params,
             vec![
                 port("DATAIN", Dir::In, vec![self.d]),
                 port("CLK", Dir::In, vec![self.clk]),

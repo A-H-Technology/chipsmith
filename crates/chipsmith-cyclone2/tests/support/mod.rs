@@ -47,8 +47,10 @@ module LCELL_COMB (input DATAA, input DATAB, input DATAC, input DATAD, input CIN
   assign COUT = DATAA ? k2[1] : k2[0];
 endmodule
 module LCELL_FF (input DATAIN, input CLK, input ENA, input ACLR, input SCLR, output reg REGOUT);
+  parameter CLK_INV = 0;
   initial REGOUT = 1'b0;
-  always @(posedge CLK, posedge ACLR)
+  wire clk = CLK_INV ? ~CLK : CLK;
+  always @(posedge clk, posedge ACLR)
     if (ACLR) REGOUT <= 1'b0;
     else if (ENA) REGOUT <= SCLR ? 1'b0 : DATAIN;
 endmodule

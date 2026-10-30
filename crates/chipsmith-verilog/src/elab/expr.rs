@@ -19,7 +19,7 @@ use super::stmt::{Mode, Slot};
 use super::{ConstVal, Dim, Env, ModElab, ScopeId, Sym, Ty};
 use crate::ast::{BinOp, Expr, ExprKind, Ident, UnOp};
 use crate::build::{as_const, extend, konst, xs};
-use crate::source::{bail, Result, Span};
+use crate::source::{bail, Diag, Result, Span};
 
 /// Extends a value of type `from` into context `ctx`: sign extension only
 /// if the context is signed (and so the value is).
@@ -181,6 +181,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
                     Sym::Param(c) => c.ty(),
                     Sym::Local(l) => self.locals[l].ty(),
                     Sym::Mem(_) => bail!(e.span, "a memory can only be used with an index"),
+                    Sym::LocalArray(_) => bail!(e.span, "an array can only be used with an index"),
                     Sym::Func(..) | Sym::Task(..) => {
                         bail!(e.span, "a function or task is not a value")
                     }
@@ -191,7 +192,13 @@ impl<'a, 'd> ModElab<'a, 'd> {
                     width: self.mems[m].width(),
                     signed: self.mems[m].signed,
                 },
-                None => Ty::BIT,
+                None => match self.local_array_word(e, scope)? {
+                    Some((a, _)) => Ty {
+                        width: self.local_arrays[a].word.width(),
+                        signed: self.local_arrays[a].signed,
+                    },
+                    None => Ty::BIT,
+                },
             },
             ExprKind::Slice { msb, lsb, .. } => {
                 let m = self.eval_i64(msb, scope)?;
@@ -376,10 +383,16 @@ impl<'a, 'd> ModElab<'a, 'd> {
                         let addr = self.mem_addr(mem, &indices, scope, env, span)?;
                         self.mem_read(mem, addr, env, span)?
                     }
-                    None => {
-                        let (bits, dim) = self.select_base(base, scope, env)?;
-                        self.bit_select(&bits, dim, index, scope, env)?
-                    }
+                    None => match self.local_word(e, scope, env)? {
+                        Some((slot, dim)) => match env.get(slot) {
+                            Some(v) => v.clone(),
+                            None => xs(dim.width()),
+                        },
+                        None => {
+                            let (bits, dim) = self.select_base(base, scope, env)?;
+                            self.bit_select(&bits, dim, index, scope, env)?
+                        }
+                    },
                 };
                 into_ctx(v, ctx)
             }
@@ -641,6 +654,7 @@ impl<'a, 'd> ModElab<'a, 'd> {
                 None => xs(self.locals[*l].dim.width()),
             },
             Sym::Mem(_) => bail!(span, "a memory can only be used with an index"),
+            Sym::LocalArray(_) => bail!(span, "an array can only be used with an index"),
             Sym::Func(..) | Sym::Task(..) => bail!(span, "a function or task is not a value"),
         })
     }
@@ -700,6 +714,10 @@ impl<'a, 'd> ModElab<'a, 'd> {
                     Sym::Mem(_) => bail!(
                         base.span,
                         "a part-select of a memory needs a word index first"
+                    ),
+                    Sym::LocalArray(_) => bail!(
+                        base.span,
+                        "a part-select of an array needs a word index first"
                     ),
                     Sym::Var(v) => {
                         let dim = self.vars[v].dim;
@@ -1020,7 +1038,15 @@ impl<'a, 'd> ModElab<'a, 'd> {
             for n in &d.names {
                 let (dim, signed) = self.decl_dim(&d.ty, fscope)?;
                 if !n.dims.is_empty() {
-                    bail!(n.name.span, "arrays in functions are not supported");
+                    if d.dir.is_some() {
+                        bail!(n.name.span, "a function's arguments can't be arrays");
+                    }
+                    let mut dims = Vec::new();
+                    for r in &n.dims {
+                        dims.push(self.eval_dim(r, fscope)?);
+                    }
+                    self.new_local_array(fscope, &n.name.name, dims, dim, signed, n.name.span);
+                    continue;
                 }
                 let l = self.new_local(fscope, &n.name.name, dim, signed, n.name.span);
                 match d.dir {
@@ -1076,6 +1102,106 @@ impl<'a, 'd> ModElab<'a, 'd> {
             .get(&Slot::Local(ret))
             .cloned()
             .unwrap_or_else(|| xs(ret_ty.width)))
+    }
+
+    pub fn new_local_array(
+        &mut self,
+        scope: ScopeId,
+        name: &Rc<str>,
+        dims: Vec<Dim>,
+        word: Dim,
+        signed: bool,
+        span: Span,
+    ) {
+        let a = super::LocalArray {
+            first: self.locals.len(),
+            dims,
+            word,
+            signed,
+        };
+        for _ in 0..a.count() {
+            self.locals.push(super::Local { dim: word, signed });
+        }
+        self.local_arrays.push(a);
+        let id = self.local_arrays.len() - 1;
+        self.scopes[scope]
+            .names
+            .insert(name.clone(), (Sym::LocalArray(id), span));
+    }
+
+    /// `a[i][j]...` naming a whole word of an array local to a function:
+    /// the word's slot and dimension. `None` if `e` isn't one (a select of
+    /// a word has more indices than the array has dimensions). The indices
+    /// are evaluated in `env`, and must come out constant.
+    pub fn local_word(
+        &mut self,
+        e: &'a Expr,
+        scope: ScopeId,
+        env: &mut Env,
+    ) -> Result<Option<(Slot, Dim)>> {
+        let Some((a, indices)) = self.local_array_word(e, scope)? else {
+            return Ok(None);
+        };
+        let arr = self.local_arrays[a].clone();
+        let mut flat = 0;
+        for (d, ix) in arr.dims.iter().zip(indices) {
+            let (bits, t) = self.lower_self(ix, scope, env)?;
+            let i = as_const(&bits)
+                .and_then(|c| {
+                    ConstVal {
+                        bits: c,
+                        signed: t.signed,
+                        string: false,
+                    }
+                    .as_i64()
+                })
+                .ok_or_else(|| {
+                    Diag::new(
+                        ix.span,
+                        "an array declared in a function can only be indexed by a constant",
+                    )
+                })?;
+            let Some(p) = d.pos(i) else {
+                bail!(
+                    ix.span,
+                    "index {i} is outside the array's [{}:{}]",
+                    d.msb,
+                    d.lsb
+                );
+            };
+            flat = flat * d.width() + p;
+        }
+        Ok(Some((Slot::Local(arr.first + flat), arr.word)))
+    }
+
+    /// The array local and the indices of `a[i][j]...`, if `e` names a
+    /// whole word of one (see [`Self::local_word`]).
+    pub fn local_array_word(
+        &mut self,
+        e: &'a Expr,
+        scope: ScopeId,
+    ) -> Result<Option<(usize, Vec<&'a Expr>)>> {
+        let mut indices = Vec::new();
+        let mut root = e;
+        while let ExprKind::Index { base, index } = &root.kind {
+            indices.push(&**index);
+            root = base;
+        }
+        let Some(Sym::LocalArray(a)) = self.expr_sym(root, scope)? else {
+            return Ok(None);
+        };
+        indices.reverse();
+        let n = self.local_arrays[a].dims.len();
+        if indices.len() < n {
+            bail!(
+                e.span,
+                "an array in a function has {n} dimensions: a word needs all {n} indices"
+            );
+        }
+        if indices.len() > n {
+            return Ok(None);
+        }
+        Ok(Some((a, indices)))
     }
 
     pub fn new_local(

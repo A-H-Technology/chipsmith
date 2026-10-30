@@ -36,6 +36,7 @@ pub(crate) struct ModElab<'a, 'd> {
     pub vars: Vec<Var>,
     pub mems: Vec<MemVar>,
     pub locals: Vec<Local>,
+    pub local_arrays: Vec<super::LocalArray>,
     /// Parameter values given by the instance (and defparams).
     overrides: FxHashMap<String, ConstVal>,
     /// Memories that must become registers (see [`super::proc`]).
@@ -72,6 +73,7 @@ pub(crate) fn elaborate_module<'a>(
         vars: Vec::new(),
         mems: Vec::new(),
         locals: Vec::new(),
+        local_arrays: Vec::new(),
         overrides: overrides.iter().cloned().collect(),
         mem2reg: FxHashSet::default(),
         ports: ast.ports.iter().map(|p| (p.clone(), None)).collect(),
@@ -486,10 +488,12 @@ impl<'a, 'd> ModElab<'a, 'd> {
             // In a function or task, a block's variables are locals.
             if self.depth > 0 {
                 if !n.dims.is_empty() {
-                    bail!(
-                        n.name.span,
-                        "arrays in functions and tasks are not supported"
-                    );
+                    let mut dims = Vec::new();
+                    for r in &n.dims {
+                        dims.push(self.eval_dim(r, scope)?);
+                    }
+                    self.new_local_array(scope, &n.name.name, dims, dim, signed, n.name.span);
+                    continue;
                 }
                 self.new_local(scope, &n.name.name, dim, signed, n.name.span);
                 continue;

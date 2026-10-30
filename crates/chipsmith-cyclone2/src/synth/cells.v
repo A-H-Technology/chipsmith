@@ -18,6 +18,8 @@ endmodule
 // Unconnected (synthesis ties them so): ENA 1, ACLR and SCLR 0.
 (* blackbox *)
 module LCELL_FF (input DATAIN, input CLK, input ENA, input ACLR, input SCLR, output REGOUT);
+  // 1: clocked on CLK's falling edge (the LAB inverts the clock).
+  parameter CLK_INV = 0;
 endmodule
 
 // Pin buffers. Each has its I/O cell's registers, rising-edge, no enable

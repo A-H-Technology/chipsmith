@@ -108,8 +108,30 @@ fn synthesize_with(
     files: &[PathBuf],
     io_registers: &BTreeMap<String, IoRegisters>,
 ) -> Synthesized {
+    synthesize_inner(name, top, files, files, io_registers)
+}
+
+/// [`synthesize`], the RTL it is checked against read from `reference`
+/// (with the same top and register names) instead of the design's own
+/// sources.
+fn synthesize_against(
+    name: &str,
+    top: &str,
+    files: &[PathBuf],
+    reference: &[PathBuf],
+) -> Synthesized {
+    synthesize_inner(name, top, files, reference, &BTreeMap::new())
+}
+
+fn synthesize_inner(
+    name: &str,
+    top: &str,
+    files: &[PathBuf],
+    reference: &[PathBuf],
+    io_registers: &BTreeMap<String, IoRegisters>,
+) -> Synthesized {
     let dir = scratch(name);
-    let rtl = support::rtl(&dir, top, files);
+    let rtl = support::rtl(&dir, top, reference);
     let mut stages = Stages::default();
     let out = synthesize_observed(support::frontend(top, files), io_registers, &mut stages)
         .unwrap_or_else(|e| panic!("{name}: {e:#}"))
@@ -480,6 +502,103 @@ fn latches() {
 #[test]
 fn async_load() {
     feature("async_load");
+}
+
+/// Falling-edge registers: the LAB clock's inversion (CLK_INV), not an
+/// inverter in front of the clock. The proof steps every register on one
+/// edge, so it can't tell the edges apart; the co-simulation does, and
+/// fails with the inversion dropped.
+#[test]
+fn negedge() {
+    let f = Path::new(ROOT).join("crates/chipsmith-cyclone2/tests/designs/negedge.v");
+    let s = synthesize("negedge", "top", std::slice::from_ref(&f));
+    let proof = prove("negedge", &s);
+    eprintln!("negedge: {} $equiv proven", proof.equivalences);
+    let refined = s.stages.refined.as_ref().unwrap();
+    let gate = s.stages.cells.as_ref().unwrap();
+    let sim = support::cosim(&s.dir, &s.rtl, refined, gate, COSIM_CYCLES, 1)
+        .unwrap_or_else(|e| panic!("negedge: co-simulation: {e}"));
+    eprintln!(
+        "negedge: co-simulated {} cycles, {} output bits compared",
+        sim.cycles, sim.compared
+    );
+    let cells = &gate.modules[0].cells;
+    let inverted = |c: &chipsmith_netlist::Cell| matches!(&c.kind, CellKind::Other(g) if g.ty == "LCELL_FF" && g.params.get("CLK_INV") == Some(&ParamValue::int(1)));
+    // n (8) and ne (4) on the falling edge.
+    assert_eq!(cells.iter().filter(|c| inverted(c)).count(), 12);
+    // No LUT reads the clock: an inverter in front of a register would.
+    let ff_clk = |c: &chipsmith_netlist::Cell| match &c.kind {
+        CellKind::Other(g) if g.ty == "LCELL_FF" => g.port("CLK").map(|p| p.sig[0]),
+        _ => None,
+    };
+    let clk = cells.iter().find_map(ff_clk).expect("a register");
+    assert!(
+        cells.iter().filter_map(ff_clk).all(|c| c == clk),
+        "one clock net"
+    );
+    for c in cells {
+        if let CellKind::Other(g) = &c.kind {
+            if g.ty == "LCELL_COMB" {
+                assert!(
+                    g.ports.iter().all(|p| !p.sig.contains(&clk)),
+                    "{} reads the clock",
+                    c.name
+                );
+            }
+        }
+    }
+    let mut rising = gate.clone();
+    for c in rising.modules[0].cells.iter_mut() {
+        if let CellKind::Other(g) = &mut c.kind {
+            g.params.remove("CLK_INV");
+        }
+    }
+    let dir = scratch("negedge-rising");
+    match support::cosim(&dir, &s.rtl, refined, &rising, COSIM_CYCLES, 1) {
+        Ok(_) => panic!("negedge: every register on the rising edge, not caught"),
+        Err(e) => {
+            assert!(e.starts_with("MISMATCH"), "{e}");
+            eprintln!("negedge, inversion dropped: caught ({e})");
+        }
+    }
+    pack(&s.dir, "chipsmith", &s.netlist);
+}
+
+/// Forencich's lfsr.v (examples/crc32), which declares arrays inside its
+/// mask function, as Ethernet's CRC-32: proven against a textbook bitwise
+/// CRC-32 with the same top (`designs/crc32_ref.v`), and co-simulated
+/// with it. yosys' own front end takes over 20 minutes on lfsr.v's
+/// constant functions, so the oracle's RTL is the reference's; that also
+/// checks the arrays elaborate to the right masks, not only that they
+/// parse.
+#[test]
+fn crc32() {
+    let reference = Path::new(ROOT).join("crates/chipsmith-cyclone2/tests/designs/crc32_ref.v");
+    let s = synthesize_against(
+        "crc32",
+        "top",
+        &example("crc32"),
+        std::slice::from_ref(&reference),
+    );
+    let proof = prove("crc32", &s);
+    eprintln!(
+        "crc32: {} $equiv proven against the reference",
+        proof.equivalences
+    );
+    let sim = support::cosim(
+        &s.dir,
+        &s.rtl,
+        s.stages.refined.as_ref().unwrap(),
+        s.stages.cells.as_ref().unwrap(),
+        COSIM_CYCLES,
+        1,
+    )
+    .unwrap_or_else(|e| panic!("crc32: co-simulation: {e}"));
+    eprintln!(
+        "crc32: co-simulated {} cycles, {} output bits compared",
+        sim.cycles, sim.compared
+    );
+    pack(&s.dir, "chipsmith", &s.netlist);
 }
 
 #[test]

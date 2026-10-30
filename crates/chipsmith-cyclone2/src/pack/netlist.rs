@@ -140,6 +140,7 @@ impl Port {
 /// A register's LAB-wide control inversions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FfConfig {
+    pub clk_inv: bool,
     pub ena_inv: bool,
     pub sclr_inv: bool,
 }

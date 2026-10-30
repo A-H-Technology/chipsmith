@@ -956,7 +956,7 @@ fn clock_report(
     r: &chipsmith_cyclone2::route::Stats,
     clocks: &BTreeMap<String, Frequency>,
 ) -> Vec<String> {
-    use chipsmith_cyclone2::route::ClockSource;
+    use chipsmith_cyclone2::route::{ClockSource, Edge};
     let hz = |i: usize| -> Option<f64> {
         match &r.clocks[i].source {
             ClockSource::Pin(port) => clocks.get(port).map(|f| f.hz() as f64),
@@ -975,15 +975,29 @@ fn clock_report(
             (ClockSource::Core, _) => format!("clock {} (from logic)", c.name),
         }
     };
+    let edge = |e: Edge| match e {
+        Edge::Rising => "rising",
+        Edge::Falling => "falling",
+    };
     let mut out = Vec::new();
     for p in &r.pairs {
         let ns = f64::from(p.critical) / 1000.0;
         if p.from == p.to {
-            let slack = hz(p.from).map(|f| 1e9 / f - ns);
+            // From one edge to the other the path has half a period (a
+            // pin's clock or a PLL output at 50% duty cycle).
+            let (label, periods) = match (p.from_edge, p.to_edge) {
+                (Edge::Rising, Edge::Rising) => (String::new(), 1.0),
+                (Edge::Falling, Edge::Falling) => (", falling edge".to_string(), 1.0),
+                (a, b) => (
+                    format!(", {} to {} edge, half a period", edge(a), edge(b)),
+                    0.5,
+                ),
+            };
+            let slack = hz(p.from).map(|f| periods * 1e9 / f - ns);
             out.push(format!(
-                "{}: critical path {ns:.2} ns, Fmax {:.1} MHz{} (estimate)",
+                "{}{label}: critical path {ns:.2} ns, Fmax {:.1} MHz{} (estimate)",
                 what(p.from),
-                1e3 / ns,
+                periods * 1e3 / ns,
                 match slack {
                     Some(s) if s < 0.0 => format!(", slack {s:.2} ns; FAILS timing"),
                     Some(s) => format!(", slack {s:.2} ns"),
