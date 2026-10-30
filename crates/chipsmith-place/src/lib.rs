@@ -177,12 +177,20 @@ pub fn place(p: &Problem, legalizer: &mut impl Legalizer, opts: Options) -> Outc
     let mut legal: Option<Vec<Pos>> = None;
     let mut best: Option<Outcome> = None;
     let mut since_best = 0;
+    // The CG solves' share of the time, for the GPU question
+    // (experiments/gpu-bench).
+    let mut solving = std::time::Duration::ZERO;
     for round in 0..opts.rounds {
         let anchor = legal
             .as_ref()
             .map(|l| (l.as_slice(), opts.anchor * round as f32));
+        let started = std::time::Instant::now();
         pos = solve(p, &weights, &pos, anchor);
+        solving += started.elapsed();
         let solved = opts.trace.then(|| wirelength(p, &pos, &weights));
+        if opts.trace {
+            eprintln!("place: solves so far {:.2} s", solving.as_secs_f64());
+        }
         spread(p, &areas, &mut pos, opts.target_density);
         let spread_wl = opts.trace.then(|| wirelength(p, &pos, &weights));
         if opts.trace {

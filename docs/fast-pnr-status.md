@@ -1,142 +1,162 @@
-# fast-pnr: status and handoff (2026-10-29, WIP)
+# fast-pnr: compile speed without losing quality
 
-Branch `fast-pnr`, base `open` 385aa15. Goal: compile speed without losing
-quality (see the brief: profile first, analytic + annealer placement,
-rayon, router speed, GPU verdict with numbers, ADR on incremental
-compilation, quality table in the README).
+Branch `fast-pnr`, base `open` 385aa15. Roadmap item 3, "optimization":
+an analytic placer, a faster router, incremental builds, and a measured
+verdict on GPUs. This note records what changed, the measurements behind
+each choice, and what is left.
 
-## What is in the tree
+All timings come from the shared 8-core machine while another agent ran
+yosys proofs and Quartus (load average 8 to 26), so they are rough.
+Routed critical paths are deterministic for a given binary, design and
+seed, and the quality decisions rest on them.
 
-- `crates/chipsmith-place`: device-generic analytic global placer
-  (bound-to-bound quadratic model, Jacobi-preconditioned CG with rayon over
-  rows, recursive-bisection spreading, anchors). The device interface is the
-  `Legalizer` trait (`legalize`, `reweight`) plus a `Problem` (objects,
-  fixed points, nets, bins). Has 3 unit tests (pass). The xc7 back end does
-  not use it yet.
-- `crates/chipsmith-cyclone2/src/place.rs`: the placer is now cluster
-  LEs into LAB-sized clusters, run analytic placement, legalise into LAB
-  slots (`LabLegalizer`), then a short refining anneal (`REFINE`: heat 0.1,
-  range 2, moves 1). `best_of` runs 8 refining anneals from different seeds
-  side by side and keeps the one with the shortest estimated critical
-  path (`CHIPSMITH_PLACE_SEEDS` overrides the count). The knobs read from
-  the environment for sweeping: `CHIPSMITH_PLACE_{HEAT,RANGE,MOVES,SEEDS,
-  DENSITY,ANCHOR,ROUNDS,PATIENCE,TRACE}`. The old from-scratch initial
-  placement (`State::initial`) is gone.
-- Clustering fallbacks for near-full designs: `merge_clusters` (connected
-  small clusters) always runs; `pack_clusters` (first-fit) and
-  `cluster_with(.., fill = true)` (top clusters up with unrelated LUT-only
-  LEs) run only when the clusters don't fit. The fill/pack code compiles
-  (release, no warnings) but has not been run.
-- `crates/chipsmith/src/flow.rs`: the routing graph and the bitstream
-  device database load on threads of their own (`Prefetch`) while
-  synthesis and placement run. The device database alone took 3-6 s,
-  more than everything else together for small designs. Built, not
-  benchmarked.
+## What changed
+
+### Placement (`crates/chipsmith-place`, `crates/chipsmith-cyclone2/src/place.rs`)
+
+1. LEs are clustered into LAB-sized groups of connected, compatible LEs
+   (`cluster`), as VPR's packer does. When the clusters don't fit, small
+   ones are merged (`merge_clusters`), topped up with unrelated LUT-only
+   LEs (`cluster_with(.., fill = true)`) and packed first-fit
+   (`pack_clusters`).
+2. `chipsmith_place::place` places the clusters, carry chains and M4Ks
+   analytically: a bound-to-bound quadratic wirelength model solved with
+   Jacobi-preconditioned CG (rows in parallel with rayon), recursive
+   bisection spreading, and anchors to the last legal placement. It is
+   device-generic: a device implements the `Legalizer` trait (`legalize`,
+   `reweight`) and describes a `Problem` (objects, fixed points, nets,
+   bins). The xc7 back end doesn't use it yet.
+3. `LabLegalizer` snaps the result onto LAB slots: chains first, then
+   clusters largest first, each into the nearest LAB that `lab_ok`
+   accepts. A small cluster may share a LAB with a carry chain's last LAB
+   or with another small cluster. That is what lets picorv32x24 fit.
+4. A refining anneal over LAB slots (`REFINE`: heat 0.5, range 3 LABs,
+   1 x N^(4/3) moves per temperature) runs from 8 seeds in parallel
+   (`best_of`). The one with the shortest estimated critical path wins,
+   so the result doesn't depend on thread timing.
+
+Knobs for sweeps, all read from the environment:
+`CHIPSMITH_PLACE_{HEAT,RANGE,MOVES,SEEDS,SEED,DENSITY,ANCHOR,ROUNDS,PATIENCE,TRACE}`.
+`SEED` picks another set of anneal seeds.
+
+### Routing (`crates/chipsmith-route`)
+
+Profiled first. On sha256, 77% of routing was the A* loop and 14% heap
+pops, and 75% of the time went to nets with 32 or more sinks, mostly in
+iterations 2 to 5. Every candidate change was measured on fixed
+placements (route-only, `de2_pnr --route-only`), reporting CPU time,
+search work and routed critical path:
+
+| hypothesis | kept? | measured |
+|---|---|---|
+| Node data side by side (one cache line per node instead of four arrays; fixed-input check as a per-tile bitmask instead of a SipHash set) | yes | byte-identical output; sha256 about 15% less time (noisy) |
+| Incremental rip-up: a congested or critical net keeps every branch on no node another net uses and reroutes only the sinks that lost their path, or whose connection is critical | yes | sha256 expansions 53M to 26M, picorv32 20 s to 10 s; critical paths within noise (20.61 to 20.44, 8.93 to 8.81, 13.18 to 13.28 ns) |
+| Seed a sink's search only with tree nodes within a few hops of the best estimate (slack 2, 4, 8) | no | sha256 about 15% less CPU; picorv32 4 to 6% slower critical path, the smaller designs unchanged |
+| First iteration in parallel (every net on an empty chip, deterministic at any thread count) | no | sha256 wall 85 to 66 s but CPU up; iteration 2 then reroutes 2,886 nets instead of 1,684; picorv32 and femtorv32 slower; picorv32 9.16 against 8.81 ns |
+| Searches kept to the net's box plus a margin, VPR's `bb_factor`, unrestricted if that fails (margin 1, 3, 6) | yes, 3 | over 15 placements (3 seeds of 5 designs): geomean critical path x0.996, worst x1.06, CPU x0.96; sha256 CPU -16%, picorv32 -28%. Margin 1 sometimes needs 21 to 27 iterations |
+| A* weight 1.2 or 2.0 instead of 1.5 | no | 2.0: CPU x0.79 but sha256 20.30 to 21.00 ns and picorv32 +5.5%; 1.2: CPU x1.08, no gain |
+
+The late-iteration "flooding" that the bounding box cures: femtorv32's
+10th iteration expanded 2M nodes for 98 nets, because a hard-to-resolve
+node with a large present-cost factor made each search cover the chip.
+
+`CHIPSMITH_ROUTE_TRACE=1` prints one line per iteration: nets rerouted,
+time, time on wide nets, search work (seeded, pushed, expanded) and
+overused nodes. `CHIPSMITH_ROUTE_{INCREMENTAL,BBOX_MARGIN,ASTAR}` are
+the knobs.
+
+### Flow (`crates/chipsmith/src/flow.rs`, `cache.rs`)
+
+- The routing graph and the bitstream's device database load on
+  threads of their own while synthesis and placement run (`Prefetch`).
+  The device database alone took 3 to 6 s, more than everything else on
+  small designs.
+- Incremental builds (ADR-0011): each in-process step leaves a stamp of
+  its key and its inputs' content hashes, and is skipped while they
+  hold. A comment-only edit re-runs synthesis, gets the same netlist,
+  and skips pack, place-and-route and the bitstream. `CHIPSMITH_CACHE=0`
+  runs every step.
 - `flake.nix`: the devshell's routing-graph cache is named after the
-  database store path. The cache only checked its format, so this
-  worktree had a graph from before the PLL/IOE pins: de2-io and
-  de2-pll-counter failed to route ("bel X131Y30/IOE0 has no such pin",
-  "no free PLL") until it was regenerated.
-- `bench/speed.sh`: the bench (below).
-- `examples/picorv32x24`: 24 picorv32 cores, about 28K LEs, the large
-  benchmark.
-- `experiments/gpu-bench`: a CubeCL (CUDA/HIP) microbench of one CG
-  iteration (SpMV + dots + axpys, scalars kept on the device) and of
-  PathFinder's congestion update, against 1-thread and rayon CPU, at
-  2K-3M rows and 0.3-4M nodes. **Never compiled** (the first release
-  build of CubeCL was interrupted). No GPU numbers yet.
+  database's store path. Before, a stale graph from before the PLL and
+  IOE pins broke de2-io and de2-pll-counter in a fresh worktree.
 
-## Measured so far
+## Choosing the placer's schedule
 
-Loads on the machine were high (load average 15-23, other agent's yosys
-proofs), so the times are rough. Quality numbers are deterministic.
-"base" is 385aa15 (`/tmp/fast-pnr2/bench-base`). "WIP" is the analytic
-placer with a single-seed refine, before `best_of`
-(`/tmp/fast-pnr2/bench-wip`).
+Rule: no example's routed critical path is worse than `open`'s beyond
+noise. Noise was measured as the spread over three anneal seeds
+(`CHIPSMITH_PLACE_SEED` 0, 1 and 2; `open` patched with the same knob,
+in scratch only). Every DE2 example except sha256 and picorv32x24 was
+run with each schedule, with routing as above. The table compares
+medians over the three seeds against `open`'s median; "!" marks a
+median above `open`'s worst seed by more than 2%.
 
-| design | base place s | base route s | base crit ns | WIP place s | WIP route s | WIP crit ns |
-|---|---|---|---|---|---|---|
-| picorv32 | 41.1 | 43.9 | 8.10 | 4.3 | 29.9 | 8.93 |
-| femtorv32 | 21.1 | 21.5 | 13.74 | 2.0 | 14.3 | 13.18 |
-| i2c-master | 3.5 | 2.9 | 7.90 | 0.6 | 2.6 | 7.38 |
-| serv | 8.0 | 4.4 | 10.47 | 0.6 | 3.4 | 10.32 |
-| m4k-tdp | 0.5 | 2.3 | 3.80 | 0.1 | 1.4 | 4.26 |
-| sha256 | 1049 | 227 | 25.29 | 52.4 | 333.1 | 20.61 |
-| picorv32x24 | about 720 | did not finish in more than 6 h | - | fails: doesn't fit | - | - |
+| schedule | heat, range, moves | geomean vs open | worst | fails |
+|---|---|---|---|---|
+| S0 (the earlier default) | 0.1, 2, 1 | x0.986 | x1.137 | picorv32 9.11 against 8.10 ns, m4k-tdp 4.39 against 3.86 ns |
+| MH | 0.3, 3, 1 | x0.977 | x1.074 | picorv32 8.70 ns (one seed) |
+| **A (default)** | 0.5, 3, 1 | **x0.980** | **x1.018** | none: m4k-tdp 3.93 [3.80-4.14] against 3.86 [3.80-3.91] ns; its placement estimate is 3.80 ns on every seed, so routing alone moves it |
+| M1 | 1, 4, 2 | x0.983 | x1.000 | none, but about twice A's placement time |
 
-The sha256 base row comes from the previous agent's log (`/tmp/fast-pnr/base-sha256-pnr.log`).
-The picorv32x24 base row is the previous agent's run (pid 2532668, still routing after 7 h when this note was written).
+Searched on picorv32 and m4k-tdp only, three seeds each: heat 1, range 4,
+moves 1 (picorv32 8.08 ns median, m4k-tdp 4.05); M1 with 4 seeds (as good
+as M1); heat 0.3, range 4, moves 2 (as good, 3 times as slow).
 
-Other findings:
+## Results
 
-- Most small examples are now bound by fixed costs: device database 3-6 s,
-  routing graph 0.5-1 s (the prefetch above targets this).
-- picorv32x24 synthesis takes 72.5 s and packing 14.6 s. Both are worth
-  profiling.
-- sha256 routing (333 s) is now the largest single stage.
-- Refine-schedule sweep (`/tmp/fast-pnr2/sweep/results{1,2}.tsv`): the
-  routed critical path moves about ±10% per design with the schedule and
-  seed, and no schedule wins everywhere. Single-seed geomean against base
-  is +1% (S0, the default) to +4% (worse). With 8 seeds:
-  - M0 (default schedule): picorv32 8.95 (base 8.10), i2c 6.99 (7.90),
-    uart 5.99 (6.05), m4k-tdp 4.36 (3.80), serv 10.32 (10.47),
-    femtorv32 13.18 (13.74), spi-master 4.90.
-  - M1 (heat 1, range 4, moves 2): picorv32 7.94, m4k-tdp 3.80, i2c 8.19,
-    uart 6.15, serv 10.38, femtorv32 13.05, spi-master 4.71, with about
-    5x the placement time.
-  - The picorv32 and m4k-tdp regressions under the default schedule
-    block making it the default (quality gate). Either M1 becomes the
-    default, or the analytic path is opt-in.
-- picorv32x24 under the WIP: 1,794 clusters + 361 chain LABs > 2,076
-  LABs. A LAB takes one enable and the design has 674 enables, so
-  singleton register clusters pile up. `merge_clusters` alone got it to
-  1,779. The fill fallback above is meant to fix it but has not been run.
+Per design: `open` against this branch, three seeds each (median, and
+the range in brackets). Times are the medians of the same runs, under
+the load described at the top.
 
-## Not verified
+RESULTS_TABLE
 
-- Release tests: lib/bins/examples passed (`LIBEXIT=0`). The integration
-  tests (`--tests --test-threads=1`) were stopped partway through the
-  m4k shape proofs; everything up to them passed. They have not been run
-  on the current tree.
-- clippy: not run.
-- Quartus byte-identical checks: not run. Setup that works: a copy of
-  cyclone2-re's `tools/` in `/tmp/fast-pnr2/c2re`, with
-  `tools/cram/target/release/cram` symlinked to the nix-built cram of
-  the locked cyclone2-re (`/nix/store/92wwpsb78rsxw8g366z8q4rfn6ljk7p9-cram-0.1.0`).
-  The cram in /pool/dev/cyclone2-re is from Oct 26, from before M4K.
-  Run `CYCLONE2_RE=/tmp/fast-pnr2/c2re bench/quartus-validate.sh <bench out>/examples/<name>`.
-- README quality table, ADR: not written.
+## GPU
 
-## Not started
+`experiments/gpu-bench` (CubeCL 0.11.3, CUDA and HIP) builds under nix
+(`nix develop` provides the CUDA toolkit and ROCm's HIP runtime). Run on
+this machine's GTX 1660, CPU numbers on the loaded 8-core host:
 
-- Router speedups (profile first: sha256 and picorv32x24). Ideas: cache
-  the timing graph's topological order (`timing::Graph::analyse`
-  rebuilds fanout lists and Kahn's order every call); for high-fanout
-  nets, seed the A* from tree nodes near the sink only; route spatially
-  disjoint nets in parallel.
-- Profiling with perf: `nix shell nixpkgs#perf`. Build with
-  `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only` into a separate target dir.
-- GPU verdict. Expectation, not measured: the analytic problem has
-  2-3K objects, so a CG iteration is microseconds on the CPU and
-  kernel-launch-bound on a GPU. The bench is there to show this with
-  numbers.
-- ADR 0011 (0010 is taken on the `mult` branch) on incremental
-  compilation: what each stage can cache and its key (netlist, packed,
-  placement keyed on inputs plus settings; routing graph keyed on the
-  database store path, done here).
-- Moving the generic anneal into chipsmith-place for xc7.
+GPU_TABLE
 
-## Next concrete step
+Verdict: not worth pursuing yet, for either placement or routing.
 
-1. Build and fix compile errors in the fill/pack clustering. Then get
-   picorv32x24 to place and route with `de2_pnr`.
-2. Settle the default placer by quality: run `bench/speed.sh` over all
-   examples with M0 and M1 (8 seeds). If neither matches base on picorv32
-   and m4k-tdp, restore the old initial placement plus the full anneal
-   as the default and make the analytic path opt-in.
-3. Run the release tests and clippy, commit, push.
-4. Profile the router, then go on to the router, GPU and ADR items in
-   order.
+- Placement: the analytic problem has about 2,000 objects (picorv32x24:
+  1,733 clusters and 169 chains). At that size one CG iteration is
+  launch-bound on the GPU: 413 us against 232 us on one CPU thread. The
+  GPU wins from about 30,000 rows (412 us against 4.2 ms). And the
+  solves are a small share of placement anyway: 1.15 s of sha256's 259 s
+  (0.4%). The time is in the refining anneal (245 s), which is
+  sequential per seed.
+- Routing: the congestion update over every node is 3 ms a PathFinder
+  iteration on one CPU thread. Iterations take seconds, nearly all of it
+  A* searches, which are pointer-chasing and sequential per net. The GPU
+  kernel itself is fast (2.8 ms against 15 ms at 4M nodes), but copying
+  the occupancy each iteration makes it slower than the CPU (191 ms).
+- Revisit when the analytic placer works at LE level on a large device
+  (30K+ objects, an ePlace-style density gradient), or with a
+  GPU-friendly router (batched, partitioned nets).
+- HIP is not tested here (no AMD GPU on this machine). On the AMD
+  desktop: `cd experiments/gpu-bench && nix develop ../.. --command
+  cargo run --release -- hip`.
+
+## Verification
+
+VERIFICATION
+
+## Left for later
+
+- The xc7 back end doesn't use `chipsmith-place` yet. Its annealer could
+  move into the crate as well.
+- The refining anneal is now the largest share of placement on large
+  designs (sha256: 245 of 259 s; picorv32x24 similar). Ideas: fewer
+  seeds on large designs, an incremental timing update instead of the
+  full `reweight` each temperature, and moving only critical clusters.
+- picorv32x24's synthesis (58 s) and packing (10 s) are the next large
+  costs on the biggest design. Not profiled.
+- Incremental placement of the unchanged parts of a design (ADR-0011,
+  considered options) needs stable cell names out of synthesis.
+- With the parallel first iteration rejected, routing is
+  single-threaded. Spatially partitioned batches of nets, with each
+  search kept inside its box, could run side by side deterministically.
 
 ## Commands
 
@@ -146,17 +166,14 @@ Other findings:
 nix develop --command bench/speed.sh target/release/chipsmith /tmp/out [example ...]
 
 # place and route from a packed.json only (de2_pnr); settings via env
-CHIPSMITH_PLACE_TRACE=1 CHIPSMITH_PLACE_SEEDS=8 \
-  target/release/examples/de2_pnr [--place-only] examples/picorv32 /tmp/scratch-with-packed.json
+CHIPSMITH_PLACE_TRACE=1 target/release/examples/de2_pnr [--place-only | --route-only] examples/picorv32 /tmp/scratch-with-packed.json
 
-# baseline binary (385aa15), already built
-/tmp/fast-pnr2/base-src/target/release/chipsmith
+# router trace on a fixed placement
+CHIPSMITH_ROUTE_TRACE=1 target/release/examples/de2_pnr --route-only examples/sha256 <dir with placed.json>
 
 # GPU bench (outside the workspace)
-cd experiments/gpu-bench && CARGO_TARGET_DIR=/tmp/fast-pnr2/gpu-target \
-  nix develop ../.. --command cargo run --release -- cuda   # or hip
+cd experiments/gpu-bench && nix develop ../.. --command cargo run --release -- cuda   # or hip
 ```
 
 Heavy jobs run under
-`systemd-run --user --scope -p MemoryMax=20G -p MemorySwapMax=0`. Run
-integration tests with `--test-threads=1`, so only one yosys runs at a time.
+`systemd-run --user --scope -p MemoryMax=20G -p MemorySwapMax=0`.
