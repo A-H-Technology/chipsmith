@@ -297,6 +297,7 @@ impl<'a> Preprocessor<'a> {
             bail!(span, "`include nested too deeply");
         }
         let text = read(&path).map_err(|m| Diag::new(span, m))?;
+        self.sources.note_read(&path);
         let file = self
             .sources
             .add_file(path.display().to_string(), text.clone());

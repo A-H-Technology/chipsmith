@@ -55,6 +55,10 @@ pub(crate) struct SourceFile {
 #[derive(Debug, Default)]
 pub struct SourceMap {
     files: Vec<SourceFile>,
+    /// Every file read from disk, `$readmem` data too: what a build
+    /// cache must check (`Frontend::files_read`). Elaboration only has a
+    /// shared reference.
+    read: std::cell::RefCell<Vec<std::path::PathBuf>>,
 }
 
 /// A position as people read it: path, 1-based line and column.
@@ -72,6 +76,14 @@ impl fmt::Display for Location {
 }
 
 impl SourceMap {
+    pub(crate) fn note_read(&self, path: &std::path::Path) {
+        self.read.borrow_mut().push(path.to_owned());
+    }
+
+    pub(crate) fn files_read(&self) -> Vec<std::path::PathBuf> {
+        self.read.borrow().clone()
+    }
+
     pub(crate) fn add_file(&mut self, name: String, text: Rc<str>) -> FileId {
         self.add(name, text, Origin::File)
     }

@@ -113,6 +113,7 @@ impl Frontend {
 
     fn read_path(&mut self, path: &Path, role: Role) -> Result<(), Error> {
         let text = std::fs::read(path).map_err(|e| Error::io(path, e))?;
+        self.sources.note_read(path);
         self.read(
             &path.display().to_string(),
             &String::from_utf8_lossy(&text),
@@ -143,5 +144,11 @@ impl Frontend {
     pub fn elaborate(&self, top: &str) -> Result<chipsmith_netlist::Design, Error> {
         elab::elaborate(&self.sources, &self.modules, top)
             .map_err(|d| Error::from_diag(&self.sources, d))
+    }
+
+    /// Every file read from disk so far, in order: sources, `` `include ``d
+    /// files and, after `elaborate`, `$readmem` data.
+    pub fn files_read(&self) -> Vec<PathBuf> {
+        self.sources.files_read()
     }
 }
