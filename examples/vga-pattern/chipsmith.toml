@@ -1,0 +1,28 @@
+# A 640x480 60 Hz test pattern on the DE2's VGA DAC (ADV7123), with its
+# frame and pixel rates readable over JTAG.
+[project]
+name = "vga-pattern"
+top = "top"
+sources = ["src/*.v"]
+
+[target]
+device = "EP2C35F672C6"
+
+# Pins: Terasic's DE2_pin_assignments.csv (DE2 System CD; a copy at
+# https://people.ece.cornell.edu/land/courses/ece5760/NiosII_asm/DE2_pin_assignments.csv),
+# the DE2 user manual's VGA table. The DAC's inputs go through their
+# I/O-cell registers, so they change together.
+[pins]
+CLOCK_50 = "PIN_N2"
+VGA_R = { pins = ["PIN_C8", "PIN_F10", "PIN_G10", "PIN_D9", "PIN_C9", "PIN_A8", "PIN_H11", "PIN_H12", "PIN_F11", "PIN_E10"], registers = ["output"] }
+VGA_G = { pins = ["PIN_B9", "PIN_A9", "PIN_C10", "PIN_D10", "PIN_B10", "PIN_A10", "PIN_G11", "PIN_D11", "PIN_E12", "PIN_D12"], registers = ["output"] }
+VGA_B = { pins = ["PIN_J13", "PIN_J14", "PIN_F12", "PIN_G12", "PIN_J10", "PIN_J11", "PIN_C11", "PIN_B11", "PIN_C12", "PIN_B12"], registers = ["output"] }
+VGA_HS = { pin = "PIN_A7", registers = ["output"] }
+VGA_VS = { pin = "PIN_D8", registers = ["output"] }
+VGA_BLANK = { pin = "PIN_D6", registers = ["output"] }
+VGA_SYNC = "PIN_B7"
+VGA_CLK = { pin = "PIN_B8", registers = ["output"] }
+LEDG = "PIN_AE22"
+
+[clocks]
+CLOCK_50 = "50 MHz"

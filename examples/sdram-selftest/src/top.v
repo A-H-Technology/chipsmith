@@ -1,8 +1,10 @@
 // The DE2's SDRAM (IS42S16400: 4 banks x 4096 rows x 256 columns x 16 bits,
 // 8 MB) written with a pseudo-random pattern and read back, over and over.
 // A 100 MHz controller on PLL_1's CLK0; the SDRAM's clock is CLK2 on
-// DRAM_CLK, PLL_1's clock output pin, shifted to lead the commands by 3 ns
-// (+7 ns of a 10 ns period), as Terasic's DE2 designs clock it.
+// DRAM_CLK, PLL_1's clock output pin, shifted +8.5 ns (leading the
+// commands by 1.5 ns). That is the middle of the window measured on the
+// DE2 2026-10-30 with RD_LAT 4: 0 errors from +6 to +10.5 ns, nearly
+// every word wrong at +5.5 and +11.5 ns.
 //
 // Each pass writes all 4M words in 8-word bursts (ACTIVE, WRITE with auto
 // precharge), the data a 32-bit LFSR seeded from the pass number, then
@@ -43,7 +45,7 @@ module top(
     .CLK0_DIVIDE_BY(1),
     .CLK2_MULTIPLY_BY(2),
     .CLK2_DIVIDE_BY(1),
-    .CLK2_PHASE_SHIFT(7000)
+    .CLK2_PHASE_SHIFT(8500)
   ) pll (
     .INCLK(CLOCK_50),
     .CLK0(clk),
