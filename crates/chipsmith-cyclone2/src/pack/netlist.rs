@@ -228,6 +228,9 @@ pub enum Kind {
         in_reg: Option<PowerUp>,
     },
     ClkCtrl,
+    /// A PLL's external clock output: the clock control between its
+    /// counter 2 and its PLL<n>_OUT pin (cyclone2-re README, "PLLs").
+    PllOut,
     /// An M4K RAM block; its contents (`INIT`) pass through as a parameter.
     M4k(m4k::Shape),
     /// An embedded multiplier, and which of its registers are in use.
@@ -292,7 +295,7 @@ impl Kind {
             Kind::Obuf { .. } => port == Port::Pad,
             Kind::Iobuf { .. } if port == Port::Pad => return Dir::InOut,
             Kind::Iobuf { .. } => matches!(port, Port::Combout | Port::Regout),
-            Kind::ClkCtrl => port == Port::Outclk,
+            Kind::ClkCtrl | Kind::PllOut => port == Port::Outclk,
             Kind::M4k(_) => match port {
                 Port::Ram(p) => p.is_output(),
                 Port::M4k(p) => p.is_output(),

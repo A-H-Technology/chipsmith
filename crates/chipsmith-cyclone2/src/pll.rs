@@ -79,10 +79,20 @@ impl Request {
             if !used[k] {
                 continue;
             }
+            let phase_ps = num(&format!("CLK{k}_PHASE_SHIFT"), 0)?;
+            // Quartus makes a negative shift by delaying the feedback
+            // counter (m_initial) and every other output with it; not
+            // modelled. Remove this check once the solver does that.
+            ensure!(
+                phase_ps as i32 >= 0,
+                "CY2_PLL CLK{k}_PHASE_SHIFT = {} ps: negative phase shifts aren't supported; ask for the output's period minus {} ps instead",
+                phase_ps as i32,
+                -(phase_ps as i32)
+            );
             *o = Some(OutputRequest {
                 multiply: num(&format!("CLK{k}_MULTIPLY_BY"), 1)?,
                 divide: num(&format!("CLK{k}_DIVIDE_BY"), 1)?,
-                phase_ps: num(&format!("CLK{k}_PHASE_SHIFT"), 0)?,
+                phase_ps,
                 duty_percent: num(&format!("CLK{k}_DUTY_CYCLE"), 50)?,
             });
         }

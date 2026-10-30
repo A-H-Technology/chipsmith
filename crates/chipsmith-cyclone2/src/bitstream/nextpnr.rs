@@ -59,6 +59,11 @@ pub enum Wire {
     ClkIn {
         g: u32,
     },
+    /// The input of a PLL's external clock output's clock control.
+    PllOutIn {
+        x: u32,
+        y: u32,
+    },
     /// LAB control line k (rcf LAB_CONTROL_MUX).
     Ctrl {
         x: u32,
@@ -132,15 +137,42 @@ pub enum IoePin {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Bel {
-    Lut { x: u32, y: u32, k: u32 },
-    Ff { x: u32, y: u32, k: u32 },
-    Ioe { x: u32, y: u32, z: u32 },
-    ClkCtrl { g: u32 },
-    M4k { x: u32, y: u32 },
-    Mult { y: u32 },
+    Lut {
+        x: u32,
+        y: u32,
+        k: u32,
+    },
+    Ff {
+        x: u32,
+        y: u32,
+        k: u32,
+    },
+    Ioe {
+        x: u32,
+        y: u32,
+        z: u32,
+    },
+    ClkCtrl {
+        g: u32,
+    },
+    /// A PLL's external clock output's clock control.
+    PllOut {
+        x: u32,
+        y: u32,
+    },
+    M4k {
+        x: u32,
+        y: u32,
+    },
+    Mult {
+        y: u32,
+    },
     Jtag,
     Asmi,
-    Pll { x: u32, y: u32 },
+    Pll {
+        x: u32,
+        y: u32,
+    },
 }
 
 #[derive(Debug)]
@@ -285,6 +317,9 @@ fn wire(dev: &Device, tx: u32, ty: u32, name: &str) -> Result<Wire> {
         if let Some(g) = num(bel, "CLKCTRL") {
             return Ok(Wire::ClkIn { g });
         }
+        if bel == "PLLOUT" {
+            return Ok(Wire::PllOutIn { x, y });
+        }
         if let Some(h) = HardInput::ALL
             .into_iter()
             .find(|h| h.bel_pin() == (bel, pin))
@@ -316,6 +351,9 @@ fn bel(tx: u32, ty: u32, name: &str) -> Result<Bel> {
     }
     if let Some(g) = num(name, "CLKCTRL") {
         return Ok(Bel::ClkCtrl { g });
+    }
+    if name == "PLLOUT" {
+        return Ok(Bel::PllOut { x, y });
     }
     if name == "M4K" {
         return Ok(Bel::M4k { x, y });
@@ -592,6 +630,8 @@ impl Routed {
         // the line is chosen by the clock control's COREIN mux.
         let mut core_in: HashMap<Node, u8> = HashMap::new();
         let mut data_line: HashMap<(u32, u32, u32), u32> = HashMap::new();
+        // Pins driven by a PLL's external clock output.
+        let mut pll_data: std::collections::HashSet<(u32, u32, u32)> = Default::default();
         let mut oe_line: HashMap<(u32, u32, u32), u32> = HashMap::new();
         let mut datain: HashMap<(u32, u32, u32), [bool; 2]> = HashMap::new();
         // The input register's pad-to-core paths, and the row-clock buffer
@@ -847,6 +887,20 @@ impl Routed {
                             [dev.routing.elements[s.0 as usize].template as usize];
                         clk_buf.insert((x, y, k), t.index as u8);
                     }
+                    // Counter 2 into the clock control: no select bits
+                    // (observed: Quartus sets none).
+                    (Wire::Node(_), Wire::PllOutIn { .. }) => {}
+                    (
+                        Wire::Node(s),
+                        Wire::Ioe {
+                            x,
+                            y,
+                            z,
+                            pin: IoePin::DataOut,
+                        },
+                    ) if dev.element_enum(s) == 303 => {
+                        pll_data.insert((x, y, z));
+                    }
                     (Wire::Node(s), Wire::ClkIn { g }) => {
                         let t = &dev.routing.templates
                             [dev.routing.elements[s.0 as usize].template as usize];
@@ -1080,6 +1134,7 @@ impl Routed {
                         sdo: need(HardInput::Sdo)?,
                     });
                 }
+                ("PLLOUT", Bel::PllOut { .. }) => {}
                 ("CLKCTRL", Bel::ClkCtrl { g }) => {
                     let (node, input) = *clk_in
                         .get(&g)
@@ -1133,6 +1188,7 @@ impl Routed {
                     let data = || -> Result<OutData> {
                         Ok(
                             match (c.params.get("OUT_CONST"), data_line.get(&(x, y, z))) {
+                                (None, None) if pll_data.contains(&(x, y, z)) => OutData::PllClock,
                                 (Some(v), _) => OutData::Const(v.ends_with('1')),
                                 (None, Some(&line)) => OutData::Line {
                                     line,
