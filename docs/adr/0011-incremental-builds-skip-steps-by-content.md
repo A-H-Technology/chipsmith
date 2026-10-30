@@ -10,7 +10,7 @@ Each in-process step now leaves a stamp next to its first output, `<output>.stam
 
 When a later build plans the same step, the step is skipped if the key matches, all of its outputs exist and every recorded input still has the same hash. The build then prints `up to date` and replays the step's report. `CHIPSMITH_CACHE=0` runs every step.
 
-Inputs are compared by content, not by date. A step whose input was rebuilt but came out byte-identical is therefore skipped, and so is everything after it. A comment edit re-runs synthesis, gives the same netlist, and skips pack, place-and-route and the bitstream. This works because every step is deterministic: the placer's parallel anneals and the router's searches give the same result whatever the thread timing, and the tests check that.
+Inputs are compared by content, not by date. A step whose input was rebuilt but came out byte-identical is therefore skipped, and so is everything after it. A comment edit re-runs synthesis, gives the same netlist, and skips pack, place-and-route and the bitstream. This works because every step is deterministic: the placer's parallel anneals and the router's searches give the same result whatever the thread timing (rebuilds were compared byte for byte, docs/fast-pnr-status.md; no test pins it yet).
 
 ## Considered options
 

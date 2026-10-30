@@ -1,14 +1,17 @@
 # fast-pnr: compile speed without losing quality
 
-Branch `fast-pnr`, base `open` 385aa15. Roadmap item 3, "optimization":
+Branch `fast-pnr`, from `open` 385aa15, with `open` 33fb8a4 (multipliers,
+falling-edge registers) merged in. Roadmap item 3, "optimization":
 an analytic placer, a faster router, incremental builds, and a measured
 verdict on GPUs. This note records what changed, the measurements behind
 each choice, and what is left.
 
-All timings come from the shared 8-core machine while another agent ran
-yosys proofs and Quartus (load average 8 to 26), so they are rough.
-Routed critical paths are deterministic for a given binary, design and
-seed, and the quality decisions rest on them.
+The sweeps that chose the router's and the placer's settings ran on the
+shared 8-core machine while another agent ran yosys proofs and Quartus
+(load average 8 to 26), so their times are rough. The final speed table
+(Results) comes from back-to-back runs on a quiet machine. Routed critical
+paths are deterministic for a given binary, design and seed, and the
+quality decisions rest on them.
 
 ## What changed
 
@@ -19,8 +22,8 @@ seed, and the quality decisions rest on them.
    ones are merged (`merge_clusters`), topped up with unrelated LUT-only
    LEs (`cluster_with(.., fill = true)`) and packed first-fit
    (`pack_clusters`).
-2. `chipsmith_place::place` places the clusters, carry chains and M4Ks
-   analytically: a bound-to-bound quadratic wirelength model solved with
+2. `chipsmith_place::place` places the clusters, carry chains and blocks
+   (M4Ks, multipliers) analytically: a bound-to-bound quadratic wirelength model solved with
    Jacobi-preconditioned CG (rows in parallel with rayon), recursive
    bisection spreading, and anchors to the last legal placement. It is
    device-generic: a device implements the `Legalizer` trait (`legalize`,
@@ -30,7 +33,11 @@ seed, and the quality decisions rest on them.
    clusters largest first, each into the nearest LAB that `lab_ok`
    accepts. A small cluster may share a LAB with a carry chain's last LAB
    or with another small cluster. That is what lets picorv32x24 fit.
-4. A refining anneal over LAB slots (`REFINE`: heat 0.5, range 3 LABs,
+   Blocks go to the nearest free site of their own kind.
+4. A LAB's register domain includes the clock's edge (`FfCtl::clk`), so
+   clustering, legalising and annealing, which all go through `lab_check`,
+   keep rising- and falling-edge registers in separate LABs.
+5. A refining anneal over LAB slots (`REFINE`: heat 0.5, range 3 LABs,
    1 x N^(4/3) moves per temperature) runs from 8 seeds in parallel
    (`best_of`). The one with the shortest estimated critical path wins,
    so the result doesn't depend on thread timing.
@@ -82,8 +89,9 @@ the knobs.
 
 ## Choosing the placer's schedule
 
-Rule: no example's routed critical path is worse than `open`'s beyond
-noise. Noise was measured as the spread over three anneal seeds
+Chosen before the merge, against `open` 385aa15, and re-checked after it
+against 33fb8a4 (Results). Rule: no example's routed critical path is
+worse than `open`'s beyond noise. Noise was measured as the spread over three anneal seeds
 (`CHIPSMITH_PLACE_SEED` 0, 1 and 2; `open` patched with the same knob,
 in scratch only). Every DE2 example except sha256 and picorv32x24 was
 run with each schedule, with routing as above. The table compares
@@ -253,7 +261,11 @@ All on the merged tree (this branch with `open` 33fb8a4) unless noted.
   designs (sha256: 245 of 259 s; picorv32x24 similar). Ideas: fewer
   seeds on large designs, an incremental timing update instead of the
   full `reweight` each temperature, and moving only critical clusters.
-- picorv32x24's synthesis (58 s) and packing (10 s) are the next large
+- With 8 anneals in parallel, placement uses all cores: on a loaded
+  machine the small designs place no faster than with `open`'s single
+  anneal, and picorv32x24 took 1,870 s. A design-size-dependent seed
+  count needs its own quality sweep (4 seeds failed picorv32).
+- picorv32x24's synthesis (28 s quiet, 58 s loaded) and packing (6 s) are the next large
   costs on the biggest design. Not profiled.
 - Incremental placement of the unchanged parts of a design (ADR-0011,
   considered options) needs stable cell names out of synthesis.
