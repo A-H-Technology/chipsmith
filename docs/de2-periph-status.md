@@ -1,8 +1,8 @@
 # DE2 peripherals: status (2026-10-30)
 
 Before this work every DE2 example drove only LEDs, switches, JTAG, M4K
-blocks or multipliers. This note covers the SDRAM, the VGA DAC and
-examples/de2-io on the board, and the gaps found along the way.
+blocks or multipliers. This note covers the SDRAM, the SRAM, the VGA DAC
+and examples/de2-io on the board, and the gaps found along the way.
 
 Board checks read the design's USER1 register over JTAG with
 `cargo run --release -p chipsmith-cyclone2 --example de2_user1 -- --words N`.
@@ -71,6 +71,45 @@ checkers side by side read 0 errors at latency 4 and every word wrong at
 5, 6 and 7. A snapshot of the input registers showed burst 0's words 0-7
 at the expected edges. Without the extra stage the READ reaches the pins
 a clock earlier and the latency is 3: 0 errors over 5,145 passes.
+
+**examples/sram-selftest.** The 512 KB IS61LV25616AL-10 asynchronous
+SRAM:
+
+- Clock: a 100 MHz controller on PLL_1 CLK0.
+- Pins: address, WE#, OE# and the data bus (input, output and OE) through
+  their I/O-cell registers, the registers' enables and resets as logic on
+  D (the fix below); CE#, UB# and LB# tied low. Pins from Terasic's
+  DE2_pin_assignments.csv.
+- Writes: 3 clocks, WE#-controlled with OE# high: address and data out,
+  WE# low for one clock (10 ns; the part wants 8), WE# high with both
+  held; they change a clock later, not on WE#'s rising edge.
+- Reads: 2 clocks. The input registers sample on the edge that puts out
+  the next address (10 ns access, 2.5 ns output hold), so `RD_LAT` is 2.
+- Test: as sdram-selftest's, all 256K words a pass.
+- Size: 606 LEs, Fmax estimated at 175.2 MHz. Quartus byte-identical.
+- Simulated first (iverilog, a behavioural SRAM): 0 errors over 2
+  passes, and one corrupted word counted once.
+
+On the board (loaded over JTAG):
+
+| build | passes | errors | notes |
+|---|---|---|---|
+| `RD_LAT` 2, 16-bit pass counter | 46,680 | 0 | 611 s, 76.4 passes/s |
+| `RD_LAT` 2 (the example, 32-bit pass counter) | not read | | loaded; by the next read 16 min later the board had gone dark (below) |
+| `RD_LAT` 3 | 862 | 226,208,709 | 10 s; nearly every word |
+
+The first row's count is exact: its 16-bit pass counter wraps at 65,536.
+The committed example counts passes in 32 bits; its RBF is the one
+loaded in the second row. That run was never read: 16 minutes after the
+load, USER1 read all zeros, and a fresh load failed with every TDO bit 0
+(the USB-Blaster still enumerated). That is a board without power or
+with its JTAG cable off. Nobody was at the board, and why it went dark
+is unknown. The SRAM design drives the bus only while OE# is high (no
+fight in simulation), and its first build ran 611 s without trouble.
+
+76.4 passes a second is 80.1 MB/s (1 MiB of traffic a pass). The bus
+would carry 200 MB/s at 100 MHz; this controller spends 3 clocks a write
+and 2 a read.
 
 **examples/vga-pattern.** A 640x480 60 Hz pattern: colour bars, four
 ramps and a white border.
@@ -174,8 +213,7 @@ register stage in front of the pins. Since branch de2-ioreg:
    output-side trick isn't used); a design samples the pin first. The fix
    is the IOE register's clock enable and clear in cyclone2-re (phase 5),
    which also lets Quartus-style asynchronous clears into I/O cells.
-5. **Untested DE2 peripherals:** the 512 KB SRAM (examples/bidir drives
-   its data pins, but nothing tests the memory), the 4 MB flash, the
+5. **Untested DE2 peripherals:** the 4 MB flash, the
    WM8731 audio codec (I2C plus I2S; its master clock hits gap 1), the
    ADV7181 TV decoder, the ISP1362 USB, the DM9000A Ethernet, the SD
    card, PS/2, IrDA and the 16x2 LCD.

@@ -18,7 +18,7 @@ no nextpnr, no cram. GHDL translates VHDL in front of it.
 
 | device | board | build | on hardware |
 |---|---|---|---|
-| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis): LUT/carry/register logic, M4K RAM blocks and embedded multipliers (below), global clocks from pins and from logic (a register, the JTAG block's TCK; one clock per LAB), PLLs (`CY2_PLL`; both on the board 2026-10-26, examples/de2-jtag-counter on TCK and examples/de2-pll-counter at 100 and 40 MHz from CLOCK_50; 2026-10-30 a PLL clock on its PLL's clock output pin, the DE2's SDRAM run at 100 MHz with 0 errors by examples/sdram-selftest); pins input, output, tri-state, bidirectional, open drain, at 3.3-V LVTTL (any current) or LVCMOS or 2.5-V inputs, with pull-up or bus hold and I/O-cell registers (Manifest, below) | yes (2026-10-25, chipsmith's own synthesis end to end, checked over JTAG: examples/de2-jtag-counter (its earlier CLOCK_50-sampled version) reads back `"DE2!"` at 50.00 MHz after a JTAG load and after `flash --persist` (loader synthesized by chipsmith too, EPCS written, verified and reloaded from; 2026-10-26 also after a power cycle); picorv32 with the same readback added runs its loop at 3.33 MHz. 2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
+| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis): LUT/carry/register logic, M4K RAM blocks and embedded multipliers (below), global clocks from pins and from logic (a register, the JTAG block's TCK; one clock per LAB), PLLs (`CY2_PLL`; both on the board 2026-10-26, examples/de2-jtag-counter on TCK and examples/de2-pll-counter at 100 and 40 MHz from CLOCK_50; 2026-10-30 a PLL clock on its PLL's clock output pin, the DE2's SDRAM run at 100 MHz with 0 errors by examples/sdram-selftest, its SRAM by examples/sram-selftest); pins input, output, tri-state, bidirectional, open drain, at 3.3-V LVTTL (any current) or LVCMOS or 2.5-V inputs, with pull-up or bus hold and I/O-cell registers (output and OE registers with clock enables and synchronous resets too; Manifest, below) | yes (2026-10-25, chipsmith's own synthesis end to end, checked over JTAG: examples/de2-jtag-counter (its earlier CLOCK_50-sampled version) reads back `"DE2!"` at 50.00 MHz after a JTAG load and after `flash --persist` (loader synthesized by chipsmith too, EPCS written, verified and reloaded from; 2026-10-26 also after a power cycle); picorv32 with the same readback added runs its loop at 3.33 MHz. 2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
 | xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes: what yosys `synth_xilinx` and openXC7's nextpnr's packer handle, LVCMOS33 pins; chipsmith places LUT/register/carry logic, RAM32Ms, pins, BUFGs, BSCANs and the PS7 and routes the interconnect (below) | yes (2026-10-24: zybo-jtag-counter placed and routed by chipsmith, read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga) |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
@@ -101,6 +101,24 @@ registers holding the first word) was found on the board: a build with
 the extra stage checking latencies 4-7 side by side read 0 errors at 4
 and every word wrong at 5-7. Without the stage the READ reaches the pins
 a clock earlier, so it is 3.
+
+`examples/sram-selftest` runs the DE2's 512 KB asynchronous SRAM
+(IS61LV25616AL-10, 256K x 16): a 100 MHz controller on PLL_1's CLK0,
+every SRAM pin but the constant chip and byte enables through its
+I/O-cell registers, a write in 3 clocks (WE# low for one), a read in 2
+(the input registers sample on the edge that puts out the next address).
+Each pass writes all 256K words from a 32-bit LFSR seeded from the pass
+number and reads them back. USER1 holds `"SRM!"`, the passes, the words
+that read back wrong and a CLOCK_50 counter (`de2_user1 -- --words 4`:
+counter 1 is the errors, counter 2 the passes). 606 LEs, 68 registers in
+I/O cells; Quartus byte-identical. On the DE2 2026-10-30 (loaded over
+JTAG): 46,680 passes over 611 s, 0 errors (23 GiB written and checked),
+76.4 passes a second, 80.1 MB/s (512 KB written
+and 512 KB read per pass; the bus would carry 200 MB/s, the controller
+spends 5 clocks per word written and read). The checker does catch a
+wrong read: a build reading a clock late (`RD_LAT` 3) counted
+226,208,709 errors in 862 passes, nearly every word. Not to be loaded
+with examples/bidir's SW[4] up: that one drives SRAM_DQ too.
 
 `examples/bidir` is cyclone2-re's tri-state test: expansion-header and
 SRAM data pins driven with their output enable from a switch, an

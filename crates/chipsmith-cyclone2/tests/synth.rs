@@ -386,6 +386,79 @@ fn io_registers_with_enables_and_resets() {
     assert_eq!(registered, 9);
 }
 
+/// The DE2 memory self-tests as their manifests build them: the
+/// controllers' registers (enables and resets included) copied into the
+/// address, command and data pins' I/O cells, every one requested taken.
+/// Neither is proven against the RTL: their LFSR checkers and controller
+/// state don't prove by induction (unreachable states), with or without
+/// I/O registers, and their inouts keep them out of co-simulation. The
+/// enable and reset shapes are `io_registers_with_enables_and_resets`';
+/// the designs are checked on the board and by Quartus.
+#[test]
+fn memory_selftests_io_registers() {
+    for (name, outputs, dq) in [
+        (
+            "sdram-selftest",
+            &[
+                ("DRAM_ADDR", 12),
+                ("DRAM_BA", 2),
+                ("DRAM_RAS_N", 0),
+                ("DRAM_CAS_N", 0),
+                ("DRAM_WE_N", 0),
+            ][..],
+            "DRAM_DQ",
+        ),
+        (
+            "sram-selftest",
+            &[("SRAM_ADDR", 18), ("SRAM_WE_N", 0), ("SRAM_OE_N", 0)][..],
+            "SRAM_DQ",
+        ),
+    ] {
+        let out = IoRegisters {
+            output: true,
+            ..Default::default()
+        };
+        let mut regs = BTreeMap::new();
+        for &(port, n) in outputs {
+            if n == 0 {
+                regs.insert(port.to_string(), out);
+            }
+            for i in 0..n {
+                regs.insert(format!("{port}[{i}]"), out);
+            }
+        }
+        for i in 0..16 {
+            regs.insert(
+                format!("{dq}[{i}]"),
+                IoRegisters {
+                    input: true,
+                    output: true,
+                    output_enable: true,
+                },
+            );
+        }
+        let s = synthesize_with(&format!("{name}-cells"), "top", &example(name), &regs);
+        let cells = s.stages.cells.expect("a cells stage");
+        let registers: usize = cells.modules[0]
+            .cells
+            .iter()
+            .map(|c| match &c.kind {
+                CellKind::Other(g) if g.ty.starts_with("CY2_") => g
+                    .params
+                    .keys()
+                    .filter(|k| k.ends_with("_REGISTER"))
+                    .count(),
+                _ => 0,
+            })
+            .sum();
+        let wanted: usize = regs
+            .values()
+            .map(|r| usize::from(r.input) + usize::from(r.output) + usize::from(r.output_enable))
+            .sum();
+        assert_eq!(registers, wanted, "{name}: I/O registers");
+    }
+}
+
 /// What an I/O register can't be is an error, not a register left behind.
 #[test]
 fn io_registers_that_cant_be_are_errors() {
