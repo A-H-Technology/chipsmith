@@ -18,7 +18,7 @@ no nextpnr, no cram. GHDL translates VHDL in front of it.
 
 | device | board | build | on hardware |
 |---|---|---|---|
-| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis): LUT/carry/register logic, M4K RAM blocks and embedded multipliers (below), global clocks from pins and from logic (a register, the JTAG block's TCK; one clock per LAB), PLLs (`CY2_PLL`; both on the board 2026-10-26, examples/de2-jtag-counter on TCK and examples/de2-pll-counter at 100 and 40 MHz from CLOCK_50; 2026-10-30 a PLL clock on its PLL's clock output pin, the DE2's SDRAM run at 100 MHz with 0 errors by examples/sdram-selftest); pins input, output, tri-state, bidirectional, open drain, at 3.3-V LVTTL (any current) or LVCMOS or 2.5-V inputs, with pull-up or bus hold and I/O-cell registers (Manifest, below) | yes (2026-10-25, chipsmith's own synthesis end to end, checked over JTAG: examples/de2-jtag-counter (its earlier CLOCK_50-sampled version) reads back `"DE2!"` at 50.00 MHz after a JTAG load and after `flash --persist` (loader synthesized by chipsmith too, EPCS written, verified and reloaded from; 2026-10-26 also after a power cycle); picorv32 with the same readback added runs its loop at 3.33 MHz. 2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
+| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis): LUT/carry/register logic, M4K RAM blocks and embedded multipliers (below), global clocks from pins and from logic (a register, the JTAG block's TCK; one clock per LAB), PLLs (`CY2_PLL`; both on the board 2026-10-26, examples/de2-jtag-counter on TCK and examples/de2-pll-counter at 100 and 40 MHz from CLOCK_50; 2026-10-30 a PLL clock on its PLL's clock output pin, the DE2's SDRAM run at 100 MHz with 0 errors by examples/sdram-selftest, its SRAM by examples/sram-selftest); pins input, output, tri-state, bidirectional, open drain, at 3.3-V LVTTL (any current) or LVCMOS or 2.5-V inputs, with pull-up or bus hold and I/O-cell registers (output and OE registers with clock enables and synchronous resets too; Manifest, below) | yes (2026-10-25, chipsmith's own synthesis end to end, checked over JTAG: examples/de2-jtag-counter (its earlier CLOCK_50-sampled version) reads back `"DE2!"` at 50.00 MHz after a JTAG load and after `flash --persist` (loader synthesized by chipsmith too, EPCS written, verified and reloaded from; 2026-10-26 also after a power cycle); picorv32 with the same readback added runs its loop at 3.33 MHz. 2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
 | xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes: what yosys `synth_xilinx` and openXC7's nextpnr's packer handle, LVCMOS33 pins; chipsmith places LUT/register/carry logic, RAM32Ms, pins, BUFGs, BSCANs and the PS7 and routes the interconnect (below) | yes (2026-10-24: zybo-jtag-counter placed and routed by chipsmith, read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga) |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
@@ -83,18 +83,42 @@ registers, 8-word bursts with auto precharge at CAS latency 3. Each pass
 writes all 4M words with a 32-bit LFSR seeded from the pass number and
 reads them back. USER1 holds `"SDR!"`, the passes, the words that read
 back wrong and a CLOCK_50 counter (`de2_user1 -- --words 4`: counter 1 is
-the errors, counter 2 the passes). On the DE2 2026-10-30 (loaded over
-JTAG, 776 LEs, 65 registers in I/O cells): 6,989 passes at +8.5 ns,
+the errors, counter 2 the passes). The controller's registers drive the
+pins straight; their enables and resets go into the I/O-cell registers
+as logic on D (Manifest, below). On the DE2 2026-10-30 (loaded over
+JTAG, 810 LEs, 65 registers in I/O cells, chipsmith de2-ioreg): 5,145
+passes at +8.5 ns, 0 errors, 5.88 passes a second. Earlier the same day,
+with an extra plain register stage in front of the pins (776 LEs, read
+latency 4): 6,989 passes at +8.5 ns,
 0 errors (58.6 GB written and checked), and 1,823 passes, 0 errors, at
 +7 ns; 5.88 passes a second, 98.7 MB/s of SDRAM traffic, half the bus's
 200 MB/s (16 cycles per 8-word burst). Swept over DRAM_CLK's shift, 25 s
 each: 0 errors from +6 to +10.5 ns, nearly every word wrong at +5.5 and
 +11.5 ns, so +8.5 ns is the window's middle (docs/de2-periph-status.md). Quartus
 assembles chipsmith's placement and routing byte-identically. The read
-latency (`RD_LAT`, 4 FPGA clocks from the controller's READ to the input
-registers holding the first word) was found on the board: a build
-checking latencies 4-7 side by side read 0 errors at 4 and every word
-wrong at 5-7.
+latency (`RD_LAT`, FPGA clocks from the controller's READ to the input
+registers holding the first word) was found on the board: a build with
+the extra stage checking latencies 4-7 side by side read 0 errors at 4
+and every word wrong at 5-7. Without the stage the READ reaches the pins
+a clock earlier, so it is 3.
+
+`examples/sram-selftest` runs the DE2's 512 KB asynchronous SRAM
+(IS61LV25616AL-10, 256K x 16): a 100 MHz controller on PLL_1's CLK0,
+every SRAM pin but the constant chip and byte enables through its
+I/O-cell registers, a write in 3 clocks (WE# low for one), a read in 2
+(the input registers sample on the edge that puts out the next address).
+Each pass writes all 256K words from a 32-bit LFSR seeded from the pass
+number and reads them back. USER1 holds `"SRM!"`, the passes, the words
+that read back wrong and a CLOCK_50 counter (`de2_user1 -- --words 4`:
+counter 1 is the errors, counter 2 the passes). 606 LEs, 68 registers in
+I/O cells; Quartus byte-identical. On the DE2 2026-10-30 (loaded over
+JTAG): 46,680 passes over 611 s, 0 errors (23 GiB written and checked),
+76.4 passes a second, 80.1 MB/s (512 KB written
+and 512 KB read per pass; the bus would carry 200 MB/s, the controller
+spends 5 clocks per word written and read). The checker does catch a
+wrong read: a build reading a clock late (`RD_LAT` 3) counted
+226,208,709 errors in 862 passes, nearly every word. Not to be loaded
+with examples/bidir's SW[4] up: that one drives SRAM_DQ too.
 
 `examples/bidir` is cyclone2-re's tri-state test: expansion-header and
 SRAM data pins driven with their output enable from a switch, an
@@ -125,11 +149,13 @@ as the board was. The outputs are unobserved.
 
 `examples/vga-pattern` puts 640x480 at 60 Hz on the VGA DAC: colour
 bars, four ramps, a white border, the DAC's inputs through I/O-cell
-registers, 25 MHz pixels from PLL_1. VGA_CLK (PIN_B8) isn't a PLL clock
+registers (with the reset synthesis finds in `visible ? r : 0` as logic
+on their D), 25 MHz pixels from PLL_1, 519 LEs. VGA_CLK (PIN_B8) isn't a PLL clock
 output pin, so a register on the PLL's 50 MHz makes it, rising halfway
 through each pixel. USER1 holds `"VGA!"` and counts of the pixel clock
 and the frames: on the DE2 2026-10-30, 25.0000 MHz and 59 frames a
-second (59.52 expected). Quartus byte-identical. No monitor has shown
+second (59.52 expected); the build without the extra register stage
+read 25.0000 MHz and 60. Quartus byte-identical. No monitor has shown
 the picture yet.
 
 Pin settings are checked against Quartus the same way
@@ -507,8 +533,10 @@ The Cyclone II limits come from cyclone2-re's open flow: M4K RAM as
 above, multipliers as above, PLLs without negative phase shifts, clock
 switchover or reconfiguration (a PLL clock reaches a pin only through its
 clock output pin, and no global clock feeds logic as data), I/O registers
-without clock enables or clears (a register synthesis finds a reset or
-enable in can't go into an I/O cell), 3.3-V LVCMOS at its default current only.
+without clock enables or clears (an output or OE register's enable and
+synchronous reset become logic on the I/O register's D; an input register
+with either, or any register with an asynchronous reset, can't go into an
+I/O cell), 3.3-V LVCMOS at its default current only.
 The timing model covers LE and register delays exactly and routing by
 per-element-type averages. M4K clock-to-output (3.33 ns) and setup are
 from one quartus_sta path each, and so is the M4K buffer's routing delay.
@@ -1356,12 +1384,19 @@ pins (`OPTIMIZE_IOC_REGISTER_PLACEMENT_FOR_TIMING`); chipsmith has no pin
 timing constraints, so it can't tell. A register in the I/O cell fixes the
 pin's clock-to-output or setup time but moves the register to the chip's
 edge, which lengthens the path from the logic that feeds it; only the
-designer knows which side matters. A register moves when it is a plain
-rising-edge register (no enable, no reset): an input register is the one
-sampling the pin, moved; an output or OE register is a copy of the one
-driving the pin's data or enable, so a register several pins share (a
-bus's enable) gets one copy per pin, and the original stays if logic reads
-it. Its power-up value goes with it. A request synthesis can't satisfy is
+designer knows which side matters. An input register is the one sampling
+the pin, moved, and must be a plain rising-edge register (no enable, no
+reset). An output or OE register is a copy of the one driving the pin's
+data or enable, so a register several pins share (a bus's enable) gets one
+copy per pin, and the original stays if logic reads it. Its power-up value
+goes with it. That register may also have a clock enable and a synchronous
+reset, which synthesis finds in ordinary RTL (`q <= c ? x : 0`, a state
+machine that holds a value): the I/O cell's plain register then samples
+the original's next state, a mux on its D that reads the original's Q, so
+the two hold the same value on every edge (`io_registers_with_enables_and_resets`
+proves it against the RTL and co-simulates it). The original stays, and
+the mux costs a LUT input or a LUT per pin. An asynchronous reset or load,
+or a falling-edge clock, can't be made that way. A request synthesis can't satisfy is
 an error that says why. The timing report then times the paths into and
 out of those registers; a pin without them stays untimed.
 

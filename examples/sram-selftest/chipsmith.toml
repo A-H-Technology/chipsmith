@@ -1,0 +1,29 @@
+# The DE2's 512 KB SRAM (ISSI IS61LV25616AL-10, 256K x 16 bits,
+# asynchronous) written and read back over and over, the result over JTAG.
+[project]
+name = "sram-selftest"
+top = "top"
+sources = ["src/*.v"]
+
+[target]
+device = "EP2C35F672C6"
+
+# Pins: Terasic's DE2_pin_assignments.csv (DE2 System CD; a copy at
+# https://people.ece.cornell.edu/land/courses/ece5760/NiosII_asm/DE2_pin_assignments.csv),
+# the DE2 user manual's SRAM table. Every SRAM pin but the constant ones
+# goes through its I/O-cell registers, so the pins change together and the
+# WE# pulse is one clock wide whatever the placement.
+[pins]
+CLOCK_50 = "PIN_N2"
+SRAM_ADDR = { pins = ["PIN_AE4", "PIN_AF4", "PIN_AC5", "PIN_AC6", "PIN_AD4", "PIN_AD5", "PIN_AE5", "PIN_AF5", "PIN_AD6", "PIN_AD7", "PIN_V10", "PIN_V9", "PIN_AC7", "PIN_W8", "PIN_W10", "PIN_Y10", "PIN_AB8", "PIN_AC8"], registers = ["output"] }
+SRAM_DQ = { pins = ["PIN_AD8", "PIN_AE6", "PIN_AF6", "PIN_AA9", "PIN_AA10", "PIN_AB10", "PIN_AA11", "PIN_Y11", "PIN_AE7", "PIN_AF7", "PIN_AE8", "PIN_AF8", "PIN_W11", "PIN_W12", "PIN_AC9", "PIN_AC10"], registers = ["input", "output", "output-enable"] }
+SRAM_WE_N = { pin = "PIN_AE10", registers = ["output"] }
+SRAM_OE_N = { pin = "PIN_AD10", registers = ["output"] }
+SRAM_UB_N = "PIN_AF9"
+SRAM_LB_N = "PIN_AE9"
+SRAM_CE_N = "PIN_AC11"
+LEDR = ["PIN_AE23", "PIN_AF23", "PIN_AB21", "PIN_AC22"]
+LEDG = "PIN_AE22"
+
+[clocks]
+CLOCK_50 = "50 MHz"

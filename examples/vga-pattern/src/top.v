@@ -88,24 +88,20 @@ module top(
     end
   end
 
-  // A pixel's outputs, then the pins' I/O-cell registers a clock later:
-  // those take a plain register, and synthesis finds a reset in
-  // `visible ? r : 0`.
-  reg [9:0] r_q = 0, g_q = 0, b_q = 0;
-  reg hs_q = 1, vs_q = 1, blank_q = 0;
+  // A pixel's outputs, in the pins' I/O-cell registers (synthesis finds
+  // a reset in `visible ? r : 0`; the I/O cell's register samples it as
+  // logic on its D).
+  initial begin
+    VGA_HS = 1'b1;
+    VGA_VS = 1'b1;
+  end
   always @(posedge pclk) begin
-    r_q <= visible ? r : 10'd0;
-    g_q <= visible ? g : 10'd0;
-    b_q <= visible ? b : 10'd0;
-    hs_q <= ~(x >= 10'd656 && x < 10'd752);
-    vs_q <= ~(y >= 10'd490 && y < 10'd492);
-    blank_q <= visible;
-    VGA_R <= r_q;
-    VGA_G <= g_q;
-    VGA_B <= b_q;
-    VGA_HS <= hs_q;
-    VGA_VS <= vs_q;
-    VGA_BLANK <= blank_q;
+    VGA_R <= visible ? r : 10'd0;
+    VGA_G <= visible ? g : 10'd0;
+    VGA_B <= visible ? b : 10'd0;
+    VGA_HS <= ~(x >= 10'd656 && x < 10'd752);
+    VGA_VS <= ~(y >= 10'd490 && y < 10'd492);
+    VGA_BLANK <= visible;
   end
 
   reg [31:0] gp = 0, gf = 0, n50 = 0, g50 = 0;
