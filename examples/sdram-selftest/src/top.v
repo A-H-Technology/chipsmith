@@ -3,7 +3,8 @@
 // A 100 MHz controller on PLL_1's CLK0; the SDRAM's clock is CLK2 on
 // DRAM_CLK, PLL_1's clock output pin, shifted +8.5 ns (leading the
 // commands by 1.5 ns). That is the middle of the window measured on the
-// DE2 2026-10-30 with RD_LAT 4: 0 errors from +6 to +10.5 ns, nearly
+// DE2 2026-10-30 with RD_LAT 4 and an extra register stage before the pins
+// (RD_LAT 3 without it): 0 errors from +6 to +10.5 ns, nearly
 // every word wrong at +5.5 and +11.5 ns.
 //
 // Each pass writes all 4M words in 8-word bursts (ACTIVE, WRITE with auto
@@ -19,24 +20,24 @@
 // passes.
 module top(
   input CLOCK_50,
-  output reg [11:0] DRAM_ADDR,
-  output reg [1:0] DRAM_BA,
+  output [11:0] DRAM_ADDR,
+  output [1:0] DRAM_BA,
   output [1:0] DRAM_DQM,
   output DRAM_CS_N,
-  output reg DRAM_RAS_N,
-  output reg DRAM_CAS_N,
-  output reg DRAM_WE_N,
+  output DRAM_RAS_N,
+  output DRAM_CAS_N,
+  output DRAM_WE_N,
   output DRAM_CKE,
   output DRAM_CLK,
   inout [15:0] DRAM_DQ,
   output [3:0] LEDR,
   output LEDG
 );
-  // FPGA clock edges from the controller's READ cycle to the input
-  // registers holding its first word: one into the pins' output registers,
-  // CAS latency 3, the SDRAM's access time and the board's delays, less
-  // the clock's lead.
-  parameter RD_LAT = 4;
+  // FPGA clock edges from the controller's READ cycle (the edge that puts
+  // READ in the pins' output registers) to the input registers holding its
+  // first word: CAS latency 3, the SDRAM's access time and the board's
+  // delays, less the clock's lead.
+  parameter RD_LAT = 3;
 
   wire clk, locked;
   CY2_PLL #(
@@ -57,26 +58,22 @@ module top(
   assign DRAM_DQM = 2'b00;
   assign LEDG = locked;
 
-  // The controller's outputs, then the pins' I/O-cell registers, plain
-  // copies of them a cycle later: an I/O-cell register has no reset or
-  // enable, which synthesis would find in the controller's muxes.
+  // The controller's outputs, which the manifest copies into the pins'
+  // I/O-cell registers (their enables and resets as logic on the copies'
+  // D inputs).
   reg [11:0] c_addr = 0;
   reg [1:0] c_ba = 0;
   // {RAS#, CAS#, WE#}; the chip is always selected, no byte masked.
   reg [2:0] c_cmd = 3'b111;
   reg [15:0] c_dq = 0, c_oe = 0;
-  reg [15:0] dq_out = 0, dq_oe = 0, dq_in = 0;
-  always @(posedge clk) begin
-    DRAM_ADDR <= c_addr;
-    DRAM_BA <= c_ba;
-    {DRAM_RAS_N, DRAM_CAS_N, DRAM_WE_N} <= c_cmd;
-    dq_out <= c_dq;
-    dq_oe <= c_oe;
-  end
+  reg [15:0] dq_in = 0;
+  assign DRAM_ADDR = c_addr;
+  assign DRAM_BA = c_ba;
+  assign {DRAM_RAS_N, DRAM_CAS_N, DRAM_WE_N} = c_cmd;
   genvar i;
   generate
     for (i = 0; i < 16; i = i + 1) begin : dq
-      assign DRAM_DQ[i] = dq_oe[i] ? dq_out[i] : 1'bz;
+      assign DRAM_DQ[i] = c_oe[i] ? c_dq[i] : 1'bz;
     end
   endgenerate
   always @(posedge clk) dq_in <= DRAM_DQ;

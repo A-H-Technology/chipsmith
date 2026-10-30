@@ -83,18 +83,24 @@ registers, 8-word bursts with auto precharge at CAS latency 3. Each pass
 writes all 4M words with a 32-bit LFSR seeded from the pass number and
 reads them back. USER1 holds `"SDR!"`, the passes, the words that read
 back wrong and a CLOCK_50 counter (`de2_user1 -- --words 4`: counter 1 is
-the errors, counter 2 the passes). On the DE2 2026-10-30 (loaded over
-JTAG, 776 LEs, 65 registers in I/O cells): 6,989 passes at +8.5 ns,
+the errors, counter 2 the passes). The controller's registers drive the
+pins straight; their enables and resets go into the I/O-cell registers
+as logic on D (Manifest, below). On the DE2 2026-10-30 (loaded over
+JTAG, 810 LEs, 65 registers in I/O cells, chipsmith de2-ioreg): 5,145
+passes at +8.5 ns, 0 errors, 5.88 passes a second. Earlier the same day,
+with an extra plain register stage in front of the pins (776 LEs, read
+latency 4): 6,989 passes at +8.5 ns,
 0 errors (58.6 GB written and checked), and 1,823 passes, 0 errors, at
 +7 ns; 5.88 passes a second, 98.7 MB/s of SDRAM traffic, half the bus's
 200 MB/s (16 cycles per 8-word burst). Swept over DRAM_CLK's shift, 25 s
 each: 0 errors from +6 to +10.5 ns, nearly every word wrong at +5.5 and
 +11.5 ns, so +8.5 ns is the window's middle (docs/de2-periph-status.md). Quartus
 assembles chipsmith's placement and routing byte-identically. The read
-latency (`RD_LAT`, 4 FPGA clocks from the controller's READ to the input
-registers holding the first word) was found on the board: a build
-checking latencies 4-7 side by side read 0 errors at 4 and every word
-wrong at 5-7.
+latency (`RD_LAT`, FPGA clocks from the controller's READ to the input
+registers holding the first word) was found on the board: a build with
+the extra stage checking latencies 4-7 side by side read 0 errors at 4
+and every word wrong at 5-7. Without the stage the READ reaches the pins
+a clock earlier, so it is 3.
 
 `examples/bidir` is cyclone2-re's tri-state test: expansion-header and
 SRAM data pins driven with their output enable from a switch, an
@@ -125,11 +131,13 @@ as the board was. The outputs are unobserved.
 
 `examples/vga-pattern` puts 640x480 at 60 Hz on the VGA DAC: colour
 bars, four ramps, a white border, the DAC's inputs through I/O-cell
-registers, 25 MHz pixels from PLL_1. VGA_CLK (PIN_B8) isn't a PLL clock
+registers (with the reset synthesis finds in `visible ? r : 0` as logic
+on their D), 25 MHz pixels from PLL_1, 519 LEs. VGA_CLK (PIN_B8) isn't a PLL clock
 output pin, so a register on the PLL's 50 MHz makes it, rising halfway
 through each pixel. USER1 holds `"VGA!"` and counts of the pixel clock
 and the frames: on the DE2 2026-10-30, 25.0000 MHz and 59 frames a
-second (59.52 expected). Quartus byte-identical. No monitor has shown
+second (59.52 expected); the build without the extra register stage
+read 25.0000 MHz and 60. Quartus byte-identical. No monitor has shown
 the picture yet.
 
 Pin settings are checked against Quartus the same way
