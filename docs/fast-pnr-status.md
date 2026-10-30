@@ -224,7 +224,7 @@ All on the merged tree (this branch with `open` 33fb8a4) unless noted.
 - Tests: `cargo test --release --workspace --lib --bins --examples` pass;
   the integration tests of chipsmith-verilog (semantics 23, yosys 15),
   chipsmith-netlist and chipsmith-synth pass; the cyclone2 synthesis
-  suite (`--test synth`, 129 tests): SYNTH_RESULT. The suite doesn't
+  suite (`--test synth`): 129 passed, 0 failed (8,508 s, two at a time). The suite doesn't
   place or route; it covers the Verilog front end's change
   (`Frontend::files_read`) and the merge.
 - clippy on chipsmith-route, chipsmith-place, chipsmith-cyclone2,
@@ -239,7 +239,7 @@ All on the merged tree (this branch with `open` 33fb8a4) unless noted.
   a0cba39's `cram`, the locked revision): 26 of the 28 DE2 examples.
   i2c-master (6 I/O bits) and uart (2 I/O bits) differ, as they do on
   `open` (README, "not investigated"); in i2c-master Quartus drops two
-  constant-1 LUTs that feed register data inputs. sha256: SHA_RESULT.
+  constant-1 LUTs that feed register data inputs. sha256 is byte-identical too.
   Placement changed every bitstream, so this is a check of new
   placements and routes, not of unchanged ones.
 - On the DE2, over JTAG (`de2_user1`), merged builds: negedge-selftest
