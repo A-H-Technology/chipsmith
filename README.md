@@ -22,7 +22,7 @@ no nextpnr, no cram. GHDL translates VHDL in front of it.
 | xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes: what yosys `synth_xilinx` and openXC7's nextpnr's packer handle, LVCMOS33 pins; chipsmith places LUT/register/carry logic, RAM32Ms, pins, BUFGs, BSCANs and the PS7 and routes the interconnect (below) | yes (2026-10-24: zybo-jtag-counter placed and routed by chipsmith, read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga) |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
-LEDs, 1,171 LEs; a build takes about 42 s, half of it placement.
+LEDs, 1,171 LEs; a build takes about 18 s (placement 9 s, routing 7 s; Compile speed, below).
 
 `examples/de2-jtag-counter` answers over the JTAG cable, so a load can be
 checked without watching the board: the Cyclone II's JTAG block makes it a
@@ -562,8 +562,8 @@ Cyclone II (EP2C35F672C6):
 | synthesis | chipsmith: what cyclone2-re's `cyclone2.ys` does, on chipsmith's netlist IR (`crates/chipsmith-synth`, `crates/chipsmith-cyclone2/src/synth`) | ours |
 | LUT mapping | chipsmith: AIG plus priority cuts, in place of `abc -lut 4` (`crates/chipsmith-synth/src/lutmap.rs`) | ours |
 | packing | chipsmith: cyclone2-re's nextpnr packer, ported (`crates/chipsmith-cyclone2/src/pack`) | ours |
-| placement | chipsmith: simulated annealing over LAB slots, nextpnr's LAB rules (`crates/chipsmith-cyclone2/src/place.rs`) | ours |
-| routing | chipsmith: PathFinder over the chip database (`crates/chipsmith-route`, `crates/chipsmith-cyclone2/src/route.rs`) | ours |
+| placement | chipsmith: analytic placement of LAB-sized clusters (`crates/chipsmith-place`), legalised onto LAB slots and refined by annealing, nextpnr's LAB rules (`crates/chipsmith-cyclone2/src/place.rs`) | ours |
+| routing | chipsmith: PathFinder over the chip database, rerouting only congested and critical branches (`crates/chipsmith-route`, `crates/chipsmith-cyclone2/src/route.rs`) | ours |
 | bitstream | chipsmith: cyclone2-re's assembler (`cram pack`), moved here and still checked against Quartus by cyclone2-re's `cram` (`crates/chipsmith-cyclone2/src/bitstream`, ADR-0003) | ours |
 | JTAG stream | chipsmith: the SVF `cram svf` wrote, CONF_DONE checked (`crates/chipsmith-cyclone2/src/bitstream/jtag.rs`) | ours |
 | cable | chipsmith: USB-Blaster and FT2232 (MPSSE) drivers, SVF player, 7-series JTAG loader (`crates/chipsmith-jtag`) | ours |
@@ -679,6 +679,70 @@ share chipsmith's own netlist IR, not Verilog.
      8.79 ns (11.23 ns of slack at 50 MHz; was 2.25 ns with nextpnr).
      Weight/exponent sweep, one seed each: 8/4 8.79 ns, 32/8 8.81 ns,
      16/4 8.94 ns, 8/2 9.35 ns.
+   - Compile speed (2026-10-30, docs/fast-pnr-status.md). Placement
+     clusters LEs into LAB-sized groups, places them analytically
+     (`crates/chipsmith-place`, device-generic: quadratic wirelength with
+     the bound-to-bound net model, CG, recursive-bisection spreading),
+     legalises them onto LAB slots and refines with a short annealer: 8
+     anneals from different seeds in parallel, and the one with the
+     shortest estimated critical path wins, so the result doesn't depend
+     on thread timing. The router reroutes only a congested net's
+     branches through overused nodes and its critical sinks, and keeps
+     each search within 3 tiles of its net's bounding box. A rebuild
+     skips every step whose inputs' contents haven't changed (ADR-0011).
+     `open` (33fb8a4) against this, on the same machine, back to back
+     (other services running, load 4 to 11); critical paths are the
+     median of three placement seeds (`CHIPSMITH_PLACE_SEED`), with the
+     range:
+
+     | design | LEs | place s | route s | build s | critical path ns, median of 3 seeds [range] |
+     |---|---|---|---|---|---|
+     | bidir | 29 | 0.1 → 0.3 | 0.3 → 0.3 | 5.1 → 4.4 | 3.37 [3.37-3.37] → 3.37 [3.37-3.37] |
+     | blinky-verilog | 26 | 0.4 → 0.4 | 0.2 → 0.3 | 4.8 → 4.2 | 3.37 [3.37-3.37] → 3.37 [3.37-3.37] |
+     | blinky-vhdl | 26 | 0.4 → 0.4 | 0.2 → 0.3 | 5.0 → 4.2 | 3.37 [3.37-3.37] → 3.37 [3.37-3.37] |
+     | crc32 | 118 | 0.8 → 0.6 | 1.3 → 0.6 | 7.3 → 4.4 | 3.87 [3.35-3.87] → 3.36 [3.24-3.47] |
+     | de2-io | 33 | 0.1 → 0.1 | 0.3 → 0.3 | 4.7 → 3.9 | 3.71 [3.71-3.71] → 3.71 [3.71-3.71] |
+     | de2-jtag-counter | 129 | 0.5 → 0.4 | 0.7 → 0.5 | 5.5 → 4.1 | 3.80 [3.80-3.80] → 3.80 [3.80-3.80] |
+     | de2-pll-counter | 321 | 2.0 → 1.0 | 1.4 → 0.8 | 7.8 → 4.3 | 3.80 [3.80-3.80] → 3.80 [3.80-3.80] |
+     | femtorv32 | 788 | 10.9 → 6.1 | 10.4 → 4.1 | 26.5 → 11.8 | 13.18 [12.97-13.74] → 13.15 [12.74-13.97] |
+     | fir | 534 | 3.6 → 2.2 | 5.8 → 4.2 | 13.8 → 7.6 | 13.44 [12.93-13.45] → 13.55 [13.24-13.57] |
+     | i2c-master | 214 | 1.6 → 1.0 | 1.7 → 0.9 | 7.9 → 4.5 | 7.87 [6.81-7.89] → 7.16 [7.03-7.77] |
+     | m4k-bytes | 98 | 0.3 → 0.3 | 0.8 → 0.9 | 5.3 → 4.2 | 3.80 [3.80-3.80] → 3.80 [3.80-3.80] |
+     | m4k-deep | 128 | 0.7 → 0.5 | 1.3 → 1.0 | 6.5 → 4.3 | 3.80 [3.80-3.98] → 3.80 [3.80-3.80] |
+     | m4k-dualclock | 112 | 0.3 → 0.3 | 0.8 → 0.8 | 5.4 → 4.1 | 3.80 [3.80-3.80] → 3.80 [3.80-3.80] |
+     | m4k-enables | 73 | 0.2 → 0.2 | 0.8 → 0.7 | 5.5 → 4.0 | 3.59 [3.59-3.59] → 3.59 [3.59-3.59] |
+     | m4k-mixed | 90 | 0.3 → 0.2 | 0.8 → 0.7 | 5.5 → 4.2 | 3.73 [3.73-3.73] → 3.73 [3.73-3.73] |
+     | m4k-outreg | 83 | 0.3 → 0.2 | 0.9 → 0.7 | 5.6 → 4.0 | 3.59 [3.59-3.79] → 3.59 [3.59-3.59] |
+     | m4k-selftest | 405 | 4.4 → 2.6 | 63.7 → 2.5 | 72.7 → 6.2 | 12.54 [12.26-12.73] → 11.60 [11.45-11.83] |
+     | m4k-shallow | 95 | 0.3 → 0.2 | 0.8 → 0.7 | 5.3 → 4.0 | 3.80 [3.80-3.80] → 3.80 [3.80-3.80] |
+     | m4k-tdp | 97 | 0.3 → 0.2 | 1.0 → 0.8 | 5.5 → 3.9 | 3.86 [3.80-3.91] → 3.93 [3.80-4.14] |
+     | mult-selftest | 1008 | 17.2 → 8.0 | 16.4 → 7.9 | 39.0 → 17.9 | 15.58 [15.03-15.70] → 15.80 [15.41-15.86] |
+     | negedge-selftest | 481 | 3.2 → 2.0 | 4.3 → 1.8 | 11.9 → 5.1 | 10.12 [9.51-10.85] → 9.72 [9.44-10.18] |
+     | picorv32 | 1171 | 20.2 → 8.9 | 19.0 → 6.5 | 45.6 → 17.5 | 8.17 [8.12-8.72] → 7.90 [7.89-8.12] |
+     | ram | 151 | 0.8 → 0.6 | 2.1 → 1.4 | 7.9 → 4.3 | 3.80 [3.80-3.80] → 3.80 [3.80-3.80] |
+     | ram-leds | 42 | 0.2 → 0.2 | 0.8 → 0.4 | 5.9 → 4.2 | 5.04 [4.77-5.15] → 4.03 [3.78-4.70] |
+     | ram_widths | 78 | 0.5 → 0.3 | 1.1 → 0.8 | 6.1 → 4.1 | 3.80 [3.80-3.80] → 3.80 [3.80-3.80] |
+     | serv | 345 | 3.8 → 1.5 | 2.8 → 1.2 | 13.2 → 4.4 | 10.37 [10.23-10.47] → 10.19 [10.19-10.61] |
+     | spi-master | 173 | 1.1 → 0.5 | 1.9 → 0.8 | 9.4 → 4.2 | 4.50 [4.36-4.69] → 4.00 [3.89-4.22] |
+     | uart | 164 | 0.9 → 0.5 | 1.1 → 0.6 | 6.4 → 4.1 | 5.85 [5.76-6.49] → 5.70 [5.53-5.83] |
+
+     Bigger designs, one seed:
+
+     | design | LEs | place s | route s | build s | critical path ns |
+     |---|---|---|---|---|---|
+     | sha256 | 6,046 | 608.5 → 63.1 | 149.3 → 45.0 | 769.3 → 115.3 | 24.18 → 20.99 |
+     | picorv32x24 | 28,449 | about 720 → 593.6 | did not finish in 7 h → 196.3 | 827.8 | → 10.65 |
+
+     (picorv32x24's `open` row is from 385aa15 on a loaded machine.
+     Before, its clusters didn't fit: 1,733 clusters and 361 carry-chain
+     LABs against 2,076 LABs. They now fit because the legaliser packs
+     small clusters into the free slots of chains' last LABs.) No
+     example's critical path is worse than `open`'s beyond the spread of
+     its seeds. The refining anneal is now most of the placement time on
+     the large designs. GPUs don't pay at these sizes:
+     `experiments/gpu-bench` measures one CG iteration on 2,000 rows at
+     413 µs on a GTX 1660 against 232 µs on one CPU thread, and the CG
+     solves are 0.4% of sha256's placement.
    - Packer (done). `crates/chipsmith-cyclone2/src/pack` is the `pack()` of cyclone2-re's nextpnr
      uarch in Rust: pin buffers named after their port bits, constants
      folded into LUT masks and pins, stuck-at-GND registers and input-less

@@ -12,6 +12,7 @@ repository = "https://github.com/A-H-Technology/chipsmith"
 chipsmith-cyclone2 = { path = "crates/chipsmith-cyclone2" }
 chipsmith-jtag = { path = "crates/chipsmith-jtag" }
 chipsmith-netlist = { path = "crates/chipsmith-netlist" }
+chipsmith-place = { path = "crates/chipsmith-place" }
 chipsmith-route = { path = "crates/chipsmith-route" }
 chipsmith-synth = { path = "crates/chipsmith-synth" }
 chipsmith-verilog = { path = "crates/chipsmith-verilog" }
@@ -23,6 +24,7 @@ glob = "0.3"
 rusb = "0.9"
 rustc-hash = "2"
 serde_json = "1"
+rayon = "1"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 lzma-rust2 = { version = "0.21", default-features = false, features = ["std", "xz"] }
 serde = { version = "1", features = ["derive"] }

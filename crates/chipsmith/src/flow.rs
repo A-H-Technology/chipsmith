@@ -31,6 +31,7 @@ use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 
+use crate::cache::{self, say, Stamp};
 use chipsmith_cyclone2::bitstream;
 use chipsmith_cyclone2::persist::{self, EpcsOp, Loader};
 use chipsmith_cyclone2::synth::cells;
@@ -780,6 +781,15 @@ impl Plan {
             std::fs::write(path, contents)
                 .with_context(|| format!("writing {}", path.display()))?;
         }
+        // The routing graph (0.5 s from its cache) and the bitstream's
+        // device database (3 s, most of it xz) load on threads of their
+        // own while the stages in front of them run; a small design used
+        // to spend most of its build waiting for them.
+        let needs = |f: fn(&Step) -> bool| self.steps.iter().any(f);
+        let mut graph = needs(|s| matches!(s, Step::PlaceRoute { .. }))
+            .then(|| Prefetch::spawn(chipsmith_cyclone2::route::load_graph));
+        let mut device_db = needs(|s| matches!(s, Step::Bitstream { .. }))
+            .then(|| Prefetch::spawn(bitstream::load_db));
         for step in &self.steps {
             eprintln!("  {}", step.label());
             match step {
@@ -789,8 +799,12 @@ impl Plan {
                     top,
                     netlist,
                     io_registers,
-                } => synth(verilog, top, netlist, io_registers)?,
-                Step::Pack { netlist, packed } => pack(netlist, packed)?,
+                } => stamp(step, &[netlist])
+                    .run(|| synth(verilog, top, netlist, io_registers))?,
+                Step::Pack { netlist, packed } => stamp(step, &[packed]).run(|| {
+                    pack(netlist, packed)?;
+                    Ok(vec![netlist.clone()])
+                })?,
                 Step::PlaceRoute {
                     packed,
                     placed,
@@ -798,8 +812,22 @@ impl Plan {
                     pins,
                     unused_pins,
                     clocks,
-                } => place_route(packed, placed, routed, pins, *unused_pins, clocks)?,
-                Step::Bitstream { routed, rbf } => bitstream(routed, rbf)?,
+                } => stamp(step, &[routed, placed]).run(|| {
+                    place_route(
+                        Prefetch::take(&mut graph, chipsmith_cyclone2::route::load_graph),
+                        packed,
+                        placed,
+                        routed,
+                        pins,
+                        *unused_pins,
+                        clocks,
+                    )?;
+                    Ok(vec![packed.clone()])
+                })?,
+                Step::Bitstream { routed, rbf } => stamp(step, &[rbf]).run(|| {
+                    bitstream(Prefetch::take(&mut device_db, bitstream::load_db), routed, rbf)?;
+                    Ok(vec![routed.clone()])
+                })?,
                 Step::Svf { rbf, svf } => bitstream::svf_file(rbf, svf)?,
                 Step::NextpnrTiming(report) => nextpnr_timing(report)?,
                 Step::Xc7Place { packed, placement } => xc7_place(packed, placement)?,
@@ -831,12 +859,18 @@ impl Plan {
     }
 }
 
+/// An in-process step's stamp (ADR-0011), keyed on the step as planned.
+fn stamp(step: &Step, outputs: &[&Path]) -> Stamp {
+    Stamp::new(cache::key(&format!("{step:?}")), outputs)
+}
+
+/// Returns every file the front end read, for the step's stamp.
 fn synth(
     verilog: &[PathBuf],
     top: &str,
     netlist: &Path,
     io_registers: &BTreeMap<String, IoRegisters>,
-) -> Result<()> {
+) -> Result<Vec<PathBuf>> {
     let started = Instant::now();
     let mut fe = chipsmith_verilog::Frontend::new();
     fe.read_library_source(cells::LIBRARY_NAME, cells::LIBRARY)?;
@@ -844,8 +878,8 @@ fn synth(
         fe.read_file(file)?;
     }
     let design = fe.elaborate(top)?;
-    eprintln!(
-        "    elaborated {} modules in {:.1} s",
+    say!(
+        "elaborated {} modules in {:.1} s",
         design.modules.iter().filter(|m| !m.is_blackbox()).count(),
         started.elapsed().as_secs_f64()
     );
@@ -853,8 +887,8 @@ fn synth(
     let started = Instant::now();
     let out = chipsmith_cyclone2::synth::synthesize(design, io_registers)?;
     let s = out.stats;
-    eprintln!(
-        "    {} gates ({} AIG ANDs) to {} LUTs, depth {}; {} registers ({} in I/O cells), {} carry chains, {} M4Ks, {} multipliers in {:.1} s",
+    say!(
+        "{} gates ({} AIG ANDs) to {} LUTs, depth {}; {} registers ({} in I/O cells), {} carry chains, {} M4Ks, {} multipliers in {:.1} s",
         s.lutmap.gates,
         s.lutmap.and_nodes,
         s.lutmap.luts,
@@ -869,14 +903,14 @@ fn synth(
     // Quartus warns the same (10240, 13004): the LE has neither, so both
     // are LUT loops whose power-up value the hardware doesn't define.
     if s.latches > 0 {
-        eprintln!(
-            "    warning: {} latches, each a LUT feeding itself; their power-up value is undefined",
+        say!(
+            "warning: {} latches, each a LUT feeding itself; their power-up value is undefined",
             s.latches
         );
     }
     if s.emulated > 0 {
-        eprintln!(
-            "    warning: {} registers with an asynchronous load or set emulated with a latch; \
+        say!(
+            "warning: {} registers with an asynchronous load or set emulated with a latch; \
              their power-up value is undefined",
             s.emulated
         );
@@ -884,14 +918,15 @@ fn synth(
     let file = std::fs::File::create(netlist)
         .with_context(|| format!("creating {}", netlist.display()))?;
     chipsmith_netlist::write_json(&out.design, file)
-        .with_context(|| format!("writing {}", netlist.display()))
+        .with_context(|| format!("writing {}", netlist.display()))?;
+    Ok(fe.files_read())
 }
 
 fn pack(netlist: &Path, packed: &Path) -> Result<()> {
     let started = Instant::now();
     let s = chipsmith_cyclone2::pack::pack_file(netlist, packed)?;
-    eprintln!(
-        "    {} LUTs, {} registers ({} on the sync load path), {} carry chains, {} M4Ks, {} clocks in {:.1} s; \
+    say!(
+        "{} LUTs, {} registers ({} on the sync load path), {} carry chains, {} M4Ks, {} clocks in {:.1} s; \
          removed {} stuck registers, {} constant and {} one-input LUTs",
         s.luts,
         s.ffs,
@@ -907,7 +942,41 @@ fn pack(netlist: &Path, packed: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Something loading on a thread of its own until a step needs it.
+struct Prefetch<T>(std::thread::JoinHandle<Result<T>>);
+
+impl<T: Send + 'static> Prefetch<T> {
+    fn spawn(load: fn() -> Result<T>) -> Self {
+        Prefetch(std::thread::spawn(load))
+    }
+
+    /// What the thread loaded (waiting for it), or a load on the spot if
+    /// it was already taken: a plan has one step of each kind, but nothing
+    /// enforces that.
+    fn take(slot: &mut Option<Self>, load: fn() -> Result<T>) -> Timed<T> {
+        let started = Instant::now();
+        let value = match slot.take() {
+            Some(Prefetch(handle)) => match handle.join() {
+                Ok(r) => r,
+                Err(panic) => std::panic::resume_unwind(panic),
+            },
+            None => load(),
+        };
+        Timed {
+            value,
+            waited: started.elapsed().as_secs_f64(),
+        }
+    }
+}
+
+/// A prefetched value and how long the step had to wait for it.
+struct Timed<T> {
+    value: Result<T>,
+    waited: f64,
+}
+
 fn place_route(
+    graph: Timed<chipsmith_route::chipdb::ChipDb>,
     packed: &Path,
     placed: &Path,
     routed: &Path,
@@ -915,17 +984,14 @@ fn place_route(
     unused_pins: UnusedPins,
     clocks: &BTreeMap<String, Frequency>,
 ) -> Result<()> {
-    let started = Instant::now();
-    let graph = chipsmith_cyclone2::route::load_graph()?;
-    eprintln!(
-        "    routing graph in {:.1} s",
-        started.elapsed().as_secs_f64()
-    );
+    let waited = graph.waited;
+    let graph = graph.value?;
+    say!("routing graph in {waited:.1} s");
 
     let started = Instant::now();
     let p = chipsmith_cyclone2::place::place_file(&graph, packed, pins, unused_pins, placed)?;
-    eprintln!(
-        "    placed {} LEs ({} carry chains), wirelength {} -> {} in {:.1} s; critical path {:.2} ns (estimate)",
+    say!(
+        "placed {} LEs ({} carry chains), wirelength {} -> {} in {:.1} s; critical path {:.2} ns (estimate)",
         p.les,
         p.chains,
         p.initial_cost,
@@ -936,8 +1002,8 @@ fn place_route(
 
     let started = Instant::now();
     let r = chipsmith_cyclone2::route::route_file(&graph, placed, routed)?;
-    eprintln!(
-        "    routed {} nets, {} pips, {} iterations in {:.1} s; critical path {:.2} ns (estimate)",
+    say!(
+        "routed {} nets, {} pips, {} iterations in {:.1} s; critical path {:.2} ns (estimate)",
         r.nets,
         r.pips,
         r.iterations,
@@ -945,7 +1011,7 @@ fn place_route(
         r.critical / 1000.0
     );
     for line in clock_report(&r, clocks) {
-        eprintln!("    {line}");
+        say!("{line}");
     }
     Ok(())
 }
@@ -1015,17 +1081,14 @@ fn clock_report(
     out
 }
 
-fn bitstream(routed: &Path, rbf: &Path) -> Result<()> {
-    let started = Instant::now();
-    let db = bitstream::load_db()?;
-    eprintln!(
-        "    device database in {:.1} s",
-        started.elapsed().as_secs_f64()
-    );
+fn bitstream(db: Timed<bitstream::phys::Db>, routed: &Path, rbf: &Path) -> Result<()> {
+    let waited = db.waited;
+    let db = db.value?;
+    say!("device database in {waited:.1} s");
     let started = Instant::now();
     let s = bitstream::pack_file(&db, routed, rbf)?;
-    eprintln!(
-        "    {} LEs, {} pins, {} nets: model bits {:?} + {} replicated-frame I/O bits in {:.1} s",
+    say!(
+        "{} LEs, {} pins, {} nets: model bits {:?} + {} replicated-frame I/O bits in {:.1} s",
         s.les,
         s.pins,
         s.nets,

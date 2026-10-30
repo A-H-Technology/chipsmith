@@ -920,6 +920,7 @@ pub(crate) fn readmem<'a>(
             format!("$readmem: reading {}: {e}", path.display()),
         )
     })?;
+    m.b.sources.note_read(&path);
     let (lo, hi) = (m.mems[mem].lo, m.mems[mem].hi);
     let start = match args.get(2) {
         Some(e) => m.eval_i64(e, scope)?,
