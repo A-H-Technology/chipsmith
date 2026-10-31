@@ -734,22 +734,18 @@ impl<'a> Router<'a> {
                 .collect();
             // Per sink, its branch from the sink back to a tree node:
             // (node, the pip into it) sink first, and the tree node.
-            let branches: Vec<Result<(Vec<(NodeId, Edge)>, NodeId)>> = match pool {
+            let branches: Vec<Result<Branch>> = match pool {
                 Some(pool) if todo.len() > 1 => todo
                     .par_iter()
                     .map(|&i| {
                         let slot = rayon::current_thread_index().unwrap_or(0) % pool.len();
                         let mut ps = pool[slot].lock().expect("a router thread panicked");
                         let ps = ps.get_or_insert_with(|| Scratch::new(self.db.nodes()));
-                        self.search(
-                            ps,
-                            index,
-                            &tree.nodes,
-                            &delays,
-                            net.sinks[i],
-                            crit[i],
-                            region,
-                        )?;
+                        let seeds = Seeds {
+                            nodes: &tree.nodes,
+                            delay: &delays,
+                        };
+                        self.search(ps, index, seeds, net.sinks[i], crit[i], region)?;
                         Ok(walk_back(ps, net.sinks[i]))
                     })
                     .collect(),
@@ -761,7 +757,11 @@ impl<'a> Router<'a> {
                         if s.in_tree[sink as usize] == gen {
                             continue;
                         }
-                        self.search(s, index, &tree.nodes, &delays, sink, crit[i], region)
+                        let seeds = Seeds {
+                            nodes: &tree.nodes,
+                            delay: &delays,
+                        };
+                        self.search(s, index, seeds, sink, crit[i], region)
                             .with_context(|| format!("net {}: no route to a sink", net.name))?;
                         let (branch, seed) = walk_back(s, sink);
                         self.graft(s, &mut tree, &mut delays, &branch, seed, gen);
@@ -878,37 +878,24 @@ impl<'a> Router<'a> {
         &self,
         s: &mut Scratch,
         net: u32,
-        tree: &[NodeId],
-        tree_delay: &[Ps],
+        seeds: Seeds,
         sink: NodeId,
         crit: f32,
         region: Option<chipdb::Box>,
     ) -> Result<()> {
         if let Some(r) = region {
-            if self
-                .search_in(s, net, tree, tree_delay, sink, crit, r)
-                .is_ok()
-            {
+            if self.search_in(s, net, seeds, sink, crit, r).is_ok() {
                 return Ok(());
             }
         }
-        self.search_in(
-            s,
-            net,
-            tree,
-            tree_delay,
-            sink,
-            crit,
-            chipdb::Box::EVERYWHERE,
-        )
+        self.search_in(s, net, seeds, sink, crit, chipdb::Box::EVERYWHERE)
     }
 
     fn search_in(
         &self,
         s: &mut Scratch,
         net: u32,
-        tree: &[NodeId],
-        tree_delay: &[Ps],
+        seeds: Seeds,
         sink: NodeId,
         crit: f32,
         region: chipdb::Box,
@@ -917,7 +904,7 @@ impl<'a> Router<'a> {
         let gen = s.generation;
         let mut heap = BinaryHeap::new();
         let per_hop = 1.0 - crit + crit * HOP_DELAY_ESTIMATE / DELAY_UNIT;
-        for (&n, &delay) in tree.iter().zip(tree_delay) {
+        for (&n, &delay) in seeds.nodes.iter().zip(seeds.delay) {
             s.work[0] += 1;
             let g = crit * delay / DELAY_UNIT;
             s.visit[n as usize] = Visit {
@@ -971,9 +958,21 @@ impl<'a> Router<'a> {
     }
 }
 
+/// Where a search starts: the tree's nodes, and each one's delay from the
+/// source.
+#[derive(Clone, Copy)]
+struct Seeds<'a> {
+    nodes: &'a [NodeId],
+    delay: &'a [Ps],
+}
+
+/// A branch from a sink back to the tree: (node, the pip into it) sink
+/// first, and the tree node it starts from.
+type Branch = (Vec<(NodeId, Edge)>, NodeId);
+
 /// The branch a search left in `s` from `sink` back to the tree node it
-/// started from: (node, the pip into it) sink first, and that tree node.
-fn walk_back(s: &Scratch, sink: NodeId) -> (Vec<(NodeId, Edge)>, NodeId) {
+/// started from.
+fn walk_back(s: &Scratch, sink: NodeId) -> Branch {
     let mut branch = Vec::new();
     let mut n = sink;
     while let Some((from, edge)) = s.visit[n as usize].via {
@@ -1158,18 +1157,17 @@ mod tests {
             used_in.insert(t);
             wide_sinks.push(t);
         }
-        let mut add =
-            |name: String, src: u32, sinks: Vec<u32>, timing: &mut timing::Graph| NetReq {
-                driver: timing.node(&name, "O"),
-                sink_ports: (0..sinks.len())
-                    .map(|k| timing.node(&name, &format!("I{k}")))
-                    .collect(),
-                source: db.node(src, wire("O")),
-                source_wire: (src, wire("O")),
-                sinks: sinks.iter().map(|&t| db.node(t, wire("I"))).collect(),
-                direct_ports: vec![],
-                name,
-            };
+        let add = |name: String, src: u32, sinks: Vec<u32>, timing: &mut timing::Graph| NetReq {
+            driver: timing.node(&name, "O"),
+            sink_ports: (0..sinks.len())
+                .map(|k| timing.node(&name, &format!("I{k}")))
+                .collect(),
+            source: db.node(src, wire("O")),
+            source_wire: (src, wire("O")),
+            sinks: sinks.iter().map(|&t| db.node(t, wire("I"))).collect(),
+            direct_ports: vec![],
+            name,
+        };
         nets.push(add("wide".into(), wide_src, wide_sinks, &mut timing));
         for i in 0..40 {
             let src = tile(next(w), next(h));

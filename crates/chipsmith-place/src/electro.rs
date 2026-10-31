@@ -488,11 +488,11 @@ impl Flat {
             } else {
                 0
             };
+            half_h.extend(std::iter::repeat_n(0.5, count));
+            let mut d = vec![0.0; r_count];
+            d[r] = opts.filler;
             for _ in 0..count {
-                half_h.push(0.5);
-                let mut d = vec![0.0; r_count];
-                d[r] = opts.filler;
-                demand.extend(d);
+                demand.extend_from_slice(&d);
             }
         }
         let n = half_h.len();
@@ -950,9 +950,9 @@ impl Engine for Cpu {
         };
         std::mem::swap(&mut self.gx, &mut self.gx_prev);
         std::mem::swap(&mut self.gy, &mut self.gy_prev);
-        for o in 0..f.n {
-            self.gx[o] = g[o][0];
-            self.gy[o] = g[o][1];
+        for ((gx, gy), g) in self.gx.iter_mut().zip(self.gy.iter_mut()).zip(&g) {
+            *gx = g[0];
+            *gy = g[1];
         }
         let (dv2, dg2) = if self.evaluated == 0 {
             (0.0, 0.0)
@@ -1155,9 +1155,9 @@ fn run(
     // The first evaluation, with no density weight, sizes the weights.
     let mut lambda = vec![0.0f32; rc];
     let first = engine.evaluate(gamma_of(1.0), &lambda);
-    for r in 0..rc {
-        if first.density_l1[r] > 0.0 {
-            lambda[r] = (opts.density_weight as f64 * first.wl_l1 / first.density_l1[r]) as f32;
+    for (l, &norm) in lambda.iter_mut().zip(&first.density_l1) {
+        if norm > 0.0 {
+            *l = (opts.density_weight as f64 * first.wl_l1 / norm) as f32;
         }
     }
     let mut a = 1.0f64;

@@ -2543,7 +2543,11 @@ pub fn place_file(
             .and_then(|v| v.parse().ok())
             .unwrap_or(default)
     };
-    let refine = if le_placed.is_some() { REFINE_LE } else { REFINE };
+    let refine = if le_placed.is_some() {
+        REFINE_LE
+    } else {
+        REFINE
+    };
     let sched = Schedule {
         range: env("CHIPSMITH_PLACE_RANGE", refine.range),
         heat: env("CHIPSMITH_PLACE_HEAT", refine.heat),

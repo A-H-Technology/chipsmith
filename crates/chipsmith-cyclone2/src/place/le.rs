@@ -99,7 +99,7 @@ pub(super) fn problem(d: &Design, grid: &Grid, fixed_xy: &[Option<Xy>]) -> LePro
 
     let mut things = Vec::new();
     let mut obj_of_le: Vec<Option<(u32, f32)>> = vec![None; d.les.len()];
-    for le in 0..d.les.len() {
+    for (le, at) in obj_of_le.iter_mut().enumerate() {
         if d.chain_of[le].is_some() {
             continue;
         }
@@ -110,7 +110,7 @@ pub(super) fn problem(d: &Design, grid: &Grid, fixed_xy: &[Option<Xy>]) -> LePro
                 (CONTROLS, control_share(le)),
             ],
         );
-        obj_of_le[le] = Some((o, 0.0));
+        *at = Some((o, 0.0));
         things.push(Thing::Le(le));
     }
     for (c, chain) in d.chains.iter().enumerate() {

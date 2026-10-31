@@ -120,9 +120,9 @@ cluster flow, which fits everything it fitted before.
 ### Detailed placement
 
 The existing timing-driven anneal (`best_of`, 8 seeds), started from the
-legal placement with a colder schedule, `REFINE_LE`: heat 0.1, range 2
-LABs, N^(4/3) moves per temperature. The cluster flow keeps `REFINE`
-(heat 0.5, range 3).
+legal placement with a colder schedule, `REFINE_LE`: heat 0.05, range 1
+LAB, N^(4/3) / 2 moves per temperature. The cluster flow keeps `REFINE`
+(heat 0.5, range 3, N^(4/3)).
 
 ## Choosing the settings
 
@@ -142,9 +142,20 @@ sha256):
 | schedule | heat, range, moves | geomean | worst | placement (sha256, loaded) |
 |---|---|---|---|---|
 | A (`REFINE`) | 0.5, 3, 1 | x0.986 | x1.008 | 213 s |
-| **C1 (`REFINE_LE`)** | 0.1, 2, 1 | **x0.971** | **x0.993** | 133 s |
+| C1 | 0.1, 2, 1 | x0.971 | x0.993 | 133 s |
 | C1 with 4 seeds | 0.1, 2, 1 | x0.981 | x0.994 | 131 s |
 | C2 | 0.05, 1, 0.5 | x0.995 | x1.028 (sha256 21.44 [20.78-22.10]) | 25 s |
+
+That chose C1. The global placer's density targets and stopping then
+changed (below), and the two were measured again with five seeds each
+against the baseline's five, plus picorv32x24 with three:
+
+| schedule | geomean (4 designs) | worst | picorv32x24, routed ns | anneal moves, picorv32x24 |
+|---|---|---|---|---|
+| C1 | x0.989 | x1.011 (femtorv32) | 9.43, 9.63, 9.63 | 113 million |
+| **C2 (`REFINE_LE`)** | **x0.990** | **x1.008 (femtorv32)** | **10.18, 9.34, 9.58** | **40 million** |
+
+As good for a third of the moves, so C2 is the default.
 
 Timing-driven global placement, with C2's anneal: weights that add up
 over the reweights instead of replacing each other, reweighting every 10
@@ -170,19 +181,19 @@ Density targets and stopping, each found on a design that broke:
   for 527 iterations; legal wirelength 7,943 against 4,206 with the
   whole-bin allowance.
 
-The defaults, seeds 0 to 4, medians against the baseline's (seeds 0 to
-4) [range]:
+The defaults, seeds 0 to 4 (picorv32x24 0 to 2), medians against the
+baseline's [range]:
 
 | design | baseline | this branch | ratio |
 |---|---|---|---|
-| picorv32 | 8.01 [7.61-8.62] | 7.85 [7.54-7.89] | x0.980 |
-| femtorv32 | 12.81 [12.66-13.43] | 12.95 [12.57-13.04] | x1.011 |
-| mult-selftest | 15.15 [14.89-15.57] | 14.91 [14.32-15.14] | x0.984 |
-| sha256 | 21.03 [20.63-21.28] | 20.65 [20.49-21.05] | x0.982 |
-| picorv32x24 (seed 0) | 10.65 | 9.43 | x0.885 |
+| picorv32 | 8.01 [7.61-8.62] | 7.78 [7.67-7.82] | x0.971 |
+| femtorv32 | 12.81 [12.66-13.43] | 12.91 [12.90-13.19] | x1.008 |
+| mult-selftest | 15.15 [14.89-15.57] | 14.98 [14.63-15.37] | x0.989 |
+| sha256 | 21.03 [20.63-21.28] | 20.91 [20.82-21.11] | x0.994 |
+| picorv32x24 | 10.65 (seed 0) | 9.58 [9.34-10.18] | x0.900 |
 
-Geomean of the first four x0.989. Every median is inside the baseline's
-range of seeds, and every design's worst seed is no worse than the
+Geomean of the first four x0.990. Every median is inside the baseline's
+range of seeds, and every design's worst seed is better than the
 baseline's worst.
 
 ## Routing
