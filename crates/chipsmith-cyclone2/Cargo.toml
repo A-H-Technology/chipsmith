@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Placement on a GPU (CHIPSMITH_ACCEL=cuda or hip; ADR-0012).
+gpu = ["chipsmith-place/gpu"]
+
 [dependencies]
 chipsmith-jtag.workspace = true
 chipsmith-netlist.workspace = true

@@ -16,6 +16,10 @@
 //! counts): a bin is one unit square, so a device whose x advances by two
 //! per logic column hands positions in halved x.
 
+pub mod electro;
+#[cfg(feature = "gpu")]
+pub mod gpu;
+
 use rayon::prelude::*;
 
 /// A point in placement space.
@@ -198,15 +202,26 @@ pub fn place(p: &Problem, legalizer: &mut impl Legalizer, opts: Options) -> Outc
             let mut demand = vec![0.0f32; w * h];
             for (o, &(x, y)) in pos.iter().enumerate() {
                 if p.objects[o].class == 0 {
-                    let (bx, by) = ((x.max(0.0) as usize).min(w - 1), (y.max(0.0) as usize).min(h - 1));
+                    let (bx, by) = (
+                        (x.max(0.0) as usize).min(w - 1),
+                        (y.max(0.0) as usize).min(h - 1),
+                    );
                     let height = p.objects[o].height.max(1) as usize;
                     for i in 0..height {
                         demand[by.saturating_sub(i) * w + bx] += areas[o] / height as f32;
                     }
                 }
             }
-            let over = demand.iter().zip(&p.bins.capacity).filter(|(d, c)| **d > **c * opts.target_density).count();
-            let worst = demand.iter().zip(&p.bins.capacity).map(|(d, c)| d / c.max(1e-3)).fold(0.0f32, f32::max);
+            let over = demand
+                .iter()
+                .zip(&p.bins.capacity)
+                .filter(|(d, c)| **d > **c * opts.target_density)
+                .count();
+            let worst = demand
+                .iter()
+                .zip(&p.bins.capacity)
+                .map(|(d, c)| d / c.max(1e-3))
+                .fold(0.0f32, f32::max);
             let (xs, ys): (Vec<f32>, Vec<f32>) = pos.iter().copied().unzip();
             eprintln!(
                 "place: after spread: {over} overfull bins, worst {worst:.2} of capacity; x {:.1}..{:.1} y {:.1}..{:.1} of {w}x{h}",
@@ -251,10 +266,9 @@ fn fixed_centre(p: &Problem) -> Pos {
     if p.fixed.is_empty() {
         return (p.bins.width as f32 / 2.0, p.bins.height as f32 / 2.0);
     }
-    let (sx, sy) = p
-        .fixed
-        .iter()
-        .fold((0.0f64, 0.0f64), |(a, b), &(x, y)| (a + x as f64, b + y as f64));
+    let (sx, sy) = p.fixed.iter().fold((0.0f64, 0.0f64), |(a, b), &(x, y)| {
+        (a + x as f64, b + y as f64)
+    });
     (
         (sx / p.fixed.len() as f64) as f32,
         (sy / p.fixed.len() as f64) as f32,
@@ -363,7 +377,10 @@ const CG_MAX_ITERATIONS: usize = 300;
 const CG_TOLERANCE: f64 = 1e-4;
 
 fn dot(a: &[f32], b: &[f32]) -> f64 {
-    a.iter().zip(b).map(|(x, y)| (*x as f64) * (*y as f64)).sum()
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (*x as f64) * (*y as f64))
+        .sum()
 }
 
 /// Solve both axes with bound-to-bound weights linearised at `at`, pulled
@@ -380,31 +397,29 @@ fn solve(p: &Problem, weights: &[f32], at: &[Pos], anchor: Option<(&[Pos], f32)>
             let mut rhs = vec![0.0f32; n];
             // A spring of weight `w` between two pins; a pin is an object
             // plus an offset or a fixed coordinate.
-            let mut spring = |a: &Pin, b: &Pin, w: f32| {
-                match (a.of, b.of) {
-                    (PinOf::Object(i), PinOf::Object(j)) => {
-                        if i == j {
-                            return;
-                        }
-                        let (oi, oj) = (offset(a), offset(b));
-                        diag[i as usize] += w;
-                        diag[j as usize] += w;
-                        terms.push((i, j, w));
-                        terms.push((j, i, w));
-                        rhs[i as usize] += w * (oj - oi);
-                        rhs[j as usize] += w * (oi - oj);
+            let mut spring = |a: &Pin, b: &Pin, w: f32| match (a.of, b.of) {
+                (PinOf::Object(i), PinOf::Object(j)) => {
+                    if i == j {
+                        return;
                     }
-                    (PinOf::Object(i), PinOf::Fixed(f)) | (PinOf::Fixed(f), PinOf::Object(i)) => {
-                        let (obj, pin) = if matches!(a.of, PinOf::Object(_)) {
-                            (i, a)
-                        } else {
-                            (i, b)
-                        };
-                        diag[obj as usize] += w;
-                        rhs[obj as usize] += w * (coord(p.fixed[f as usize]) - offset(pin));
-                    }
-                    (PinOf::Fixed(_), PinOf::Fixed(_)) => {}
+                    let (oi, oj) = (offset(a), offset(b));
+                    diag[i as usize] += w;
+                    diag[j as usize] += w;
+                    terms.push((i, j, w));
+                    terms.push((j, i, w));
+                    rhs[i as usize] += w * (oj - oi);
+                    rhs[j as usize] += w * (oi - oj);
                 }
+                (PinOf::Object(i), PinOf::Fixed(f)) | (PinOf::Fixed(f), PinOf::Object(i)) => {
+                    let (obj, pin) = if matches!(a.of, PinOf::Object(_)) {
+                        (i, a)
+                    } else {
+                        (i, b)
+                    };
+                    diag[obj as usize] += w;
+                    rhs[obj as usize] += w * (coord(p.fixed[f as usize]) - offset(pin));
+                }
+                (PinOf::Fixed(_), PinOf::Fixed(_)) => {}
             };
             for (net, &w) in p.nets.iter().zip(weights) {
                 let k = net.pins.len();
@@ -669,13 +684,25 @@ fn bisect(
     }
     let (left, right) = if along_x {
         (
-            Region { x1: r.x0 + split, ..r },
-            Region { x0: r.x0 + split, ..r },
+            Region {
+                x1: r.x0 + split,
+                ..r
+            },
+            Region {
+                x0: r.x0 + split,
+                ..r
+            },
         )
     } else {
         (
-            Region { y1: r.y0 + split, ..r },
-            Region { y0: r.y0 + split, ..r },
+            Region {
+                y1: r.y0 + split,
+                ..r
+            },
+            Region {
+                y0: r.y0 + split,
+                ..r
+            },
         )
     };
     let (lm, rm) = members.split_at_mut(k);
@@ -755,7 +782,11 @@ mod tests {
     }
 
     fn two_pin(a: PinOf, b: PinOf) -> Net {
-        let pin = |of| Pin { of, dx: 0.0, dy: 0.0 };
+        let pin = |of| Pin {
+            of,
+            dx: 0.0,
+            dy: 0.0,
+        };
         Net {
             pins: vec![pin(a), pin(b)],
             weight: 1.0,
@@ -767,10 +798,20 @@ mod tests {
         // Fixed at (0, 2) and (9, 2); eight cells in a chain between them
         // on a 10x5 grid of unit bins.
         let n = 8;
-        let objects = vec![Object { class: 0, area: 1.0, height: 1 }; n];
+        let objects = vec![
+            Object {
+                class: 0,
+                area: 1.0,
+                height: 1
+            };
+            n
+        ];
         let mut nets = vec![two_pin(PinOf::Fixed(0), PinOf::Object(0))];
         for i in 0..n - 1 {
-            nets.push(two_pin(PinOf::Object(i as u32), PinOf::Object(i as u32 + 1)));
+            nets.push(two_pin(
+                PinOf::Object(i as u32),
+                PinOf::Object(i as u32 + 1),
+            ));
         }
         nets.push(two_pin(PinOf::Object(n as u32 - 1), PinOf::Fixed(1)));
         let bins = Bins {
@@ -788,8 +829,15 @@ mod tests {
         // In order along x, within the grid, near row 2.
         let xs: Vec<f32> = out.targets.iter().map(|p| p.0).collect();
         assert!(xs.windows(2).all(|w| w[0] < w[1]), "{xs:?}");
-        assert!(out.targets.iter().all(|&(x, y)| (0.0..10.0).contains(&x) && (0.0..5.0).contains(&y)));
-        assert!(out.targets.iter().all(|&(_, y)| (y - 2.0).abs() < 1.5), "{:?}", out.targets);
+        assert!(out
+            .targets
+            .iter()
+            .all(|&(x, y)| (0.0..10.0).contains(&x) && (0.0..5.0).contains(&y)));
+        assert!(
+            out.targets.iter().all(|&(_, y)| (y - 2.0).abs() < 1.5),
+            "{:?}",
+            out.targets
+        );
     }
 
     #[test]
@@ -797,7 +845,14 @@ mod tests {
         // 20 unconnected-but-anchored cells all pulled to one corner pin;
         // the grid holds one per bin at 90%, so they must spread out.
         let n = 20;
-        let objects = vec![Object { class: 0, area: 1.0, height: 1 }; n];
+        let objects = vec![
+            Object {
+                class: 0,
+                area: 1.0,
+                height: 1
+            };
+            n
+        ];
         let nets: Vec<Net> = (0..n)
             .map(|i| two_pin(PinOf::Fixed(0), PinOf::Object(i as u32)))
             .collect();
@@ -823,9 +878,21 @@ mod tests {
     #[test]
     fn the_same_problem_places_the_same_way() {
         let n = 30;
-        let objects = vec![Object { class: 0, area: 1.0, height: 1 }; n];
+        let objects = vec![
+            Object {
+                class: 0,
+                area: 1.0,
+                height: 1
+            };
+            n
+        ];
         let nets: Vec<Net> = (0..n)
-            .map(|i| two_pin(PinOf::Object(i as u32), PinOf::Object(((i * 7 + 3) % n) as u32)))
+            .map(|i| {
+                two_pin(
+                    PinOf::Object(i as u32),
+                    PinOf::Object(((i * 7 + 3) % n) as u32),
+                )
+            })
             .chain([two_pin(PinOf::Fixed(0), PinOf::Object(0))])
             .collect();
         let bins = Bins {

@@ -10,4 +10,5 @@ repository.workspace = true
 anyhow.workspace = true
 lzma-rust2.workspace = true
 postcard.workspace = true
+rayon.workspace = true
 serde.workspace = true

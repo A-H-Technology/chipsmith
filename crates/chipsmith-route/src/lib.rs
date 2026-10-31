@@ -8,6 +8,9 @@ pub mod timing;
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
+use std::sync::Mutex;
+
+use rayon::prelude::*;
 
 use anyhow::{bail, ensure, Context, Result};
 
@@ -162,6 +165,9 @@ pub struct Router<'a> {
     bbox_margin: f32,
     /// `ASTAR`, or `CHIPSMITH_ROUTE_ASTAR` for tuning it.
     astar: f32,
+    /// How nets are grouped to route side by side (`CHIPSMITH_ROUTE_BATCH`:
+    /// `regions`, or a group size; unset, one at a time).
+    batching: Batching,
     /// Per tile type, per pip: the LE whose LUT input it permutes.
     permutes: Vec<Option<Vec<i8>>>,
     /// Per tile, bit k: LE k's LUT inputs can't be permuted
@@ -174,6 +180,21 @@ pub struct Router<'a> {
     /// Nodes only one net may use (by index), e.g. the ends of routes
     /// another tool has fixed. Empty when nothing is reserved.
     owner: Vec<u32>,
+}
+
+/// How a PathFinder iteration groups the nets it reroutes. Each group
+/// routes side by side against the routing as it was when the group began,
+/// then commits in net order (a net that collided with an earlier one of
+/// its group is routed again first), so the result doesn't depend on the
+/// number of threads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Batching {
+    /// One net at a time, each seeing every net routed before it.
+    Off,
+    /// Groups whose nets' search regions don't overlap.
+    Regions,
+    /// Groups of this many nets, in order.
+    Fixed(usize),
 }
 
 fn permuting_pips(tt: &chipdb::TileType) -> Option<Vec<i8>> {
@@ -226,6 +247,11 @@ impl<'a> Router<'a> {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(BBOX_MARGIN),
+            batching: match std::env::var("CHIPSMITH_ROUTE_BATCH").as_deref() {
+                Ok("regions") => Batching::Regions,
+                Ok(k) => k.parse().map_or(Batching::Off, Batching::Fixed),
+                Err(_) => Batching::Off,
+            },
             astar: std::env::var("CHIPSMITH_ROUTE_ASTAR")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -289,6 +315,70 @@ impl<'a> Router<'a> {
         dx as f32 * kx + dy as f32 * ky
     }
 
+    /// The box a net's searches stay in: its source and sinks, grown by the
+    /// margin; `None` when unlimited.
+    fn region(&self, net: &NetReq) -> Option<chipdb::Box> {
+        self.bbox_margin.is_finite().then(|| {
+            let mut b = self.node[net.source as usize].bbox;
+            for &n in &net.sinks {
+                b = b.union(self.node[n as usize].bbox);
+            }
+            b.grow(self.bbox_margin.min(255.0) as u8)
+        })
+    }
+
+    /// Cut `todo` (net indices, in order) into batches whose regions don't
+    /// overlap: each net goes into the first batch it overlaps nothing in.
+    /// A net without a region is a batch of its own.
+    fn batches(&self, nets: &[NetReq], todo: &[usize]) -> Vec<Vec<usize>> {
+        let (w, h) = (self.db.width as usize, self.db.height as usize);
+        let words = w.div_ceil(64);
+        // Per batch, per row, the columns its regions cover.
+        let mut taken: Vec<Vec<u64>> = Vec::new();
+        let mut out: Vec<Vec<usize>> = Vec::new();
+        let span = |b: chipdb::Box| {
+            let (x0, x1) = (b.x0 as usize, (b.x1 as usize).min(w - 1));
+            let (y0, y1) = (b.y0 as usize, (b.y1 as usize).min(h - 1));
+            let mask: Vec<u64> = (0..words)
+                .map(|k| {
+                    let (lo, hi) = (k * 64, k * 64 + 63);
+                    if x1 < lo || x0 > hi {
+                        return 0;
+                    }
+                    let (a, b) = (x0.max(lo) - lo, x1.min(hi) - lo);
+                    (u64::MAX >> (63 - b)) & (u64::MAX << a)
+                })
+                .collect();
+            (y0, y1, mask)
+        };
+        for &i in todo {
+            let Some(region) = self.region(&nets[i]) else {
+                out.push(vec![i]);
+                taken.push(vec![u64::MAX; words * h]);
+                continue;
+            };
+            let (y0, y1, mask) = span(region);
+            let free = |t: &Vec<u64>| {
+                (y0..=y1).all(|y| (0..words).all(|k| t[y * words + k] & mask[k] == 0))
+            };
+            let b = match taken.iter().position(free) {
+                Some(b) => b,
+                None => {
+                    taken.push(vec![0; words * h]);
+                    out.push(Vec::new());
+                    taken.len() - 1
+                }
+            };
+            for y in y0..=y1 {
+                for k in 0..words {
+                    taken[b][y * words + k] |= mask[k];
+                }
+            }
+            out[b].push(i);
+        }
+        out
+    }
+
     /// Net arcs of the current routing, for timing analysis: every routed
     /// sink in net and sink order, then the unrouted direct ones.
     pub fn net_arcs(nets: &[NetReq], trees: &[Tree]) -> Vec<Arc> {
@@ -325,30 +415,161 @@ impl<'a> Router<'a> {
         // Out of `self` while the searches borrow it; put back on the way
         // out (a failed search ends the routing).
         let mut scratch = std::mem::replace(&mut self.scratch, Scratch::new(0));
+        // Nodes taken by the batch being committed: where equal to
+        // `batch_stamp`.
+        let mut taken: Vec<u32> = vec![
+            0;
+            if self.batching == Batching::Off {
+                0
+            } else {
+                self.db.nodes()
+            }
+        ];
+        let mut batch_stamp = 0u32;
+        // One search scratch per thread for batches, made on first use.
+        let mut pool: Vec<Mutex<Option<Scratch>>> = (0..rayon::current_num_threads())
+            .map(|_| Mutex::new(None))
+            .collect();
         for iteration in 1..=MAX_ITERATIONS {
             let t_iter = std::time::Instant::now();
             let mut rerouted = 0;
             let mut t_wide = 0.0;
+            let (mut batch_count, mut widest, mut repaired) = (0usize, 0usize, 0usize);
             scratch.work = [0; 3];
-            for (i, net) in nets.iter().enumerate() {
-                let congested = trees[i].nodes.iter().any(|&n| self.node[n as usize].occ > 1);
-                let critical = crit[i].iter().any(|&c| c > REROUTE_CRITICALITY);
-                if iteration > 1 && !congested && !critical {
-                    continue;
+            if self.batching != Batching::Off {
+                // The nets that may reroute are batched once, before any of
+                // them moves; then batch by batch, each batch's nets
+                // against the routing as it stood when the batch began.
+                let todo: Vec<usize> = (0..nets.len())
+                    .filter(|&i| {
+                        iteration == 1
+                            || trees[i]
+                                .nodes
+                                .iter()
+                                .any(|&n| self.node[n as usize].occ > 1)
+                            || crit[i].iter().any(|&c| c > REROUTE_CRITICALITY)
+                    })
+                    .collect();
+                let batches = match self.batching {
+                    Batching::Fixed(k) => todo.chunks(k.max(1)).map(<[usize]>::to_vec).collect(),
+                    _ => self.batches(nets, &todo),
+                };
+                widest = widest.max(batches.iter().map(Vec::len).max().unwrap_or(0));
+                batch_count += batches.len();
+                for batch in &batches {
+                    // Asked again now that earlier batches have moved: a
+                    // net whose congestion they cleared keeps its tree, as
+                    // in the one-at-a-time loop. Rerouting it anyway kept
+                    // pairs of critical nets trading local lines forever
+                    // (picorv32 stuck at 2 overused nodes for 50
+                    // iterations).
+                    let batch: Vec<usize> = batch
+                        .iter()
+                        .copied()
+                        .filter(|&i| {
+                            iteration == 1
+                                || trees[i]
+                                    .nodes
+                                    .iter()
+                                    .any(|&n| self.node[n as usize].occ > 1)
+                                || crit[i].iter().any(|&c| c > REROUTE_CRITICALITY)
+                        })
+                        .collect();
+                    if batch.is_empty() {
+                        continue;
+                    }
+                    for &i in &batch {
+                        for &n in &trees[i].nodes {
+                            self.node[n as usize].occ -= 1;
+                        }
+                    }
+                    let olds: Vec<Tree> = batch
+                        .iter()
+                        .map(|&i| std::mem::take(&mut trees[i]))
+                        .collect();
+                    let this = &*self;
+                    let route = |s: &mut Scratch, i: usize, old: &Tree| -> (Result<Tree>, f64) {
+                        let t_net = std::time::Instant::now();
+                        let keep = (this.incremental && iteration > 1).then_some(old);
+                        let tree = this.route_net(s, i as u32, &nets[i], &crit[i], keep);
+                        let wide = if nets[i].sinks.len() >= 32 {
+                            t_net.elapsed().as_secs_f64()
+                        } else {
+                            0.0
+                        };
+                        (tree, wide)
+                    };
+                    let routed: Vec<(Result<Tree>, f64)> = if batch.len() == 1 {
+                        vec![route(&mut scratch, batch[0], &olds[0])]
+                    } else {
+                        batch
+                            .par_iter()
+                            .zip(&olds)
+                            .map(|(&i, old)| {
+                                let slot = rayon::current_thread_index().unwrap_or(0) % pool.len();
+                                let mut s = pool[slot].lock().expect("a router thread panicked");
+                                let s = s.get_or_insert_with(|| Scratch::new(this.db.nodes()));
+                                route(s, i, old)
+                            })
+                            .collect()
+                    };
+                    // Committed in net order. A net whose tree takes a
+                    // node an earlier net of this batch just took (a long
+                    // wire reaching into both regions, or a search that
+                    // left its region) is routed again now, against what
+                    // is committed: two nets that can't see each other
+                    // would otherwise trade the same wire back and forth
+                    // every iteration and never converge.
+                    batch_stamp += 1;
+                    for ((&i, (tree, wide)), old) in batch.iter().zip(routed).zip(&olds) {
+                        let mut tree = tree?;
+                        t_wide += wide;
+                        if tree.nodes.iter().any(|&n| taken[n as usize] == batch_stamp) {
+                            let keep = (self.incremental && iteration > 1).then_some(old);
+                            tree =
+                                self.route_net(&mut scratch, i as u32, &nets[i], &crit[i], keep)?;
+                            repaired += 1;
+                        }
+                        for &n in &tree.nodes {
+                            self.node[n as usize].occ += 1;
+                            taken[n as usize] = batch_stamp;
+                        }
+                        trees[i] = tree;
+                    }
+                    rerouted += batch.len();
                 }
-                for &n in &trees[i].nodes {
-                    self.node[n as usize].occ -= 1;
+                for s in pool.iter_mut() {
+                    if let Some(s) = s.get_mut().expect("a router thread panicked") {
+                        for k in 0..3 {
+                            scratch.work[k] += s.work[k];
+                        }
+                        s.work = [0; 3];
+                    }
                 }
-                rerouted += 1;
-                let t_net = std::time::Instant::now();
-                let old = std::mem::take(&mut trees[i]);
-                let keep = (self.incremental && iteration > 1).then_some(&old);
-                trees[i] = self.route_net(&mut scratch, i as u32, net, &crit[i], keep)?;
-                if net.sinks.len() >= 32 {
-                    t_wide += t_net.elapsed().as_secs_f64();
-                }
-                for &n in &trees[i].nodes {
-                    self.node[n as usize].occ += 1;
+            } else {
+                for (i, net) in nets.iter().enumerate() {
+                    let congested = trees[i]
+                        .nodes
+                        .iter()
+                        .any(|&n| self.node[n as usize].occ > 1);
+                    let critical = crit[i].iter().any(|&c| c > REROUTE_CRITICALITY);
+                    if iteration > 1 && !congested && !critical {
+                        continue;
+                    }
+                    for &n in &trees[i].nodes {
+                        self.node[n as usize].occ -= 1;
+                    }
+                    rerouted += 1;
+                    let t_net = std::time::Instant::now();
+                    let old = std::mem::take(&mut trees[i]);
+                    let keep = (self.incremental && iteration > 1).then_some(&old);
+                    trees[i] = self.route_net(&mut scratch, i as u32, net, &crit[i], keep)?;
+                    if net.sinks.len() >= 32 {
+                        t_wide += t_net.elapsed().as_secs_f64();
+                    }
+                    for &n in &trees[i].nodes {
+                        self.node[n as usize].occ += 1;
+                    }
                 }
             }
 
@@ -363,16 +584,42 @@ impl<'a> Router<'a> {
                 }
             }
 
-            let overused: Vec<usize> = (0..self.node.len()).filter(|&n| self.node[n].occ > 1).collect();
+            let overused: Vec<usize> = (0..self.node.len())
+                .filter(|&n| self.node[n].occ > 1)
+                .collect();
             if trace {
                 eprintln!(
-                    "route: iteration {iteration}: {rerouted} nets in {t_search:.2} s ({t_wide:.2} s on nets of 32 sinks or more; {:?} seeded, pushed, expanded), timing {:.2} s, {} overused, critical {:.2} ns, {:.1} s in all",
+                    "route: iteration {iteration}: {rerouted} nets in {t_search:.2} s ({batch_count} batches, the largest {widest} nets, {repaired} rerouted after a collision; {t_wide:.2} s on nets of 32 sinks or more; {:?} seeded, pushed, expanded), timing {:.2} s, {} overused, critical {:.2} ns, {:.1} s in all",
                     scratch.work,
                     t_iter.elapsed().as_secs_f64() - t_search,
                     overused.len(),
                     analysis.critical / 1000.0,
                     started.elapsed().as_secs_f64()
                 );
+            }
+            if trace
+                && !overused.is_empty()
+                && overused.len() <= 3
+                && std::env::var("CHIPSMITH_ROUTE_TRACE").as_deref() == Ok("2")
+            {
+                for &n in &overused {
+                    let users: Vec<(usize, usize, bool)> = trees
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, t)| t.nodes.contains(&(n as NodeId)))
+                        .map(|(i, t)| {
+                            (
+                                i,
+                                nets[i].sinks.len(),
+                                t.nodes[0] == n as NodeId || nets[i].sinks.contains(&(n as NodeId)),
+                            )
+                        })
+                        .collect();
+                    eprintln!(
+                        "route: node {n} ({:?}, {}) used by (net, sinks, is an end) {users:?}",
+                        self.node[n].bbox, self.db.wire_types[self.db.node_type[n] as usize]
+                    );
+                }
             }
             if overused.is_empty() {
                 self.scratch = scratch;
@@ -412,13 +659,7 @@ impl<'a> Router<'a> {
             self.keep_branches(s, net, crit, old, &mut tree);
         }
 
-        let region = self.bbox_margin.is_finite().then(|| {
-            let mut b = self.node[net.source as usize].bbox;
-            for &n in &net.sinks {
-                b = b.union(self.node[n as usize].bbox);
-            }
-            b.grow(self.bbox_margin.min(255.0) as u8)
-        });
+        let region = self.region(net);
         // Most critical first, so they get the direct wires; then nearest.
         let mut order: Vec<usize> = (0..net.sinks.len()).collect();
         order.sort_by(|&a, &b| {
@@ -438,7 +679,9 @@ impl<'a> Router<'a> {
             let mut branch = Vec::new();
             let mut n = sink;
             while s.in_tree[n as usize] != s.tree_generation {
-                let (from, edge) = s.visit[n as usize].via.expect("searched nodes have a predecessor");
+                let (from, edge) = s.visit[n as usize]
+                    .via
+                    .expect("searched nodes have a predecessor");
                 branch.push((n, edge));
                 n = from;
             }
@@ -465,7 +708,14 @@ impl<'a> Router<'a> {
     /// whose connection isn't critical enough to reroute. On a congested
     /// net with hundreds of sinks, one shared wire otherwise reroutes all
     /// of them.
-    fn keep_branches(&self, s: &mut Scratch, net: &NetReq, crit: &[f32], old: &Tree, tree: &mut Tree) {
+    fn keep_branches(
+        &self,
+        s: &mut Scratch,
+        net: &NetReq,
+        crit: &[f32],
+        old: &Tree,
+        tree: &mut Tree,
+    ) {
         let gen = s.tree_generation;
         for (&sink, &c) in net.sinks.iter().zip(crit) {
             if c <= REROUTE_CRITICALITY {
