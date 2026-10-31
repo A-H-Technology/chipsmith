@@ -49,6 +49,10 @@ pub enum Port {
     Pad,
     Inclk,
     Outclk,
+    /// An I/O cell's register clock enables and asynchronous reset.
+    Inclkena,
+    Outclkena,
+    Areset,
     /// Constant drivers' output.
     Y,
     /// Top-level port cells: input port's output, output port's input.
@@ -73,7 +77,7 @@ pub enum Port {
 pub const LUT_INPUTS: [Port; 4] = [Port::DataA, Port::DataB, Port::DataC, Port::DataD];
 
 impl Port {
-    const FIXED: [(Port, &'static str); 22] = [
+    const FIXED: [(Port, &'static str); 25] = [
         (Port::DataA, "DATAA"),
         (Port::DataB, "DATAB"),
         (Port::DataC, "DATAC"),
@@ -93,6 +97,9 @@ impl Port {
         (Port::Pad, "PAD"),
         (Port::Inclk, "INCLK"),
         (Port::Outclk, "OUTCLK"),
+        (Port::Inclkena, "INCLKENA"),
+        (Port::Outclkena, "OUTCLKENA"),
+        (Port::Areset, "ARESET"),
         (Port::Y, "Y"),
         (Port::O, "O"),
         (Port::I, "I"),

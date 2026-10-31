@@ -22,24 +22,33 @@ module LCELL_FF (input DATAIN, input CLK, input ENA, input ACLR, input SCLR, out
   parameter CLK_INV = 0;
 endmodule
 
-// Pin buffers. Each has its I/O cell's registers, rising-edge, no enable
-// or clear: INPUT_REGISTER samples the pad on INCLK into REGOUT;
-// OUTPUT_REGISTER samples DATAOUT and OE_REGISTER samples OE on OUTCLK, and
-// the pad takes what they hold. A register is used when its parameter is
-// "low" or "high", its power-up value; "none" (the default) bypasses it.
+// Pin buffers. Each has its I/O cell's registers: INPUT_REGISTER samples
+// the pad on INCLK into REGOUT; OUTPUT_REGISTER samples DATAOUT and
+// OE_REGISTER samples OE on OUTCLK, and the pad takes what they hold. A
+// register is used when its parameter is "low" or "high", its power-up
+// value; "none" (the default) bypasses it. <register>_ENA = 1: it samples
+// only while its side's enable (INCLKENA; OUTCLKENA, which the output and
+// OE registers share) is active; <register>_ARESET = 1: ARESET, which all
+// three share, returns it to its power-up value. INCLK_INVERT /
+// OUTCLK_INVERT clock a side on the falling edge; INCLKENA_INVERT,
+// OUTCLKENA_INVERT, ARESET_INVERT make those controls active low
+// (pin.rs: register_param, control_param).
 (* blackbox *)
-module CY2_IBUF (input PAD, input INCLK, output COMBOUT, output REGOUT);
+module CY2_IBUF (input PAD, input INCLK, input INCLKENA, input ARESET,
+                 output COMBOUT, output REGOUT);
   parameter INPUT_REGISTER = "none";
 endmodule
 
 (* blackbox *)
-module CY2_OBUF (input DATAOUT, input OUTCLK, output PAD);
+module CY2_OBUF (input DATAOUT, input OUTCLK, input OUTCLKENA, input ARESET,
+                 output PAD);
   parameter OUTPUT_REGISTER = "none";
 endmodule
 
 // Tri-state output or bidir: PAD = OE ? DATAOUT : 1'bz, COMBOUT = PAD.
 (* blackbox *)
 module CY2_IOBUF (input DATAOUT, input OE, input INCLK, input OUTCLK,
+                  input INCLKENA, input OUTCLKENA, input ARESET,
                   output COMBOUT, output REGOUT, inout PAD);
   parameter INPUT_REGISTER = "none";
   parameter OUTPUT_REGISTER = "none";

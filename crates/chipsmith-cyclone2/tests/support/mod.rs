@@ -54,34 +54,83 @@ module LCELL_FF (input DATAIN, input CLK, input ENA, input ACLR, input SCLR, out
     if (ACLR) REGOUT <= 1'b0;
     else if (ENA) REGOUT <= SCLR ? 1'b0 : DATAIN;
 endmodule
-module CY2_IBUF (input PAD, input INCLK, output COMBOUT, output REGOUT);
-  parameter INPUT_REGISTER = "none";
-  reg q = INPUT_REGISTER == "high";
-  always @(posedge INCLK) q <= PAD;
-  assign COMBOUT = PAD;
-  assign REGOUT = q;
+// An I/O cell register (`cells.v`): on its side's clock edge
+// (`*CLK_INVERT`: falling), while its enable is active if it takes one; the
+// cell's reset, if it takes it, restores the power-up value.
+module CY2_IOREG (input CLK, input D, input ENA, input ARESET, output reg Q);
+  parameter MODE = "none";
+  parameter USE_ENA = 0;
+  parameter USE_ARESET = 0;
+  parameter CLK_INVERT = 0;
+  parameter ENA_INVERT = 0;
+  parameter ARESET_INVERT = 0;
+  initial Q = MODE == "high";
+  wire clk = CLK_INVERT ? ~CLK : CLK;
+  wire ena = !USE_ENA || (ENA_INVERT ? ~ENA : ENA);
+  wire rst = USE_ARESET && (ARESET_INVERT ? ~ARESET : ARESET);
+  always @(posedge clk, posedge rst)
+    if (rst) Q <= MODE == "high";
+    else if (ena) Q <= D;
 endmodule
-module CY2_OBUF (input DATAOUT, input OUTCLK, output PAD);
+module CY2_IBUF (input PAD, input INCLK, input INCLKENA, input ARESET,
+                 output COMBOUT, output REGOUT);
+  parameter INPUT_REGISTER = "none";
+  parameter INPUT_REGISTER_ENA = 0;
+  parameter INPUT_REGISTER_ARESET = 0;
+  parameter INCLK_INVERT = 0;
+  parameter INCLKENA_INVERT = 0;
+  parameter ARESET_INVERT = 0;
+  CY2_IOREG #(.MODE(INPUT_REGISTER), .USE_ENA(INPUT_REGISTER_ENA), .USE_ARESET(INPUT_REGISTER_ARESET),
+              .CLK_INVERT(INCLK_INVERT), .ENA_INVERT(INCLKENA_INVERT), .ARESET_INVERT(ARESET_INVERT))
+    ri (.CLK(INCLK), .D(PAD), .ENA(INCLKENA), .ARESET(ARESET), .Q(REGOUT));
+  assign COMBOUT = PAD;
+endmodule
+module CY2_OBUF (input DATAOUT, input OUTCLK, input OUTCLKENA, input ARESET, output PAD);
   parameter OUTPUT_REGISTER = "none";
-  reg q = OUTPUT_REGISTER == "high";
-  always @(posedge OUTCLK) q <= DATAOUT;
+  parameter OUTPUT_REGISTER_ENA = 0;
+  parameter OUTPUT_REGISTER_ARESET = 0;
+  parameter OUTCLK_INVERT = 0;
+  parameter OUTCLKENA_INVERT = 0;
+  parameter ARESET_INVERT = 0;
+  wire q;
+  CY2_IOREG #(.MODE(OUTPUT_REGISTER), .USE_ENA(OUTPUT_REGISTER_ENA), .USE_ARESET(OUTPUT_REGISTER_ARESET),
+              .CLK_INVERT(OUTCLK_INVERT), .ENA_INVERT(OUTCLKENA_INVERT), .ARESET_INVERT(ARESET_INVERT))
+    rd (.CLK(OUTCLK), .D(DATAOUT), .ENA(OUTCLKENA), .ARESET(ARESET), .Q(q));
   assign PAD = OUTPUT_REGISTER == "none" ? DATAOUT : q;
 endmodule
 // The checker cuts every pin (`cut_pins`): EXT is what the outside drives
 // while the buffer is off.
 module CY2_IOBUF (input DATAOUT, input OE, input INCLK, input OUTCLK, input EXT,
+                  input INCLKENA, input OUTCLKENA, input ARESET,
                   output COMBOUT, output REGOUT, output PAD);
   parameter INPUT_REGISTER = "none";
   parameter OUTPUT_REGISTER = "none";
   parameter OE_REGISTER = "none";
-  reg qi = INPUT_REGISTER == "high", qd = OUTPUT_REGISTER == "high", qe = OE_REGISTER == "high";
-  always @(posedge INCLK) qi <= PAD;
-  always @(posedge OUTCLK) begin qd <= DATAOUT; qe <= OE; end
+  parameter INPUT_REGISTER_ENA = 0;
+  parameter INPUT_REGISTER_ARESET = 0;
+  parameter OUTPUT_REGISTER_ENA = 0;
+  parameter OUTPUT_REGISTER_ARESET = 0;
+  parameter OE_REGISTER_ENA = 0;
+  parameter OE_REGISTER_ARESET = 0;
+  parameter INCLK_INVERT = 0;
+  parameter OUTCLK_INVERT = 0;
+  parameter INCLKENA_INVERT = 0;
+  parameter OUTCLKENA_INVERT = 0;
+  parameter ARESET_INVERT = 0;
+  wire qd, qe;
+  CY2_IOREG #(.MODE(INPUT_REGISTER), .USE_ENA(INPUT_REGISTER_ENA), .USE_ARESET(INPUT_REGISTER_ARESET),
+              .CLK_INVERT(INCLK_INVERT), .ENA_INVERT(INCLKENA_INVERT), .ARESET_INVERT(ARESET_INVERT))
+    ri (.CLK(INCLK), .D(PAD), .ENA(INCLKENA), .ARESET(ARESET), .Q(REGOUT));
+  CY2_IOREG #(.MODE(OUTPUT_REGISTER), .USE_ENA(OUTPUT_REGISTER_ENA), .USE_ARESET(OUTPUT_REGISTER_ARESET),
+              .CLK_INVERT(OUTCLK_INVERT), .ENA_INVERT(OUTCLKENA_INVERT), .ARESET_INVERT(ARESET_INVERT))
+    rd (.CLK(OUTCLK), .D(DATAOUT), .ENA(OUTCLKENA), .ARESET(ARESET), .Q(qd));
+  CY2_IOREG #(.MODE(OE_REGISTER), .USE_ENA(OE_REGISTER_ENA), .USE_ARESET(OE_REGISTER_ARESET),
+              .CLK_INVERT(OUTCLK_INVERT), .ENA_INVERT(OUTCLKENA_INVERT), .ARESET_INVERT(ARESET_INVERT))
+    re (.CLK(OUTCLK), .D(OE), .ENA(OUTCLKENA), .ARESET(ARESET), .Q(qe));
   wire d = OUTPUT_REGISTER == "none" ? DATAOUT : qd;
   wire e = OE_REGISTER == "none" ? OE : qe;
   assign PAD = e ? d : EXT;
   assign COMBOUT = PAD;
-  assign REGOUT = qi;
 endmodule
 // The embedded multiplier (cells.v): the product of the low A_WIDTH and
 // B_WIDTH bits, each two's complement when its *_SIGNED is set, with the
