@@ -18,7 +18,7 @@ no nextpnr, no cram. GHDL translates VHDL in front of it.
 
 | device | board | build | on hardware |
 |---|---|---|---|
-| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis): LUT/carry/register logic, M4K RAM blocks and embedded multipliers (below), global clocks from pins and from logic (a register, the JTAG block's TCK; one clock per LAB), PLLs (`CY2_PLL`; both on the board 2026-10-26, examples/de2-jtag-counter on TCK and examples/de2-pll-counter at 100 and 40 MHz from CLOCK_50; 2026-10-30 a PLL clock on its PLL's clock output pin, the DE2's SDRAM run at 100 MHz with 0 errors by examples/sdram-selftest, its SRAM by examples/sram-selftest); pins input, output, tri-state, bidirectional, open drain, at 3.3-V LVTTL (any current) or LVCMOS or 2.5-V inputs, with pull-up or bus hold and I/O-cell registers (output and OE registers with clock enables and synchronous resets too; Manifest, below) | yes (2026-10-25, chipsmith's own synthesis end to end, checked over JTAG: examples/de2-jtag-counter (its earlier CLOCK_50-sampled version) reads back `"DE2!"` at 50.00 MHz after a JTAG load and after `flash --persist` (loader synthesized by chipsmith too, EPCS written, verified and reloaded from; 2026-10-26 also after a power cycle); picorv32 with the same readback added runs its loop at 3.33 MHz. 2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
+| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis): LUT/carry/register logic, M4K RAM blocks and embedded multipliers (below), global clocks from pins and from logic (a register, the JTAG block's TCK; one clock per LAB), PLLs (`CY2_PLL`; both on the board 2026-10-26, examples/de2-jtag-counter on TCK and examples/de2-pll-counter at 100 and 40 MHz from CLOCK_50; 2026-10-30 a PLL clock on its PLL's clock output pin, 2026-10-31 on any pin or into logic as data, the DE2's SDRAM run at 100 MHz with 0 errors by examples/sdram-selftest, its SRAM by examples/sram-selftest); pins input, output, tri-state, bidirectional, open drain, at 3.3-V LVTTL (any current) or LVCMOS or 2.5-V inputs, with pull-up or bus hold and I/O-cell registers (output and OE registers with clock enables and synchronous resets too; Manifest, below) | yes (2026-10-25, chipsmith's own synthesis end to end, checked over JTAG: examples/de2-jtag-counter (its earlier CLOCK_50-sampled version) reads back `"DE2!"` at 50.00 MHz after a JTAG load and after `flash --persist` (loader synthesized by chipsmith too, EPCS written, verified and reloaded from; 2026-10-26 also after a power cycle); picorv32 with the same readback added runs its loop at 3.33 MHz. 2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
 | xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes: what yosys `synth_xilinx` and openXC7's nextpnr's packer handle, LVCMOS33 pins; chipsmith places LUT/register/carry logic, RAM32Ms, pins, BUFGs, BSCANs and the PS7 and routes the interconnect (below) | yes (2026-10-24: zybo-jtag-counter placed and routed by chipsmith, read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga) |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
@@ -67,12 +67,15 @@ prints counter 1 at 2.000000 and counter 2 at 0.800000 times counter 0
 and routing of it byte-identically (setup slack 6.21 ns at 100 MHz in
 quartus_sta, 6.20 ns estimated).
 
-A PLL clock leaves the chip on its PLL's clock output pin only: CLK2
+A PLL's dedicated way off the chip is its clock output pin: CLK2
 (counter 2) through that pin's own clock control, PLL_1's being PIN_AA7,
-the DE2's DRAM_CLK (cyclone2-re README, "PLLs"). chipsmith packs a
-`CY2_PLL` CLK2 driving an output pin that way, and says so when a design
-asks for CLK0/CLK1 on a pin or a pin that isn't the PLL's (PLL_2: F21,
-PLL_3: E5, PLL_4: V21). Quartus assembles it byte-identically.
+the DE2's DRAM_CLK (cyclone2-re README, "PLLs"; PLL_2: F21, PLL_3: E5,
+PLL_4: V21). chipsmith builds a `CY2_PLL` CLK2 alone on that pin that way.
+Since 2026-10-31 a PLL clock is also data, as in Terasic's `assign VGA_CLK
+= pll_clk`: on any other pin, into a LUT or a register's data, it travels
+on its global and leaves it through a row clock buffer onto a LAB line,
+as Quartus routes it (cyclone2-re README, "Global clocks as data";
+docs/de2-periph-status.md). Quartus assembles both byte-identically.
 
 Phase shifts are picked the way Quartus picks them: the shift rounds to
 the nearest eighth of a VCO period, and the VCO is the one that hits all
@@ -164,13 +167,15 @@ as the board was. The outputs are unobserved.
 `examples/vga-pattern` puts 640x480 at 60 Hz on the VGA DAC: colour
 bars, four ramps, a white border, the DAC's inputs through I/O-cell
 registers (with the reset synthesis finds in `visible ? r : 0` as logic
-on their D), 25 MHz pixels from PLL_1, 519 LEs. VGA_CLK (PIN_B8) isn't a PLL clock
-output pin, so a register on the PLL's 50 MHz makes it, rising halfway
-through each pixel. USER1 holds `"VGA!"` and counts of the pixel clock
+on their D), 25 MHz pixels from PLL_1, 516 LEs. VGA_CLK (PIN_B8) is
+the pixel clock inverted, `assign VGA_CLK = ~pclk` as Terasic writes it,
+rising halfway through each pixel (since 2026-10-31; before, a register
+on a second PLL clock at 50 MHz made it). USER1 holds `"VGA!"` and counts of the pixel clock
 and the frames: on the DE2 2026-10-30, 25.0000 MHz and 59 frames a
 second (59.52 expected); the build without the extra register stage
-read 25.0000 MHz and 60. Quartus byte-identical. No monitor has shown
-the picture yet.
+read 25.0000 MHz and 60 (both builds with the register-made VGA_CLK;
+the direct one hasn't been on the board). Quartus byte-identical. No
+monitor has shown the picture yet.
 
 Pin settings are checked against Quartus the same way
 (`bench/quartus-validate.sh`, `bench/io-fuzz.py`), 2026-10-26: examples/de2-io
@@ -545,8 +550,7 @@ nextpnr's placement.
 
 The Cyclone II limits come from cyclone2-re's open flow: M4K RAM as
 above, multipliers as above, PLLs without clock
-switchover or reconfiguration (a PLL clock reaches a pin only through its
-clock output pin, and no global clock feeds logic as data), I/O registers
+switchover or reconfiguration, I/O registers
 without clock enables or clears (an output or OE register's enable and
 synchronous reset become logic on the I/O register's D; an input register
 with either, or any register with an asynchronous reset, can't go into an

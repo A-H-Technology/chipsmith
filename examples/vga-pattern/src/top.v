@@ -1,15 +1,12 @@
 // 640x480 at 60 Hz (25 MHz pixels, 800 x 525 per frame: 59.52 Hz) on the
 // DE2's VGA DAC: eight colour bars over the top half, red, green, blue
 // and grey ramps over the bottom, a white border. PLL_1 makes the 25 MHz
-// pixel clock (CLK0) and 50 MHz (CLK1) from CLOCK_50.
+// pixel clock (CLK0) from CLOCK_50.
 //
-// VGA_CLK, the DAC's latch clock, can't be the PLL clock itself: a PLL
-// clock reaches only its PLL<n>_OUT pin, and VGA_CLK (PIN_B8) isn't one.
-// So a register on the 50 MHz clock makes it, rising halfway through each
-// pixel: `t` toggles on every pixel clock, and VGA_CLK is t, sampled on
-// 50 MHz, XORed with its previous sample (high after the 50 MHz edge
-// between pixel edges, low after the one on a pixel edge). The two clocks
-// come from one VCO, so their edges keep that order.
+// VGA_CLK, the DAC's latch clock, is the pixel clock inverted, as
+// Terasic's VGA controller writes it: it rises halfway through each
+// pixel, where the DAC's inputs are steady. The clock reaches PIN_B8 as
+// data on its global.
 //
 // USER1 holds "VGA!" and Gray-coded counters of CLOCK_50, the pixel
 // clock and the frames: `cargo run --release -p chipsmith-cyclone2
@@ -24,32 +21,23 @@ module top(
   output reg VGA_VS,
   output reg VGA_BLANK,
   output VGA_SYNC,
-  output reg VGA_CLK,
+  output VGA_CLK,
   output LEDG
 );
-  wire pclk, clk50, locked;
+  wire pclk, locked;
   CY2_PLL #(
     .INCLK0_INPUT_FREQUENCY(20000),
     .CLK0_MULTIPLY_BY(1),
-    .CLK0_DIVIDE_BY(2),
-    .CLK1_MULTIPLY_BY(1),
-    .CLK1_DIVIDE_BY(1)
+    .CLK0_DIVIDE_BY(2)
   ) pll (
     .INCLK(CLOCK_50),
     .CLK0(pclk),
-    .CLK1(clk50),
     .LOCKED(locked)
   );
   assign LEDG = locked;
   assign VGA_SYNC = 1'b0;
 
-  reg t = 0;
-  always @(posedge pclk) t <= ~t;
-  reg s = 0;
-  always @(posedge clk50) begin
-    s <= t;
-    VGA_CLK <= t ^ s;
-  end
+  assign VGA_CLK = ~pclk;
 
   // 800 x 525: 640 visible, front porch 16, sync 96, back porch 48; 480
   // lines, 10, 2, 33. Both syncs active low.
