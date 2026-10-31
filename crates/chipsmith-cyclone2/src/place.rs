@@ -2584,7 +2584,7 @@ pub fn place_file(
     let seeds = env("CHIPSMITH_PLACE_SEEDS", SEEDS as f64).max(1.0) as usize;
     let mut state = state;
     let mut detail_moves = 0;
-    if le_placed.is_some() && env("CHIPSMITH_PLACE_DETAIL", 1.0) != 0.0 {
+    if le_placed.is_some() && env("CHIPSMITH_PLACE_DETAIL", 0.0) != 0.0 {
         let t = std::time::Instant::now();
         let par = !matches!(accel, chipsmith_place::electro::Accel::Serial);
         let done = detail::refine(&mut state, par, trace);
