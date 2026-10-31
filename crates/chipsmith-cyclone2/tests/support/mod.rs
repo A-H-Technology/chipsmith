@@ -2210,3 +2210,52 @@ pub fn cosim(
         })?;
     Ok(Cosim { cycles, compared })
 }
+
+/// Builds `body` (inside `module top(...)` with `ports`) with `pins`
+/// (port, PIN_x) and the I/O registers `registers` asks for through the
+/// whole flow on the devshell's chip database (synthesis, pack, place,
+/// route, bitstream), returning the routed design.
+pub fn flow(
+    name: &str,
+    ports: &str,
+    body: &str,
+    pins: &[(&str, &str)],
+    registers: &BTreeMap<String, chipsmith_cyclone2::pin::IoRegisters>,
+) -> (
+    chipsmith_cyclone2::bitstream::device::Device,
+    chipsmith_cyclone2::bitstream::nextpnr::Routed,
+) {
+    use chipsmith_cyclone2::place::{self, PinPlan};
+    use chipsmith_cyclone2::{bitstream, pack, route, synth};
+    let dir = scratch(Path::new(env!("CARGO_TARGET_TMPDIR")), name);
+    let src = dir.join("top.v");
+    std::fs::write(&src, format!("module top({ports});\n{body}\nendmodule\n")).unwrap();
+    let design = frontend("top", &[PathBuf::from(&src)]);
+    let out = synth::synthesize(design, registers).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+    let netlist = dir.join("netlist.json");
+    write(&out.design, &netlist);
+    let packed = dir.join("packed.json");
+    pack::pack_file(&netlist, &packed).unwrap_or_else(|e| panic!("{name}: pack: {e:#}"));
+    let graph = route::load_graph().unwrap();
+    let pins: BTreeMap<String, PinPlan> = pins
+        .iter()
+        .map(|&(port, pin)| {
+            let plan = PinPlan {
+                pin: pin.to_string(),
+                settings: Default::default(),
+            };
+            (port.to_string(), plan)
+        })
+        .collect();
+    let placed = dir.join("placed.json");
+    place::place_file(&graph, &packed, &pins, Default::default(), &placed)
+        .unwrap_or_else(|e| panic!("{name}: place: {e:#}"));
+    let routed = dir.join("routed.json");
+    route::route_file(&graph, &placed, &routed).unwrap_or_else(|e| panic!("{name}: route: {e:#}"));
+    let db = bitstream::load_db().unwrap();
+    bitstream::pack_file(&db, &routed, &dir.join("top.rbf"))
+        .unwrap_or_else(|e| panic!("{name}: bitstream: {e:#}"));
+    let r = bitstream::nextpnr::read(&db.dev, &routed).unwrap();
+    (db.dev, r)
+}
+

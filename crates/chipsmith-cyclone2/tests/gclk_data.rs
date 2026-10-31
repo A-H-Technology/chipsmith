@@ -9,50 +9,14 @@
 mod support;
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 
-use chipsmith_cyclone2::bitstream::{self, device::Device, nextpnr};
-use chipsmith_cyclone2::pin::UnusedPins;
-use chipsmith_cyclone2::place::{self, PinPlan};
-use chipsmith_cyclone2::{pack, route, synth};
+use chipsmith_cyclone2::bitstream::{device::Device, nextpnr};
 
 const BLK_CLK_BUF: i16 = 560;
 const LOCAL_INTERCONNECT: i16 = 276;
 
-/// Builds `body` (inside `module top(...)` with `ports`) with `pins`
-/// (port, PIN_x), returning the routed design.
 fn build(name: &str, ports: &str, body: &str, pins: &[(&str, &str)]) -> (Device, nextpnr::Routed) {
-    let dir = support::scratch(Path::new(env!("CARGO_TARGET_TMPDIR")), name);
-    let src = dir.join("top.v");
-    std::fs::write(&src, format!("module top({ports});\n{body}\nendmodule\n")).unwrap();
-    let design = support::frontend("top", &[PathBuf::from(&src)]);
-    let out =
-        synth::synthesize(design, &BTreeMap::new()).unwrap_or_else(|e| panic!("{name}: {e:#}"));
-    let netlist = dir.join("netlist.json");
-    support::write(&out.design, &netlist);
-    let packed = dir.join("packed.json");
-    pack::pack_file(&netlist, &packed).unwrap_or_else(|e| panic!("{name}: pack: {e:#}"));
-    let graph = route::load_graph().unwrap();
-    let pins: BTreeMap<String, PinPlan> = pins
-        .iter()
-        .map(|&(port, pin)| {
-            let plan = PinPlan {
-                pin: pin.to_string(),
-                settings: Default::default(),
-            };
-            (port.to_string(), plan)
-        })
-        .collect();
-    let placed = dir.join("placed.json");
-    place::place_file(&graph, &packed, &pins, UnusedPins::default(), &placed)
-        .unwrap_or_else(|e| panic!("{name}: place: {e:#}"));
-    let routed = dir.join("routed.json");
-    route::route_file(&graph, &placed, &routed).unwrap_or_else(|e| panic!("{name}: route: {e:#}"));
-    let db = bitstream::load_db().unwrap();
-    bitstream::pack_file(&db, &routed, &dir.join("top.rbf"))
-        .unwrap_or_else(|e| panic!("{name}: bitstream: {e:#}"));
-    let r = nextpnr::read(&db.dev, &routed).unwrap();
-    (db.dev, r)
+    support::flow(name, ports, body, pins, &BTreeMap::new())
 }
 
 /// The net into `port`'s pin, and the type of the cell driving it.
@@ -184,4 +148,25 @@ fn counter_2_on_its_own_pin_keeps_the_dedicated_output() {
         ],
     );
     assert_eq!(pin_net(&r, "DRAM_CLK").1, "PLLOUT");
+}
+
+/// PLL_4, fed from a bottom-edge clock pin (PIN_AE14, the DE2's SW[3]),
+/// with counter 2 on its own clock output pin, PIN_V21: both as Quartus
+/// placed them in cyclone2-re's q4a-q4f (README, "PLLs").
+#[test]
+fn pll_4_from_a_bottom_clock_pin_to_its_own_pin() {
+    let body = PLL.replace("CLOCK_50", "CLK_IN") + "  assign PLL_OUT = c2;";
+    let (_, r) = build(
+        "gclk-data-pll4",
+        "input CLK_IN, output LEDR, output PLL_OUT",
+        &body,
+        &[
+            ("CLK_IN", "PIN_AE14"),
+            ("LEDR", "PIN_AE23"),
+            ("PLL_OUT", "PIN_V21"),
+        ],
+    );
+    assert_eq!(pin_net(&r, "PLL_OUT").1, "PLLOUT");
+    let pll = r.cells.values().find(|c| c.ty == "CY2_PLL").expect("a PLL");
+    assert_eq!(pll.bel, nextpnr::Bel::Pll { x: 65, y: 1 }, "PLL_4's tile");
 }
