@@ -635,7 +635,7 @@ Cyclone II (EP2C35F672C6):
 | synthesis | chipsmith: what cyclone2-re's `cyclone2.ys` does, on chipsmith's netlist IR (`crates/chipsmith-synth`, `crates/chipsmith-cyclone2/src/synth`) | ours |
 | LUT mapping | chipsmith: AIG plus priority cuts, in place of `abc -lut 4` (`crates/chipsmith-synth/src/lutmap.rs`) | ours |
 | packing | chipsmith: cyclone2-re's nextpnr packer, ported (`crates/chipsmith-cyclone2/src/pack`) | ours |
-| placement | chipsmith: analytic placement of LAB-sized clusters (`crates/chipsmith-place`), legalised onto LAB slots and refined by annealing, nextpnr's LAB rules (`crates/chipsmith-cyclone2/src/place.rs`) | ours |
+| placement | chipsmith: electrostatic global placement of every LE (`crates/chipsmith-place`, on CPU threads or, built with `--features gpu`, a GPU; ADR-0012), legalised LE by LE onto LAB slots and refined by a short annealer, nextpnr's LAB rules (`crates/chipsmith-cyclone2/src/place.rs`, `place/le.rs`); the earlier LAB-cluster flow is the fallback | ours |
 | routing | chipsmith: PathFinder over the chip database, rerouting only congested and critical branches (`crates/chipsmith-route`, `crates/chipsmith-cyclone2/src/route.rs`) | ours |
 | bitstream | chipsmith: cyclone2-re's assembler (`cram pack`), moved here and still checked against Quartus by cyclone2-re's `cram` (`crates/chipsmith-cyclone2/src/bitstream`, ADR-0003) | ours |
 | JTAG stream | chipsmith: the SVF `cram svf` wrote, CONF_DONE checked (`crates/chipsmith-cyclone2/src/bitstream/jtag.rs`) | ours |
