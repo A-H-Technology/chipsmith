@@ -152,9 +152,15 @@ impl Loop {
 /// Everything a PLL is set to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
+    /// The input clock's period (the atom's `inclk0_input_frequency`); the
+    /// lock window goes by it.
+    pub inclk_period_ps: u32,
     /// Pre-divider n (1-4) and feedback divider m. A count of 1 is bypass.
     pub n: u8,
     pub m: Divider,
+    /// The feedback counter's delay, as an output's `initial` and `phase`:
+    /// more than 1 cycle (or a tap) makes every output lead the input by
+    /// it, Quartus' negative phase shifts.
     pub m_initial: u8,
     pub m_phase: u8,
     /// The VCO runs at twice the PFD times m and is divided by 2 before the
@@ -379,7 +385,7 @@ impl PllDb {
         };
         self.put(s, (N_MODE, -1), n_mode, &mut out)?;
         self.put(s, (N_DIVIDED_BY, -1), n_code, &mut out)?;
-        let mut taps = 1u32 << c.m_phase;
+        let mut taps = vco_taps(c.m_phase, c.vco_div2);
         for (k, o) in c.outputs.iter().enumerate() {
             let g = k as i32;
             match o {
@@ -395,7 +401,7 @@ impl PllDb {
                     self.put(s, (C_LOW, g), low, &mut out)?;
                     self.put(s, (C_PRESET, g), count(o.initial), &mut out)?;
                     self.put(s, (C_PHASE, g), u32::from(o.phase), &mut out)?;
-                    taps |= 1 << o.phase;
+                    taps |= vco_taps(o.phase, c.vco_div2);
                 }
                 // An unused counter: bypass, 15/15, no preset.
                 None => {
@@ -410,8 +416,7 @@ impl PllDb {
         // The VCO taps the counters use, one bit each (p16: c1 on tap 6).
         self.put(s, (VCO_PHASE_CONTROL, -1), taps, &mut out)?;
         let l = c.r#loop;
-        let m_eff = c.m.count() * if c.vco_div2 { 2 } else { 1 };
-        let lock = lock_window(m_eff);
+        let lock = lock_window(u64::from(c.inclk_period_ps) * u64::from(c.n));
         self.put(s, (LOCK_WINDOW, -1), lock, &mut out)?;
         self.put(s, (LOCK_WINDOW_FB, -1), lock, &mut out)?;
         self.put(s, (LOCK_MODE, -1), 3, &mut out)?;
@@ -452,6 +457,24 @@ impl PllDb {
     }
 }
 
+/// `VCO_PHASE_CONTROL` bits for a counter on tap `phase` (p16: c1 on tap
+/// 6 sets bit 6). With the post-scale, tap t is also the VCO's tap 2t,
+/// and past a whole VCO period (2t >= 8) the one after that too
+/// (cyclone2-re specimens k1-k7 at 10 MHz: tap 1 sets bits 0-2, 3 sets 0,
+/// 3 and 6, 4 sets 0, 1 and 4, 6 sets 0 and 4-6; bit 0 is the feedback
+/// counter's tap 0).
+fn vco_taps(phase: u8, vco_div2: bool) -> u32 {
+    let t = u32::from(phase);
+    if !vco_div2 {
+        return 1 << t;
+    }
+    let mut bits = 1 << t | 1 << (2 * t % 8);
+    if 2 * t >= 8 {
+        bits |= 1 << (2 * t - 7);
+    }
+    bits
+}
+
 /// `CHARGE_PUMP_CURRENT` code of `charge_pump_current`.
 fn charge_pump_code(ua: u16) -> Result<u32> {
     Ok(match ua {
@@ -483,16 +506,58 @@ fn loop_c_code(pf: u16) -> Result<u32> {
 }
 
 /// `SELECT_LOCK_WINDOW` code (one of its asmdb map's 1, 2, 3, 4, 7, 8, 11,
-/// 15) for a feedback count of `m`: 3 at m = 4, 4 to m = 6, 7 to 8, 8 to
-/// 10, 11 to 16, 15 above (the m = 4-32 sweep; n doesn't change it). Below
-/// m = 4 never seen.
-fn lock_window(m: u32) -> u32 {
-    match m {
-        0..=4 => 3,
-        5..=6 => 4,
-        7..=8 => 7,
-        9..=10 => 8,
-        11..=16 => 11,
+/// 15) for a phase-detector period of `pfd_ps` (the input's times n): 3 to
+/// 5 ns, 4 to 7.5, 7 to 10, 8 to 12.5, 11 to 20, 15 above. The m sweep ran
+/// the VCO at 800 MHz, where m and the phase-detector period move
+/// together; cyclone2-re's lw specimens split them (m 10, 18 and 20 at
+/// 20 ns: 11; m 14 at 25 ns: 15) and put the steps between 5 and 5.6, 7.5
+/// and 8.1, 10 and 10.6, 12.5 and 13.1, 20 and 20.4 ns. Shorter than 5 ns
+/// never seen.
+fn lock_window(pfd_ps: u64) -> u32 {
+    match pfd_ps {
+        0..=5_000 => 3,
+        5_001..=7_500 => 4,
+        7_501..=10_000 => 7,
+        10_001..=12_500 => 8,
+        12_501..=20_000 => 11,
         _ => 15,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// cyclone2-re's lw specimens and the m sweep, by phase-detector period.
+    #[test]
+    fn lock_window_goes_by_the_phase_detector_period() {
+        for (ps, code) in [
+            (5_000, 3),
+            (5_600, 4),
+            (7_500, 4),
+            (8_100, 7),
+            (10_000, 7),
+            (10_600, 8),
+            (12_500, 8),
+            (13_100, 11),
+            (20_000, 11),
+            (20_400, 15),
+            (25_000, 15),
+        ] {
+            assert_eq!(lock_window(ps), code, "{ps} ps");
+        }
+    }
+
+    /// Specimens k1-k7 (10 MHz, post-scale 2, c0 on taps 1-7), less the
+    /// feedback counter's bit 0; r12 (m_ph 5) and s4 (c0 tap 6) agree.
+    #[test]
+    fn post_scaled_taps() {
+        let want = [
+            0b111, 0b10101, 0b1001001, 0b10011, 0b101101, 0b1110001, 0b11000001,
+        ];
+        for (t, w) in (1..=7u8).zip(want) {
+            assert_eq!(vco_taps(t, true) | 1, w, "tap {t}");
+            assert_eq!(vco_taps(t, false), 1 << t);
+        }
     }
 }

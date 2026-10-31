@@ -1,4 +1,4 @@
-# DE2 peripherals: status (2026-10-30)
+# DE2 peripherals: status (2026-10-31)
 
 Before this work every DE2 example drove only LEDs, switches, JTAG, M4K
 blocks or multipliers. This note covers the SDRAM, the SRAM, the VGA DAC
@@ -24,8 +24,8 @@ the one PLL design it couldn't assemble). The fix:
 - chipsmith: the packer, the placer and the IOE bit `IO_CORE_PLL_SELECT`.
 - How it was found: the residual of a Quartus design (PLL_1 c2 to AA7)
   that cram assembled without that output was 4 bits: that IOE bit, the
-  data inverter, and 2 lock-window bits that belong to the negative-phase
-  gap below.
+  data inverter, and 2 lock-window bits (the lock window goes by the
+  phase detector's period; "Fixed: negative PLL phase shifts" below).
 
 chipsmith's build of the same thing is Quartus byte-identical. Other DE2
 examples (de2-pll-counter, de2-jtag-counter, m4k-selftest, mult-selftest,
@@ -34,7 +34,8 @@ de2-io) build to the same RBFs on the new chip database.
 **examples/sdram-selftest.** The 8 MB IS42S16400 SDRAM:
 
 - Clocks: a 100 MHz controller on PLL_1 CLK0, and DRAM_CLK from CLK2 at
-  +8.5 ns.
+  -1.5 ns since 2026-10-31, the same clock as the +8.5 ns all the board
+  runs below used (not yet on the board).
 - Pins: every non-constant SDRAM pin goes through its I/O-cell
   registers.
 - Bursts: 8-word bursts with auto precharge, CAS latency 3, a refresh
@@ -116,7 +117,7 @@ ramps and a white border.
 
 - Clocks: PLL_1 makes the 25 MHz pixel clock and 50 MHz.
 - DAC pins: all through their I/O-cell registers, straight from the
-  pixel logic since gap 2 below was fixed (519 LEs).
+  pixel logic since the I/O-register fix below (519 LEs).
 - VGA_CLK: made by a register (see the gaps below).
 - Quartus byte-identical.
 
@@ -186,6 +187,51 @@ register stage in front of the pins. Since branch de2-ioreg:
   vga-pattern's changed with their sources, and both are Quartus
   byte-identical.
 
+## Fixed: negative PLL phase shifts (was gap 2)
+
+A negative shift was an error (and before that wrapped to 4294964296
+ps); a design asked for the period minus the shift. Since branch
+de2-pllneg, chipsmith builds it as Quartus does. Found by compiling 46
+small PLL designs with Quartus and reading their post-fit atoms
+(cyclone2-re `tools/clk_jobs.txt`, "Phase shifts"; its README, "PLLs"):
+
+- Encoding: a shift is a whole number of eighths of the counters' clock
+  period, whole cycles into the counter's preset and the rest onto a VCO
+  tap. Quartus never folds a negative shift into the period. It delays
+  the feedback counter (`m_initial`, `m_ph`) by the most negative
+  output's shift and every output by the same, so the outputs lead the
+  input. -3 ns at 100 MHz is m 20 with `m_initial` 4; sdram-selftest's
+  -1.5 ns next to c0 at 0 is `m_initial` 2, `m_ph` 4 and c0 at preset 2,
+  tap 4; -12 ns is 12 cycles of feedback delay.
+- Picking the counters: post-scale 1 over 2, then the smallest summed
+  phase error, then the VCO nearest 800 MHz, then the smallest n. So a
+  shift moves the VCO: +8.5 ns at 100 MHz is now m 20 (exact) where the
+  old solver took m 16 and made 8437.5 ps; +700 ps is m 18 and 694 ps.
+  With post-scale 2 the VCO is 600-1000 MHz, not 500-1000.
+- Limits: a preset holds 16 cycles plus a tap. Past that at every
+  post-scale-1 VCO, Quartus clamps the shift (-40 ns at 100 MHz made
+  -30 ns, warning 15559). chipsmith refuses it with an error instead.
+- Bits: the lock window goes by the phase detector's period (the input's
+  times n): 3 to 5 ns, 4 to 7.5, 7 to 10, 8 to 12.5, 11 to 20, 15 above.
+  The old m sweep ran the VCO at 800 MHz, where m and that period move
+  together; designs at the same period with m 10, 18 and 20 split them.
+  With post-scale 2, a counter on tap t also sets VCO tap 2t mod 8, and
+  2t - 7 when 2t >= 8.
+- Proof: the solver picks Quartus' counters for all 34 altpll designs
+  (`phase_shifts_as_quartus_fits_them` in `pll.rs`, -20 to +20 ns, 10 to
+  100 MHz, one to three outputs); all 46 designs assemble byte-identically
+  in `cram roundtrip`. sdram-selftest at -1.5 ns, vga-pattern and
+  de2-pll-counter built by chipsmith are Quartus byte-identical.
+- Not checked: a VCO that clamps could beat one that doesn't in Quartus'
+  scoring for a request near the preset limit; chipsmith never picks
+  one that clamps (never seen). That post-scale 1 wins over a smaller
+  phase error at post-scale 2 is seen once (that -40 ns design).
+- RBFs: sdram-selftest's changed (-1.5 ns, m 20). vga-pattern's is the
+  same as de2-ioreg's build. de2-pll-counter has no shift, so its
+  counters and lock window (20 ns: 11, as m 16 gave) are the same by
+  construction; no earlier build on this chip database was at hand to
+  compare.
+
 ## Gaps, ranked
 
 1. **A global clock as data.** A PLL clock (or any global clock) can feed
@@ -196,26 +242,19 @@ register stage in front of the pins. Since branch de2-ioreg:
    register clocked at twice the rate. How Quartus routes a global into
    the core or onto a non-PLL pin is not reverse-engineered; that's the
    first RE task for "Terasic designs build unchanged".
-2. **Negative PLL phase shifts.** They are an error now; before, they
-   wrapped to 4294964296 ps. Quartus makes them by delaying the feedback
-   counter (`m_initial` > 1) and every output with it. A design asks for
-   the period minus the shift instead (sdram-selftest: +8.5 ns, not
-   -1.5 ns). The same Quartus designs pick a lock window the m sweep
-   doesn't predict (m 20, `m_initial` 4: 11, not 15); those are the 2
-   bits cram's roundtrip still misses on its own PLL_1-to-AA7 design.
-3. **Observation.** No camera view of the board or a monitor, so VGA
+2. **Observation.** No camera view of the board or a monitor, so VGA
    output and every LED-only example remain unobserved; JTAG readback is
    the only check. Boundary-scan SAMPLE would read every pin's state
    without a camera, but the EP2C35F672 BSDL isn't in the Quartus
    install, and bsdl.info needs a browser session.
-4. **Input registers with an enable or reset.** An I/O cell's input
+3. **Input registers with an enable or reset.** An I/O cell's input
    register must still be a plain one (see "Fixed" above for why the
    output-side trick isn't used); a design samples the pin first. The fix
    is the IOE register's clock enable and clear in cyclone2-re (phase 5),
    which also lets Quartus-style asynchronous clears into I/O cells.
-5. **Untested DE2 peripherals:** the 4 MB flash, the
+4. **Untested DE2 peripherals:** the 4 MB flash, the
    WM8731 audio codec (I2C plus I2S; its master clock hits gap 1), the
    ADV7181 TV decoder, the ISP1362 USB, the DM9000A Ethernet, the SD
    card, PS/2, IrDA and the 16x2 LCD.
-6. **PLL_4** has never been seen in a Quartus design. E5, F21 and V21
+5. **PLL_4** has never been seen in a Quartus design. E5, F21 and V21
    are inferred from the routing database alone.

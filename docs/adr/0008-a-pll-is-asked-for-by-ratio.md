@@ -14,5 +14,6 @@ The reason is that the counters are the device's business and their constraints 
 ## Consequences
 
 - chipsmith's counters can differ from Quartus' for the same request where several meet it equally well; both make the same frequencies. The Quartus export carries chipsmith's counters, so the two still assemble the same bits.
+- Phase shifts (2026-10-31): the solver picks the VCO for the shifts as Quartus does (the smallest summed error, rounded to the nearest eighth of a VCO period) and makes a negative shift by delaying the feedback counter; it matches Quartus' counters on 34 altpll designs. A shift beyond the presets is an error where Quartus clamps it. The lock window goes by the phase detector's period, not m.
 - Loop settings are only known for m (times the VCO post-scale) of 4-32 and VCOs of 600-800 MHz; the solver doesn't go below m = 4.
 - Exact ratios only: a request off by a fraction of a ppm is refused rather than approximated.
