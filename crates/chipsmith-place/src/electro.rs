@@ -431,15 +431,23 @@ impl Flat {
             .map(|r| {
                 let cap: f64 = p.capacity[r].iter().map(|&c| c as f64).sum();
                 let util = if cap > 0.0 { real_demand[r] / cap } else { 0.0 };
-                // A bin can't be filled to less than one object: a
-                // resource whose objects take a whole bin each (a LAB's
-                // register controls on sha256, where 1,804 registers each
-                // have their own clear) is spread to full bins, or its
-                // overflow never drops below the gap.
-                let largest = p.objects.iter().map(|o| o.demand[r]).fold(0.0f32, f32::max) as f64;
+                // A bin can't be filled to a share finer than its objects:
+                // a resource whose demand comes mostly in whole bins (a
+                // LAB's register controls on sha256, where 1,804 registers
+                // each have their own clear) is spread to full bins, or
+                // its overflow never drops below the gap. The demand-
+                // weighted mean share says how coarse it is; the largest
+                // object would let a few such registers (picorv32x24 has
+                // some) fill every LAB's controls.
+                let total: f64 = p.objects.iter().map(|o| o.demand[r] as f64).sum();
+                let coarse = if total > 0.0 {
+                    p.objects.iter().map(|o| (o.demand[r] as f64).powi(2)).sum::<f64>() / total
+                } else {
+                    0.0
+                };
                 (opts.target_density as f64)
                     .max(util + 0.02)
-                    .max(largest)
+                    .max(coarse)
                     .min(1.0) as f32
             })
             .collect();

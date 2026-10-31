@@ -2198,6 +2198,19 @@ const REFINE: Schedule = Schedule {
     moves: 1.0,
 };
 
+/// After LE-level placement (ADR-0012), whose start is close enough that
+/// the anneal only refines: picked on routed critical paths over
+/// picorv32, femtorv32, mult-selftest and sha256, three seeds each,
+/// against `open` 40a29cb (docs/gpu-pnr.md): geomean x0.971 of its
+/// medians, none worse; colder (heat 0.05, range 1, half the moves) was
+/// 5 times faster but left sha256 3% slower; `REFINE` took twice the
+/// time for x0.986 (worse than this on femtorv32 and mult-selftest).
+const REFINE_LE: Schedule = Schedule {
+    range: 2.0,
+    heat: 0.1,
+    moves: 1.0,
+};
+
 fn anneal(s: &mut State, rng: &mut Rng, sched: Schedule) -> u64 {
     let d = s.design;
     let movable: Vec<usize> = (0..d.les.len())
@@ -2526,10 +2539,11 @@ pub fn place_file(
             .and_then(|v| v.parse().ok())
             .unwrap_or(default)
     };
+    let refine = if le_placed.is_some() { REFINE_LE } else { REFINE };
     let sched = Schedule {
-        range: env("CHIPSMITH_PLACE_RANGE", REFINE.range),
-        heat: env("CHIPSMITH_PLACE_HEAT", REFINE.heat),
-        moves: env("CHIPSMITH_PLACE_MOVES", REFINE.moves),
+        range: env("CHIPSMITH_PLACE_RANGE", refine.range),
+        heat: env("CHIPSMITH_PLACE_HEAT", refine.heat),
+        moves: env("CHIPSMITH_PLACE_MOVES", refine.moves),
     };
     let seeds = env("CHIPSMITH_PLACE_SEEDS", SEEDS as f64).max(1.0) as usize;
     let (mut state, moves) = best_of(&state, seeds, sched);

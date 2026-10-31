@@ -422,6 +422,20 @@ impl<'a> Router<'a> {
     }
 
     pub fn route(&mut self, nets: &[NetReq]) -> Result<(Vec<Tree>, usize, timing::Analysis)> {
+        // The nets as experiments/gpu-bench's routing bench reads them: per
+        // net, its region's corners, its source, then its sinks.
+        if let Some(path) = std::env::var_os("CHIPSMITH_ROUTE_DUMP") {
+            let mut out = String::new();
+            for net in nets {
+                let r = self.region(net).unwrap_or(chipdb::Box::EVERYWHERE);
+                out += &format!("{} {} {} {} {}", r.x0, r.y0, r.x1, r.y1, net.source);
+                for s in &net.sinks {
+                    out += &format!(" {s}");
+                }
+                out.push('\n');
+            }
+            std::fs::write(&path, out).context("writing CHIPSMITH_ROUTE_DUMP")?;
+        }
         let mut trees: Vec<Tree> = vec![Tree::default(); nets.len()];
         // Per net, per sink: how critical its connection is. Nothing is
         // known before the first routing.
