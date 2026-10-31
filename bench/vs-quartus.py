@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""Helpers for bench/vs-quartus.sh: a Quartus II 13.0sp1 project from a
+chipsmith manifest, and the numbers out of either tool's logs.
+
+    bench/vs-quartus.py project <example dir> <out dir> <flavour>
+    bench/vs-quartus.py quartus-row <quartus dir>
+    bench/vs-quartus.py chipsmith-row <stamped flow log> <sta summary or ->
+    bench/vs-quartus.py table <runs.tsv>
+
+`project` writes <out dir>/top.qpf, top.qsf and top.sdc: the manifest's
+sources, top module, pins (3.3-V LVTTL, chipsmith's default) and clocks,
+so both tools compile the same Verilog to the same pins against the same
+constraint. Flavours: `default` (Quartus' own defaults: Auto Fit, its own
+processor count), `all` (NUM_PARALLEL_PROCESSORS ALL), `fast` (Fast Fit).
+
+`quartus-row` and `chipsmith-row` print key=value pairs (LEs, critical path
+and Fmax by each tool's own timing analysis, processors Quartus used);
+`table` turns runs.tsv into the Markdown tables of docs/vs-quartus.md.
+"""
+import glob
+import os
+import re
+import statistics
+import sys
+import tomllib
+
+FLAVOURS = {
+    "default": [],
+    "all": ["set_global_assignment -name NUM_PARALLEL_PROCESSORS ALL"],
+    "fast": ['set_global_assignment -name FITTER_EFFORT "FAST FIT"'],
+}
+
+# chipsmith's CY2_JTAG (crates/chipsmith-cyclone2/src/synth/cells.v) as the
+# Quartus atom it becomes; quartus_map connects the dedicated JTAG pins
+# itself.
+JTAG_SHIM = """\
+module CY2_JTAG (input TDOUSER, output TMSUTAP, output TCKUTAP, output TDIUTAP,
+                 output SHIFTUSER, output CLKDRUSER, output UPDATEUSER,
+                 output RUNIDLEUSER, output USR1USER);
+  cycloneii_jtag jtag (.tdouser(TDOUSER), .tmsutap(TMSUTAP), .tckutap(TCKUTAP),
+    .tdiutap(TDIUTAP), .shiftuser(SHIFTUSER), .clkdruser(CLKDRUSER),
+    .updateuser(UPDATEUSER), .runidleuser(RUNIDLEUSER), .usr1user(USR1USER));
+endmodule
+"""
+
+
+def pins(entries):
+    """(port, pin) pairs from a manifest's [pins] table."""
+    for port, v in entries.items():
+        if isinstance(v, dict):
+            if set(v) - {"pin", "pins"}:
+                # Pin settings (registers, standards, pulls) have Quartus
+                # spellings, but no design benchmarked here uses them.
+                sys.exit(f"{port}: pin settings {sorted(set(v) - {'pin', 'pins'})} not supported")
+            v = v.get("pins", v.get("pin"))
+        if isinstance(v, str):
+            yield port, v
+        else:
+            for i, p in enumerate(v):
+                yield f"{port}[{i}]", p
+
+
+def mhz(s):
+    m = re.fullmatch(r"\s*([0-9.]+)\s*MHz\s*", s)
+    if not m:
+        sys.exit(f"clock {s!r}: expected '<n> MHz'")
+    return float(m.group(1))
+
+
+def project(example, out, flavour):
+    with open(os.path.join(example, "chipsmith.toml"), "rb") as f:
+        m = tomllib.load(f)
+    if m["target"]["device"] != "EP2C35F672C6":
+        sys.exit(f"{example}: not an EP2C35F672C6 design")
+    sources = []
+    for pat in m["project"]["sources"]:
+        found = sorted(glob.glob(os.path.join(example, pat)))
+        if not found:
+            sys.exit(f"{example}: no source matches {pat}")
+        sources += [os.path.realpath(s) for s in found]
+    if any(not s.endswith(".v") for s in sources):
+        sys.exit(f"{example}: Verilog sources only")
+    os.makedirs(out, exist_ok=True)
+    if any("CY2_JTAG" in open(s).read() for s in sources):
+        with open(os.path.join(out, "cy2_jtag.v"), "w") as f:
+            f.write(JTAG_SHIM)
+        sources.append(os.path.join(out, "cy2_jtag.v"))
+    with open(os.path.join(out, "top.qpf"), "w") as f:
+        f.write('QUARTUS_VERSION = "13.0sp1"\nPROJECT_REVISION = "top"\n')
+    q = [
+        'set_global_assignment -name FAMILY "Cyclone II"',
+        "set_global_assignment -name DEVICE EP2C35F672C6",
+        f"set_global_assignment -name TOP_LEVEL_ENTITY {m['project']['top']}",
+        "set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files",
+        'set_global_assignment -name STRATIX_DEVICE_IO_STANDARD "3.3-V LVTTL"',
+        'set_global_assignment -name RESERVE_ALL_UNUSED_PINS "AS INPUT TRI-STATED"',
+        "set_global_assignment -name SDC_FILE top.sdc",
+    ]
+    q += [f"set_global_assignment -name VERILOG_FILE {s}" for s in sources]
+    q += [f"set_location_assignment {pin} -to {port}" for port, pin in pins(m["pins"])]
+    q += FLAVOURS[flavour]
+    with open(os.path.join(out, "top.qsf"), "w") as f:
+        f.write("\n".join(q) + "\n")
+    with open(os.path.join(out, "top.sdc"), "w") as f:
+        for port, freq in m.get("clocks", {}).items():
+            f.write(f"create_clock -name {port} -period {1000 / mhz(freq):.3f} [get_ports {port}]\n")
+
+
+def read(path):
+    try:
+        with open(path, errors="replace") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
+
+
+def fmax_row(sta):
+    """CLOCK_50's restricted Fmax (MHz) in a report_clock_fmax_summary
+    panel (the first clock's if there is no CLOCK_50), and its period."""
+    rows = re.findall(r"^;\s*[0-9.]+ MHz\s*;\s*([0-9.]+) MHz\s*;\s*(\S+)", sta, re.M)
+    if not rows:
+        return {"q_fmax": "-", "q_crit": "-"}
+    fmax = next((f for f, clk in rows if clk == "CLOCK_50"), rows[0][0])
+    return {"q_fmax": fmax, "q_crit": f"{1000 / float(fmax):.2f}"}
+
+
+def quartus_row(qdir):
+    fit = read(os.path.join(qdir, "output_files", "top.fit.rpt"))
+    les = re.search(r"Total logic elements\s*;\s*([0-9,]+)", fit)
+    allowed = re.search(r"Maximum allowed\s*;\s*(\d+)", fit)
+    used = re.search(r"Average used\s*;\s*([0-9.]+)", fit)
+    effort = re.search(r"^; Fitter Effort\s*;\s*([^;]+?)\s*;", fit, re.M)
+    row = {
+        "les": les.group(1).replace(",", "") if les else "-",
+        "procs": allowed.group(1) if allowed else "-",
+        "procs_avg": used.group(1) if used else "-",
+        "effort": effort.group(1).replace(" ", "_") if effort else "-",
+    }
+    row.update(fmax_row(read(os.path.join(qdir, "fmax.txt"))))
+    return row
+
+
+def chipsmith_row(log, sta):
+    text = read(log)
+    placed = re.search(r"placed (\d+) LEs.*?critical path ([0-9.]+) ns", text)
+    routed = re.search(r"routed \d+ nets.*?critical path ([0-9.]+) ns", text)
+    row = {
+        "les": placed.group(1) if placed else "-",
+        "cs_crit": routed.group(1) if routed else "-",
+        "cs_fmax": f"{1000 / float(routed.group(1)):.1f}" if routed else "-",
+    }
+    row.update(fmax_row(read(sta)) if sta != "-" else {"q_fmax": "-", "q_crit": "-"})
+    return row
+
+
+def spread(xs, digits=1):
+    xs = [float(x) for x in xs if x not in ("-", "")]
+    if not xs:
+        return "-"
+    med = statistics.median(xs)
+    if len(xs) == 1:
+        return f"{med:.{digits}f}"
+    return f"{med:.{digits}f} [{min(xs):.{digits}f}-{max(xs):.{digits}f}]"
+
+
+def load_rows(path):
+    rows = []
+    with open(path) as f:
+        header = f.readline().rstrip("\n").split("\t")
+        for line in f:
+            r = dict(zip(header, line.rstrip("\n").split("\t")))
+            for kv in r.pop("quality", "").split():
+                k, _, v = kv.partition("=")
+                r[k] = v
+            r["stages"] = {
+                st.split("=")[0]: tuple(map(float, st.split("=")[1].split("/")))
+                for st in r.get("stages", "-").split(",") if "=" in st
+            }
+            rows.append(r)
+    return rows
+
+
+def table(path, kinds="fresh"):
+    """Per design and tool: medians [min-max] of the runs whose kind
+    matches (`fresh` for full builds, `edit` for incr's rebuilds)."""
+    rows = [r for r in load_rows(path) if r["kind"].startswith(kinds)]
+    designs = list(dict.fromkeys(r["design"] for r in rows))
+    tools = list(dict.fromkeys(r["tool"] for r in rows))
+    print("| design | tool | runs | LEs | wall s | CPU s | CPU/wall | load | own critical ns | "
+          "quartus_sta Fmax MHz | stages, median wall/CPU s |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    for d in designs:
+        for t in tools:
+            rs = [r for r in rows if r["design"] == d and r["tool"] == t and r["status"] == "ok"]
+            failed = sum(1 for r in rows if r["design"] == d and r["tool"] == t and r["status"] != "ok")
+            if not rs:
+                if failed:
+                    print(f"| {d} | {t} | 0 ({failed} failed) | | | | | | | | |")
+                continue
+            wall = [float(r["wall"]) for r in rs]
+            cpu = [float(r["cpu"]) for r in rs]
+            ratio = statistics.median(c / w for c, w in zip(cpu, wall))
+            own = [r["cs_crit"] if "cs_crit" in r else r.get("q_crit", "-") for r in rs]
+            names = list(dict.fromkeys(k for r in rs for k in r["stages"]))
+            stages = ", ".join(
+                f"{n} {statistics.median(r['stages'][n][0] for r in rs if n in r['stages']):.1f}/"
+                f"{statistics.median(r['stages'][n][1] for r in rs if n in r['stages']):.1f}"
+                for n in names)
+            runs = f"{len(rs)}" + (f" ({failed} failed)" if failed else "")
+            print(f"| {d} | {t} | {runs} | {rs[0].get('les', '-')} | {spread(wall)} | {spread(cpu)} | "
+                  f"{ratio:.2f} | {spread([r['load'] for r in rs])} | {spread(own, 2)} | "
+                  f"{spread([r.get('q_fmax', '-') for r in rs])} | {stages} |")
+
+
+def main():
+    cmd, *args = sys.argv[1:]
+    if cmd == "project":
+        project(*args)
+    elif cmd in ("quartus-row", "chipsmith-row"):
+        row = quartus_row(*args) if cmd == "quartus-row" else chipsmith_row(*args)
+        print(" ".join(f"{k}={v}" for k, v in row.items()))
+    elif cmd == "table":
+        table(*args)
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main()
