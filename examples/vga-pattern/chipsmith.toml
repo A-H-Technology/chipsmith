@@ -21,7 +21,7 @@ VGA_HS = { pin = "PIN_A7", registers = ["output"] }
 VGA_VS = { pin = "PIN_D8", registers = ["output"] }
 VGA_BLANK = { pin = "PIN_D6", registers = ["output"] }
 VGA_SYNC = "PIN_B7"
-VGA_CLK = { pin = "PIN_B8", registers = ["output"] }
+VGA_CLK = "PIN_B8"
 LEDG = "PIN_AE22"
 
 [clocks]

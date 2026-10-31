@@ -667,15 +667,85 @@ fn a_pll_clock_on_a_pin_goes_through_its_clock_output() {
     );
 }
 
+/// The clock control on `cell_name`'s `port`, and its global.
+fn global_of(nl: &Netlist, cell_name: &str, port: Port) -> (CellId, NetId) {
+    let src = cell(nl, cell_name).net(port).expect("driven");
+    let cc = nl
+        .cells()
+        .into_iter()
+        .find(|&c| nl.cell(c).kind == Kind::ClkCtrl && nl.cell(c).net(Port::Inclk) == Some(src))
+        .expect("a clock control on the net");
+    (cc, nl.cell(cc).net(Port::Outclk).unwrap())
+}
+
+/// Terasic's `assign VGA_CLK = pll_clk`: a PLL clock other than CLK2 on a
+/// pin is data on its global, which gets a clock control though nothing
+/// is clocked by it.
 #[test]
-fn only_clk2_reaches_a_pin() {
-    let mut nl = yosys::import(&design(&[(
-        "pll",
-        "CY2_PLL",
-        None,
-        json!({"INCLK": [10], "CLK0": [11]}),
-    )]))
-    .unwrap();
-    let e = pack(&mut nl).unwrap_err().to_string();
-    assert!(e.contains("only from CLK2"), "{e}");
+fn a_pll_clock_on_a_pin_other_than_clk2_is_data_on_its_global() {
+    let (nl, stats) = packed(&[("pll", "CY2_PLL", None, json!({"INCLK": [10], "CLK0": [11]}))]);
+    assert!(nl
+        .cells()
+        .into_iter()
+        .all(|c| nl.cell(c).kind != Kind::PllOut));
+    let (_, g) = global_of(&nl, "pll", Port::Hard(hard::Pin::Clk0));
+    assert_eq!(cell(&nl, "led_buf").net(Port::Dataout), Some(g));
+    assert_eq!(stats.clocks, 1);
+}
+
+/// A PLL clock into a LUT and a register's clock: both on the one global.
+#[test]
+fn a_pll_clock_into_a_lut_is_on_its_global() {
+    let (nl, stats) = packed(&[
+        ("pll", "CY2_PLL", None, json!({"INCLK": [10], "CLK0": [20]})),
+        (
+            "lut",
+            "LCELL_COMB",
+            Some(0x8888), // A & B
+            json!({"DATAA": [20], "DATAB": [12], "DATAC": ["1"], "DATAD": ["1"], "COMBOUT": [21]}),
+        ),
+        (
+            "ff",
+            "LCELL_FF",
+            None,
+            json!({"DATAIN": [21], "CLK": [20], "ENA": ["1"], "ACLR": ["0"], "SCLR": ["0"], "REGOUT": [11]}),
+        ),
+    ]);
+    let (_, g) = global_of(&nl, "pll", Port::Hard(hard::Pin::Clk0));
+    let raw = cell(&nl, "pll").net(Port::Hard(hard::Pin::Clk0));
+    let lut = cell(&nl, "lut");
+    let inputs: Vec<_> = LUT_INPUTS.iter().filter_map(|&p| lut.net(p)).collect();
+    assert!(inputs.contains(&g), "the LUT reads the global");
+    assert!(
+        !inputs.iter().any(|&n| Some(n) == raw),
+        "nothing but the clock control on the PLL's output"
+    );
+    assert_eq!(cell(&nl, "ff").net(Port::Clk), Some(g));
+    assert_eq!(stats.clocks, 1);
+}
+
+/// A clock pin's other loads keep the pin's own routing (Quartus routes a
+/// dedicated clock pin onto R24/C4 for them, not through its global).
+#[test]
+fn a_clock_pin_into_a_lut_stays_off_the_global() {
+    let (nl, _) = packed(&[
+        (
+            "lut",
+            "LCELL_COMB",
+            Some(0x8888),
+            json!({"DATAA": [10], "DATAB": [12], "DATAC": ["1"], "DATAD": ["1"], "COMBOUT": [21]}),
+        ),
+        (
+            "ff",
+            "LCELL_FF",
+            None,
+            json!({"DATAIN": [21], "CLK": [10], "ENA": ["1"], "ACLR": ["0"], "SCLR": ["0"], "REGOUT": [11]}),
+        ),
+    ]);
+    let (_, g) = global_of(&nl, "clk_buf", Port::Combout);
+    assert_eq!(cell(&nl, "ff").net(Port::Clk), Some(g));
+    let lut = cell(&nl, "lut");
+    let inputs: Vec<_> = LUT_INPUTS.iter().filter_map(|&p| lut.net(p)).collect();
+    assert!(inputs.contains(&cell(&nl, "clk_buf").net(Port::Combout).unwrap()));
+    assert!(!inputs.contains(&g));
 }

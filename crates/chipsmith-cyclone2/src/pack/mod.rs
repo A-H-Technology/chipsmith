@@ -73,8 +73,8 @@ fn pack(nl: &mut Netlist) -> Result<Stats> {
     pack_lut1(nl, &mut stats);
     pack_lut_ff(nl, &mut stats)?;
     pack_carry(nl, &mut stats)?;
+    pack_pll_outputs(nl);
     pack_clocks(nl, &mut stats)?;
-    pack_pll_outputs(nl)?;
     // Last, so no constant folding takes these LUTs away again.
     unsigned_signs(nl);
     for c in nl.cells() {
@@ -1045,11 +1045,18 @@ fn pack_carry(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
     Ok(())
 }
 
-/// A global clock control on every net that clocks a register or an M4K.
-/// Which one is the placer's choice. The clock can come from a pin or from
-/// the core (an LE, the JTAG block's TCK): a clock control takes either,
-/// the core through its tile's LAB lines (cyclone2-re README, "Global clocks
-/// from the core").
+/// A global clock control on every net that clocks a register or an M4K,
+/// and on every PLL output something uses. Which one is the placer's
+/// choice. The clock can come from a pin or from the core (an LE, the JTAG
+/// block's TCK): a clock control takes either, the core through its tile's
+/// LAB lines (cyclone2-re README, "Global clocks from the core").
+///
+/// A PLL output reaches nothing but clock controls, so everything else on
+/// it (a pin, a LUT, a register's data) goes on its global as well, which
+/// reaches LAB lines and I/O cells' data through the row clock buffers
+/// (cyclone2-re README, "Global clocks as data"). A clock pin's or the
+/// core's other loads keep their own routing: a dedicated clock pin
+/// reaches the routing itself, as Quartus routes it.
 fn pack_clocks(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
     let is_clock = |nl: &Netlist, (u, p): (CellId, Port)| match nl.cell(u).kind {
         Kind::Ff(_) => p == Port::Clk,
@@ -1060,10 +1067,13 @@ fn pack_clocks(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
         }
         _ => false,
     };
+    let goes_global = |nl: &Netlist, ni: NetId, u: (CellId, Port)| {
+        is_clock(nl, u) || (is_pll_clock(nl, ni) && nl.cell(u.0).kind != Kind::PllOut)
+    };
     let clocks: Vec<NetId> = nl
         .nets()
         .into_iter()
-        .filter(|&n| nl.users(n).into_iter().any(|u| is_clock(nl, u)))
+        .filter(|&n| nl.users(n).into_iter().any(|u| goes_global(nl, n, u)))
         .collect();
     for ni in clocks {
         let name = nl.net(ni).name.clone();
@@ -1075,7 +1085,7 @@ fn pack_clocks(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
         nl.add_port(cc, Port::Outclk);
         let g = nl.create_net(format!("{name}$global"));
         for (u, p) in nl.users(ni) {
-            if is_clock(nl, (u, p)) {
+            if goes_global(nl, ni, (u, p)) {
                 nl.reconnect(u, p, g);
             }
         }
@@ -1086,18 +1096,25 @@ fn pack_clocks(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
     Ok(())
 }
 
-/// A PLL output driving a pin goes through that PLL's external clock
-/// output: counter 2 (CY2_PLL's CLK2) through the clock control of its
-/// PLL<n>_OUT pin, the only way a PLL clock leaves the chip. The pin buffer
-/// can't invert or register it: the clock bypasses the IOE's output path
-/// (`IO_CORE_PLL_SELECT`).
-fn pack_pll_outputs(nl: &mut Netlist) -> Result<()> {
+/// Whether `ni` is a PLL's clock output CLK0-CLK2.
+fn is_pll_clock(nl: &Netlist, ni: NetId) -> bool {
+    use hard::Pin::{Clk0, Clk1, Clk2};
+    matches!(nl.net(ni).driver, Some((d, Port::Hard(Clk0 | Clk1 | Clk2)))
+        if nl.cell(d).kind == Kind::Hard(hard::Block::Pll))
+}
+
+/// A PLL's counter 2 driving one plain output pin goes through that PLL's
+/// external clock output: CY2_PLL's CLK2 through the clock control of its
+/// PLL<n>_OUT pin, as Quartus builds it. Whether the pin is that PLL's
+/// PLL<n>_OUT pin only the placement knows; if it isn't, the placer puts
+/// the pin on the clock's global instead (`place`). Every other PLL clock
+/// on a pin (another counter, an inverted or registered pin, more than one
+/// pin) is data on the global (`pack_clocks`).
+fn pack_pll_outputs(nl: &mut Netlist) {
     for ni in nl.nets() {
-        let Some((d, Port::Hard(pin))) = nl.net(ni).driver else {
-            continue;
-        };
-        use hard::Pin::{Clk0, Clk1, Clk2};
-        if nl.cell(d).kind != Kind::Hard(hard::Block::Pll) || !matches!(pin, Clk0 | Clk1 | Clk2) {
+        if !matches!(nl.net(ni).driver, Some((_, Port::Hard(hard::Pin::Clk2))))
+            || !is_pll_clock(nl, ni)
+        {
             continue;
         }
         let pins: Vec<CellId> = nl
@@ -1109,22 +1126,22 @@ fn pack_pll_outputs(nl: &mut Netlist) -> Result<()> {
             })
             .map(|(u, _)| u)
             .collect();
-        if pins.is_empty() {
+        let &[obuf] = pins.as_slice() else {
+            continue;
+        };
+        if !matches!(
+            nl.cell(obuf).kind,
+            Kind::Obuf {
+                data: IoeIn::Signal {
+                    invert: false,
+                    reg: None
+                },
+                ..
+            }
+        ) {
             continue;
         }
         let name = nl.net(ni).name.clone();
-        ensure!(
-            pin == Clk2,
-            "{name}: a PLL clock reaches a pin only from CLK2 (the counter wired to the PLL's PLL<n>_OUT pin), not {pin}"
-        );
-        let &[obuf] = pins.as_slice() else {
-            bail!("{name}: a PLL drives one pin at most (its PLL<n>_OUT pin)");
-        };
-        ensure!(
-            matches!(nl.cell(obuf).kind, Kind::Obuf { data: IoeIn::Signal { invert: false, reg: None }, .. }),
-            "{}: a PLL clock output pin is a plain output, neither inverted, registered nor tri-stated",
-            nl.cell(obuf).name
-        );
         let cc = nl.create_cell(format!("{name}$pllout"), Kind::PllOut);
         nl.add_port(cc, Port::Inclk);
         nl.add_port(cc, Port::Outclk);
@@ -1133,7 +1150,6 @@ fn pack_pll_outputs(nl: &mut Netlist) -> Result<()> {
         nl.connect(cc, Port::Inclk, ni);
         nl.connect(cc, Port::Outclk, o);
     }
-    Ok(())
 }
 
 fn hide_name(name: &str) -> u8 {

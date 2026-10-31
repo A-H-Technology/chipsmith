@@ -850,12 +850,22 @@ impl Bbox {
     }
 }
 
+/// What `fixed_cells` found.
+enum Fixed {
+    /// Pins and clock controls, with their bel names.
+    Sites(HashMap<usize, (u32, String)>),
+    /// The packer's guess that these PLL external clock outputs (`PLLOUT`
+    /// cells) drive their PLL's clock output pin was wrong: their pins are
+    /// ordinary ones (`globals_for_pll_pins`).
+    OffPin(Vec<usize>),
+}
+
 /// Fixed cells: pins and clock controls, with their bel names.
 fn fixed_cells(
     db: &ChipDb,
     design: &Design,
     pins: &std::collections::BTreeMap<String, PinPlan>,
-) -> Result<HashMap<usize, (u32, String)>> {
+) -> Result<Fixed> {
     let mut out = HashMap::default();
     let pads: HashMap<&str, &Pad> = db.pads.iter().map(|p| (p.pin.as_str(), p)).collect();
     for (i, c) in design.cells.iter().enumerate() {
@@ -1009,8 +1019,9 @@ fn fixed_cells(
         })?;
         out.insert(i, site);
     }
-    // A PLL's external clock output: the one its counter 2 reaches, which
-    // must be wired to the pin it drives.
+    // A PLL's external clock output: the one its counter 2 reaches, if
+    // that is wired to the pin it drives.
+    let mut off_pin = Vec::new();
     for (i, c) in design
         .cells
         .iter()
@@ -1045,31 +1056,20 @@ fn fixed_cells(
             db.node(*tile, db.tile_type(*tile).bels[bel].pins[p])
         };
         let (from, to) = (node(&site, "OUTCLK"), node(&out[&pin], "DATAOUT"));
-        let pad_at = |n: NodeId| {
-            db.pads
-                .iter()
-                .find(|p| node(&(p.tile, p.bel.clone()), "DATAOUT") == n)
-                .map_or("unknown".into(), |p| format!("PIN_{}", p.pin))
-        };
         let reached: Vec<NodeId> = db
             .downhill(from)
             .iter()
             .flat_map(|e| db.downhill(e.dst))
             .map(|e| e.dst)
             .collect();
-        ensure!(
-            reached.contains(&to),
-            "{}: {} drives {}, but the PLL's clock output pin is {}",
-            design.cells[d].name,
-            design.cells[pin].name,
-            pad_at(to),
-            reached
-                .iter()
-                .map(|&n| pad_at(n))
-                .find(|p| p != "unknown")
-                .unwrap_or_else(|| "unknown".into())
-        );
+        if !reached.contains(&to) {
+            off_pin.push(i);
+            continue;
+        }
         out.insert(i, site);
+    }
+    if !off_pin.is_empty() {
+        return Ok(Fixed::OffPin(off_pin));
     }
     // Clocks from pins first: each takes the nearest free clock control
     // its pin reaches, as nextpnr's packer picks it. Clocks from the core
@@ -1137,7 +1137,7 @@ fn fixed_cells(
             .with_context(|| format!("{}: all 16 global clocks are taken", design.cells[i].name))?;
         out.insert(i, free);
     }
-    Ok(out)
+    Ok(Fixed::Sites(out))
 }
 
 /// The placement being annealed.
@@ -2373,6 +2373,48 @@ pub struct PinPlan {
 /// to pins; their settings go onto the pins' cells as parameters, and
 /// `unused_pins` onto the top module as an attribute, for the bitstream
 /// (`crate::pin`).
+/// A PLL clock on an ordinary pin, which the packer put on the PLL's
+/// external clock output (`pack_pll_outputs`): the pin goes on the clock's
+/// global instead, as data (cyclone2-re README, "Global clocks as data").
+/// The PLLOUT cell becomes the global's clock control, or, if the clock
+/// has a global already, the pin moves onto it and the cell goes.
+fn globals_for_pll_pins(json: &mut Value, design: &Design, cells: &[usize]) -> Result<()> {
+    let top = json["modules"]["top"]["cells"]
+        .as_object_mut()
+        .context("no cells")?;
+    let net = |c: &Value, p: &str| {
+        c["connections"][p]
+            .as_array()
+            .and_then(|a| a.first()?.as_u64())
+    };
+    for &i in cells {
+        let name = &design.cells[i].name;
+        let po = &top[name.as_str()];
+        let (inclk, outclk) = (net(po, "INCLK"), net(po, "OUTCLK"));
+        let global = top
+            .values()
+            .find(|c| c["type"] == "CLKCTRL" && net(c, "INCLK") == inclk)
+            .and_then(|c| net(c, "OUTCLK"));
+        let Some(global) = global else {
+            top.get_mut(name.as_str()).context("PLLOUT cell")?["type"] = Value::from("CLKCTRL");
+            continue;
+        };
+        top.remove(name.as_str());
+        for c in top.values_mut() {
+            for bits in c["connections"]
+                .as_object_mut()
+                .into_iter()
+                .flat_map(|m| m.values_mut())
+            {
+                if bits.as_array().and_then(|a| a.first()?.as_u64()) == outclk {
+                    *bits = Value::from(vec![global]);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn place_file(
     db: &ChipDb,
     packed: &Path,
@@ -2383,8 +2425,18 @@ pub fn place_file(
     let text =
         std::fs::read_to_string(packed).with_context(|| format!("reading {}", packed.display()))?;
     let mut json: Value = serde_json::from_str(&text)?;
-    let design = read_design(&json)?;
-    let fixed = fixed_cells(db, &design, pins)?;
+    let mut design = read_design(&json)?;
+    let fixed = match fixed_cells(db, &design, pins)? {
+        Fixed::Sites(f) => f,
+        Fixed::OffPin(cells) => {
+            globals_for_pll_pins(&mut json, &design, &cells)?;
+            design = read_design(&json)?;
+            match fixed_cells(db, &design, pins)? {
+                Fixed::Sites(f) => f,
+                Fixed::OffPin(_) => bail!("a PLL clock output is still off its pin"),
+            }
+        }
+    };
 
     let grid = Grid::new(db);
     let mut fixed_xy = vec![None; design.cells.len()];

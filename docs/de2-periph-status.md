@@ -11,12 +11,13 @@ board, so nothing here was checked by looking at LEDs or a monitor.
 
 ## What works
 
-**PLL clock to a pin.** A PLL clock leaves the chip only on its PLL's
-clock output pin: counter 2 goes through a clock control of its own to
-`IO_RAW_DATAOUT` and the pin's output. PLL_1's pin is PIN_AA7, the DE2's
-DRAM_CLK; PLL_2 uses F21, PLL_3 E5 and PLL_4 V21. Quartus had no other
-path, and neither did cyclone2-re's chip database (its fuzz design p12 was
-the one PLL design it couldn't assemble). The fix:
+**PLL clock to its clock output pin.** A PLL's dedicated way off the
+chip is its clock output pin: counter 2 goes through a clock control of
+its own to `IO_RAW_DATAOUT` and the pin's output. PLL_1's pin is PIN_AA7,
+the DE2's DRAM_CLK; PLL_2 uses F21, PLL_3 E5 and PLL_4 V21. cyclone2-re's
+chip database didn't have that path (its fuzz design p12 was the one PLL
+design it couldn't assemble). Any other pin takes the clock as data on
+its global ("Fixed: a global clock as data" below). The fix:
 
 - cyclone2-re: four `PLLOUT` bels and the missing `IO_RAW_DATAOUT` → pin
   pip in the chip database, `cram quartus-export` and `cram roundtrip`
@@ -115,13 +116,17 @@ and 2 a read.
 **examples/vga-pattern.** A 640x480 60 Hz pattern: colour bars, four
 ramps and a white border.
 
-- Clocks: PLL_1 makes the 25 MHz pixel clock and 50 MHz.
+- Clocks: PLL_1 makes the 25 MHz pixel clock (and made 50 MHz for
+  VGA_CLK's register until branch de2-gclkdata).
 - DAC pins: all through their I/O-cell registers, straight from the
-  pixel logic since the I/O-register fix below (519 LEs).
-- VGA_CLK: made by a register (see the gaps below).
+  pixel logic since the I/O-register fix below.
+- VGA_CLK: `assign VGA_CLK = ~pclk`, the PLL clock itself on its global
+  ("Fixed: a global clock as data" below), 516 LEs; before that a
+  register on the 50 MHz clock made it (519 LEs).
 - Quartus byte-identical.
 
-On the board, USER1 counts the pixel clock at 25.0000 MHz (0.500000 times
+On the board (the register-made VGA_CLK build; the direct one has not
+been on the board), USER1 counts the pixel clock at 25.0000 MHz (0.500000 times
 CLOCK_50) and 59 frames a second (59.52 expected; the reading counts whole
 frames per second); the build without the extra stage read 25.0000 MHz
 and 60. **Nobody has seen the picture.** No monitor was in
@@ -142,6 +147,58 @@ which is what the board should give:
 Pressing keys and flipping switches needs someone at the board. Its
 outputs (LED drive strengths, the LED that powers up lit, HEX0) can't be
 seen without a camera on the board.
+
+## Fixed: a global clock as data (was gap 1)
+
+Terasic's DE2 designs write `assign VGA_CLK = pll_clk` (and likewise the
+audio codec's AUD_XCK). A PLL clock reached a pin only on its PLL<n>_OUT
+path, and anything else on it was an error at pack time. Since branch
+de2-gclkdata it builds, the way Quartus builds it. cyclone2-re found how
+(its README, "Global clocks as data"; 15 Quartus designs, gd1-gd15 in
+`tools/clk_jobs.txt`):
+
+- What Quartus does: a global leaves the clock network through the row
+  clock buffers onto LAB lines (`BLK_CLK_BUF` → `LOCAL_INTERCONNECT`),
+  and from there to an LE input or an I/O cell's data like any signal. A
+  top or bottom pin is reached through the I/O row's clock spine
+  (`TB_IO_CLK`), a side pin through a row clock. No dedicated mux, no
+  bits beyond the routing edges'. The chip database had these edges
+  already: 14 of the 15 designs assembled byte-identically in `cram
+  roundtrip` with no change (gd4's 2 bits are a LAB clock from a LAB
+  line, an older not-covered case).
+- A PLL output used only as data still gets a clock control and a global
+  (gd11). A dedicated clock pin used as data doesn't go through its
+  global: its clock buffer drives R24 and C4 lines itself (gd1, gd6,
+  gd10, gd14).
+- chipsmith (`pack/mod.rs`, `place.rs`): every load of a PLL output goes
+  on its global, except counter 2 on its PLL's external clock output;
+  a PLL output gets a clock control if anything uses it. Counter 2 alone
+  on one plain pin is still packed onto the external clock output, as
+  before; whether that pin is the PLL's PLL<n>_OUT pin only placement
+  knows, so the placer moves an ordinary pin onto the clock's global
+  (the external output cell becomes the clock control, or the pin joins
+  a global the clock has already). A clock pin's other loads keep their
+  own routing, as Quartus routes them. The router needed nothing: the
+  chip database has every graph edge as a pip.
+- Proof: vga-pattern with `assign VGA_CLK = ~pclk` (PIN_B8) is Quartus
+  byte-identical, and chipsmith routed it as Quartus routes gd7 (the
+  same `TB_IO_CLK` → `BLK_CLK_BUF` X17 Y36 → line → `IO_DATAOUT`). So
+  are three test designs (`tests/gclk_data.rs`): c0 onto B8 and into a
+  LUT with counter 2 alone on A5; counter 2 on A5 beside a register on
+  it; counter 2 on AA7, which keeps its external output. Those tests
+  build each through the whole flow and check the route leaves the
+  global through a row clock buffer; they fail on the old packer (the
+  error at pack time) and placer. Pack tests check the netlist rules.
+- Not the same as Quartus: a clock from the core (a divided clock, TCK)
+  used as data keeps its own routing for the data; Quartus puts those
+  loads on the global too (gd12). Either is legal; changing it would
+  change every such example's RBF. And counter 2 on its PLL<n>_OUT pin
+  and on another pin goes all on the global, where Quartus also uses the
+  external output for the PLL<n>_OUT pin (gd15).
+- RBFs: vga-pattern's changed with its source. The other 31
+  DE2 examples build to the same RBF as on branch open (built on both;
+  picorv32x24, 26k LUTs and no PLL, not rebuilt): none puts a PLL clock
+  anywhere but on registers or its PLL<n>_OUT pin.
 
 ## Fixed: I/O-cell registers with an enable or reset (was gap 2)
 
@@ -234,27 +291,20 @@ small PLL designs with Quartus and reading their post-fit atoms
 
 ## Gaps, ranked
 
-1. **A global clock as data.** A PLL clock (or any global clock) can feed
-   a pin only on its PLL_OUT path. It can't drive an ordinary pin or a
-   LUT input; chipsmith rejects it at pack time. Terasic's DE2 designs
-   write `assign VGA_CLK = pll_clk` (and likewise the audio codec's
-   AUD_XCK), and those don't build. vga-pattern works around it with a
-   register clocked at twice the rate. How Quartus routes a global into
-   the core or onto a non-PLL pin is not reverse-engineered; that's the
-   first RE task for "Terasic designs build unchanged".
-2. **Observation.** No camera view of the board or a monitor, so VGA
+1. **Observation.** No camera view of the board or a monitor, so VGA
    output and every LED-only example remain unobserved; JTAG readback is
    the only check. Boundary-scan SAMPLE would read every pin's state
    without a camera, but the EP2C35F672 BSDL isn't in the Quartus
    install, and bsdl.info needs a browser session.
-3. **Input registers with an enable or reset.** An I/O cell's input
+2. **Input registers with an enable or reset.** An I/O cell's input
    register must still be a plain one (see "Fixed" above for why the
    output-side trick isn't used); a design samples the pin first. The fix
    is the IOE register's clock enable and clear in cyclone2-re (phase 5),
    which also lets Quartus-style asynchronous clears into I/O cells.
-4. **Untested DE2 peripherals:** the 4 MB flash, the
-   WM8731 audio codec (I2C plus I2S; its master clock hits gap 1), the
+3. **Untested DE2 peripherals:** the 4 MB flash, the
+   WM8731 audio codec (I2C plus I2S; its master clock, AUD_XCK, builds
+   now), the
    ADV7181 TV decoder, the ISP1362 USB, the DM9000A Ethernet, the SD
    card, PS/2, IrDA and the 16x2 LCD.
-5. **PLL_4** has never been seen in a Quartus design. E5, F21 and V21
+4. **PLL_4** has never been seen in a Quartus design. E5, F21 and V21
    are inferred from the routing database alone.
