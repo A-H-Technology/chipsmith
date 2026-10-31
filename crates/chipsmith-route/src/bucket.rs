@@ -254,6 +254,22 @@ impl Router<'_> {
         &self,
         fx: &Fixed,
         s: &mut Scratch,
+        index: u32,
+        net: &NetReq,
+        crit: &[f32],
+        keep: Option<&Tree>,
+    ) -> Result<Tree> {
+        let mut l = std::mem::take(&mut s.labels);
+        let tree = self.route_net_bucketed_with(fx, s, &mut l, index, net, crit, keep);
+        s.labels = l;
+        tree
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn route_net_bucketed_with(
+        &self,
+        fx: &Fixed,
+        s: &mut Scratch,
         l: &mut Labels,
         index: u32,
         net: &NetReq,

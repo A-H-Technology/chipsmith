@@ -2606,7 +2606,6 @@ pub fn place_file(
         }
         done.moves
     };
-    let mut state = state;
     let mut detail_moves = 0;
     if detail == 1 {
         detail_moves += run_detail(&mut state, trace);

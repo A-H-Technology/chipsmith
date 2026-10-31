@@ -641,17 +641,9 @@ impl<'a> Router<'a> {
                                     // The GPU's search on CPU threads: the
                                     // same trees as `route_batch_gpu`.
                                     Some(fx) if !(this.incremental && iteration > 1) => {
-                                        let mut labels = std::mem::take(&mut s.labels);
                                         let tree = this.route_net_bucketed(
-                                            fx,
-                                            s,
-                                            &mut labels,
-                                            i as u32,
-                                            &nets[i],
-                                            &crit[i],
-                                            None,
+                                            fx, s, i as u32, &nets[i], &crit[i], None,
                                         );
-                                        s.labels = labels;
                                         (tree, 0.0)
                                     }
                                     _ => route(s, i, old, None),

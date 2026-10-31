@@ -797,17 +797,8 @@ impl crate::Router<'_> {
                 let tree = match t {
                     Some(t) => Ok(self.tree_of_slot(&nets[i], t)),
                     None => {
-                        let mut labels = std::mem::take(&mut s.labels);
-                        let tree = self.route_net_bucketed(
-                            fx,
-                            s,
-                            &mut labels,
-                            i as u32,
-                            &nets[i],
-                            &crit[i],
-                            None,
-                        );
-                        s.labels = labels;
+                        let tree =
+                            self.route_net_bucketed(fx, s, i as u32, &nets[i], &crit[i], None);
                         tree
                     }
                 };
