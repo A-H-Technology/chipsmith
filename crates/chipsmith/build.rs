@@ -2,7 +2,7 @@
 // LLVM's static libraries before pliron-llvm, which calls into them, on
 // the link line; GNU ld scans each archive once and leaves
 // LLVM_InitializeNativeTarget and LLVMOrc* undefined. lld resolves
-// regardless of order (experiments/gpu-bench/.cargo/config.toml, the same
+// regardless of order (experiments/gpu-bench/.cargo/config.toml and crates/chipsmith-place/build.rs, the same
 // workaround). No upstream issue yet; drop this once the default linker
 // links a `--features gpu` build.
 fn main() {

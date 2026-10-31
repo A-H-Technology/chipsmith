@@ -193,6 +193,12 @@ pub(super) fn problem(d: &Design, grid: &Grid, fixed_xy: &[Option<Xy>]) -> LePro
 struct LeTiming<'a> {
     d: &'a Design,
     cell_at: &'a [At],
+    /// How much more a fully critical net counts (the anneal's
+    /// `TIMING_WEIGHT` by default; `CHIPSMITH_ELECTRO_TIMING_WEIGHT`).
+    weight: f32,
+    /// Add each reweight's criticality term to the weights so far instead
+    /// of replacing them (`CHIPSMITH_ELECTRO_TIMING_ACCUMULATE=1`).
+    accumulate: bool,
 }
 
 impl LeTiming<'_> {
@@ -237,12 +243,14 @@ impl Timing for LeTiming<'_> {
             })
             .collect();
         let analysis = d.timing.analyse(&arcs);
-        weights.iter_mut().for_each(|w| *w = 1.0);
+        let mut term = vec![0.0f32; weights.len()];
         for (c, a) in d.conns.iter().zip(&arcs) {
             if let Some(n) = c.net {
-                let w = 1.0 + TIMING_WEIGHT * analysis.criticality(a).powf(CRIT_EXP);
-                weights[n] = weights[n].max(w);
+                term[n] = term[n].max(self.weight * analysis.criticality(a).powf(CRIT_EXP));
             }
+        }
+        for (w, t) in weights.iter_mut().zip(term) {
+            *w = if self.accumulate { *w + t } else { 1.0 + t };
         }
     }
 }
@@ -431,6 +439,8 @@ pub(super) fn place(
         ..defaults
     };
     let mut timing = LeTiming {
+        weight: env("CHIPSMITH_ELECTRO_TIMING_WEIGHT", TIMING_WEIGHT),
+        accumulate: env("CHIPSMITH_ELECTRO_TIMING_ACCUMULATE", 0.0) != 0.0,
         d,
         cell_at: &lp.cell_at,
     };

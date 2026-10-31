@@ -172,6 +172,8 @@ pub struct Router<'a> {
     /// How nets are grouped to route side by side (`CHIPSMITH_ROUTE_BATCH`:
     /// `regions`, or a group size; unset, one at a time).
     batching: Batching,
+    /// Iterations that batch (`CHIPSMITH_ROUTE_BATCH_ITERATIONS`).
+    batch_iterations: usize,
     /// Per tile type, per pip: the LE whose LUT input it permutes.
     permutes: Vec<Option<Vec<i8>>>,
     /// Per tile, bit k: LE k's LUT inputs can't be permuted
@@ -251,6 +253,10 @@ impl<'a> Router<'a> {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(BBOX_MARGIN),
+            batch_iterations: std::env::var("CHIPSMITH_ROUTE_BATCH_ITERATIONS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1),
             batching: match std::env::var("CHIPSMITH_ROUTE_BATCH").as_deref() {
                 Ok("regions") => Batching::Regions,
                 Ok(k) => k.parse().map_or(Batching::Off, Batching::Fixed),
@@ -333,7 +339,7 @@ impl<'a> Router<'a> {
 
     /// Cut `todo` (net indices, in order) into batches whose regions don't
     /// overlap: each net goes into the first batch it overlaps nothing in.
-    /// A net without a region is a batch of its own.
+    /// A net without a region, or a wide one, is a batch of its own.
     fn batches(&self, nets: &[NetReq], todo: &[usize]) -> Vec<Vec<usize>> {
         let (w, h) = (self.db.width as usize, self.db.height as usize);
         let words = w.div_ceil(64);
@@ -356,7 +362,13 @@ impl<'a> Router<'a> {
             (y0, y1, mask)
         };
         for &i in todo {
-            let Some(region) = self.region(&nets[i]) else {
+            // A wide net goes alone, so its sinks go side by side instead;
+            // in a batch, small nets elsewhere finish while one thread
+            // routes it.
+            let region = self
+                .region(&nets[i])
+                .filter(|_| nets[i].sinks.len() < WIDE_NET);
+            let Some(region) = region else {
                 out.push(vec![i]);
                 taken.push(vec![u64::MAX; words * h]);
                 continue;
@@ -440,7 +452,12 @@ impl<'a> Router<'a> {
             let mut t_wide = 0.0;
             let (mut batch_count, mut widest, mut repaired) = (0usize, 0usize, 0usize);
             scratch.work = [0; 3];
-            if self.batching != Batching::Off {
+            // Batches in the first iterations only: they reroute most nets
+            // and take most of the time, while late iterations reroute a
+            // few hundred nets whose convergence the one-at-a-time order
+            // settles faster (sha256: 50 iterations batched throughout,
+            // 21 one at a time).
+            if self.batching != Batching::Off && iteration <= self.batch_iterations {
                 // The nets that may reroute are batched once, before any of
                 // them moves; then batch by batch, each batch's nets
                 // against the routing as it stood when the batch began.
@@ -492,7 +509,11 @@ impl<'a> Router<'a> {
                         .map(|&i| std::mem::take(&mut trees[i]))
                         .collect();
                     let this = &*self;
-                    let route = |s: &mut Scratch, i: usize, old: &Tree, pool: Option<&[Mutex<Option<Scratch>>]>| -> (Result<Tree>, f64) {
+                    let route = |s: &mut Scratch,
+                                 i: usize,
+                                 old: &Tree,
+                                 pool: Option<&[Mutex<Option<Scratch>>]>|
+                     -> (Result<Tree>, f64) {
                         let t_net = std::time::Instant::now();
                         let keep = (this.incremental && iteration > 1).then_some(old);
                         let tree = this.route_net(s, i as u32, &nets[i], &crit[i], keep, pool);
@@ -531,8 +552,14 @@ impl<'a> Router<'a> {
                         t_wide += wide;
                         if tree.nodes.iter().any(|&n| taken[n as usize] == batch_stamp) {
                             let keep = (self.incremental && iteration > 1).then_some(old);
-                            tree =
-                                self.route_net(&mut scratch, i as u32, &nets[i], &crit[i], keep, Some(&pool))?;
+                            tree = self.route_net(
+                                &mut scratch,
+                                i as u32,
+                                &nets[i],
+                                &crit[i],
+                                keep,
+                                Some(&pool),
+                            )?;
                             repaired += 1;
                         }
                         for &n in &tree.nodes {
@@ -700,7 +727,15 @@ impl<'a> Router<'a> {
                         let slot = rayon::current_thread_index().unwrap_or(0) % pool.len();
                         let mut ps = pool[slot].lock().expect("a router thread panicked");
                         let ps = ps.get_or_insert_with(|| Scratch::new(self.db.nodes()));
-                        self.search(ps, index, &tree.nodes, &delays, net.sinks[i], crit[i], region)?;
+                        self.search(
+                            ps,
+                            index,
+                            &tree.nodes,
+                            &delays,
+                            net.sinks[i],
+                            crit[i],
+                            region,
+                        )?;
                         Ok(walk_back(ps, net.sinks[i]))
                     })
                     .collect(),
@@ -721,7 +756,8 @@ impl<'a> Router<'a> {
                 }
             };
             for b in branches {
-                let (branch, seed) = b.with_context(|| format!("net {}: no route to a sink", net.name))?;
+                let (branch, seed) =
+                    b.with_context(|| format!("net {}: no route to a sink", net.name))?;
                 self.graft(s, &mut tree, &mut delays, &branch, seed, gen);
             }
         }
@@ -737,7 +773,15 @@ impl<'a> Router<'a> {
     /// from tree node `seed`) to the tree, from where it meets the tree as
     /// it is now: a branch found from an older tree may run into one added
     /// since.
-    fn graft(&self, s: &mut Scratch, tree: &mut Tree, delays: &mut Vec<Ps>, branch: &[(NodeId, Edge)], seed: NodeId, gen: u32) {
+    fn graft(
+        &self,
+        s: &mut Scratch,
+        tree: &mut Tree,
+        delays: &mut Vec<Ps>,
+        branch: &[(NodeId, Edge)],
+        seed: NodeId,
+        gen: u32,
+    ) {
         let cut = branch
             .iter()
             .position(|&(n, _)| s.in_tree[n as usize] == gen)
@@ -827,11 +871,22 @@ impl<'a> Router<'a> {
         region: Option<chipdb::Box>,
     ) -> Result<()> {
         if let Some(r) = region {
-            if self.search_in(s, net, tree, tree_delay, sink, crit, r).is_ok() {
+            if self
+                .search_in(s, net, tree, tree_delay, sink, crit, r)
+                .is_ok()
+            {
                 return Ok(());
             }
         }
-        self.search_in(s, net, tree, tree_delay, sink, crit, chipdb::Box::EVERYWHERE)
+        self.search_in(
+            s,
+            net,
+            tree,
+            tree_delay,
+            sink,
+            crit,
+            chipdb::Box::EVERYWHERE,
+        )
     }
 
     fn search_in(
@@ -1032,7 +1087,14 @@ mod tests {
             for e in ["HL", "HR", "VB", "VT"] {
                 t += &format!("p O {e}{k}\np {e}{k} I\n");
             }
-            for (a, b) in [("HL", "HR"), ("HR", "HL"), ("VB", "VT"), ("VT", "VB"), ("HL", "VT"), ("VB", "HR")] {
+            for (a, b) in [
+                ("HL", "HR"),
+                ("HR", "HL"),
+                ("VB", "VT"),
+                ("VT", "VB"),
+                ("HL", "VT"),
+                ("VB", "HR"),
+            ] {
                 t += &format!("p {a}{k} {b}{k}\n");
             }
         }
@@ -1082,15 +1144,18 @@ mod tests {
             used_in.insert(t);
             wide_sinks.push(t);
         }
-        let mut add = |name: String, src: u32, sinks: Vec<u32>, timing: &mut timing::Graph| NetReq {
-            driver: timing.node(&name, "O"),
-            sink_ports: (0..sinks.len()).map(|k| timing.node(&name, &format!("I{k}"))).collect(),
-            source: db.node(src, wire("O")),
-            source_wire: (src, wire("O")),
-            sinks: sinks.iter().map(|&t| db.node(t, wire("I"))).collect(),
-            direct_ports: vec![],
-            name,
-        };
+        let mut add =
+            |name: String, src: u32, sinks: Vec<u32>, timing: &mut timing::Graph| NetReq {
+                driver: timing.node(&name, "O"),
+                sink_ports: (0..sinks.len())
+                    .map(|k| timing.node(&name, &format!("I{k}")))
+                    .collect(),
+                source: db.node(src, wire("O")),
+                source_wire: (src, wire("O")),
+                sinks: sinks.iter().map(|&t| db.node(t, wire("I"))).collect(),
+                direct_ports: vec![],
+                name,
+            };
         nets.push(add("wide".into(), wide_src, wide_sinks, &mut timing));
         for i in 0..40 {
             let src = tile(next(w), next(h));
@@ -1118,12 +1183,19 @@ mod tests {
             timing,
         };
         let route = |batching: Batching, threads: usize| -> Vec<Vec<NodeId>> {
-            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
             pool.install(|| {
                 let mut router = Router::new(&db, &design);
                 router.batching = batching;
+                router.batch_iterations = usize::MAX;
                 let (trees, _, _) = router.route(&design.nets).unwrap();
-                assert!(router.node.iter().all(|n| n.occ <= 1), "overused nodes left");
+                assert!(
+                    router.node.iter().all(|n| n.occ <= 1),
+                    "overused nodes left"
+                );
                 trees.into_iter().map(|t| t.nodes).collect()
             })
         };
@@ -1133,7 +1205,11 @@ mod tests {
             assert_eq!(one, four, "{batching:?}");
             for (net, tree) in design.nets.iter().zip(&one) {
                 for sink in &net.sinks {
-                    assert!(tree.contains(sink), "{batching:?}: {} misses a sink", net.name);
+                    assert!(
+                        tree.contains(sink),
+                        "{batching:?}: {} misses a sink",
+                        net.name
+                    );
                 }
             }
         }

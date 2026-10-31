@@ -643,14 +643,6 @@ impl Gpu {
             .expect("reading from the GPU");
         f32::from_bytes(&bytes).to_vec()
     }
-
-    fn read_f64(&self, h: &Handle) -> Vec<f64> {
-        let bytes = self
-            .client
-            .read_one(h.clone())
-            .expect("reading from the GPU");
-        f64::from_bytes(&bytes).to_vec()
-    }
 }
 
 /// A buffer argument over `h` holding `len` elements.
@@ -878,8 +870,15 @@ impl Engine for Gpu {
                 nets,
             );
         }
-        let partial = self.read_f64(&self.partial);
-        let over = self.read_f64(&self.over);
+        // Both partial sums in one transfer: the iteration's only wait.
+        let read = self
+            .client
+            .read(vec![self.partial.clone(), self.over.clone()])
+            .expect("reading from the GPU");
+        let (partial, over) = (
+            f64::from_bytes(&read[0]).to_vec(),
+            f64::from_bytes(&read[1]).to_vec(),
+        );
         let chunks = n.div_ceil(CHUNK as usize);
         let (mut wl_l1, mut dv2, mut dg2) = (0.0, 0.0, 0.0);
         for t in 0..chunks {

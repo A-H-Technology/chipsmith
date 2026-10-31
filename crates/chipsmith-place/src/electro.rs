@@ -1357,4 +1357,32 @@ mod tests {
             );
         }
     }
+
+    /// Needs a CUDA device; passes (saying so) without one.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn the_gpu_repeats_itself_and_lands_near_the_cpu() {
+        let p = problem();
+        let opts = |accel| Options {
+            accel,
+            ..Options::default()
+        };
+        let gpu = Accel::Gpu(crate::gpu::Runtime::Cuda);
+        let a = match place(&p, &mut NoTiming, None, &opts(gpu)) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("no GPU to test on: {e}");
+                return;
+            }
+        };
+        let b = place(&p, &mut NoTiming, None, &opts(gpu)).unwrap();
+        assert_eq!(a.centres, b.centres, "two GPU runs differ");
+        let cpu = place(&p, &mut NoTiming, None, &opts(Accel::Threads)).unwrap();
+        let (hg, hc) = (p.hpwl(&a.centres), p.hpwl(&cpu.centres));
+        assert!(
+            (hg - hc).abs() < 0.1 * hc,
+            "GPU hpwl {hg} against the CPU's {hc}"
+        );
+        assert!(a.overflow[0] < 0.1, "{:?}", a.overflow);
+    }
 }
