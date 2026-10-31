@@ -2329,6 +2329,16 @@ fn anneal(s: &mut State, rng: &mut Rng, sched: Schedule) -> u64 {
     total_moves
 }
 
+/// Designs with this many LEs are placed LE by LE (ADR-0012); smaller
+/// ones by clusters. The global placement costs a few seconds whatever
+/// the design's size (its fillers cover the chip), which the cluster
+/// flow's anneal only costs from about here: over every DE2 example,
+/// m4k-bytes (98 LEs) placed in 0.8 s by clusters and 7.2 s LE by LE,
+/// fir (534) 7.4 and 14.1 s, femtorv32 (788) 14.5 and 11.2 s, all loaded;
+/// critical paths there were about even. `CHIPSMITH_PLACER=electro` or
+/// `cluster` picks either.
+const LE_LEVEL_FROM: usize = 700;
+
 /// How many refining anneals run side by side, one thread each, from the
 /// same legal start with different seeds. Fixed rather than the machine's
 /// core count, so every machine places a design the same way.
@@ -2448,8 +2458,14 @@ pub fn place_file(
     );
     let started = std::time::Instant::now();
     let accel = chipsmith_place::electro::Accel::from_env().map_err(anyhow::Error::msg)?;
-    let le_placed = match std::env::var("CHIPSMITH_PLACER").as_deref() {
-        Ok("electro") | Err(_) => match le::place(&mut state, &fixed_xy, accel, trace) {
+    let le_level = match std::env::var("CHIPSMITH_PLACER").as_deref() {
+        Ok("electro") => true,
+        Ok("cluster") => false,
+        Err(_) => design.les.len() >= LE_LEVEL_FROM,
+        Ok(other) => bail!("CHIPSMITH_PLACER={other}: not electro or cluster"),
+    };
+    let le_placed = match le_level {
+        true => match le::place(&mut state, &fixed_xy, accel, trace) {
             Ok(p) => Some(p.iterations),
             Err(e) => {
                 // The cluster flow fits everything it did before, so a
@@ -2458,8 +2474,7 @@ pub fn place_file(
                 None
             }
         },
-        Ok("cluster") => None,
-        Ok(other) => bail!("CHIPSMITH_PLACER={other}: not electro or cluster"),
+        false => None,
     };
     let rounds = match le_placed {
         Some(iterations) => iterations,
