@@ -2200,15 +2200,15 @@ const REFINE: Schedule = Schedule {
 
 /// After LE-level placement (ADR-0012), whose start is close enough that
 /// the anneal only refines: picked on routed critical paths over
-/// picorv32, femtorv32, mult-selftest and sha256, three seeds each,
-/// against `open` 40a29cb (docs/gpu-pnr.md): geomean x0.971 of its
-/// medians, none worse; colder (heat 0.05, range 1, half the moves) was
-/// 5 times faster but left sha256 3% slower; `REFINE` took twice the
-/// time for x0.986 (worse than this on femtorv32 and mult-selftest).
+/// picorv32, femtorv32, mult-selftest and sha256, five seeds each, against
+/// `open` 40a29cb (docs/gpu-pnr.md): geomean x0.990 of its medians, every
+/// median inside its range of seeds; picorv32x24 9.58 ns median of three
+/// seeds against its 10.65. Warmer (heat 0.1, range 2, twice the moves)
+/// was as good (x0.989, picorv32x24 9.63) for three times the moves.
 const REFINE_LE: Schedule = Schedule {
-    range: 2.0,
-    heat: 0.1,
-    moves: 1.0,
+    range: 1.0,
+    heat: 0.05,
+    moves: 0.5,
 };
 
 fn anneal(s: &mut State, rng: &mut Rng, sched: Schedule) -> u64 {
