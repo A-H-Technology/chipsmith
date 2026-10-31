@@ -43,21 +43,58 @@ module CY2_JTAG (input TDOUSER, output TMSUTAP, output TCKUTAP, output TDIUTAP,
 endmodule
 """
 
+# chipsmith's CY2_PLL as the altpll Quartus infers it from. Its ARESET and
+# PFDENA stay unconnected (no benchmarked design drives them): an undriven
+# pfdena would hold the PLL's phase detector off.
+PLL_SHIM = """\
+module CY2_PLL (input INCLK, input ARESET, input PFDENA, output CLK0, output CLK1, output CLK2,
+                output LOCKED);
+  parameter INCLK0_INPUT_FREQUENCY = 20000;
+  parameter OPERATION_MODE = "NORMAL";
+""" + "".join(
+    f"  parameter CLK{i}_MULTIPLY_BY = 1;\n  parameter CLK{i}_DIVIDE_BY = 1;\n"
+    f"  parameter CLK{i}_PHASE_SHIFT = 0;\n  parameter CLK{i}_DUTY_CYCLE = 50;\n"
+    for i in range(3)) + """\
+  wire [5:0] c;
+  altpll #(.intended_device_family("Cyclone II"), .lpm_type("altpll"),
+    .operation_mode(OPERATION_MODE), .compensate_clock("CLK0"),
+    .inclk0_input_frequency(INCLK0_INPUT_FREQUENCY),
+    .port_inclk0("PORT_USED"), .port_inclk1("PORT_UNUSED"),
+    .port_clk0("PORT_USED"), .port_clk1("PORT_USED"), .port_clk2("PORT_USED"),
+    .port_locked("PORT_USED"), .port_areset("PORT_UNUSED"), .port_pfdena("PORT_UNUSED"),
+""" + "".join(
+    f"    .clk{i}_multiply_by(CLK{i}_MULTIPLY_BY), .clk{i}_divide_by(CLK{i}_DIVIDE_BY),\n"
+    f"    .clk{i}_phase_shift(CLK{i}_PHASE_SHIFT), .clk{i}_duty_cycle(CLK{i}_DUTY_CYCLE),\n"
+    for i in range(3)).rstrip(",\n") + """)
+    pll (.inclk({1'b0, INCLK}), .clk(c), .locked(LOCKED));
+  assign {CLK2, CLK1, CLK0} = c[2:0];
+endmodule
+"""
+
+# A manifest pin's `registers` as Quartus' fast I/O register assignments.
+FAST_REGISTERS = {
+    "input": "FAST_INPUT_REGISTER",
+    "output": "FAST_OUTPUT_REGISTER",
+    "output-enable": "FAST_OUTPUT_ENABLE_REGISTER",
+}
+
 
 def pins(entries):
-    """(port, pin) pairs from a manifest's [pins] table."""
+    """(port, pin, I/O-cell registers) from a manifest's [pins] table."""
     for port, v in entries.items():
+        regs = []
         if isinstance(v, dict):
-            if set(v) - {"pin", "pins"}:
-                # Pin settings (registers, standards, pulls) have Quartus
+            if set(v) - {"pin", "pins", "registers"}:
+                # Other pin settings (standards, pulls) have Quartus
                 # spellings, but no design benchmarked here uses them.
-                sys.exit(f"{port}: pin settings {sorted(set(v) - {'pin', 'pins'})} not supported")
+                sys.exit(f"{port}: pin settings {sorted(set(v) - {'pin', 'pins', 'registers'})} not supported")
+            regs = v.get("registers", [])
             v = v.get("pins", v.get("pin"))
         if isinstance(v, str):
-            yield port, v
+            yield port, v, regs
         else:
             for i, p in enumerate(v):
-                yield f"{port}[{i}]", p
+                yield f"{port}[{i}]", p, regs
 
 
 def mhz(s):
@@ -85,6 +122,11 @@ def project(example, out, flavour):
         with open(os.path.join(out, "cy2_jtag.v"), "w") as f:
             f.write(JTAG_SHIM)
         sources.append(os.path.join(out, "cy2_jtag.v"))
+    has_pll = any("CY2_PLL" in open(s).read() for s in sources)
+    if has_pll:
+        with open(os.path.join(out, "cy2_pll.v"), "w") as f:
+            f.write(PLL_SHIM)
+        sources.append(os.path.join(out, "cy2_pll.v"))
     with open(os.path.join(out, "top.qpf"), "w") as f:
         f.write('QUARTUS_VERSION = "13.0sp1"\nPROJECT_REVISION = "top"\n')
     q = [
@@ -97,13 +139,17 @@ def project(example, out, flavour):
         "set_global_assignment -name SDC_FILE top.sdc",
     ]
     q += [f"set_global_assignment -name VERILOG_FILE {s}" for s in sources]
-    q += [f"set_location_assignment {pin} -to {port}" for port, pin in pins(m["pins"])]
+    for port, pin, regs in pins(m["pins"]):
+        q.append(f"set_location_assignment {pin} -to {port}")
+        q += [f"set_instance_assignment -name {FAST_REGISTERS[r]} ON -to {port}" for r in regs]
     q += FLAVOURS[flavour]
     with open(os.path.join(out, "top.qsf"), "w") as f:
         f.write("\n".join(q) + "\n")
     with open(os.path.join(out, "top.sdc"), "w") as f:
         for port, freq in m.get("clocks", {}).items():
             f.write(f"create_clock -name {port} -period {1000 / mhz(freq):.3f} [get_ports {port}]\n")
+        if has_pll:
+            f.write("derive_pll_clocks\n")
 
 
 def read(path):
