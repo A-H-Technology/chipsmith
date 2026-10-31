@@ -1172,10 +1172,7 @@ impl Routed {
                         let clock = *io_clk
                             .get(&(x, y, z, clk))
                             .with_context(|| format!("{name}: {param} clock not routed"))?;
-                        Ok(Some(IoReg {
-                            clock,
-                            powers_up_high: power_up.high(),
-                        }))
+                        Ok(Some(IoReg::plain(clock, power_up.high())))
                     };
                     let in_reg = reg(register_param::INPUT, IoePin::InClk)?;
                     let input = Input {

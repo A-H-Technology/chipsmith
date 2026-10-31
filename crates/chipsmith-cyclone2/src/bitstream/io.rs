@@ -42,6 +42,19 @@ mod arch {
     pub const IO_OUTREG_POWERS_UP_HIGH: i32 = 115;
     pub const IO_INREG_CLK_FAST_MUX: i32 = 89;
     pub const IO_OUTREG_CLK_FAST_MUX: i32 = 93;
+    pub const IO_PIA_TO_CLR: i32 = 101;
+    pub const IO_PIA_TO_SCLR: i32 = 102;
+    pub const IO_PIA_TO_INREG_CE: i32 = 103;
+    pub const IO_PIA_TO_OEREG_CE: i32 = 106;
+    pub const IO_CLR_INVERT: i32 = 116;
+    pub const IO_SCLR_INVERT: i32 = 117;
+    pub const IO_INREG_CE_INVERT: i32 = 119;
+    pub const IO_INREG_CLK_INVERT: i32 = 120;
+    pub const IO_OEREG_CE_INVERT: i32 = 124;
+    pub const IO_OUTREG_CLK_INVERT: i32 = 126;
+    pub const IO_USE_SCLR_INREG: i32 = 167;
+    pub const IO_USE_SCLR_OEREG: i32 = 168;
+    pub const IO_USE_SCLR_OUTREG: i32 = 169;
     pub const IO_DATA_INVERT: i32 = 118;
     pub const IO_CORE_PLL_SELECT: i32 = 146;
     pub const IO_USE_CLR_INREG: i32 = 164;
@@ -159,6 +172,17 @@ impl SourceMux {
     }
 }
 
+/// The two-level source muxes from the LAB-local lines: output data,
+/// output enable, and the register controls.
+const SOURCE_MUXES: [i32; 6] = [
+    arch::IO_DATA_INPUT,
+    arch::IO_PIA_TO_OE,
+    arch::IO_PIA_TO_INREG_CE,
+    arch::IO_PIA_TO_OEREG_CE,
+    arch::IO_PIA_TO_CLR,
+    arch::IO_PIA_TO_SCLR,
+];
+
 /// One IOE's bits of a feature, in level order (`None`: a sentinel slot
 /// the hardware doesn't have).
 type FeatureBits = Vec<Option<IoBit>>;
@@ -229,7 +253,7 @@ impl IoDb {
                 g.block_type,
                 g.arch_type
             );
-            if [arch::IO_DATA_INPUT, arch::IO_PIA_TO_OE].contains(&g.arch_type) {
+            if SOURCE_MUXES.contains(&g.arch_type) {
                 let d = g.data().first().context("source mux without data")?;
                 let (aux, next) = (mux_bits(db, &d.aux), mux_bits(db, &d.next_selection));
                 let levels = g
@@ -327,14 +351,79 @@ pub enum Vccio {
     Board(Standard),
 }
 
-/// An I/O-cell register (no clear, no clock enable: those aren't modelled).
+/// A register control into an I/O cell: a LAB-local line through the
+/// cell's source mux for it, optionally inverted in the cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IoControl {
+    pub line: u32,
+    pub inverted: bool,
+}
+
+/// How a side's registers are clocked. The input register has its own
+/// clock; the output and OE registers share one clock mux, clock inverter
+/// and clock-enable line (each register still picks whether it uses the
+/// enable: `IO_SET_CE_TO_*REG_TIE_OFF`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IoClock {
+    /// The I/O row clock buffer (`BLK_CLK_BUF` index).
+    pub buffer: u32,
+    /// Clocked on the falling edge (the netlist's `!clk`).
+    pub inverted: bool,
+    pub enable: Option<IoControl>,
+}
+
+/// An I/O-cell register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IoReg {
-    /// The I/O row clock buffer (`BLK_CLK_BUF` index) that clocks it.
-    pub clock: u32,
+    pub clock: IoClock,
     /// Power-up value 1 (`*_power_up = "high"`): what Quartus uses to
     /// move an inverter from after the register to before it.
     pub powers_up_high: bool,
+    /// The cell's asynchronous reset, if this register uses it. It
+    /// returns the register to its power-up value: a clear on one that
+    /// powers up 0, a preset on one that powers up 1 (Quartus writes
+    /// `*_async_reset = "preset"` with `*_power_up = "high"`, and the bits
+    /// differ only in `*REG_POWERS_UP_HIGH`). The cell has one, shared by
+    /// its three registers.
+    pub areset: Option<IoControl>,
+    /// The cell's synchronous clear, if this register uses it; also one
+    /// per cell. Only seen on registers powering up 0.
+    pub sclr: Option<IoControl>,
+}
+
+impl IoReg {
+    /// A rising-edge register with no enable, reset or clear.
+    pub fn plain(buffer: u32, powers_up_high: bool) -> Self {
+        IoReg {
+            clock: IoClock {
+                buffer,
+                inverted: false,
+                enable: None,
+            },
+            powers_up_high,
+            areset: None,
+            sclr: None,
+        }
+    }
+}
+
+/// `a` and `b` where both are given must be the same: one of the cell's
+/// shared controls.
+fn agree<T: PartialEq + Copy + std::fmt::Debug>(
+    what: &str,
+    v: impl IntoIterator<Item = Option<T>>,
+) -> Result<Option<T>> {
+    let mut out = None;
+    for x in v.into_iter().flatten() {
+        match out {
+            Some(o) => ensure!(
+                o == x,
+                "two different {what}s in one I/O cell ({o:?}, {x:?}): it has one"
+            ),
+            None => out = Some(x),
+        }
+    }
+    Ok(out)
 }
 
 /// An output's data: a LAB-local line into the IOE's data mux (optionally
@@ -386,28 +475,55 @@ pub struct Output {
 }
 
 impl Output {
-    /// The I/O row clock buffer of the output-side registers. The output
-    /// and OE registers share one clock mux (`IO_OUTREG_CLK_FAST_MUX`), so
-    /// two different clocks are an error.
-    pub fn clock(&self) -> Result<Option<u32>> {
-        let d = match self.data {
-            OutData::Line { reg, .. } => reg.map(|r| r.clock),
+    pub fn data_reg(&self) -> Option<IoReg> {
+        match self.data {
+            OutData::Line { reg, .. } => reg,
             OutData::Const(_) | OutData::PllClock => None,
-        };
-        let e = match self.enable {
-            OutputEnable::Line { reg, .. } => reg.map(|r| r.clock),
-            _ => None,
-        };
-        match (d, e) {
-            (Some(a), Some(b)) => {
-                ensure!(
-                    a == b,
-                    "output register on clock buffer {a}, OE register on {b}: they share one clock"
-                );
-                Ok(Some(a))
-            }
-            (a, b) => Ok(a.or(b)),
         }
+    }
+
+    pub fn oe_reg(&self) -> Option<IoReg> {
+        match self.enable {
+            OutputEnable::Line { reg, .. } => reg,
+            _ => None,
+        }
+    }
+
+    /// The output-side registers' clock buffer and edge. The output and OE
+    /// registers share one clock mux (`IO_OUTREG_CLK_FAST_MUX`), clock
+    /// inverter and enable line, so two different ones are an error.
+    pub fn clock(&self) -> Result<Option<(u32, bool)>> {
+        let regs = [self.data_reg(), self.oe_reg()];
+        agree(
+            "clock-enable line",
+            regs.map(|r| r.and_then(|r| r.clock.enable)),
+        )?;
+        agree(
+            "output-side clock",
+            regs.map(|r| r.map(|r| (r.clock.buffer, r.clock.inverted))),
+        )
+    }
+}
+
+impl Dir {
+    /// The cell's registers: input, output, OE.
+    pub fn regs(&self) -> [Option<IoReg>; 3] {
+        let o = self.output();
+        [
+            self.input().and_then(|i| i.reg).map(|r| r.reg),
+            o.and_then(Output::data_reg),
+            o.and_then(Output::oe_reg),
+        ]
+    }
+
+    /// The cell's asynchronous reset and synchronous clear lines, which
+    /// its registers share.
+    pub fn resets(&self) -> Result<(Option<IoControl>, Option<IoControl>)> {
+        let r = self.regs();
+        Ok((
+            agree("asynchronous reset", r.map(|r| r.and_then(|r| r.areset)))?,
+            agree("synchronous clear", r.map(|r| r.and_then(|r| r.sclr)))?,
+        ))
     }
 }
 
@@ -604,10 +720,17 @@ fn used_settings(block: i32, u: &PinUse) -> Result<Vec<Setting>> {
                 &[1, 0]
             },
         ));
-        v.extend([
-            (IO_SET_CE_TO_OEREG_TIE_OFF, -1, &[1][..]),
-            (IO_SET_CE_TO_OUTREG_TIE_OFF, -1, &[1][..]),
-        ]);
+        // The output and OE registers' clock enables are tied on unless
+        // the register uses the cell's enable line (the input register
+        // has no tie-off: its enable mux, unselected, enables it).
+        let [_, out_reg, oe_reg_] = u.dir.regs();
+        let enabled = |r: Option<IoReg>| r.is_some_and(|r| r.clock.enable.is_some());
+        if !enabled(oe_reg_) {
+            v.push((IO_SET_CE_TO_OEREG_TIE_OFF, -1, &[1]));
+        }
+        if !enabled(out_reg) {
+            v.push((IO_SET_CE_TO_OUTREG_TIE_OFF, -1, &[1]));
+        }
         // An input's output buffer is held off by the inverter after its
         // (unselected) OE mux; a tri-state output inverts its OE there.
         let oe_invert = match u.dir.output().map(|o| o.enable) {
@@ -660,9 +783,9 @@ fn used_settings(block: i32, u: &PinUse) -> Result<Vec<Setting>> {
                 v.push((IO_SET_PAD_TO_CORE_DUAL_FUNC_DELAY_MAG, k as i32, code));
             }
         }
-        // Registers: no clear (the USE_CLR bits read 1 then), clock from
-        // the row clock buffer. The clock fast mux is one-hot, bit =
-        // buffer index + 1 (observed for buffers 4 and 5).
+        // Registers: clock from the row clock buffer. The clock fast mux
+        // is one-hot, bit = buffer index + 1 (observed for buffers 3, 4
+        // and 5).
         const ONE_HOT: [&[u8]; 6] = [
             &[0, 1, 0, 0, 0, 0, 0],
             &[0, 0, 1, 0, 0, 0, 0],
@@ -677,39 +800,76 @@ fn used_settings(block: i32, u: &PinUse) -> Result<Vec<Setting>> {
                 .copied()
                 .with_context(|| format!("{}: I/O clock buffer {b}", u.pin))
         };
-        // A register powering up 1 sets its POWERS_UP_HIGH bit (observed
-        // on OE registers whose inverter Quartus moved in front of them).
-        let reg = |r: IoReg, use_clr: i32, high: i32| -> Vec<Setting> {
-            let mut s: Vec<Setting> = vec![(use_clr, -1, &[1])];
-            if r.powers_up_high {
-                s.push((high, -1, &[1]));
+        // Per register: `USE_CLR` reads 1 unless it uses the cell's
+        // asynchronous reset, `USE_SCLR` 10 if it uses the synchronous
+        // clear, `POWERS_UP_HIGH` for power-up 1, which is also the value
+        // the reset restores (ioce fuzz designs e3, e4, e8, e16).
+        let regs = u.dir.regs();
+        let feats = [
+            (IO_USE_CLR_INREG, IO_USE_SCLR_INREG, IO_INREG_POWERS_UP_HIGH),
+            (
+                IO_USE_CLR_OUTREG,
+                IO_USE_SCLR_OUTREG,
+                IO_OUTREG_POWERS_UP_HIGH,
+            ),
+            (IO_USE_CLR_OEREG, IO_USE_SCLR_OEREG, IO_OEREG_POWERS_UP_HIGH),
+        ];
+        for (r, (use_clr, use_sclr, high)) in regs.iter().zip(feats) {
+            let Some(r) = r else { continue };
+            ensure!(
+                !(r.sclr.is_some() && r.powers_up_high),
+                "{}: an I/O register powering up 1 with a synchronous clear (never seen)",
+                u.pin
+            );
+            if r.areset.is_none() {
+                v.push((use_clr, -1, &[1]));
             }
-            s
-        };
-        let in_reg = u.dir.input().and_then(|i| i.reg).map(|r| r.reg);
-        if let Some(r) = in_reg {
-            v.extend(reg(r, IO_USE_CLR_INREG, IO_INREG_POWERS_UP_HIGH));
+            if r.sclr.is_some() {
+                v.push((use_sclr, -1, &[1, 0]));
+            }
+            if r.powers_up_high {
+                v.push((high, -1, &[1]));
+            }
         }
-        let out = u.dir.output();
-        if let Some(OutData::Line { reg: Some(r), .. }) = out.map(|o| o.data) {
-            v.extend(reg(r, IO_USE_CLR_OUTREG, IO_OUTREG_POWERS_UP_HIGH));
+        if regs[1].is_some() {
             v.push((IO_REG_FEEDS_PIN_OUT_YGR, -1, &[1, 0]));
         }
-        if let Some(OutputEnable::Line { reg: Some(r), .. }) = out.map(|o| o.enable) {
-            v.extend(reg(r, IO_USE_CLR_OEREG, IO_OEREG_POWERS_UP_HIGH));
+        // The shared controls' inverters. The clear is active low in the
+        // cell, so an active-high reset sets its inverter; the enables and
+        // the synchronous clear are active high.
+        let (areset, sclr) = u.dir.resets().with_context(|| u.pin.clone())?;
+        if areset.is_some_and(|c| !c.inverted) {
+            v.push((IO_CLR_INVERT, -1, &[1]));
         }
-        if let Some(r) = in_reg {
-            v.push((IO_INREG_CLK_FAST_MUX, -1, clk(r.clock)?));
+        if sclr.is_some_and(|c| c.inverted) {
+            v.push((IO_SCLR_INVERT, -1, &[1]));
+        }
+        if let Some(r) = regs[0] {
+            v.push((IO_INREG_CLK_FAST_MUX, -1, clk(r.clock.buffer)?));
+            if r.clock.inverted {
+                v.push((IO_INREG_CLK_INVERT, -1, &[1]));
+            }
+            if r.clock.enable.is_some_and(|c| c.inverted) {
+                v.push((IO_INREG_CE_INVERT, -1, &[1]));
+            }
         }
         // The output and OE registers share the output clock mux; an OE
         // register alone sets it too (observed on oereg pins).
-        if let Some(b) = out
-            .map(Output::clock)
-            .transpose()
-            .with_context(|| u.pin.clone())?
-            .flatten()
-        {
-            v.push((IO_OUTREG_CLK_FAST_MUX, -1, clk(b)?));
+        if let Some(o) = u.dir.output() {
+            if let Some((b, inverted)) = o.clock().with_context(|| u.pin.clone())? {
+                v.push((IO_OUTREG_CLK_FAST_MUX, -1, clk(b)?));
+                if inverted {
+                    v.push((IO_OUTREG_CLK_INVERT, -1, &[1, 1]));
+                }
+            }
+            if agree(
+                "clock-enable line",
+                [o.data_reg(), o.oe_reg()].map(|r| r.and_then(|r| r.clock.enable)),
+            )?
+            .is_some_and(|c| c.inverted)
+            {
+                v.push((IO_OEREG_CE_INVERT, -1, &[1]));
+            }
         }
     } else {
         ensure!(
@@ -809,18 +969,36 @@ impl IoDb {
                     }
                 }
             }
-            if let Some(o) = u.and_then(|u| u.dir.output()) {
-                let data_line = match o.data {
+            if let Some(u) = u.filter(|_| matches!(p.ioe.block, BLOCK_ROW | BLOCK_COL)) {
+                let o = u.dir.output();
+                let data_line = o.and_then(|o| match o.data {
                     OutData::Line { line, .. } => Some(line),
                     OutData::Const(_) | OutData::PllClock => None,
-                };
-                let oe_line = match o.enable {
+                });
+                let oe_line = o.and_then(|o| match o.enable {
                     OutputEnable::Line { line, .. } => Some(line),
                     _ => None,
-                };
+                });
+                let [in_reg, out_reg, oe_reg] = u.dir.regs();
+                let line = |c: Option<IoControl>| c.map(|c| c.line);
+                // The output side's enable line drives the OEREG_CE mux,
+                // whichever of the two registers uses it (ioce fuzz e1:
+                // output registers alone set it too).
+                let out_ce = agree(
+                    "clock-enable line",
+                    [out_reg, oe_reg].map(|r| r.and_then(|r| r.clock.enable)),
+                )?;
+                let (areset, sclr) = u.dir.resets()?;
                 for (a, line) in [
                     (arch::IO_DATA_INPUT, data_line),
                     (arch::IO_PIA_TO_OE, oe_line),
+                    (
+                        arch::IO_PIA_TO_INREG_CE,
+                        line(in_reg.and_then(|r| r.clock.enable)),
+                    ),
+                    (arch::IO_PIA_TO_OEREG_CE, line(out_ce)),
+                    (arch::IO_PIA_TO_CLR, line(areset)),
+                    (arch::IO_PIA_TO_SCLR, line(sclr)),
                 ] {
                     let Some(line) = line else { continue };
                     let m = self
