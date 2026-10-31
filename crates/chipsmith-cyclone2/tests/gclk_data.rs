@@ -16,7 +16,7 @@ const BLK_CLK_BUF: i16 = 560;
 const LOCAL_INTERCONNECT: i16 = 276;
 
 fn build(name: &str, ports: &str, body: &str, pins: &[(&str, &str)]) -> (Device, nextpnr::Routed) {
-    support::flow(name, ports, body, pins, &BTreeMap::new())
+    support::flow(std::path::Path::new(env!("CARGO_TARGET_TMPDIR")), name, ports, body, pins, &BTreeMap::new())
 }
 
 /// The net into `port`'s pin, and the type of the cell driving it.

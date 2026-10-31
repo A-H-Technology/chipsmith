@@ -44,6 +44,7 @@ fn registers_take_the_cells_controls() {
         ("G".to_string(), only(true, true, true)),
     ]);
     let (dev, r) = support::flow(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
         "ioe-controls",
         "input CLK, input RST, input RST_N, input EN_N, input [1:0] D, output [1:0] Q, \
          output O, inout G, output GI",

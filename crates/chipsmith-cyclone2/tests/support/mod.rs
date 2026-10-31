@@ -2212,10 +2212,12 @@ pub fn cosim(
 }
 
 /// Builds `body` (inside `module top(...)` with `ports`) with `pins`
-/// (port, PIN_x) and the I/O registers `registers` asks for through the
+/// (port, PIN_x) and the I/O registers `registers` asks for, in a scratch
+/// directory under `base` (tests pass `CARGO_TARGET_TMPDIR`), through the
 /// whole flow on the devshell's chip database (synthesis, pack, place,
 /// route, bitstream), returning the routed design.
 pub fn flow(
+    base: &Path,
     name: &str,
     ports: &str,
     body: &str,
@@ -2227,7 +2229,7 @@ pub fn flow(
 ) {
     use chipsmith_cyclone2::place::{self, PinPlan};
     use chipsmith_cyclone2::{bitstream, pack, route, synth};
-    let dir = scratch(Path::new(env!("CARGO_TARGET_TMPDIR")), name);
+    let dir = scratch(base, name);
     let src = dir.join("top.v");
     std::fs::write(&src, format!("module top({ports});\n{body}\nendmodule\n")).unwrap();
     let design = frontend("top", &[PathBuf::from(&src)]);
