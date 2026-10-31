@@ -24,7 +24,8 @@ pub const COST_CAP: u64 = 1 << 20;
 pub const G_MAX: u64 = (1 << 28) - 1;
 /// `via` of a node the search started from.
 pub const SEED: u32 = (1 << 24) - 1;
-/// Bucket width: a round relaxes nodes within this of the best estimate.
+/// Bucket width: a round relaxes nodes within this of the best estimate
+/// (`CHIPSMITH_ROUTE_BUCKET`, in node costs, overrides it).
 pub const BUCKET: u64 = SCALE;
 
 /// What the integer search needs of the graph, flattened once.
@@ -39,6 +40,7 @@ pub struct Fixed {
     pub ky_q: u64,
     pub astar_q: u64,
     pub hop_q: u64,
+    pub bucket_q: u64,
 }
 
 pub fn q(v: f32) -> u64 {
@@ -69,6 +71,10 @@ impl Fixed {
             ky_q: q(r.tile_distance[1]),
             astar_q: q(r.astar),
             hop_q: q(HOP_DELAY_ESTIMATE / DELAY_UNIT),
+            bucket_q: std::env::var("CHIPSMITH_ROUTE_BUCKET")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .map_or(BUCKET, |b| q(b).max(1)),
         }
     }
 
@@ -187,7 +193,7 @@ impl Router<'_> {
             if sink_g.is_some_and(|g| g <= fmin) {
                 break;
             }
-            let bound = fmin + BUCKET;
+            let bound = fmin + fx.bucket_q;
             improved.clear();
             let mut deferred: Vec<(NodeId, u64)> = Vec::new();
             for &(v, gv) in &frontier {

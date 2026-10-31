@@ -127,9 +127,40 @@ cluster flow, which fits everything it fitted before.
 ### Detailed placement
 
 The existing timing-driven anneal (`best_of`, 8 seeds), started from the
-legal placement with a colder schedule, `REFINE_LE`: heat 0.05, range 1
-LAB, N^(4/3) / 2 moves per temperature. The cluster flow keeps `REFINE`
+legal placement with a colder, shorter schedule, `REFINE_LE`: heat 0.05,
+range 1 LAB, N^(4/3) / 10 moves per temperature (picorv32x24: 8 million
+moves against `open`'s 274 million). The cluster flow keeps `REFINE`
 (heat 0.5, range 3, N^(4/3)).
+
+A batched detailed placer (`place/detail.rs`, `CHIPSMITH_PLACE_DETAIL=1`
+before the anneal, `2` after) was built to replace the anneal and
+measured against it; it stays opt-in. Each round, every LE scores moves
+towards the middle of its nets (into a free slot of the nearest LABs, or
+swapping with an LE there) against the placement as it stands, on rayon
+or one thread, bit-identical; the best are taken greedily when they
+share no LAB and no net whose box one of them changes (moves that leave
+a box alone can share its net: together they only shrink it). After the
+first round only LEs whose proposal lost a clash, or that sit on a net a
+taken move changed, propose again, and a full round ends the run.
+
+| picorv32x24, from the same legal placement | wirelength | estimated critical ns | anneal moves |
+|---|---|---|---|
+| detailed placement alone | 79,160 | 10.44 | 0 |
+| detailed placement, then the anneal at 0.1 or 0.2 of C2's moves | 78,182 / 77,528 | 10.44 / 10.44 | 8.0 / 16.1 million |
+| the anneal at 0.1 of C2's moves (`REFINE_LE`) | 79,931 | **10.16** | 7.9 million |
+| C2's anneal | 76,839 | 10.10 | 40 million |
+
+Greedy moves shorten wires as well as the anneal does but leave its
+timing behind: the anneal's best of 8 seeds, chosen by estimated
+critical path, is what the single greedy descent can't match, and an
+anneal started from the greedy result stays in its basin. Run after the
+short anneal instead, five seeds each, routed (medians against `open`
+untraced): picorv32 8.17, femtorv32 12.97, mult-selftest 14.91, sha256
+21.17, picorv32x24 9.51 (two seeds); geomean x1.004 against the short
+anneal's x1.011, sha256 worse, for 140 s more on picorv32x24 (300
+rounds of mostly small gains, a timing reweight each). Scoring is
+lab_check and box arithmetic per move; porting it to the GPU would speed
+the rounds up, not the descent's result.
 
 ## Choosing the settings
 
@@ -160,9 +191,27 @@ against the baseline's five, plus picorv32x24 with three:
 | schedule | geomean (4 designs) | worst | picorv32x24, routed ns | anneal moves, picorv32x24 |
 |---|---|---|---|---|
 | C1 | x0.989 | x1.011 (femtorv32) | 9.43, 9.63, 9.63 | 113 million |
-| **C2 (`REFINE_LE`)** | **x0.990** | **x1.008 (femtorv32)** | **10.18, 9.34, 9.58** | **40 million** |
+| C2 | x0.990 | x1.008 (femtorv32) | 10.18, 9.34, 9.58 | 40 million |
 
-As good for a third of the moves, so C2 is the default.
+C2 was as good for a third of the moves. Then the anneal itself was cut
+again: C3 (heat 0.05, range 1, a tenth of N^(4/3) moves), against
+`open` without the placement trace (which `open` lets change its
+placement, see Determinism), five seeds:
+
+| design | `open` | C2 | **C3 (`REFINE_LE`)** |
+|---|---|---|---|
+| picorv32 | 7.90 [7.69-8.38] | 7.78 [7.67-7.82] | 8.15 [7.92-8.41] |
+| femtorv32 | 13.15 [12.74-13.97] | 12.91 [12.90-13.19] | 13.26 [12.97-13.92] |
+| mult-selftest | 15.41 [15.07-15.86] | 14.98 [14.63-15.37] | 15.38 [14.76-15.41] |
+| sha256 | 20.59 [20.17-20.99] | 20.91 [20.82-21.11] | 20.74 [20.24-21.23] |
+| geomean of medians | | x0.989 | x1.011 |
+| picorv32x24 (`open`: seed 0) | 10.65 | 9.58 [9.34-10.18] | 9.64 [9.37-9.90] |
+
+C3's medians are all inside `open`'s ranges of seeds, its worst seeds
+within 1.1% of `open`'s worst; it does a fifth of C2's anneal (8 million
+moves on picorv32x24), which is most of a large design's placement.
+C2 is about 2% better on these four designs; `CHIPSMITH_PLACE_MOVES=0.5`
+gets it back.
 
 Timing-driven global placement, with C2's anneal: weights that add up
 over the reweights instead of replacing each other, reweighting every 10
@@ -188,20 +237,10 @@ Density targets and stopping, each found on a design that broke:
   for 527 iterations; legal wirelength 7,943 against 4,206 with the
   whole-bin allowance.
 
-The defaults, seeds 0 to 4 (picorv32x24 0 to 2), medians against the
-baseline's [range]:
-
-| design | baseline | this branch | ratio |
-|---|---|---|---|
-| picorv32 | 8.01 [7.61-8.62] | 7.78 [7.67-7.82] | x0.971 |
-| femtorv32 | 12.81 [12.66-13.43] | 12.91 [12.90-13.19] | x1.008 |
-| mult-selftest | 15.15 [14.89-15.57] | 14.98 [14.63-15.37] | x0.989 |
-| sha256 | 21.03 [20.63-21.28] | 20.91 [20.82-21.11] | x0.994 |
-| picorv32x24 | 10.65 (seed 0) | 9.58 [9.34-10.18] | x0.900 |
-
-Geomean of the first four x0.990. Every median is inside the baseline's
-range of seeds, and every design's worst seed is better than the
-baseline's worst.
+The traced `open` (the earlier baseline runs, with the trace's reweight)
+and C2, for the record: picorv32 8.01 against 7.78, femtorv32 12.81
+against 12.91, mult-selftest 15.15 against 14.98, sha256 21.03 against
+20.91 (geomean x0.990).
 
 ## Routing
 
@@ -234,7 +273,80 @@ What it took to make it converge, and why it stays off:
   61.6 s and 14 iterations against 50.6 s and 9, critical path 21.03
   against 20.49 ns (load 17).
 
-### A GPU router: prototyped and rejected
+### The GPU router (`chipsmith-route`, feature `gpu`)
+
+Built from the design above, after the breadth-first prototype below
+lost. The search the GPU runs is A* in a form that parallelises and is
+deterministic (`bucket.rs`): label-correcting rounds, each relaxing
+every frontier node within a bucket (one node cost) of the frontier's
+best estimate, from the cost the node had when the round began; costs,
+delays and the estimate in fixed point (1/1024 of an R4); a node's label
+is the least (cost, edge) offered, taken by an atomic minimum; the
+search stops when the sink's cost is no more than the best estimate
+left. The CPU runs the same search (`CHIPSMITH_ROUTE_SEARCH=bucket`), so
+the GPU's trees can be checked against the CPU's: they are the same,
+byte for byte (unit tests on a grid; picorv32, sha256 and picorv32x24's
+`routed.json`).
+
+On the GPU (`CHIPSMITH_ROUTE_ACCEL=cuda`, implies the integer search):
+the routing graph (CSR, edge sources, usable-edge mask, node boxes and
+delays), occupancy and history stay on the device; a batch of up to 64
+nets is one kernel launch, one cube (256 threads) per net looping over
+its rounds and sinks inside the kernel: thread 0 ends a search (walks
+the branch back, grafts it where it meets the tree, picks the next
+sink), all threads seed, take the frontier's minimum, relax and compact.
+Up goes the batch (sources, sinks, criticalities, regions: one buffer)
+and the committed trees as occupancy deltas; down comes each net's tree.
+Labels are stamped with a per-slot generation, so nothing is cleared
+between searches.
+
+The integer search runs for the nets of batches of more than one net in
+the first iteration; nets alone in a batch (wide ones: 32 sinks or
+more), collision repairs and later iterations use A*, the same in every
+mode. Batches of 64 nets in order (`CHIPSMITH_ROUTE_BATCH=64`): region
+batches are too small on compact designs (picorv32: 884 batches, at most
+5 nets) to fill a GPU.
+
+Routing from the same placement (load 3 to 10):
+
+| design | router | route s | iteration 1 s | of it on the GPU | iterations | routed ns |
+|---|---|---|---|---|---|---|
+| picorv32 | A*, one net at a time | 9.3 | 4.05 | | 10 | 7.89 |
+| | integer, 1 thread | 10.2 | 6.78 | | 7 | 7.84 |
+| | integer, rayon (8) | 7.8 | 3.31 | | 7 | 7.84 |
+| | integer, GPU | 24.3 | 7.17 | 2.49 | 7 | 7.84 |
+| sha256 | A*, one net at a time | 49.6 | 29.1 | | 9 | 20.49 |
+| | integer, 1 thread | 68.7 | 52.9 | | 7 | 20.50 |
+| | integer, rayon | 41.4 | 25.0 | | 7 | 20.50 |
+| | integer, GPU | 39.0 | 13.9 | 2.04 (122 launches) | 7 | 20.50 |
+| picorv32x24 | A*, one net at a time | 144.2 | 66.0 | | 15 | 9.43 |
+| | integer, rayon | 160.7 | 76.9 | | 27 | 9.52 |
+| | integer, GPU | 139.6 | 44.8 | 4.77 (621 launches) | 27 | 9.52 |
+
+- The GPU earns its keep on what it runs: the batched nets of sha256's
+  first iteration take 2.0 s on the GTX 1660 against about 14 s on 8
+  threads and about 40 s on one (the rest of the iteration is the wide
+  nets, about 11 s of A*); picorv32x24's, 4.8 s against about 37 s on 8
+  threads. Same trees.
+- It doesn't make routing much faster yet: wide nets and every later
+  iteration run sequential A* on the CPU, and on picorv32x24 the 64-net
+  batches (whose nets don't see each other) leave more overuse, 27
+  iterations instead of 15. sha256 routes 1.27 times faster than with
+  A* alone; picorv32x24 3% faster.
+- On the CPU the integer search is slower than A* (no heap: every
+  round passes over the frontier), so batching it on rayon doesn't beat
+  A* one net at a time; the GPU's gain over rayon is the GPU's.
+- Rounds dominate a batch: a net's sinks are searched one after
+  another, about 20 rounds each. A wider bucket (4, 16 node costs) makes
+  fewer rounds but more relaxations: picorv32's batches 2.49 → 1.38 s,
+  sha256's 2.04 → 5.84 s, and changes the routes (both still the CPU's).
+  The default stays 1.
+
+The first version made 6 launches and a host round-trip per round
+(picorv32: 52 s for 11,698 rounds); one launch per batch with the rounds
+inside the kernel took that to 2.5 s.
+
+### The GPU router's prototype: breadth-first, rejected
 
 `experiments/gpu-bench route` takes the nets of a real routing
 (`CHIPSMITH_ROUTE_DUMP`) and runs a first iteration's searches (every

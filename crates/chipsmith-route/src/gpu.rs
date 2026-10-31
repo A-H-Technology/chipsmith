@@ -136,6 +136,7 @@ fn slot_kernel(
     astar_q: u64,
     hop_q: u64,
     has_owner: u32,
+    bucket_q: u64,
     batch: u32,
     slots: u32,
     o_sinks: u32,
@@ -199,7 +200,7 @@ fn slot_kernel(
                 } else if empty {
                     ph = 3u32;
                 } else {
-                    scal[s * 3] = fm + 1024u64;
+                    scal[s * 3] = fm + bucket_q;
                     if reached {
                         scal[s * 3 + 1] = sg;
                     } else {
@@ -509,6 +510,7 @@ pub struct Searcher {
     ky_q: u64,
     astar_q: u64,
     hop_q: u64,
+    bucket_q: u64,
     /// Seconds in the batches, and batches run.
     pub busy_s: f64,
     pub batches: u64,
@@ -585,6 +587,7 @@ impl Searcher {
             ky_q: fx.ky_q,
             astar_q: fx.astar_q,
             hop_q: fx.hop_q,
+            bucket_q: fx.bucket_q,
             busy_s: 0.0,
             batches: 0,
             phase_s: [0.0; 3],
@@ -715,6 +718,7 @@ impl Searcher {
                 self.astar_q,
                 self.hop_q,
                 self.has_owner as u32,
+                self.bucket_q,
                 self.batch,
                 k as u32,
                 o_sinks,
