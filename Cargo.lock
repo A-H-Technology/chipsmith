@@ -613,6 +613,7 @@ name = "chipsmith-route"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cubecl",
  "lzma-rust2",
  "postcard",
  "rayon",

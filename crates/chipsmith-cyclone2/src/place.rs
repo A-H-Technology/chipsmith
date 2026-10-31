@@ -2582,13 +2582,17 @@ pub fn place_file(
         moves: env("CHIPSMITH_PLACE_MOVES", refine.moves),
     };
     let seeds = env("CHIPSMITH_PLACE_SEEDS", SEEDS as f64).max(1.0) as usize;
-    let mut state = state;
-    let mut detail_moves = 0;
-    if le_placed.is_some() && env("CHIPSMITH_PLACE_DETAIL", 0.0) != 0.0 {
+    // CHIPSMITH_PLACE_DETAIL: 1 runs the batched detailed placement
+    // before the anneal, 2 after it.
+    let detail = if le_placed.is_some() {
+        env("CHIPSMITH_PLACE_DETAIL", 0.0) as u32
+    } else {
+        0
+    };
+    let run_detail = |state: &mut State, trace: bool| -> u64 {
         let t = std::time::Instant::now();
         let par = !matches!(accel, chipsmith_place::electro::Accel::Serial);
-        let done = detail::refine(&mut state, par, trace);
-        detail_moves = done.moves;
+        let done = detail::refine(state, par, trace);
         if trace {
             eprintln!(
                 "place: detail {} rounds, {} moves, wirelength {}, {:.2} s ({:.2} s scoring, {:.2} s taking)",
@@ -2600,12 +2604,21 @@ pub fn place_file(
                 done.take_s
             );
         }
+        done.moves
+    };
+    let mut state = state;
+    let mut detail_moves = 0;
+    if detail == 1 {
+        detail_moves += run_detail(&mut state, trace);
     }
     let (mut state, moves) = if env("CHIPSMITH_PLACE_ANNEAL", 1.0) != 0.0 {
         best_of(&state, seeds, sched)
     } else {
         (state, 0)
     };
+    if detail == 2 {
+        detail_moves += run_detail(&mut state, trace);
+    }
     let moves = moves + detail_moves;
     let critical = state.reweight();
     if trace {

@@ -8,7 +8,7 @@ repository.workspace = true
 
 [features]
 # Placement on a GPU (CHIPSMITH_ACCEL=cuda or hip; ADR-0012).
-gpu = ["chipsmith-place/gpu"]
+gpu = ["chipsmith-place/gpu", "chipsmith-route/gpu"]
 
 [dependencies]
 chipsmith-jtag.workspace = true

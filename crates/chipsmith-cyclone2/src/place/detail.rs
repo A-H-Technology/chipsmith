@@ -38,6 +38,13 @@ pub(super) struct Proposal {
 const TARGET_LABS: usize = 3;
 const SWAPS: usize = 3;
 
+fn knob(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 /// Rounds stop when a round gains less than this share of the cost.
 const MIN_GAIN: f64 = 1e-5;
 const MAX_ROUNDS: usize = 300;
@@ -87,7 +94,9 @@ impl State<'_> {
                 self.pos[x].0
             }
         };
-        if self.lab_check_of(lab, &dst, lab_of).is_err() || self.lab_check_of(from, &src, lab_of).is_err() {
+        if self.lab_check_of(lab, &dst, lab_of).is_err()
+            || self.lab_check_of(from, &src, lab_of).is_err()
+        {
             return None;
         }
         let mut nets: Vec<usize> = d.nets_of_le[le].iter().map(|&(n, _)| n).collect();
@@ -164,7 +173,7 @@ impl State<'_> {
                     }
                 }
             }
-            if labs.len() >= TARGET_LABS {
+            if labs.len() >= knob("CHIPSMITH_DETAIL_LABS", TARGET_LABS) {
                 break 'ring;
             }
         }
@@ -177,12 +186,12 @@ impl State<'_> {
                 }
             }
         };
-        for &(_, lab) in labs.iter().take(TARGET_LABS) {
+        for &(_, lab) in labs.iter().take(knob("CHIPSMITH_DETAIL_LABS", TARGET_LABS)) {
             if let Some(k) = (0..LES_PER_LAB).find(|&k| self.slots[lab][k].is_none()) {
                 consider(self.score(le, lab, k));
             }
             let h = mix((round as u64) << 32 ^ le as u64 ^ (lab as u64) << 48);
-            for i in 0..SWAPS {
+            for i in 0..knob("CHIPSMITH_DETAIL_SWAPS", SWAPS).min(8) {
                 let k = ((h >> (8 * i)) % LES_PER_LAB as u64) as usize;
                 if self.slots[lab][k].is_some() {
                     consider(self.score(le, lab, k));
@@ -224,8 +233,11 @@ pub(super) fn refine(s: &mut State, par: bool, trace: bool) -> Done {
     // lost to a clash, and those on a net a taken move changed (a later
     // round re-proposing everyone found little more for several times the
     // scoring).
-    let mut active: Vec<usize> = (0..d.les.len()).filter(|&le| d.chain_of[le].is_none()).collect();
+    let mut active: Vec<usize> = (0..d.les.len())
+        .filter(|&le| d.chain_of[le].is_none())
+        .collect();
     let mut wake = vec![0u32; d.les.len()];
+    let movable = active.len();
     let mut lab_stamp = vec![0u32; s.slots.len()];
     // Per net, the round in which a taken move touched it, and changed
     // its box.
@@ -239,9 +251,15 @@ pub(super) fn refine(s: &mut State, par: bool, trace: bool) -> Done {
         let t = std::time::Instant::now();
         let state = &*s;
         let mut props: Vec<Proposal> = if par {
-            active.par_iter().filter_map(|&le| state.propose(le, round)).collect()
+            active
+                .par_iter()
+                .filter_map(|&le| state.propose(le, round))
+                .collect()
         } else {
-            active.iter().filter_map(|&le| state.propose(le, round)).collect()
+            active
+                .iter()
+                .filter_map(|&le| state.propose(le, round))
+                .collect()
         };
         score_s += t.elapsed().as_secs_f64();
         let t = std::time::Instant::now();
@@ -251,9 +269,11 @@ pub(super) fn refine(s: &mut State, par: bool, trace: bool) -> Done {
         let mut taken = 0;
         for p in &props {
             let (from, _) = s.pos[p.le];
-            let clash = p.nets.iter().zip(&p.changed).any(|(&n, &c)| {
-                net_changed[n] == stamp || (c && net_touched[n] == stamp)
-            });
+            let clash = p
+                .nets
+                .iter()
+                .zip(&p.changed)
+                .any(|(&n, &c)| net_changed[n] == stamp || (c && net_touched[n] == stamp));
             if lab_stamp[from] == stamp || lab_stamp[p.lab] == stamp || clash {
                 wake[p.le] = stamp;
                 continue;
@@ -290,12 +310,15 @@ pub(super) fn refine(s: &mut State, par: bool, trace: bool) -> Done {
                 s.wirelength()
             );
         }
-        active = (0..d.les.len())
-            .filter(|&le| wake[le] == stamp && d.chain_of[le].is_none())
-            .collect();
-        if taken == 0 || gain < MIN_GAIN * total {
+        let everyone = active.len() == movable;
+        let small = taken == 0 || gain < MIN_GAIN * total;
+        if small && everyone {
             break;
         }
+        // The woken run dry: everyone proposes once more before stopping.
+        active = (0..d.les.len())
+            .filter(|&le| d.chain_of[le].is_none() && (small || wake[le] == stamp))
+            .collect();
     }
     Done {
         rounds,
