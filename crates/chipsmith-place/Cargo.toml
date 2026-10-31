@@ -8,3 +8,9 @@ repository.workspace = true
 
 [dependencies]
 rayon.workspace = true
+# The GPU engine (`gpu` feature): off by default, so a machine without
+# the CUDA toolkit or ROCm builds chipsmith (ADR-0012).
+cubecl = { version = "=0.11.3", default-features = false, features = ["std", "stdlib", "hip", "cuda"], optional = true }
+
+[features]
+gpu = ["dep:cubecl"]

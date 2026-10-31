@@ -670,8 +670,8 @@ Cyclone II (EP2C35F672C6):
 | synthesis | chipsmith: what cyclone2-re's `cyclone2.ys` does, on chipsmith's netlist IR (`crates/chipsmith-synth`, `crates/chipsmith-cyclone2/src/synth`) | ours |
 | LUT mapping | chipsmith: AIG plus priority cuts, in place of `abc -lut 4` (`crates/chipsmith-synth/src/lutmap.rs`) | ours |
 | packing | chipsmith: cyclone2-re's nextpnr packer, ported (`crates/chipsmith-cyclone2/src/pack`) | ours |
-| placement | chipsmith: analytic placement of LAB-sized clusters (`crates/chipsmith-place`), legalised onto LAB slots and refined by annealing, nextpnr's LAB rules (`crates/chipsmith-cyclone2/src/place.rs`) | ours |
-| routing | chipsmith: PathFinder over the chip database, rerouting only congested and critical branches (`crates/chipsmith-route`, `crates/chipsmith-cyclone2/src/route.rs`) | ours |
+| placement | chipsmith: electrostatic global placement of every LE from 700 LEs (`crates/chipsmith-place`, on CPU threads or, built with `--features gpu`, a GPU; ADR-0012), legalised LE by LE onto LAB slots and refined by a short annealer, nextpnr's LAB rules (`crates/chipsmith-cyclone2/src/place.rs`, `place/le.rs`); smaller designs, and any the LE legaliser can't fit, by the LAB-cluster flow | ours |
+| routing | chipsmith: PathFinder over the chip database, rerouting only congested and critical branches (`crates/chipsmith-route`, `crates/chipsmith-cyclone2/src/route.rs`); optionally the first iteration in batches, on CPU threads or a GPU (docs/gpu-pnr.md) | ours |
 | bitstream | chipsmith: cyclone2-re's assembler (`cram pack`), moved here and still checked against Quartus by cyclone2-re's `cram` (`crates/chipsmith-cyclone2/src/bitstream`, ADR-0003) | ours |
 | JTAG stream | chipsmith: the SVF `cram svf` wrote, CONF_DONE checked (`crates/chipsmith-cyclone2/src/bitstream/jtag.rs`) | ours |
 | cable | chipsmith: USB-Blaster and FT2232 (MPSSE) drivers, SVF player, 7-series JTAG loader (`crates/chipsmith-jtag`) | ours |
@@ -802,6 +802,13 @@ share chipsmith's own netlist IR, not Verilog.
      (other services running, load 4 to 11); critical paths are the
      median of three placement seeds (`CHIPSMITH_PLACE_SEED`), with the
      range:
+
+     Since gpu-pnr (docs/gpu-pnr.md, ADR-0012) placement works on every
+     LE of designs from 700 LEs, with a short anneal after it:
+     picorv32x24 places in 39.7 s instead of 636.6 and builds 4.2 times
+     faster (835 → 201 s), sha256 2.0 times (129 → 64 s), back to back,
+     load 4 to 7; routed critical paths within `open`'s range over five
+     seeds. The table below is fast-pnr's, before that.
 
      | design | LEs | place s | route s | build s | critical path ns, median of 3 seeds [range] |
      |---|---|---|---|---|---|

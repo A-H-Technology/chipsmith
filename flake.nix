@@ -90,8 +90,15 @@
             # from $ROCM_PATH/lib.
             pkgs.rocmPackages.clr
             cudaToolkit
-            # experiments/cubecl-hello links with it, see its .cargo/config.toml.
-            pkgs.lld
+            # CubeCL builds (`--features gpu`, experiments/gpu-bench) link with
+            # lld (crates/chipsmith/build.rs). nixpkgs' wrapped one, alone:
+            # it adds the rpaths of the libraries it links (libusb), which
+            # the bare `pkgs.lld` doesn't, and the rest of LLVM's binutils
+            # would shadow GNU's for everything else.
+            (pkgs.runCommand "wrapped-ld-lld" { } ''
+              mkdir -p $out/bin
+              ln -s ${pkgs.llvmPackages.bintools}/bin/ld.lld $out/bin/ld.lld
+            '')
             # Random co-simulation of M4K designs against their RTL (tests).
             pkgs.iverilog
           ]

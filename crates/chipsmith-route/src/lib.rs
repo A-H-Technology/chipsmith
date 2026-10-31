@@ -3,11 +3,17 @@
 //! ends. Each device reads its placed design into a [`Design`] and writes
 //! the routed trees back in its own format.
 
+pub mod bucket;
 pub mod chipdb;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod timing;
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
+use std::sync::Mutex;
+
+use rayon::prelude::*;
 
 use anyhow::{bail, ensure, Context, Result};
 
@@ -90,6 +96,10 @@ const MAX_CRITICALITY: f32 = 0.95;
 /// Nets with a connection this critical are rerouted every iteration, not
 /// only when congested, so they can follow the timing as it changes.
 const REROUTE_CRITICALITY: f32 = 0.8;
+/// Nets with this many sinks search their sinks `SINK_GROUP` at a time
+/// side by side, when routing in batches.
+const WIDE_NET: usize = 32;
+const SINK_GROUP: usize = 8;
 
 /// What the search reads of a node for every edge into it, side by side:
 /// the search is bound by cache misses on random nodes, and one line per
@@ -131,6 +141,8 @@ struct Scratch {
     /// Search work, for `CHIPSMITH_ROUTE_TRACE`: tree nodes seeded, nodes
     /// pushed while expanding, nodes expanded.
     work: [u64; 3],
+    /// The integer search's labels (`bucket`), made on first use.
+    labels: bucket::Labels,
 }
 
 impl Scratch {
@@ -144,6 +156,7 @@ impl Scratch {
             kept_sink: vec![0; n],
             delay_to: vec![0.0; n],
             work: [0; 3],
+            labels: bucket::Labels::default(),
         }
     }
 }
@@ -162,6 +175,22 @@ pub struct Router<'a> {
     bbox_margin: f32,
     /// `ASTAR`, or `CHIPSMITH_ROUTE_ASTAR` for tuning it.
     astar: f32,
+    /// How nets are grouped to route side by side (`CHIPSMITH_ROUTE_BATCH`:
+    /// `regions`, or a group size; unset, one at a time).
+    batching: Batching,
+    /// Iterations that batch (`CHIPSMITH_ROUTE_BATCH_ITERATIONS`).
+    batch_iterations: usize,
+    /// The integer search (`bucket`) instead of A* for the nets of
+    /// batches of more than one net, in the iterations that batch from
+    /// scratch (`CHIPSMITH_ROUTE_SEARCH=bucket`; the GPU's search, so a
+    /// GPU and the CPU's threads route the same). Nets alone in a batch,
+    /// repairs and later iterations use A*.
+    bucketed: bool,
+    fixed: Option<bucket::Fixed>,
+    /// The integer search's batches on a GPU (`CHIPSMITH_ROUTE_ACCEL=cuda`
+    /// or `hip`, which implies `bucketed`).
+    #[cfg(feature = "gpu")]
+    gpu_runtime: Option<gpu::Runtime>,
     /// Per tile type, per pip: the LE whose LUT input it permutes.
     permutes: Vec<Option<Vec<i8>>>,
     /// Per tile, bit k: LE k's LUT inputs can't be permuted
@@ -174,6 +203,21 @@ pub struct Router<'a> {
     /// Nodes only one net may use (by index), e.g. the ends of routes
     /// another tool has fixed. Empty when nothing is reserved.
     owner: Vec<u32>,
+}
+
+/// How a PathFinder iteration groups the nets it reroutes. Each group
+/// routes side by side against the routing as it was when the group began,
+/// then commits in net order (a net that collided with an earlier one of
+/// its group is routed again first), so the result doesn't depend on the
+/// number of threads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Batching {
+    /// One net at a time, each seeing every net routed before it.
+    Off,
+    /// Groups whose nets' search regions don't overlap.
+    Regions,
+    /// Groups of this many nets, in order.
+    Fixed(usize),
 }
 
 fn permuting_pips(tt: &chipdb::TileType) -> Option<Vec<i8>> {
@@ -226,6 +270,27 @@ impl<'a> Router<'a> {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(BBOX_MARGIN),
+            bucketed: std::env::var("CHIPSMITH_ROUTE_SEARCH").as_deref() == Ok("bucket")
+                || matches!(
+                    std::env::var("CHIPSMITH_ROUTE_ACCEL").as_deref(),
+                    Ok("cuda") | Ok("hip")
+                ),
+            #[cfg(feature = "gpu")]
+            gpu_runtime: match std::env::var("CHIPSMITH_ROUTE_ACCEL").as_deref() {
+                Ok("cuda") => Some(gpu::Runtime::Cuda),
+                Ok("hip") => Some(gpu::Runtime::Hip),
+                _ => None,
+            },
+            fixed: None,
+            batch_iterations: std::env::var("CHIPSMITH_ROUTE_BATCH_ITERATIONS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1),
+            batching: match std::env::var("CHIPSMITH_ROUTE_BATCH").as_deref() {
+                Ok("regions") => Batching::Regions,
+                Ok(k) => k.parse().map_or(Batching::Off, Batching::Fixed),
+                Err(_) => Batching::Off,
+            },
             astar: std::env::var("CHIPSMITH_ROUTE_ASTAR")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -289,6 +354,76 @@ impl<'a> Router<'a> {
         dx as f32 * kx + dy as f32 * ky
     }
 
+    /// The box a net's searches stay in: its source and sinks, grown by the
+    /// margin; `None` when unlimited.
+    fn region(&self, net: &NetReq) -> Option<chipdb::Box> {
+        self.bbox_margin.is_finite().then(|| {
+            let mut b = self.node[net.source as usize].bbox;
+            for &n in &net.sinks {
+                b = b.union(self.node[n as usize].bbox);
+            }
+            b.grow(self.bbox_margin.min(255.0) as u8)
+        })
+    }
+
+    /// Cut `todo` (net indices, in order) into batches whose regions don't
+    /// overlap: each net goes into the first batch it overlaps nothing in.
+    /// A net without a region, or a wide one, is a batch of its own.
+    fn batches(&self, nets: &[NetReq], todo: &[usize]) -> Vec<Vec<usize>> {
+        let (w, h) = (self.db.width as usize, self.db.height as usize);
+        let words = w.div_ceil(64);
+        // Per batch, per row, the columns its regions cover.
+        let mut taken: Vec<Vec<u64>> = Vec::new();
+        let mut out: Vec<Vec<usize>> = Vec::new();
+        let span = |b: chipdb::Box| {
+            let (x0, x1) = (b.x0 as usize, (b.x1 as usize).min(w - 1));
+            let (y0, y1) = (b.y0 as usize, (b.y1 as usize).min(h - 1));
+            let mask: Vec<u64> = (0..words)
+                .map(|k| {
+                    let (lo, hi) = (k * 64, k * 64 + 63);
+                    if x1 < lo || x0 > hi {
+                        return 0;
+                    }
+                    let (a, b) = (x0.max(lo) - lo, x1.min(hi) - lo);
+                    (u64::MAX >> (63 - b)) & (u64::MAX << a)
+                })
+                .collect();
+            (y0, y1, mask)
+        };
+        for &i in todo {
+            // A wide net goes alone, so its sinks go side by side instead;
+            // in a batch, small nets elsewhere finish while one thread
+            // routes it.
+            let region = self
+                .region(&nets[i])
+                .filter(|_| nets[i].sinks.len() < WIDE_NET);
+            let Some(region) = region else {
+                out.push(vec![i]);
+                taken.push(vec![u64::MAX; words * h]);
+                continue;
+            };
+            let (y0, y1, mask) = span(region);
+            let free = |t: &Vec<u64>| {
+                (y0..=y1).all(|y| (0..words).all(|k| t[y * words + k] & mask[k] == 0))
+            };
+            let b = match taken.iter().position(free) {
+                Some(b) => b,
+                None => {
+                    taken.push(vec![0; words * h]);
+                    out.push(Vec::new());
+                    taken.len() - 1
+                }
+            };
+            for y in y0..=y1 {
+                for k in 0..words {
+                    taken[b][y * words + k] |= mask[k];
+                }
+            }
+            out[b].push(i);
+        }
+        out
+    }
+
     /// Net arcs of the current routing, for timing analysis: every routed
     /// sink in net and sink order, then the unrouted direct ones.
     pub fn net_arcs(nets: &[NetReq], trees: &[Tree]) -> Vec<Arc> {
@@ -316,6 +451,30 @@ impl<'a> Router<'a> {
     }
 
     pub fn route(&mut self, nets: &[NetReq]) -> Result<(Vec<Tree>, usize, timing::Analysis)> {
+        // The nets as experiments/gpu-bench's routing bench reads them: per
+        // net, its region's corners, its source, then its sinks.
+        if let Some(path) = std::env::var_os("CHIPSMITH_ROUTE_DUMP") {
+            let mut out = String::new();
+            for net in nets {
+                let r = self.region(net).unwrap_or(chipdb::Box::EVERYWHERE);
+                out += &format!("{} {} {} {} {}", r.x0, r.y0, r.x1, r.y1, net.source);
+                for s in &net.sinks {
+                    out += &format!(" {s}");
+                }
+                out.push('\n');
+            }
+            std::fs::write(&path, out).context("writing CHIPSMITH_ROUTE_DUMP")?;
+        }
+        if self.bucketed && self.fixed.is_none() {
+            self.fixed = Some(bucket::Fixed::new(self));
+        }
+        #[cfg(feature = "gpu")]
+        let mut searcher = match (self.gpu_runtime, &self.fixed) {
+            (Some(rt), Some(fx)) => {
+                Some(gpu::Searcher::new(rt, self.db, fx, &self.owner).map_err(anyhow::Error::msg)?)
+            }
+            _ => None,
+        };
         let mut trees: Vec<Tree> = vec![Tree::default(); nets.len()];
         // Per net, per sink: how critical its connection is. Nothing is
         // known before the first routing.
@@ -325,30 +484,243 @@ impl<'a> Router<'a> {
         // Out of `self` while the searches borrow it; put back on the way
         // out (a failed search ends the routing).
         let mut scratch = std::mem::replace(&mut self.scratch, Scratch::new(0));
+        // Nodes taken by the batch being committed: where equal to
+        // `batch_stamp`.
+        let mut taken: Vec<u32> = vec![
+            0;
+            if self.batching == Batching::Off {
+                0
+            } else {
+                self.db.nodes()
+            }
+        ];
+        let mut batch_stamp = 0u32;
+        // One search scratch per thread for batches, made on first use.
+        let mut pool: Vec<Mutex<Option<Scratch>>> = (0..rayon::current_num_threads())
+            .map(|_| Mutex::new(None))
+            .collect();
         for iteration in 1..=MAX_ITERATIONS {
             let t_iter = std::time::Instant::now();
             let mut rerouted = 0;
             let mut t_wide = 0.0;
+            let (mut batch_count, mut widest, mut repaired) = (0usize, 0usize, 0usize);
             scratch.work = [0; 3];
-            for (i, net) in nets.iter().enumerate() {
-                let congested = trees[i].nodes.iter().any(|&n| self.node[n as usize].occ > 1);
-                let critical = crit[i].iter().any(|&c| c > REROUTE_CRITICALITY);
-                if iteration > 1 && !congested && !critical {
-                    continue;
+            // Batches in the first iterations only: they reroute most nets
+            // and take most of the time, while late iterations reroute a
+            // few hundred nets whose convergence the one-at-a-time order
+            // settles faster (sha256: 50 iterations batched throughout,
+            // 21 one at a time).
+            if self.batching != Batching::Off && iteration <= self.batch_iterations {
+                // The nets that may reroute are batched once, before any of
+                // them moves; then batch by batch, each batch's nets
+                // against the routing as it stood when the batch began.
+                let todo: Vec<usize> = (0..nets.len())
+                    .filter(|&i| {
+                        iteration == 1
+                            || trees[i]
+                                .nodes
+                                .iter()
+                                .any(|&n| self.node[n as usize].occ > 1)
+                            || crit[i].iter().any(|&c| c > REROUTE_CRITICALITY)
+                    })
+                    .collect();
+                // The GPU's occupancy and history are uploaded once an
+                // iteration, then kept current by the batches' commits.
+                #[cfg(feature = "gpu")]
+                let mut gpu_state_set = false;
+                #[cfg(feature = "gpu")]
+                let mut committed: Vec<u32> = Vec::new();
+                let batches = match self.batching {
+                    // In order, a wide net alone (its sinks then go side
+                    // by side), the others `k` at a time.
+                    Batching::Fixed(k) => {
+                        let mut out: Vec<Vec<usize>> = Vec::new();
+                        let mut open: Vec<usize> = Vec::new();
+                        for &i in &todo {
+                            if nets[i].sinks.len() >= WIDE_NET {
+                                out.push(vec![i]);
+                            } else {
+                                open.push(i);
+                                if open.len() == k.max(1) {
+                                    out.push(std::mem::take(&mut open));
+                                }
+                            }
+                        }
+                        if !open.is_empty() {
+                            out.push(open);
+                        }
+                        out
+                    }
+                    _ => self.batches(nets, &todo),
+                };
+                widest = widest.max(batches.iter().map(Vec::len).max().unwrap_or(0));
+                batch_count += batches.len();
+                for batch in &batches {
+                    // Asked again now that earlier batches have moved: a
+                    // net whose congestion they cleared keeps its tree, as
+                    // in the one-at-a-time loop. Rerouting it anyway kept
+                    // pairs of critical nets trading local lines forever
+                    // (picorv32 stuck at 2 overused nodes for 50
+                    // iterations).
+                    let batch: Vec<usize> = batch
+                        .iter()
+                        .copied()
+                        .filter(|&i| {
+                            iteration == 1
+                                || trees[i]
+                                    .nodes
+                                    .iter()
+                                    .any(|&n| self.node[n as usize].occ > 1)
+                                || crit[i].iter().any(|&c| c > REROUTE_CRITICALITY)
+                        })
+                        .collect();
+                    if batch.is_empty() {
+                        continue;
+                    }
+                    for &i in &batch {
+                        for &n in &trees[i].nodes {
+                            self.node[n as usize].occ -= 1;
+                        }
+                    }
+                    let olds: Vec<Tree> = batch
+                        .iter()
+                        .map(|&i| std::mem::take(&mut trees[i]))
+                        .collect();
+                    let this = &*self;
+                    let route = |s: &mut Scratch,
+                                 i: usize,
+                                 old: &Tree,
+                                 pool: Option<&[Mutex<Option<Scratch>>]>|
+                     -> (Result<Tree>, f64) {
+                        let t_net = std::time::Instant::now();
+                        let keep = (this.incremental && iteration > 1).then_some(old);
+                        let tree = this.route_net(s, i as u32, &nets[i], &crit[i], keep, pool);
+                        let wide = if nets[i].sinks.len() >= 32 {
+                            t_net.elapsed().as_secs_f64()
+                        } else {
+                            0.0
+                        };
+                        (tree, wide)
+                    };
+                    #[cfg(feature = "gpu")]
+                    let on_gpu = searcher.is_some()
+                        && batch.len() > 1
+                        && !(self.incremental && iteration > 1);
+                    #[cfg(not(feature = "gpu"))]
+                    let on_gpu = false;
+                    let routed: Vec<(Result<Tree>, f64)> = if batch.len() == 1 {
+                        // Alone: its sinks may go side by side instead.
+                        vec![route(&mut scratch, batch[0], &olds[0], Some(&pool))]
+                    } else if on_gpu {
+                        #[cfg(feature = "gpu")]
+                        {
+                            let g = searcher.as_mut().expect("on_gpu");
+                            if !gpu_state_set {
+                                let occ: Vec<u32> =
+                                    this.node.iter().map(|n| n.occ as u32).collect();
+                                let hist: Vec<u32> =
+                                    this.node.iter().map(|n| n.hist as u32).collect();
+                                g.set_state(&occ, &hist);
+                                gpu_state_set = true;
+                                // Already in the occupancy just uploaded.
+                                committed.clear();
+                            }
+                            this.route_batch_gpu(g, &mut scratch, &batch, nets, &crit)
+                        }
+                        #[cfg(not(feature = "gpu"))]
+                        unreachable!()
+                    } else {
+                        batch
+                            .par_iter()
+                            .zip(&olds)
+                            .map(|(&i, old)| {
+                                let slot = rayon::current_thread_index().unwrap_or(0) % pool.len();
+                                let mut s = pool[slot].lock().expect("a router thread panicked");
+                                let s = s.get_or_insert_with(|| Scratch::new(this.db.nodes()));
+                                match &this.fixed {
+                                    // The GPU's search on CPU threads: the
+                                    // same trees as `route_batch_gpu`.
+                                    Some(fx) if !(this.incremental && iteration > 1) => {
+                                        let tree = this.route_net_bucketed(
+                                            fx, s, i as u32, &nets[i], &crit[i], None,
+                                        );
+                                        (tree, 0.0)
+                                    }
+                                    _ => route(s, i, old, None),
+                                }
+                            })
+                            .collect()
+                    };
+                    // Committed in net order. A net whose tree takes a
+                    // node an earlier net of this batch just took (a long
+                    // wire reaching into both regions, or a search that
+                    // left its region) is routed again now, against what
+                    // is committed: two nets that can't see each other
+                    // would otherwise trade the same wire back and forth
+                    // every iteration and never converge.
+                    batch_stamp += 1;
+                    for ((&i, (tree, wide)), old) in batch.iter().zip(routed).zip(&olds) {
+                        let mut tree = tree?;
+                        t_wide += wide;
+                        if tree.nodes.iter().any(|&n| taken[n as usize] == batch_stamp) {
+                            let keep = (self.incremental && iteration > 1).then_some(old);
+                            tree = self.route_net(
+                                &mut scratch,
+                                i as u32,
+                                &nets[i],
+                                &crit[i],
+                                keep,
+                                Some(&pool),
+                            )?;
+                            repaired += 1;
+                        }
+                        for &n in &tree.nodes {
+                            self.node[n as usize].occ += 1;
+                            taken[n as usize] = batch_stamp;
+                        }
+                        #[cfg(feature = "gpu")]
+                        committed.extend(tree.nodes.iter().copied());
+                        trees[i] = tree;
+                    }
+                    #[cfg(feature = "gpu")]
+                    if let Some(g) = searcher.as_mut().filter(|_| gpu_state_set) {
+                        g.commit(&committed);
+                        committed.clear();
+                    }
+                    rerouted += batch.len();
                 }
-                for &n in &trees[i].nodes {
-                    self.node[n as usize].occ -= 1;
+                for s in pool.iter_mut() {
+                    if let Some(s) = s.get_mut().expect("a router thread panicked") {
+                        for k in 0..3 {
+                            scratch.work[k] += s.work[k];
+                        }
+                        s.work = [0; 3];
+                    }
                 }
-                rerouted += 1;
-                let t_net = std::time::Instant::now();
-                let old = std::mem::take(&mut trees[i]);
-                let keep = (self.incremental && iteration > 1).then_some(&old);
-                trees[i] = self.route_net(&mut scratch, i as u32, net, &crit[i], keep)?;
-                if net.sinks.len() >= 32 {
-                    t_wide += t_net.elapsed().as_secs_f64();
-                }
-                for &n in &trees[i].nodes {
-                    self.node[n as usize].occ += 1;
+            } else {
+                for (i, net) in nets.iter().enumerate() {
+                    let congested = trees[i]
+                        .nodes
+                        .iter()
+                        .any(|&n| self.node[n as usize].occ > 1);
+                    let critical = crit[i].iter().any(|&c| c > REROUTE_CRITICALITY);
+                    if iteration > 1 && !congested && !critical {
+                        continue;
+                    }
+                    for &n in &trees[i].nodes {
+                        self.node[n as usize].occ -= 1;
+                    }
+                    rerouted += 1;
+                    let t_net = std::time::Instant::now();
+                    let old = std::mem::take(&mut trees[i]);
+                    let keep = (self.incremental && iteration > 1).then_some(&old);
+                    trees[i] = self.route_net(&mut scratch, i as u32, net, &crit[i], keep, None)?;
+                    if net.sinks.len() >= 32 {
+                        t_wide += t_net.elapsed().as_secs_f64();
+                    }
+                    for &n in &trees[i].nodes {
+                        self.node[n as usize].occ += 1;
+                    }
                 }
             }
 
@@ -363,16 +735,46 @@ impl<'a> Router<'a> {
                 }
             }
 
-            let overused: Vec<usize> = (0..self.node.len()).filter(|&n| self.node[n].occ > 1).collect();
+            let overused: Vec<usize> = (0..self.node.len())
+                .filter(|&n| self.node[n].occ > 1)
+                .collect();
             if trace {
                 eprintln!(
-                    "route: iteration {iteration}: {rerouted} nets in {t_search:.2} s ({t_wide:.2} s on nets of 32 sinks or more; {:?} seeded, pushed, expanded), timing {:.2} s, {} overused, critical {:.2} ns, {:.1} s in all",
+                    "route: iteration {iteration}: {rerouted} nets in {t_search:.2} s ({batch_count} batches, the largest {widest} nets, {repaired} rerouted after a collision; {t_wide:.2} s on nets of 32 sinks or more; {:?} seeded, pushed, expanded), timing {:.2} s, {} overused, critical {:.2} ns, {:.1} s in all",
                     scratch.work,
                     t_iter.elapsed().as_secs_f64() - t_search,
                     overused.len(),
                     analysis.critical / 1000.0,
                     started.elapsed().as_secs_f64()
                 );
+            }
+            if trace
+                && !overused.is_empty()
+                && overused.len() <= 3
+                && std::env::var("CHIPSMITH_ROUTE_TRACE").as_deref() == Ok("2")
+            {
+                for &n in &overused {
+                    let users: Vec<(usize, usize, bool)> = trees
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, t)| t.nodes.contains(&(n as NodeId)))
+                        .map(|(i, t)| {
+                            (
+                                i,
+                                nets[i].sinks.len(),
+                                t.nodes[0] == n as NodeId || nets[i].sinks.contains(&(n as NodeId)),
+                            )
+                        })
+                        .collect();
+                    eprintln!(
+                        "route: node {n} ({:?}, {}) used by (net, sinks, is an end) {users:?}",
+                        self.node[n].bbox, self.db.wire_types[self.db.node_type[n] as usize]
+                    );
+                }
+            }
+            #[cfg(feature = "gpu")]
+            if let (true, Some(g)) = (trace, &searcher) {
+                eprintln!("route: GPU batches so far {:.2} s, {} launches ({:.2} s uploading, {:.2} s in kernels, {:.2} s reading trees)", g.busy_s, g.batches, g.phase_s[0], g.phase_s[1], g.phase_s[2]);
             }
             if overused.is_empty() {
                 self.scratch = scratch;
@@ -397,28 +799,27 @@ impl<'a> Router<'a> {
         net: &NetReq,
         crit: &[f32],
         keep: Option<&Tree>,
+        pool: Option<&[Mutex<Option<Scratch>>]>,
     ) -> Result<Tree> {
         s.tree_generation += 1;
+        let gen = s.tree_generation;
         let mut tree = Tree {
             nodes: vec![net.source],
             pips: Vec::new(),
             sink_delay: Vec::new(),
             parent: vec![0],
         };
-        s.in_tree[net.source as usize] = s.tree_generation;
+        s.in_tree[net.source as usize] = gen;
         s.tree_pos[net.source as usize] = 0;
         s.delay_to[net.source as usize] = self.node[net.source as usize].delay;
         if let Some(old) = keep.filter(|t| !t.nodes.is_empty()) {
             self.keep_branches(s, net, crit, old, &mut tree);
         }
+        // Each tree node's delay from the source, in tree order: where a
+        // search starts from it.
+        let mut delays: Vec<Ps> = tree.nodes.iter().map(|&n| s.delay_to[n as usize]).collect();
 
-        let region = self.bbox_margin.is_finite().then(|| {
-            let mut b = self.node[net.source as usize].bbox;
-            for &n in &net.sinks {
-                b = b.union(self.node[n as usize].bbox);
-            }
-            b.grow(self.bbox_margin.min(255.0) as u8)
-        });
+        let region = self.region(net);
         // Most critical first, so they get the direct wires; then nearest.
         let mut order: Vec<usize> = (0..net.sinks.len()).collect();
         order.sort_by(|&a, &b| {
@@ -427,29 +828,60 @@ impl<'a> Router<'a> {
                     .total_cmp(&self.distance(net.source, net.sinks[b])),
             )
         });
-        for i in order {
-            let sink = net.sinks[i];
-            if s.in_tree[sink as usize] == s.tree_generation {
-                continue;
-            }
-            self.search(s, index, &tree.nodes, sink, crit[i], region)
-                .with_context(|| format!("net {}: no route to a sink", net.name))?;
-            // Walk back from the sink to the tree, then add the branch.
-            let mut branch = Vec::new();
-            let mut n = sink;
-            while s.in_tree[n as usize] != s.tree_generation {
-                let (from, edge) = s.visit[n as usize].via.expect("searched nodes have a predecessor");
-                branch.push((n, edge));
-                n = from;
-            }
-            let mut d = s.delay_to[n as usize];
-            let mut parent = s.tree_pos[n as usize];
-            for &(n, edge) in branch.iter().rev() {
-                d += self.node[n as usize].delay;
-                s.delay_to[n as usize] = d;
-                s.in_tree[n as usize] = s.tree_generation;
-                s.tree_pos[n as usize] = tree.nodes.len() as u32;
-                parent = add_node(&mut tree, n, edge, parent);
+        // A wide net's sinks are searched SINK_GROUP at a time side by side,
+        // each from the tree as it was when the group began; the group size
+        // is fixed, so the tree doesn't depend on the number of threads.
+        let group = match pool {
+            Some(_) if net.sinks.len() >= WIDE_NET => SINK_GROUP,
+            _ => 1,
+        };
+        for chunk in order.chunks(group) {
+            let todo: Vec<usize> = chunk
+                .iter()
+                .copied()
+                .filter(|&i| s.in_tree[net.sinks[i] as usize] != gen)
+                .collect();
+            // Per sink, its branch from the sink back to a tree node:
+            // (node, the pip into it) sink first, and the tree node.
+            let branches: Vec<Result<Branch>> = match pool {
+                Some(pool) if todo.len() > 1 => todo
+                    .par_iter()
+                    .map(|&i| {
+                        let slot = rayon::current_thread_index().unwrap_or(0) % pool.len();
+                        let mut ps = pool[slot].lock().expect("a router thread panicked");
+                        let ps = ps.get_or_insert_with(|| Scratch::new(self.db.nodes()));
+                        let seeds = Seeds {
+                            nodes: &tree.nodes,
+                            delay: &delays,
+                        };
+                        self.search(ps, index, seeds, net.sinks[i], crit[i], region)?;
+                        Ok(walk_back(ps, net.sinks[i]))
+                    })
+                    .collect(),
+                _ => {
+                    // One at a time: each search sees the branches added
+                    // before it.
+                    for &i in &todo {
+                        let sink = net.sinks[i];
+                        if s.in_tree[sink as usize] == gen {
+                            continue;
+                        }
+                        let seeds = Seeds {
+                            nodes: &tree.nodes,
+                            delay: &delays,
+                        };
+                        self.search(s, index, seeds, sink, crit[i], region)
+                            .with_context(|| format!("net {}: no route to a sink", net.name))?;
+                        let (branch, seed) = walk_back(s, sink);
+                        self.graft(s, &mut tree, &mut delays, &branch, seed, gen);
+                    }
+                    Vec::new()
+                }
+            };
+            for b in branches {
+                let (branch, seed) =
+                    b.with_context(|| format!("net {}: no route to a sink", net.name))?;
+                self.graft(s, &mut tree, &mut delays, &branch, seed, gen);
             }
         }
         tree.sink_delay = net
@@ -460,12 +892,55 @@ impl<'a> Router<'a> {
         Ok(tree)
     }
 
+    /// Add `branch` (sink first, each node with the pip into it, starting
+    /// from tree node `seed`) to the tree, from where it meets the tree as
+    /// it is now: a branch found from an older tree may run into one added
+    /// since.
+    fn graft(
+        &self,
+        s: &mut Scratch,
+        tree: &mut Tree,
+        delays: &mut Vec<Ps>,
+        branch: &[(NodeId, Edge)],
+        seed: NodeId,
+        gen: u32,
+    ) {
+        let cut = branch
+            .iter()
+            .position(|&(n, _)| s.in_tree[n as usize] == gen)
+            .unwrap_or(branch.len());
+        let fresh = &branch[..cut];
+        if fresh.is_empty() {
+            return;
+        }
+        // What the first fresh node hangs off: the next node along the
+        // branch, or the tree node the search started from.
+        let attach = branch.get(cut).map_or(seed, |&(n, _)| n);
+        let mut d = s.delay_to[attach as usize];
+        let mut parent = s.tree_pos[attach as usize];
+        for &(n, edge) in fresh.iter().rev() {
+            d += self.node[n as usize].delay;
+            s.delay_to[n as usize] = d;
+            s.in_tree[n as usize] = gen;
+            s.tree_pos[n as usize] = tree.nodes.len() as u32;
+            parent = add_node(tree, n, edge, parent);
+            delays.push(d);
+        }
+    }
+
     /// Copy into `tree` (holding only the source) the branches of `old`
     /// that stay: those on no node another net uses that lead to a sink
     /// whose connection isn't critical enough to reroute. On a congested
     /// net with hundreds of sinks, one shared wire otherwise reroutes all
     /// of them.
-    fn keep_branches(&self, s: &mut Scratch, net: &NetReq, crit: &[f32], old: &Tree, tree: &mut Tree) {
+    fn keep_branches(
+        &self,
+        s: &mut Scratch,
+        net: &NetReq,
+        crit: &[f32],
+        old: &Tree,
+        tree: &mut Tree,
+    ) {
         let gen = s.tree_generation;
         for (&sink, &c) in net.sinks.iter().zip(crit) {
             if c <= REROUTE_CRITICALITY {
@@ -512,24 +987,24 @@ impl<'a> Router<'a> {
         &self,
         s: &mut Scratch,
         net: u32,
-        tree: &[NodeId],
+        seeds: Seeds,
         sink: NodeId,
         crit: f32,
         region: Option<chipdb::Box>,
     ) -> Result<()> {
         if let Some(r) = region {
-            if self.search_in(s, net, tree, sink, crit, r).is_ok() {
+            if self.search_in(s, net, seeds, sink, crit, r).is_ok() {
                 return Ok(());
             }
         }
-        self.search_in(s, net, tree, sink, crit, chipdb::Box::EVERYWHERE)
+        self.search_in(s, net, seeds, sink, crit, chipdb::Box::EVERYWHERE)
     }
 
     fn search_in(
         &self,
         s: &mut Scratch,
         net: u32,
-        tree: &[NodeId],
+        seeds: Seeds,
         sink: NodeId,
         crit: f32,
         region: chipdb::Box,
@@ -538,9 +1013,9 @@ impl<'a> Router<'a> {
         let gen = s.generation;
         let mut heap = BinaryHeap::new();
         let per_hop = 1.0 - crit + crit * HOP_DELAY_ESTIMATE / DELAY_UNIT;
-        for &n in tree {
+        for (&n, &delay) in seeds.nodes.iter().zip(seeds.delay) {
             s.work[0] += 1;
-            let g = crit * s.delay_to[n as usize] / DELAY_UNIT;
+            let g = crit * delay / DELAY_UNIT;
             s.visit[n as usize] = Visit {
                 cost: g,
                 stamp: gen,
@@ -590,6 +1065,30 @@ impl<'a> Router<'a> {
         }
         bail!("unreachable")
     }
+}
+
+/// Where a search starts: the tree's nodes, and each one's delay from the
+/// source.
+#[derive(Clone, Copy)]
+struct Seeds<'a> {
+    nodes: &'a [NodeId],
+    delay: &'a [Ps],
+}
+
+/// A branch from a sink back to the tree: (node, the pip into it) sink
+/// first, and the tree node it starts from.
+type Branch = (Vec<(NodeId, Edge)>, NodeId);
+
+/// The branch a search left in `s` from `sink` back to the tree node it
+/// started from.
+fn walk_back(s: &Scratch, sink: NodeId) -> Branch {
+    let mut branch = Vec::new();
+    let mut n = sink;
+    while let Some((from, edge)) = s.visit[n as usize].via {
+        branch.push((n, edge));
+        n = from;
+    }
+    (branch, n)
 }
 
 /// Append `n`, driven by `edge` from the node at index `parent`; returns
@@ -694,5 +1193,211 @@ mod tests {
         assert!(trees[0].nodes.contains(&node("N")));
         assert!(!trees[0].nodes.contains(&node("M")));
         assert!(router.reserve(node("M"), 0).is_err());
+    }
+
+    /// A w x h grid of tiles, each with an output O, an input I and two
+    /// tracks each way: segments HL/HR between horizontal neighbours,
+    /// VB/VT between vertical ones, with pips onto, along and off them.
+    fn grid(w: u32, h: u32) -> ChipDb {
+        let mut t = format!("chip {w} {h}\ntt T\nw O W\nw I W\n");
+        for k in 0..2 {
+            for e in ["HL", "HR", "VB", "VT"] {
+                t += &format!("w {e}{k} W\n");
+            }
+        }
+        for k in 0..2 {
+            for e in ["HL", "HR", "VB", "VT"] {
+                t += &format!("p O {e}{k}\np {e}{k} I\n");
+            }
+            for (a, b) in [
+                ("HL", "HR"),
+                ("HR", "HL"),
+                ("VB", "VT"),
+                ("VT", "VB"),
+                ("HL", "VT"),
+                ("VB", "HR"),
+            ] {
+                t += &format!("p {a}{k} {b}{k}\n");
+            }
+        }
+        t += "end\n";
+        for y in 0..h {
+            for x in 0..w {
+                t += &format!("t {x} {y} T\n");
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                for k in 0..2 {
+                    if x + 1 < w {
+                        t += &format!("node {x} {y} HR{k} {} {y} HL{k}\n", x + 1);
+                    }
+                    if y + 1 < h {
+                        t += &format!("node {x} {y} VT{k} {x} {} VB{k}\n", y + 1);
+                    }
+                }
+            }
+        }
+        ChipDb::parse(t.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn batched_routing_is_the_same_on_any_number_of_threads() {
+        let (w, h) = (12u32, 12u32);
+        let db = grid(w, h);
+        let tile = |x: u32, y: u32| y * w + x;
+        let wire = |name: &str| db.tile_type(0).wire(name).unwrap();
+        let mut timing = timing::Graph::default();
+        let mut nets = Vec::new();
+        // Pseudo-random short nets on distinct sources and sinks, and one
+        // net with 40 sinks (the sink-group path).
+        let mut used_in = std::collections::HashSet::new();
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as u32
+        };
+        let wide_src = tile(0, 0);
+        let mut wide_sinks = Vec::new();
+        for i in 0..40 {
+            let t = tile(1 + i % 11, 1 + (i / 11) * 3);
+            used_in.insert(t);
+            wide_sinks.push(t);
+        }
+        let add = |name: String, src: u32, sinks: Vec<u32>, timing: &mut timing::Graph| NetReq {
+            driver: timing.node(&name, "O"),
+            sink_ports: (0..sinks.len())
+                .map(|k| timing.node(&name, &format!("I{k}")))
+                .collect(),
+            source: db.node(src, wire("O")),
+            source_wire: (src, wire("O")),
+            sinks: sinks.iter().map(|&t| db.node(t, wire("I"))).collect(),
+            direct_ports: vec![],
+            name,
+        };
+        nets.push(add("wide".into(), wide_src, wide_sinks, &mut timing));
+        for i in 0..40 {
+            let src = tile(next(w), next(h));
+            if src == wide_src {
+                continue;
+            }
+            let (sx, sy) = (src % w, src / w);
+            let mut sinks = Vec::new();
+            for _ in 0..1 + next(3) {
+                let t = tile((sx + next(5)).min(w - 1), (sy + next(5)).min(h - 1));
+                if used_in.insert(t) {
+                    sinks.push(t);
+                }
+            }
+            if !sinks.is_empty() {
+                nets.push(add(format!("n{i}"), src, sinks, &mut timing));
+            }
+        }
+        // Distinct sources: drop nets whose source another net already has.
+        let mut seen = std::collections::HashSet::new();
+        nets.retain(|n| seen.insert(n.source));
+        let design = Design {
+            nets,
+            fixed_inputs: HashSet::new(),
+            timing,
+        };
+        let route = |batching: Batching, bucketed: bool, threads: usize| -> Vec<Vec<NodeId>> {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                let mut router = Router::new(&db, &design);
+                router.batching = batching;
+                router.batch_iterations = usize::MAX;
+                router.bucketed = bucketed;
+                let (trees, _, _) = router.route(&design.nets).unwrap();
+                assert!(
+                    router.node.iter().all(|n| n.occ <= 1),
+                    "overused nodes left"
+                );
+                trees.into_iter().map(|t| t.nodes).collect()
+            })
+        };
+        for (batching, bucketed) in [
+            (Batching::Regions, false),
+            (Batching::Fixed(4), false),
+            (Batching::Regions, true),
+        ] {
+            let one = route(batching, bucketed, 1);
+            let four = route(batching, bucketed, 4);
+            assert_eq!(one, four, "{batching:?}, bucketed {bucketed}");
+            for (net, tree) in design.nets.iter().zip(&one) {
+                for sink in &net.sinks {
+                    assert!(
+                        tree.contains(sink),
+                        "{batching:?}: {} misses a sink",
+                        net.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// Needs a CUDA device; passes (saying so) without one.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn gpu_batches_route_as_the_cpu_does() {
+        let (w, h) = (12u32, 12u32);
+        let db = grid(w, h);
+        let wire = |name: &str| db.tile_type(0).wire(name).unwrap();
+        let mut timing = timing::Graph::default();
+        let mut nets = Vec::new();
+        for i in 0..12u32 {
+            let src = (i * 7) % (w * h);
+            let sinks: Vec<u32> = (1..=1 + i % 3)
+                .map(|k| (src + 13 * k + i) % (w * h))
+                .filter(|&t| t != src)
+                .collect();
+            let name = format!("n{i}");
+            nets.push(NetReq {
+                driver: timing.node(&name, "O"),
+                sink_ports: (0..sinks.len())
+                    .map(|k| timing.node(&name, &format!("I{k}")))
+                    .collect(),
+                source: db.node(src, wire("O")),
+                source_wire: (src, wire("O")),
+                sinks: sinks.iter().map(|&t| db.node(t, wire("I"))).collect(),
+                direct_ports: vec![],
+                name,
+            });
+        }
+        let mut seen_src = HashSet::new();
+        let mut seen_sink = HashSet::new();
+        nets.retain(|n| seen_src.insert(n.source) && n.sinks.iter().all(|s| seen_sink.insert(*s)));
+        let design = Design {
+            nets,
+            fixed_inputs: HashSet::new(),
+            timing,
+        };
+        let route = |gpu: bool, batching: Batching| -> Option<Vec<Vec<NodeId>>> {
+            let mut router = Router::new(&db, &design);
+            router.batching = batching;
+            router.bucketed = true;
+            if gpu {
+                router.gpu_runtime = Some(gpu::Runtime::Cuda);
+            }
+            match router.route(&design.nets) {
+                Ok((trees, _, _)) => Some(trees.into_iter().map(|t| t.nodes).collect()),
+                Err(e) if gpu => {
+                    eprintln!("no GPU to test on: {e}");
+                    None
+                }
+                Err(e) => panic!("{e}"),
+            }
+        };
+        for batching in [Batching::Regions, Batching::Fixed(4)] {
+            let cpu = route(false, batching).unwrap();
+            if let Some(gpu) = route(true, batching) {
+                assert_eq!(cpu, gpu, "{batching:?}");
+            }
+        }
     }
 }

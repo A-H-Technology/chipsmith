@@ -13,12 +13,15 @@
 //!   that fill the occupancy run on the CPU, so the GPU version pays for
 //!   copying it over each iteration.
 //!
-//! `gpu-bench [cuda|hip]` prints one table row per size.
+//! `gpu-bench [cuda|hip]` prints one table row per size; `gpu-bench route
+//! <dump> [cuda|hip]` times a router's searches (`route.rs`).
 
 use std::time::Instant;
 
 use cubecl::prelude::*;
 use rayon::prelude::*;
+
+mod route;
 
 const UNITS: u32 = 256;
 
@@ -195,6 +198,15 @@ fn count(n: usize) -> CubeCount {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("route") {
+        let device = match args.get(3).map(String::as_str) {
+            Some("hip") => cubecl::Device::Hip(Default::default()),
+            _ => cubecl::Device::Cuda(Default::default()),
+        };
+        route::run(args.get(2).expect("gpu-bench route <dump> [cuda|hip]"), device);
+        return;
+    }
     let device = match std::env::args().nth(1).as_deref() {
         Some("hip") => cubecl::Device::Hip(Default::default()),
         _ => cubecl::Device::Cuda(Default::default()),

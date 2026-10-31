@@ -700,6 +700,17 @@ impl ChipDb {
         self.node_of[(self.wire_base[tile as usize] + wire) as usize]
     }
 
+    /// The indices of `node`'s downhill edges (`edge`): edges of one node
+    /// are numbered contiguously, all nodes' in node order.
+    pub fn downhill_range(&self, node: NodeId) -> std::ops::Range<usize> {
+        let n = node as usize;
+        self.edge_start[n] as usize..self.edge_start[n + 1] as usize
+    }
+
+    pub fn edge(&self, i: usize) -> &Edge {
+        &self.edges[i]
+    }
+
     pub fn downhill(&self, node: NodeId) -> &[Edge] {
         let n = node as usize;
         &self.edges[self.edge_start[n] as usize..self.edge_start[n + 1] as usize]

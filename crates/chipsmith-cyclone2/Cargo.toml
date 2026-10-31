@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Placement on a GPU (CHIPSMITH_ACCEL=cuda or hip; ADR-0012).
+gpu = ["chipsmith-place/gpu", "chipsmith-route/gpu"]
+
 [dependencies]
 chipsmith-jtag.workspace = true
 chipsmith-netlist.workspace = true
@@ -15,6 +19,7 @@ chipsmith-place.workspace = true
 anyhow.workspace = true
 lzma-rust2.workspace = true
 postcard.workspace = true
+rayon.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true
 serde_json.workspace = true

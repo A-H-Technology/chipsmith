@@ -7,6 +7,8 @@ description = "Is any of chipsmith's placement or routing arithmetic worth a GPU
 [dependencies]
 cubecl = { version = "=0.11.3", default-features = false, features = ["std", "stdlib", "hip", "cuda"] }
 rayon = "1"
+# The routing bench (`gpu-bench route`) reads the routing graph.
+chipsmith-route = { path = "../../crates/chipsmith-route" }
 
 # Not part of the chipsmith workspace: keeps CubeCL (and the LLVM it
 # bundles) out of every chipsmith build.

@@ -217,6 +217,14 @@ Verdict: not worth pursuing yet, for either placement or routing.
   desktop: `cd experiments/gpu-bench && nix develop ../.. --command
   cargo run --release -- hip`.
 
+Revisited on the `gpu-pnr` branch (docs/gpu-pnr.md, ADR-0012): global
+placement now works on every LE with an electrostatic density model, on
+CPU threads or a GPU, and the refining anneal runs cold after it. The
+gain is the algorithm's; the GPU makes global placement about twice as
+fast as rayon (3 to 5 times per iteration), a few seconds of a build. A GPU router (breadth-first
+searches in each net's region, 32 connections a launch) lost to A* on
+8 CPU threads: 20.1 s against 11.3 s for sha256's first iteration.
+
 ## Verification
 
 All on the merged tree (this branch with `open` 33fb8a4) unless noted.

@@ -32,6 +32,9 @@ use chipsmith_place::{Bins, Legalizer, Net, Object, Options, Pin, PinOf, Pos, Pr
 use chipsmith_route::chipdb::{ChipDb, NodeId, Pad, PadIo};
 use chipsmith_route::timing::{self, Arc, Ps};
 
+mod detail;
+mod le;
+
 const LES_PER_LAB: usize = 16;
 /// Signals from outside a LAB arrive on its 38 local lines, each LE input
 /// reaching about half of them. nextpnr's cyclone2 uarch measured 34 as the
@@ -1331,6 +1334,18 @@ impl<'a> State<'a> {
     /// nextpnr's `isBelLocationValid` for one LAB. Hot: runs on every
     /// move, so it allocates nothing and reads each LE's precomputed `Sig`.
     fn lab_check(&self, lab: usize) -> Result<(), Refusal> {
+        self.lab_check_of(lab, &self.slots[lab], |le| self.pos[le].0)
+    }
+
+    /// `lab_check` for LAB `lab` holding `slots`, with `lab_of` saying
+    /// where each LE is (for a LAB's own signals): a move can be checked
+    /// before it is made.
+    fn lab_check_of(
+        &self,
+        lab: usize,
+        slots: &[Option<usize>; LES_PER_LAB],
+        lab_of: impl Fn(usize) -> usize,
+    ) -> Result<(), Refusal> {
         let d = self.design;
         // A third distinct domain already fails, so three slots suffice.
         let mut domains: [((Option<NetId>, bool), Ctl); 3] = [((None, false), (None, false)); 3];
@@ -1348,11 +1363,11 @@ impl<'a> State<'a> {
             }
             (Some(_), Some(s)) => s == v,
         };
-        for le in self.slots[lab].iter().flatten() {
+        for le in slots.iter().flatten() {
             let sig = &d.sigs[*le];
             for &n in &sig.inputs[..sig.n_inputs as usize] {
                 // Driven inside the LAB, or already counted: no new line.
-                let here = d.driver_le[n as usize].is_some_and(|le| self.pos[le as usize].0 == lab);
+                let here = d.driver_le[n as usize].is_some_and(|le| lab_of(le as usize) == lab);
                 if here || inputs[..n_inputs].contains(&n) {
                     continue;
                 }
@@ -2207,6 +2222,19 @@ const REFINE: Schedule = Schedule {
     moves: 1.0,
 };
 
+/// After LE-level placement (ADR-0012), whose start is close enough that
+/// the anneal only polishes: picked on routed critical paths over
+/// picorv32, femtorv32, mult-selftest and sha256, five seeds each, against
+/// `open` 40a29cb untraced (docs/gpu-pnr.md): geomean x1.011 of its
+/// medians, each inside its range of seeds; picorv32x24 9.64 ns median of
+/// three seeds against its 10.65. Five times the moves was x0.989
+/// (picorv32x24 9.58); a fifth of the work is what large designs need.
+const REFINE_LE: Schedule = Schedule {
+    range: 1.0,
+    heat: 0.05,
+    moves: 0.1,
+};
+
 fn anneal(s: &mut State, rng: &mut Rng, sched: Schedule) -> u64 {
     let d = s.design;
     let movable: Vec<usize> = (0..d.les.len())
@@ -2324,6 +2352,16 @@ fn anneal(s: &mut State, rng: &mut Rng, sched: Schedule) -> u64 {
     }
     total_moves
 }
+
+/// Designs with this many LEs are placed LE by LE (ADR-0012); smaller
+/// ones by clusters. The global placement costs a few seconds whatever
+/// the design's size (its fillers cover the chip), which the cluster
+/// flow's anneal only costs from about here: over every DE2 example,
+/// m4k-bytes (98 LEs) placed in 0.8 s by clusters and 7.2 s LE by LE,
+/// fir (534) 7.4 and 14.1 s, femtorv32 (788) 14.5 and 11.2 s, all loaded;
+/// critical paths there were about even. `CHIPSMITH_PLACER=electro` or
+/// `cluster` picks either.
+const LE_LEVEL_FROM: usize = 700;
 
 /// How many refining anneals run side by side, one thread each, from the
 /// same legal start with different seeds. Fixed rather than the machine's
@@ -2473,39 +2511,6 @@ pub fn place_file(
             fixed_xy.iter().flatten().map(|p| p.0).max()
         );
     }
-    let started = std::time::Instant::now();
-    let clusters = cluster(&design, &grid, &fixed_xy);
-    if trace {
-        let mut sizes = [0usize; LES_PER_LAB + 1];
-        for c in &clusters {
-            sizes[c.len()] += 1;
-        }
-        let controls: HashSet<_> = design
-            .sigs
-            .iter()
-            .filter_map(|s| s.ff.map(|f| (f.ena, f.sclr, f.aclr, f.sync_kind)))
-            .collect();
-        let distinct = |f: &dyn Fn(&FfCtl) -> Option<NetId>| {
-            design
-                .sigs
-                .iter()
-                .filter_map(|s| s.ff.and_then(|c| f(&c)))
-                .collect::<HashSet<_>>()
-                .len()
-        };
-        eprintln!(
-            "place: {} clusters of {} LEs (sizes 1..16: {:?}), {} register control sets ({} enable, {} sclr, {} aclr nets), {} chains, in {:.1} s",
-            clusters.len(),
-            clusters.iter().map(Vec::len).sum::<usize>(),
-            &sizes[1..],
-            controls.len(),
-            distinct(&|c| c.ena.0),
-            distinct(&|c| c.sclr.0),
-            distinct(&|c| c.aclr),
-            design.chains.len(),
-            started.elapsed().as_secs_f64()
-        );
-    }
     for b in Block::ALL {
         let used = (0..design.blocks.len())
             .filter(|&r| design.block_kind(r) == b)
@@ -2527,36 +2532,98 @@ pub fn place_file(
         design.les.len(),
         grid.tiles.len() * LES_PER_LAB
     );
-    let an = analytic_problem(&design, &grid, &fixed_xy, &clusters);
-    let rounds = {
-        let mut legalizer = LabLegalizer::new(&mut state, &an);
-        legalizer.trace = trace;
-        let env = |name: &str, default: f32| -> f32 {
-            std::env::var(name)
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(default)
-        };
-        let defaults = Options::default();
-        let options = Options {
-            trace,
-            // Objects are whole LABs' worth: no slack is needed for
-            // legalisation.
-            target_density: env("CHIPSMITH_PLACE_DENSITY", 1.0),
-            anchor: env("CHIPSMITH_PLACE_ANCHOR", defaults.anchor),
-            rounds: env("CHIPSMITH_PLACE_ROUNDS", defaults.rounds as f32) as usize,
-            patience: env("CHIPSMITH_PLACE_PATIENCE", defaults.patience as f32) as usize,
-        };
-        let outcome = chipsmith_place::place(&an.problem, &mut legalizer, options);
-        legalizer.legalize(&outcome.targets);
-        ensure!(!legalizer.failed, "the design doesn't fit");
-        outcome.rounds
+    let started = std::time::Instant::now();
+    let accel = chipsmith_place::electro::Accel::from_env().map_err(anyhow::Error::msg)?;
+    let le_level = match std::env::var("CHIPSMITH_PLACER").as_deref() {
+        Ok("electro") => true,
+        Ok("cluster") => false,
+        Err(_) => design.les.len() >= LE_LEVEL_FROM,
+        Ok(other) => bail!("CHIPSMITH_PLACER={other}: not electro or cluster"),
+    };
+    let le_placed = match le_level {
+        true => match le::place(&mut state, &fixed_xy, accel, trace) {
+            Ok(p) => Some(p.iterations),
+            Err(e) => {
+                // The cluster flow fits everything it did before, so a
+                // design the LE legaliser can't fit still places.
+                eprintln!("place: LE-level placement didn't fit ({e}); placing clusters instead");
+                None
+            }
+        },
+        false => None,
+    };
+    let rounds = match le_placed {
+        Some(iterations) => iterations,
+        None => {
+            let clusters = cluster(&design, &grid, &fixed_xy);
+            if trace {
+                let mut sizes = [0usize; LES_PER_LAB + 1];
+                for c in &clusters {
+                    sizes[c.len()] += 1;
+                }
+                let controls: HashSet<_> = design
+                    .sigs
+                    .iter()
+                    .filter_map(|s| s.ff.map(|f| (f.ena, f.sclr, f.aclr, f.sync_kind)))
+                    .collect();
+                let distinct = |f: &dyn Fn(&FfCtl) -> Option<NetId>| {
+                    design
+                        .sigs
+                        .iter()
+                        .filter_map(|s| s.ff.and_then(|c| f(&c)))
+                        .collect::<HashSet<_>>()
+                        .len()
+                };
+                eprintln!(
+                    "place: {} clusters of {} LEs (sizes 1..16: {:?}), {} register control sets ({} enable, {} sclr, {} aclr nets), {} chains, in {:.1} s",
+                    clusters.len(),
+                    clusters.iter().map(Vec::len).sum::<usize>(),
+                    &sizes[1..],
+                    controls.len(),
+                    distinct(&|c| c.ena.0),
+                    distinct(&|c| c.sclr.0),
+                    distinct(&|c| c.aclr),
+                    design.chains.len(),
+                    started.elapsed().as_secs_f64()
+                );
+            }
+            let an = analytic_problem(&design, &grid, &fixed_xy, &clusters);
+            let rounds = {
+                let mut legalizer = LabLegalizer::new(&mut state, &an);
+                legalizer.trace = trace;
+                let env = |name: &str, default: f32| -> f32 {
+                    std::env::var(name)
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(default)
+                };
+                let defaults = Options::default();
+                let options = Options {
+                    trace,
+                    // Objects are whole LABs' worth: no slack is needed for
+                    // legalisation.
+                    target_density: env("CHIPSMITH_PLACE_DENSITY", 1.0),
+                    anchor: env("CHIPSMITH_PLACE_ANCHOR", defaults.anchor),
+                    rounds: env("CHIPSMITH_PLACE_ROUNDS", defaults.rounds as f32) as usize,
+                    patience: env("CHIPSMITH_PLACE_PATIENCE", defaults.patience as f32) as usize,
+                };
+                let outcome = chipsmith_place::place(&an.problem, &mut legalizer, options);
+                legalizer.legalize(&outcome.targets);
+                ensure!(!legalizer.failed, "the design doesn't fit");
+                outcome.rounds
+            };
+            rounds
+        }
     };
     let initial_cost = state.wirelength();
+    // The nets' timing weights from the legal placement, which the anneal
+    // sizes its first temperature with. Only the trace used to compute
+    // them, so tracing changed the placement.
+    let initial_critical = state.reweight();
     if trace {
         eprintln!(
             "place: analytic {rounds} rounds, wirelength {initial_cost}, critical {:.2} ns, {:.1} s",
-            state.reweight() / 1000.0,
+            initial_critical / 1000.0,
             started.elapsed().as_secs_f64()
         );
     }
@@ -2567,13 +2634,54 @@ pub fn place_file(
             .and_then(|v| v.parse().ok())
             .unwrap_or(default)
     };
+    let refine = if le_placed.is_some() {
+        REFINE_LE
+    } else {
+        REFINE
+    };
     let sched = Schedule {
-        range: env("CHIPSMITH_PLACE_RANGE", REFINE.range),
-        heat: env("CHIPSMITH_PLACE_HEAT", REFINE.heat),
-        moves: env("CHIPSMITH_PLACE_MOVES", REFINE.moves),
+        range: env("CHIPSMITH_PLACE_RANGE", refine.range),
+        heat: env("CHIPSMITH_PLACE_HEAT", refine.heat),
+        moves: env("CHIPSMITH_PLACE_MOVES", refine.moves),
     };
     let seeds = env("CHIPSMITH_PLACE_SEEDS", SEEDS as f64).max(1.0) as usize;
-    let (mut state, moves) = best_of(&state, seeds, sched);
+    // CHIPSMITH_PLACE_DETAIL: 1 runs the batched detailed placement
+    // before the anneal, 2 after it.
+    let detail = if le_placed.is_some() {
+        env("CHIPSMITH_PLACE_DETAIL", 0.0) as u32
+    } else {
+        0
+    };
+    let run_detail = |state: &mut State, trace: bool| -> u64 {
+        let t = std::time::Instant::now();
+        let par = !matches!(accel, chipsmith_place::electro::Accel::Serial);
+        let done = detail::refine(state, par, trace);
+        if trace {
+            eprintln!(
+                "place: detail {} rounds, {} moves, wirelength {}, {:.2} s ({:.2} s scoring, {:.2} s taking)",
+                done.rounds,
+                done.moves,
+                state.wirelength(),
+                t.elapsed().as_secs_f64(),
+                done.score_s,
+                done.take_s
+            );
+        }
+        done.moves
+    };
+    let mut detail_moves = 0;
+    if detail == 1 {
+        detail_moves += run_detail(&mut state, trace);
+    }
+    let (mut state, moves) = if env("CHIPSMITH_PLACE_ANNEAL", 1.0) != 0.0 {
+        best_of(&state, seeds, sched)
+    } else {
+        (state, 0)
+    };
+    if detail == 2 {
+        detail_moves += run_detail(&mut state, trace);
+    }
+    let moves = moves + detail_moves;
     let critical = state.reweight();
     if trace {
         eprintln!(
