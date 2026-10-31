@@ -300,9 +300,21 @@ pub struct Flat {
     pub real_demand: Vec<f64>,
     /// Per resource, per bin: capacity times target.
     pub limit: Vec<f32>,
+    /// Per resource: how much more overflow than `stop_overflow` the run
+    /// accepts (0 for a resource nothing uses). A resource whose demand
+    /// comes in whole bins (blocks, sha256's one-register control sets)
+    /// keeps a smoothed overflow while its objects straddle bins, and
+    /// waiting for it over-spreads everything else (mult-selftest: 527
+    /// iterations for its multipliers, HPWL 7,943 against 4,390); the
+    /// legaliser puts such objects on sites anyway.
+    pub slack: Vec<f32>,
 }
 
 pub const FIXED: u32 = u32::MAX;
+
+/// A resource whose demand-weighted object share is at least this comes in
+/// whole bins (`Flat::slack`).
+const WHOLE_BINS: f64 = 0.9;
 
 /// Iterations without a 1% drop in the worst overflow before stopping.
 const STALL: usize = 50;
@@ -427,6 +439,20 @@ impl Flat {
         let real_demand: Vec<f64> = (0..r_count)
             .map(|r| p.objects.iter().map(|o| o.demand[r] as f64).sum())
             .collect();
+        let coarse: Vec<f64> = (0..r_count)
+            .map(|r| {
+                let total: f64 = p.objects.iter().map(|o| o.demand[r] as f64).sum();
+                if total > 0.0 {
+                    p.objects
+                        .iter()
+                        .map(|o| (o.demand[r] as f64).powi(2))
+                        .sum::<f64>()
+                        / total
+                } else {
+                    0.0
+                }
+            })
+            .collect();
         let target: Vec<f32> = (0..r_count)
             .map(|r| {
                 let cap: f64 = p.capacity[r].iter().map(|&c| c as f64).sum();
@@ -439,15 +465,9 @@ impl Flat {
                 // weighted mean share says how coarse it is; the largest
                 // object would let a few such registers (picorv32x24 has
                 // some) fill every LAB's controls.
-                let total: f64 = p.objects.iter().map(|o| o.demand[r] as f64).sum();
-                let coarse = if total > 0.0 {
-                    p.objects.iter().map(|o| (o.demand[r] as f64).powi(2)).sum::<f64>() / total
-                } else {
-                    0.0
-                };
                 (opts.target_density as f64)
                     .max(util + 0.02)
-                    .max(coarse)
+                    .max(coarse[r])
                     .min(1.0) as f32
             })
             .collect();
@@ -515,6 +535,13 @@ impl Flat {
                 fill[o as usize] += 1;
             }
         }
+        let slack: Vec<f32> = (0..r_count)
+            .map(|r| match (real_demand[r] > 0.0, coarse[r] >= WHOLE_BINS) {
+                (false, _) => 0.0,
+                (true, false) => 1.0,
+                (true, true) => 2.0,
+            })
+            .collect();
         let mut background = vec![0.0; r_count * bins];
         let mut limit = vec![0.0; r_count * bins];
         for r in 0..r_count {
@@ -542,6 +569,7 @@ impl Flat {
             target,
             real_demand,
             limit,
+            slack,
         }
     }
 
@@ -1136,7 +1164,23 @@ fn run(
     let mut prev_hpwl: Option<f64> = None;
     let mut overflow = first.overflow.clone();
     let mut iterations = 0;
-    let max_over = |o: &[f32]| o.iter().copied().fold(0.0f32, f32::max);
+    // The worst overflow, each resource's measured against its slack.
+    let max_over = |o: &[f32]| {
+        o.iter()
+            .zip(&f.slack)
+            .filter(|(_, &s)| s > 0.0)
+            .map(|(&v, &s)| v / s)
+            .fold(0.0f32, f32::max)
+    };
+    if opts.trace {
+        eprintln!(
+            "electro: {} objects ({} fillers), targets {:?}, overflow slack {:?}",
+            f.n_real,
+            f.n - f.n_real,
+            f.target,
+            f.slack
+        );
+    }
     let mut best_overflow = f32::MAX;
     let mut since_progress = 0;
     let mut best: Option<Vec<Pos>> = None;
