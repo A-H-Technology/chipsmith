@@ -90,8 +90,15 @@
             # from $ROCM_PATH/lib.
             pkgs.rocmPackages.clr
             cudaToolkit
-            # experiments/cubecl-hello links with it, see its .cargo/config.toml.
-            pkgs.lld
+            # CubeCL builds (`--features gpu`, experiments/gpu-bench) link with
+            # lld (crates/chipsmith/build.rs). nixpkgs' wrapped one, alone:
+            # it adds the rpaths of the libraries it links (libusb), which
+            # the bare `pkgs.lld` doesn't, and the rest of LLVM's binutils
+            # would shadow GNU's for everything else.
+            (pkgs.runCommand "wrapped-ld-lld" { } ''
+              mkdir -p $out/bin
+              ln -s ${pkgs.llvmPackages.bintools}/bin/ld.lld $out/bin/ld.lld
+            '')
             # Random co-simulation of M4K designs against their RTL (tests).
             pkgs.iverilog
           ]
@@ -114,10 +121,8 @@
             export CHIPSMITH_CYCLONE2_GRAPH=$PWD/target/routing-graph-${builtins.baseNameOf open.db}.bin
             export CHIPSMITH_XC7_GRAPH=$PWD/target/xc7-routing-graph-${builtins.baseNameOf xc7.prjxray-db}.bin
             # cudarc dlopens libcuda by bare name; NixOS puts the driver's
-            # copy here rather than anywhere ld.so searches. A `--features
-            # gpu` build links the LLVM CubeCL bundles, which needs
-            # libstdc++ at run time.
-            export LD_LIBRARY_PATH=/run/opengl-driver/lib:${cudaToolkit}/lib:${pkgs.stdenv.cc.cc.lib}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+            # copy here rather than anywhere ld.so searches.
+            export LD_LIBRARY_PATH=/run/opengl-driver/lib:${cudaToolkit}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
           '';
         };
       }

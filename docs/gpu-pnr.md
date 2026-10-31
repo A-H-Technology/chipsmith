@@ -342,9 +342,10 @@ the next two columns change only the global placement's engine.
   (CUDA toolkit, ROCm's HIP runtime). CubeCL's bundled LLVM needs lld to
   link (GNU ld scans its archives in the wrong order), which
   `crates/chipsmith/build.rs` and `crates/chipsmith-place/build.rs` ask
-  for when the feature is on, and libstdc++ at run time, which the
-  devshell puts on `LD_LIBRARY_PATH`. `llvm-sys` is held at 231.0.1,
-  gpu-bench's version.
+  for when the feature is on. The devshell's `ld.lld` is nixpkgs'
+  wrapped one, which writes the rpaths of what it links (libusb,
+  libstdc++) as GNU ld's wrapper does; the bare `pkgs.lld` didn't, and
+  the binaries didn't start outside the devshell.
 - HIP builds but has not run: there is no AMD GPU here. On the AMD
   desktop: `CHIPSMITH_ACCEL=hip target/release/chipsmith -C examples/sha256
   build`, and `cd experiments/gpu-bench && nix develop ../.. --command
