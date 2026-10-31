@@ -321,6 +321,17 @@ the next two columns change only the global placement's engine.
   on every `CHIPSMITH_*` variable, ADR-0011).
 - The anneal (8 seeds on threads, the best by estimated critical path)
   and the router (batched or not) are deterministic as before.
+- Found on the way, and older than this branch: the nets' timing weights
+  before the anneal were computed only inside the placement trace's
+  message, and the anneal sizes its first temperature with them, so
+  `CHIPSMITH_PLACE_TRACE=1` changed the placement. They are computed
+  always now (every measurement here ran with the trace on, so the
+  numbers hold); picorv32 with and without the trace gives the same
+  bitstream.
+- Checked on the bench: global placement on 1 and on 8 threads gives
+  byte-identical `placed.json`, `routed.json` and bitstreams for
+  picorv32, sha256 and picorv32x24; two CUDA runs of picorv32 give the
+  same bitstream.
 
 ## Building and running
 

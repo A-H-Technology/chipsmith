@@ -2525,10 +2525,14 @@ pub fn place_file(
         }
     };
     let initial_cost = state.wirelength();
+    // The nets' timing weights from the legal placement, which the anneal
+    // sizes its first temperature with. Only the trace used to compute
+    // them, so tracing changed the placement.
+    let initial_critical = state.reweight();
     if trace {
         eprintln!(
             "place: analytic {rounds} rounds, wirelength {initial_cost}, critical {:.2} ns, {:.1} s",
-            state.reweight() / 1000.0,
+            initial_critical / 1000.0,
             started.elapsed().as_secs_f64()
         );
     }
