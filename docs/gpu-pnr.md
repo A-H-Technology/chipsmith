@@ -106,6 +106,13 @@ with offsets, nets, the resources' capacities per bin and a timing hook.
 The xc7 back end can use it with its own resources (LUTs, flip-flops,
 control sets per slice).
 
+Designs of 700 LEs or more are placed this way; smaller ones by the
+cluster flow, as before. The global placement costs a few seconds
+whatever the design's size: its fillers cover the chip (about 7,300 of
+them against 100 real objects on m4k-bytes), and the cluster flow's
+anneal only costs that much from about 700 LEs (see "Every DE2
+example"). `CHIPSMITH_PLACER=electro` or `cluster` forces either.
+
 ### Legalisation (Cyclone II, `place/le.rs`)
 
 Greedy and deterministic, per LE: blocks to the nearest free site of
@@ -311,6 +318,25 @@ the next two columns change only the global placement's engine.
   run drew a higher load (12) than the CPU's.
 - Routed critical paths are as good or better, on these single seeds as
   over five seeds (Choosing the settings).
+
+## Every DE2 example
+
+`bench/speed.sh` (synthesis to bitstream, no trace) over all 33 DE2
+examples with `open` 40a29cb and with this branch placing everything LE
+by LE, seed 0, at load 25 to 40: every example built. Routed critical
+paths were equal (within 0.03 ns) on 17, better on 9 (femtorv32 13.97 → 13.19,
+mult-selftest 15.80 → 14.63, picorv32 7.90 → 7.74, picorv32x24 10.65 →
+10.18, negedge-selftest 9.44 → 9.09, vga-pattern 6.63 → 6.32,
+sram-selftest 5.93 → 5.69, de2-io 3.71 → 3.45, m4k-tdp 3.93 → 3.80) and
+worse on 7 (ram-leds 4.03 → 4.37, i2c-master 7.03 → 7.49, m4k-selftest
+11.83 → 12.50, spi-master 4.22 → 4.45, sdram-selftest 6.48 → 6.65,
+crc32 3.47 → 3.53, sha256 20.99 → 21.11), single seeds against seed
+spreads of 2 to 20% on these designs (docs/fast-pnr-status.md).
+Placement of the small examples went from under a second to 5 to 13 s
+(m4k-bytes 0.8 → 7.2 s, ram 1.4 → 13.4 s, uart 0.7 → 5.9 s), the global
+placement's fixed cost; fir (534 LEs) 7.4 → 14.1 s, femtorv32 (788)
+14.5 → 11.2 s. That set the 700-LE threshold: below it the examples
+place by clusters again, as on `open`.
 
 ## Determinism
 

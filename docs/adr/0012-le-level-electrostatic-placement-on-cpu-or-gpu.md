@@ -13,7 +13,7 @@ Global placement now works on every LE: an electrostatic placer (ePlace's densit
 
 ## Consequences
 
-- Below about 30,000 objects the GPU is launch-bound, so the gain from a GPU on these designs is bounded. Most of the speed-up comes from the algorithm, which runs the same way on CPU threads. docs/gpu-pnr.md reports serial CPU, parallel CPU and GPU separately.
+- Below about 30,000 objects the GPU is launch-bound, so the gain from a GPU on these designs is bounded: global placement runs about twice as fast as on CPU threads, which is a few seconds of a build. The speed-up comes from the algorithm, which runs the same way on CPU threads. docs/gpu-pnr.md reports serial CPU, parallel CPU and GPU separately.
 - GPU and CPU placements differ, and each is repeatable on its own.
-- The old cluster flow stays. It is the fallback when the LE legaliser can't fit a design, and `CHIPSMITH_PLACER=cluster` selects it for comparison.
+- The old cluster flow stays. It places designs under 700 LEs, where the global placement's fixed cost (its fillers cover the chip) is more than the cluster flow's whole anneal. It is also the fallback when the LE legaliser can't fit a design. `CHIPSMITH_PLACER=electro` or `cluster` forces either flow.
 - CubeCL is an optional dependency of `chipsmith-place` (the `gpu` feature). Builds without the feature don't compile it, but Cargo.lock lists it, so nix fetches its sources.
