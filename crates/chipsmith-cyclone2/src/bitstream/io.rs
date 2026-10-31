@@ -1032,6 +1032,20 @@ impl IoDb {
         self.sources(p, arch::IO_PIA_TO_OE)
     }
 
+    /// LAB-local lines each register control's source mux can select, by
+    /// the pin buffer port it serves: the input register's clock enable,
+    /// the output side's (the `OEREG_CE` mux, which both registers use),
+    /// the asynchronous reset. The same tile's lines as the data mux (rcf
+    /// `IO_CEIN_PIN`, `IO_CEOUT_PIN`, `IO_ACLR_PIN` sit beside
+    /// `IO_DATAOUT`).
+    pub fn control_sources(&self, p: &Pin) -> [(&'static str, Vec<u32>); 3] {
+        [
+            ("INCLKENA", self.sources(p, arch::IO_PIA_TO_INREG_CE)),
+            ("OUTCLKENA", self.sources(p, arch::IO_PIA_TO_OEREG_CE)),
+            ("ARESET", self.sources(p, arch::IO_PIA_TO_CLR)),
+        ]
+    }
+
     fn sources(&self, p: &Pin, arch: i32) -> Vec<u32> {
         let Some(m) = self.muxes.get(&(p.ioe.block, arch)) else {
             return vec![];

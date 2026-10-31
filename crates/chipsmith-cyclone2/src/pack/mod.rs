@@ -28,7 +28,7 @@ pub use yosys::bit_name;
 
 use crate::hard;
 use crate::m4k::{CellPort, Param, Pin, Ports, Sel, Side};
-use crate::pin::{register_param, PowerUp};
+use crate::pin::{control_param, is_one, register_param, PowerUp};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -936,6 +936,23 @@ fn pack_lut1(nl: &mut Netlist, stats: &mut Stats) {
                         if let Kind::Ff(cfg) = &mut nl.cell_mut(u).kind {
                             cfg.clk_inv = !cfg.clk_inv;
                         }
+                    }
+                }
+                // Into an I/O cell's register controls, which invert in
+                // the cell (quartus_map folds them there too).
+                (Kind::Ibuf { .. } | Kind::Obuf { .. } | Kind::Iobuf { .. }, _)
+                    if matches!(p, Port::Inclkena | Port::Outclkena | Port::Areset) =>
+                {
+                    nl.reconnect(u, p, input);
+                    if inv {
+                        let name = match p {
+                            Port::Inclkena => control_param::INCLKENA_INVERT,
+                            Port::Outclkena => control_param::OUTCLKENA_INVERT,
+                            _ => control_param::ARESET_INVERT,
+                        };
+                        let params = &mut nl.cell_mut(u).params;
+                        let was = params.get(name).and_then(Value::as_str).is_some_and(is_one);
+                        params.insert(name.into(), Value::String(if was { "0" } else { "1" }.into()));
                     }
                 }
                 (Kind::Ff(_), _) if matches!(p, Port::Ena | Port::Sclr) => {

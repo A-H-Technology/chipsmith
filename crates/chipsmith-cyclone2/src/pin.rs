@@ -392,3 +392,78 @@ pub fn register_of(params: &HashMap<String, String>, name: &str) -> Result<Optio
         areset: flag("ARESET"),
     }))
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_survive_their_params() {
+        let mut all = Vec::new();
+        for pull in [Pull::None, Pull::Up, Pull::BusHold] {
+            for c in LvttlCurrent::ALL {
+                all.push(PinSettings {
+                    standard: Standard::Lvttl(c),
+                    pull,
+                });
+            }
+            for standard in [Standard::Lvcmos, Standard::V25Input] {
+                all.push(PinSettings { standard, pull });
+            }
+        }
+        for s in all {
+            let params: HashMap<String, String> = s
+                .params()
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect();
+            assert_eq!(PinSettings::from_params(&params).unwrap(), s, "{params:?}");
+        }
+        // The defaults are no assignments at all.
+        assert!(PinSettings::default().params().is_empty());
+    }
+
+    #[test]
+    fn contradictory_params_are_rejected() {
+        for bad in [
+            &[
+                ("WEAK_PULL_UP_RESISTOR", "ON"),
+                ("ENABLE_BUS_HOLD_CIRCUITRY", "ON"),
+            ][..],
+            &[
+                ("IO_STANDARD", "3.3-V LVCMOS"),
+                ("CURRENT_STRENGTH_NEW", "8MA"),
+            ],
+            &[("IO_STANDARD", "1.8 V")],
+            &[("CURRENT_STRENGTH_NEW", "2MA")],
+        ] {
+            let params = bad
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            assert!(PinSettings::from_params(&params).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn register_modes_survive_their_params() {
+        for power_up in [PowerUp::Low, PowerUp::High] {
+            for enable in [false, true] {
+                for areset in [false, true] {
+                    let m = IoRegMode {
+                        power_up,
+                        enable,
+                        areset,
+                    };
+                    let params: HashMap<String, String> = m
+                        .params(register_param::OUTPUT, str::to_string, || "1".to_string())
+                        .into_iter()
+                        .collect();
+                    assert_eq!(register_of(&params, register_param::OUTPUT).unwrap(), Some(m));
+                }
+            }
+        }
+        assert_eq!(register_of(&HashMap::new(), register_param::INPUT).unwrap(), None);
+    }
+}

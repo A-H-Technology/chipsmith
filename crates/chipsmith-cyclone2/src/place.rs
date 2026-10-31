@@ -63,13 +63,17 @@ enum Port {
     Outclk,
     Dataout,
     Oe,
+    /// An I/O cell's register clock enables and asynchronous reset.
+    Inclkena,
+    Outclkena,
+    Areset,
     M4k(m4k::Pin),
     Mult(mult::Pin),
     Hard(hard::Pin),
 }
 
 impl Port {
-    const FIXED: [Port; 18] = [
+    const FIXED: [Port; 21] = [
         Port::DataA,
         Port::DataB,
         Port::DataC,
@@ -88,12 +92,16 @@ impl Port {
         Port::Outclk,
         Port::Dataout,
         Port::Oe,
+        Port::Inclkena,
+        Port::Outclkena,
+        Port::Areset,
     ];
 
     /// The netlist's name of each port, in `FIXED` order.
-    const NAMES: [&'static str; 18] = [
+    const NAMES: [&'static str; 21] = [
         "DATAA", "DATAB", "DATAC", "DATAD", "CIN", "COUT", "COMBOUT", "DATAIN", "SDATA", "CLK",
-        "ENA", "ACLR", "SCLR", "REGOUT", "INCLK", "OUTCLK", "DATAOUT", "OE",
+        "ENA", "ACLR", "SCLR", "REGOUT", "INCLK", "OUTCLK", "DATAOUT", "OE", "INCLKENA",
+        "OUTCLKENA", "ARESET",
     ];
 
     fn parse(name: &str) -> Option<Port> {
@@ -127,6 +135,9 @@ impl Port {
             Port::Outclk => 15,
             Port::Dataout => 16,
             Port::Oe => 17,
+            Port::Inclkena => 18,
+            Port::Outclkena => 19,
+            Port::Areset => 20,
             Port::M4k(_) | Port::Mult(_) | Port::Hard(_) => return None,
         })
     }
