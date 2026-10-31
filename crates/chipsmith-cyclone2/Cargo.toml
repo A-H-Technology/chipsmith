@@ -19,6 +19,7 @@ chipsmith-place.workspace = true
 anyhow.workspace = true
 lzma-rust2.workspace = true
 postcard.workspace = true
+rayon.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -32,6 +32,7 @@ use chipsmith_place::{Bins, Legalizer, Net, Object, Options, Pin, PinOf, Pos, Pr
 use chipsmith_route::chipdb::{ChipDb, NodeId, Pad, PadIo};
 use chipsmith_route::timing::{self, Arc, Ps};
 
+mod detail;
 mod le;
 
 const LES_PER_LAB: usize = 16;
@@ -1322,6 +1323,18 @@ impl<'a> State<'a> {
     /// nextpnr's `isBelLocationValid` for one LAB. Hot: runs on every
     /// move, so it allocates nothing and reads each LE's precomputed `Sig`.
     fn lab_check(&self, lab: usize) -> Result<(), Refusal> {
+        self.lab_check_of(lab, &self.slots[lab], |le| self.pos[le].0)
+    }
+
+    /// `lab_check` for LAB `lab` holding `slots`, with `lab_of` saying
+    /// where each LE is (for a LAB's own signals): a move can be checked
+    /// before it is made.
+    fn lab_check_of(
+        &self,
+        lab: usize,
+        slots: &[Option<usize>; LES_PER_LAB],
+        lab_of: impl Fn(usize) -> usize,
+    ) -> Result<(), Refusal> {
         let d = self.design;
         // A third distinct domain already fails, so three slots suffice.
         let mut domains: [((Option<NetId>, bool), Ctl); 3] = [((None, false), (None, false)); 3];
@@ -1339,11 +1352,11 @@ impl<'a> State<'a> {
             }
             (Some(_), Some(s)) => s == v,
         };
-        for le in self.slots[lab].iter().flatten() {
+        for le in slots.iter().flatten() {
             let sig = &d.sigs[*le];
             for &n in &sig.inputs[..sig.n_inputs as usize] {
                 // Driven inside the LAB, or already counted: no new line.
-                let here = d.driver_le[n as usize].is_some_and(|le| self.pos[le as usize].0 == lab);
+                let here = d.driver_le[n as usize].is_some_and(|le| lab_of(le as usize) == lab);
                 if here || inputs[..n_inputs].contains(&n) {
                     continue;
                 }
@@ -2569,7 +2582,31 @@ pub fn place_file(
         moves: env("CHIPSMITH_PLACE_MOVES", refine.moves),
     };
     let seeds = env("CHIPSMITH_PLACE_SEEDS", SEEDS as f64).max(1.0) as usize;
-    let (mut state, moves) = best_of(&state, seeds, sched);
+    let mut state = state;
+    let mut detail_moves = 0;
+    if le_placed.is_some() && env("CHIPSMITH_PLACE_DETAIL", 1.0) != 0.0 {
+        let t = std::time::Instant::now();
+        let par = !matches!(accel, chipsmith_place::electro::Accel::Serial);
+        let done = detail::refine(&mut state, par, trace);
+        detail_moves = done.moves;
+        if trace {
+            eprintln!(
+                "place: detail {} rounds, {} moves, wirelength {}, {:.2} s ({:.2} s scoring, {:.2} s taking)",
+                done.rounds,
+                done.moves,
+                state.wirelength(),
+                t.elapsed().as_secs_f64(),
+                done.score_s,
+                done.take_s
+            );
+        }
+    }
+    let (mut state, moves) = if env("CHIPSMITH_PLACE_ANNEAL", 1.0) != 0.0 {
+        best_of(&state, seeds, sched)
+    } else {
+        (state, 0)
+    };
+    let moves = moves + detail_moves;
     let critical = state.reweight();
     if trace {
         eprintln!(
