@@ -17,7 +17,7 @@ use super::device::{Device, Node};
 use super::device::element_name;
 use super::hard::{self, Asmi, Hard, HardInput, Jtag};
 use super::io::{
-    Dir, InReg, Input, IoDb, IoReg, OutData, Output, OutputEnable, PinUse, Standard, Vccio,
+    Dir, InReg, Input, IoClock, IoControl, IoDb, IoReg, OutData, Output, OutputEnable, PinUse, Standard, Vccio,
     BLOCK_CLK_N, BLOCK_CLK_P,
 };
 use super::logic::{
@@ -28,7 +28,7 @@ use super::m4k::{self, Content, Controls, CtlSrc, M4k, Mode, Width};
 use super::mult::{self as bmult, DataIn, DataPin, Mult, Sign};
 use super::phys::{PhysDesign, Pip, RoutedNet};
 use crate::mult::{self as cmult, Operand};
-use crate::pin::{assignment, register_of, register_param, PinSettings, Pull};
+use crate::pin::{assignment, control_param, register_of, register_param, PinSettings, Pull};
 
 /// A nextpnr wire, by what it is in the device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -133,6 +133,12 @@ pub enum IoePin {
     RegOut,
     /// The output and OE registers' clock.
     OutClk,
+    /// The input register's clock enable, the output and OE registers',
+    /// and the cell's asynchronous reset: LAB lines into the cell's
+    /// source muxes.
+    InClkEna,
+    OutClkEna,
+    Areset,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -310,6 +316,9 @@ fn wire(dev: &Device, tx: u32, ty: u32, name: &str) -> Result<Wire> {
                 "INCLK" => IoePin::InClk,
                 "REGOUT" => IoePin::RegOut,
                 "OUTCLK" => IoePin::OutClk,
+                "INCLKENA" => IoePin::InClkEna,
+                "OUTCLKENA" => IoePin::OutClkEna,
+                "ARESET" => IoePin::Areset,
                 _ => bail!("wire {name}"),
             };
             return Ok(Wire::Ioe { x, y, z, pin });
@@ -638,6 +647,8 @@ impl Routed {
         // of each IOE's input and output-side registers.
         let mut reg_datain: HashMap<(u32, u32, u32), [bool; 2]> = HashMap::new();
         let mut io_clk: HashMap<(u32, u32, u32, IoePin), u32> = HashMap::new();
+        // The LAB line each IOE's clock enables and reset come in on.
+        let mut io_ctl_line: HashMap<(u32, u32, u32, IoePin), u32> = HashMap::new();
         let mut ram_in: HashMap<(u32, u32), BTreeMap<m4k::Input, u8>> = HashMap::new();
         let mut ram_pia: HashMap<(u32, u32), [Option<u8>; 8]> = HashMap::new();
         let mut ram_ctl: HashMap<(u32, u32, u8), CtlSrc> = HashMap::new();
@@ -912,7 +923,12 @@ impl Routed {
                             x,
                             y,
                             z,
-                            pin: pin @ (IoePin::DataOut | IoePin::Oe),
+                            pin:
+                                pin @ (IoePin::DataOut
+                                | IoePin::Oe
+                                | IoePin::InClkEna
+                                | IoePin::OutClkEna
+                                | IoePin::Areset),
                         },
                     ) => {
                         let t = &dev.routing.templates
@@ -923,12 +939,11 @@ impl Routed {
                             n.name,
                             element_name(t.element_enum)
                         );
-                        let m = if pin == IoePin::Oe {
-                            &mut oe_line
-                        } else {
-                            &mut data_line
+                        match pin {
+                            IoePin::Oe => oe_line.insert((x, y, z), t.index as u32),
+                            IoePin::DataOut => data_line.insert((x, y, z), t.index as u32),
+                            _ => io_ctl_line.insert((x, y, z, pin), t.index as u32),
                         };
-                        m.insert((x, y, z), t.index as u32);
                     }
                     (
                         Wire::Ioe {
@@ -1165,16 +1180,39 @@ impl Routed {
                     let (standard, drive) = settings.standard.ioe();
                     // An I/O register, clocked from the row-clock buffer the
                     // routing reached its clock pin through.
+                    // A control the routing brought in, and whether the
+                    // cell inverts it.
+                    let control = |pin: IoePin, invert: &str| {
+                        io_ctl_line.get(&(x, y, z, pin)).map(|&line| IoControl {
+                            line,
+                            inverted: flag(c, invert),
+                        })
+                    };
+                    let areset = control(IoePin::Areset, control_param::ARESET_INVERT);
                     let reg = |param: &str, clk: IoePin| -> Result<Option<IoReg>> {
-                        let Some(power_up) = register_of(&c.params, param)? else {
+                        let Some(mode) = register_of(&c.params, param)? else {
                             return Ok(None);
                         };
-                        let clock = *io_clk
+                        let buffer = *io_clk
                             .get(&(x, y, z, clk))
                             .with_context(|| format!("{name}: {param} clock not routed"))?;
+                        let (ena, clk_inv, ena_inv) = if clk == IoePin::InClk {
+                            (IoePin::InClkEna, control_param::INCLK_INVERT, control_param::INCLKENA_INVERT)
+                        } else {
+                            (IoePin::OutClkEna, control_param::OUTCLK_INVERT, control_param::OUTCLKENA_INVERT)
+                        };
+                        let enable = control(ena, ena_inv);
+                        ensure!(!mode.enable || enable.is_some(), "{name}: {param}'s clock enable not routed");
+                        ensure!(!mode.areset || areset.is_some(), "{name}: {param}'s reset not routed");
                         Ok(Some(IoReg {
-                            clock,
-                            powers_up_high: power_up.high(),
+                            clock: IoClock {
+                                buffer,
+                                inverted: flag(c, clk_inv),
+                                enable: enable.filter(|_| mode.enable),
+                            },
+                            powers_up_high: mode.power_up.high(),
+                            areset: areset.filter(|_| mode.areset),
+                            sclr: None,
                         }))
                     };
                     let in_reg = reg(register_param::INPUT, IoePin::InClk)?;

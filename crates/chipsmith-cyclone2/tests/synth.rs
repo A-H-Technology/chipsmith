@@ -319,9 +319,10 @@ fn io_registers() {
 
 /// Output and OE registers with clock enables and synchronous resets
 /// (every order `$sdffe`/`$sdffce` has, either polarity, powering up 0 and
-/// 1, one register on two pins): the I/O cell's plain register samples
-/// the LE register's next state. Proven against the RTL with the
-/// registers in the pin buffers' models, and co-simulated.
+/// 1, one register on two pins): the I/O cell's register samples the LE
+/// register's next state (an enable alone is the cell's own since
+/// branch de2-ioece: q0, q1). Proven against the RTL with the registers in
+/// the pin buffers' models, and co-simulated.
 #[test]
 fn io_registers_with_enables_and_resets() {
     let dir = scratch("io-register-gated-src");
@@ -338,7 +339,7 @@ fn io_registers_with_enables_and_resets() {
          reg [1:0] st = 0;\n\
          always @(posedge clk) case (st) 0: if (en) st <= 1; 1: st <= a[5] ? 2 : 0; default: st <= 0; endcase\n\
          reg oe = 0; always @(posedge clk) if (rst) oe <= 0; else if (en) oe <= a[5];\n\
-         reg [1:0] tq = 0; always @(posedge clk) if (en_n) tq <= a[1:0];\n\
+         reg [1:0] tq = 0; always @(posedge clk) if (rst) tq <= 0; else if (en_n) tq <= a[1:0];\n\
          assign y = {st[1], st[0], q4, q3, q2, q1, q0};\n\
          assign t[0] = oe ? tq[0] : 1'bz; assign t[1] = oe ? tq[1] : 1'bz;\nendmodule\n",
     )
@@ -459,70 +460,211 @@ fn memory_selftests_io_registers() {
     }
 }
 
-/// What an I/O register can't be is an error, not a register left behind.
+/// Registers with the I/O cell's own controls, as Quartus packs them
+/// (cyclone2-re README, "I/O-cell register controls"): input and output
+/// registers with clock enables of either polarity, asynchronous clears
+/// and presets (the cell's reset, to the power-up value) and falling-edge
+/// clocks, and a tri-state pin whose output and OE registers have
+/// different enables, which become logic on D. Proven against the RTL with
+/// the registers in the pin buffers' models, co-simulated, and each
+/// control checked to be the cell's, not logic.
+#[test]
+fn io_registers_with_cell_controls() {
+    let dir = scratch("io-register-controls-src");
+    let v = dir.join("top.v");
+    std::fs::write(
+        &v,
+        "module top(input clk, input en, input en_n, input rst, input rst_n, input [3:0] pi,\n\
+                    input [5:0] a, output [5:0] y, output [3:0] o, output t);\n\
+         reg i0; always @(posedge clk) if (en) i0 <= pi[0];\n\
+         reg i1; always @(posedge clk or posedge rst) if (rst) i1 <= 0; else if (!en_n) i1 <= pi[1];\n\
+         reg i2; always @(negedge clk or negedge rst_n) if (!rst_n) i2 <= 1; else i2 <= pi[2];\n\
+         reg i3 = 1; always @(negedge clk) if (en) i3 <= pi[3];\n\
+         assign o = {i3, i2, i1, i0};\n\
+         reg q0; always @(posedge clk) if (!en_n) q0 <= a[0];\n\
+         reg q1; always @(posedge clk or posedge rst) if (rst) q1 <= 0; else q1 <= a[1];\n\
+         reg q2; always @(posedge clk or negedge rst_n) if (!rst_n) q2 <= 1; else if (en) q2 <= a[2];\n\
+         reg q3; always @(negedge clk) q3 <= a[3];\n\
+         reg q4 = 1; always @(negedge clk) if (en) q4 <= a[4];\n\
+         reg q5; always @(posedge clk or posedge rst) if (rst) q5 <= 0; else if (en) q5 <= a[5];\n\
+         assign y = {q5, q4, q3, q2, q1, q0};\n\
+         reg td, te; always @(posedge clk) begin if (en) td <= a[2]; if (!en_n) te <= a[3]; end\n\
+         assign t = te ? td : 1'bz;\nendmodule\n",
+    )
+    .unwrap();
+    let out = IoRegisters {
+        output: true,
+        ..Default::default()
+    };
+    let mut regs: BTreeMap<String, IoRegisters> =
+        (0..6).map(|k| (format!("y[{k}]"), out)).collect();
+    for k in 0..4 {
+        regs.insert(
+            format!("pi[{k}]"),
+            IoRegisters {
+                input: true,
+                ..Default::default()
+            },
+        );
+    }
+    regs.insert(
+        "t".into(),
+        IoRegisters {
+            output: true,
+            output_enable: true,
+            ..Default::default()
+        },
+    );
+    let files = [v];
+    design_with("io-register-controls", "top", &files, false, &regs);
+    let params = cosim_io_params("io-register-controls-cosim", &files, &regs);
+    let count = |k: &str| params.iter().filter(|p| p.contains_key(k)).count();
+    // Enables: i0, i1, i3; q0, q2, q4, q5. t's two differ: logic.
+    assert_eq!(count("INPUT_REGISTER_ENA"), 3);
+    assert_eq!(count("OUTPUT_REGISTER_ENA"), 4);
+    assert_eq!(count("OE_REGISTER_ENA"), 0);
+    // Resets: i1, i2; q1, q2, q5.
+    assert_eq!(count("INPUT_REGISTER_ARESET"), 2);
+    assert_eq!(count("OUTPUT_REGISTER_ARESET"), 3);
+    assert_eq!(count("INCLK_INVERT"), 2);
+    assert_eq!(count("OUTCLK_INVERT"), 2);
+    // (An active-low enable may come out of yosys as an inverter LUT
+    // shared by several registers, so its polarity isn't counted.)
+    assert_eq!(count("ARESET_INVERT"), 2);
+    // A preset powers up 1.
+    let high = |k: &str| {
+        params
+            .iter()
+            .filter(|p| p.get(k).and_then(|v| v.str()) == Some("high"))
+            .count()
+    };
+    assert_eq!(high("INPUT_REGISTER"), 2);
+    assert_eq!(high("OUTPUT_REGISTER"), 2);
+}
+
+/// Tri-state pins whose output and OE registers take the cell's controls:
+/// one enable line (one register using it, or both), one reset, a falling
+/// edge. Co-simulated only: a tri-stated register holding its value isn't
+/// seen at the pin, and the proof matches registers by name, which a
+/// register now in the cell has no longer (the bidir's three registers
+/// sharing one reset are `tests/ioe_controls.rs`').
+#[test]
+fn io_registers_tri_state_cell_controls() {
+    let dir = scratch("io-register-tri-controls-src");
+    let v = dir.join("top.v");
+    std::fs::write(
+        &v,
+        "module top(input clk, input en, input en_n, input rst, input [3:0] a, output [2:0] u);\n\
+         reg d0, e0; always @(posedge clk or posedge rst) if (rst) begin d0 <= 0; e0 <= 0; end\n\
+           else begin if (en) d0 <= a[0]; e0 <= a[1]; end\n\
+         assign u[0] = e0 ? d0 : 1'bz;\n\
+         reg d1, e1; always @(negedge clk) if (!en_n) begin d1 <= a[2]; e1 <= a[3]; end\n\
+         assign u[1] = e1 ? d1 : 1'bz;\n\
+         reg d2, e2 = 1; always @(posedge clk) begin d2 <= a[1]; if (en) e2 <= a[0]; end\n\
+         assign u[2] = e2 ? d2 : 1'bz;\nendmodule\n",
+    )
+    .unwrap();
+    let both = IoRegisters {
+        output: true,
+        output_enable: true,
+        ..Default::default()
+    };
+    let regs: BTreeMap<String, IoRegisters> = (0..3).map(|k| (format!("u[{k}]"), both)).collect();
+    let params = cosim_io_params("io-register-tri-controls", &[v], &regs);
+    let count = |k: &str| params.iter().filter(|p| p.contains_key(k)).count();
+    assert_eq!(count("OUTPUT_REGISTER_ENA"), 2);
+    assert_eq!(count("OE_REGISTER_ENA"), 2);
+    assert_eq!(count("OUTPUT_REGISTER_ARESET"), 1);
+    assert_eq!(count("OE_REGISTER_ARESET"), 1);
+    assert_eq!(count("OUTCLK_INVERT"), 1);
+}
+
+/// Synthesizes with I/O registers, co-simulates against the RTL, and
+/// returns the pin buffers' parameters.
+fn cosim_io_params(
+    name: &str,
+    files: &[PathBuf],
+    regs: &BTreeMap<String, IoRegisters>,
+) -> Vec<BTreeMap<String, chipsmith_netlist::ParamValue>> {
+    let s = synthesize_with(name, "top", files, regs);
+    let sim = support::cosim(
+        &s.dir,
+        &s.rtl,
+        s.stages.refined.as_ref().unwrap(),
+        s.stages.cells.as_ref().unwrap(),
+        COSIM_CYCLES,
+        1,
+    )
+    .unwrap_or_else(|e| panic!("co-simulation: {e}"));
+    assert!(sim.compared > 0);
+    let cells = s.stages.cells.expect("a cells stage");
+    cells.modules[0]
+        .cells
+        .iter()
+        .filter_map(|c| match &c.kind {
+            CellKind::Other(g) if g.ty.starts_with("CY2_") => Some(g.params.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What an I/O register can't be is an error, not a register left behind:
+/// what Quartus doesn't pack either, and requests that make no sense.
 #[test]
 fn io_registers_that_cant_be_are_errors() {
     let dir = scratch("io-register-errors");
     let v = dir.join("top.v");
     std::fs::write(
         &v,
-        "module top(input clk, input en, input rst, input a, input b, output y, output z, \
-                    output w, output e);\n\
-         reg q; always @(posedge clk or posedge rst) if (rst) q <= 0; else q <= a;\n\
-         reg n; always @(negedge clk) n <= a;\n\
-         reg s; always @(posedge clk) if (en) s <= b;\n\
-         assign y = q; assign z = n; assign w = a; assign e = s;\nendmodule\n",
+        "module top(input clk, input en, input rst, input rst2, input set, input a, input b, \
+                    input d, output y, output z, output w, output e, output f, inout g, inout h);\n\
+         reg s; always @(posedge clk) if (rst) s <= 0; else s <= b;\n\
+         reg q; always @(posedge clk or posedge rst or posedge set) if (rst) q <= 0; \
+                else if (set) q <= 1; else q <= a;\n\
+         reg l; always @(posedge clk or posedge rst) if (rst) l <= d; else l <= a;\n\
+         reg p = 1; always @(posedge clk or posedge rst) if (rst) p <= 0; else p <= a;\n\
+         reg gi; always @(posedge clk or posedge rst) if (rst) gi <= 0; else gi <= g;\n\
+         reg gd; always @(posedge clk or posedge rst2) if (rst2) gd <= 0; else gd <= a;\n\
+         assign g = en ? gd : 1'bz;\n\
+         reg hd; always @(posedge clk) hd <= a; reg he; always @(negedge clk) he <= d;\n\
+         assign h = he ? hd : 1'bz;\n\
+         assign y = q; assign z = l; assign w = a; assign e = s ^ gi; assign f = p;\nendmodule\n",
     )
     .unwrap();
+    let out = IoRegisters {
+        output: true,
+        ..Default::default()
+    };
+    let input = IoRegisters {
+        input: true,
+        ..Default::default()
+    };
     for (port, want, says) in [
+        ("b", input, "synchronous reset"),
+        ("y", out, "both an asynchronous set and"),
+        ("z", out, "asynchronous load"),
+        ("f", out, "restores its power-up value"),
         (
-            "y",
-            IoRegisters {
-                output: true,
-                ..Default::default()
-            },
-            "make the reset synchronous",
-        ),
-        (
-            "b",
+            "g",
             IoRegisters {
                 input: true,
-                ..Default::default()
-            },
-            "sample the pin in a plain register",
-        ),
-        (
-            "z",
-            IoRegisters {
                 output: true,
                 ..Default::default()
             },
-            "falling edge",
+            "different asynchronous resets",
         ),
         (
-            "w",
+            "h",
             IoRegisters {
                 output: true,
+                output_enable: true,
                 ..Default::default()
             },
-            "no register drives",
+            "different clocks or clock edges",
         ),
-        (
-            "en",
-            IoRegisters {
-                input: true,
-                ..Default::default()
-            },
-            "samples the pin",
-        ),
-        (
-            "a",
-            IoRegisters {
-                output: true,
-                ..Default::default()
-            },
-            "on an input",
-        ),
+        ("w", out, "no register drives"),
+        ("en", input, "samples the pin"),
+        ("a", out, "on an input"),
         (
             "y",
             IoRegisters {
@@ -531,14 +673,7 @@ fn io_registers_that_cant_be_are_errors() {
             },
             "never tri-stated",
         ),
-        (
-            "nope",
-            IoRegisters {
-                input: true,
-                ..Default::default()
-            },
-            "doesn't have",
-        ),
+        ("nope", input, "doesn't have"),
     ] {
         let regs = BTreeMap::from([(port.to_string(), want)]);
         let err = match synthesize_observed(

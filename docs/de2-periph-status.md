@@ -17,7 +17,9 @@ its own to `IO_RAW_DATAOUT` and the pin's output. PLL_1's pin is PIN_AA7,
 the DE2's DRAM_CLK; PLL_2 uses F21, PLL_3 E5 and PLL_4 V21. cyclone2-re's
 chip database didn't have that path (its fuzz design p12 was the one PLL
 design it couldn't assemble). Any other pin takes the clock as data on
-its global ("Fixed: a global clock as data" below). The fix:
+its global ("Fixed: a global clock as data" below). Since branch
+de2-ioece Quartus has placed each of F21, E5 and V21 itself ("Fixed:
+PLL_4" below). The fix:
 
 - cyclone2-re: four `PLLOUT` bels and the missing `IO_RAW_DATAOUT` → pin
   pip in the chip database, `cram quartus-export` and `cram roundtrip`
@@ -43,10 +45,10 @@ de2-io) build to the same RBFs on the new chip database.
   every 7 µs.
 - Test: each pass writes all 4M words with a 32-bit LFSR seeded from the
   pass number, then reads them back and compares.
-- Size: 810 LEs since the controller's registers drive the pins
-  straight (below); 776 with the extra register stage it had first.
-  Quartus byte-identical; chipsmith estimates Fmax at 154.2 MHz (152.6
-  before).
+- Size: 777 LEs since branch de2-ioece, the controller's enables the I/O
+  cells' own (Fmax estimate 163.3 MHz; not yet on the board); 810 with
+  them as logic on D, the build the board ran (154.2 MHz); 776 with the
+  extra register stage it had first. Quartus byte-identical.
 
 On the board (loaded over JTAG):
 
@@ -88,7 +90,9 @@ SRAM:
 - Reads: 2 clocks. The input registers sample on the edge that puts out
   the next address (10 ns access, 2.5 ns output hold), so `RD_LAT` is 2.
 - Test: as sdram-selftest's, all 256K words a pass.
-- Size: 606 LEs, Fmax estimated at 175.2 MHz. Quartus byte-identical.
+- Size: 539 LEs since branch de2-ioece (the enables the I/O cells' own;
+  Fmax estimate 167.9 MHz; not yet on the board), 606 and 175.2 MHz with
+  them as logic, the build the board ran. Quartus byte-identical.
 - Simulated first (iverilog, a behavioural SRAM): 0 errors over 2
   passes, and one corrupted word counted once.
 
@@ -147,6 +151,81 @@ which is what the board should give:
 Pressing keys and flipping switches needs someone at the board. Its
 outputs (LED drive strengths, the LED that powers up lit, HEX0) can't be
 seen without a camera on the board.
+
+## Fixed: the I/O cell's own register controls (was gap 2)
+
+An input register had to be plain, and an output or OE register's enable
+and synchronous reset were logic on its D ("Fixed: I/O-cell registers with
+an enable or reset" below); an asynchronous reset or a falling edge was an
+error. Since branch de2-ioece chipsmith puts them into the I/O cell as
+Quartus does. cyclone2-re found how (its README, "I/O-cell register
+controls"; 35 Quartus designs in `tools/ioce_jobs.txt`):
+
+- What the cell has: per register a clock enable (the input register its
+  own, the output and OE registers one line between them, each using it
+  or tied off), one asynchronous reset for all three that returns a
+  register to its power-up value (a preset is a clear plus power-up 1), a
+  synchronous clear, and clock inversion per side. Each control is a LAB
+  line into a source mux (`IO_PIA_TO_INREG_CE`, `IO_PIA_TO_OEREG_CE`,
+  `IO_PIA_TO_CLR`, `IO_PIA_TO_SCLR`) with an inverter; the clear is
+  active low in the cell. 34 of the 35 designs assemble byte-identically
+  in `cram roundtrip`; the miss is a core LAB with two clears.
+- What Quartus packs: enables, clears, presets and falling edges on all
+  three registers. A synchronous reset it makes logic on an output or OE
+  register's D and leaves an input register with one in the core. It also
+  leaves an input register in the core beside a different reset, and an OE
+  register beside an output register with another edge or enable.
+- chipsmith (`synth/io.rs`, `pack/mod.rs`, `bitstream/io.rs`): the same.
+  An enable or reset goes in natively, an inverter in front folds into
+  the cell. A synchronous reset stays logic on D (two different output and
+  OE enables become logic too, where Quartus leaves the OE register out).
+  The chip database gives each user IOE bel `INCLKENA`, `OUTCLKENA` and
+  `ARESET` pins; cyclone2-re's Quartus export writes them (and switches
+  off Quartus' automatic globals, which moved a pin driving clears onto a
+  global and left the routing dangling).
+- Still errors, as Quartus won't pack them: an input register with a
+  synchronous reset, an asynchronous load, both an asynchronous set and
+  clear, different resets in one cell, output and OE registers on
+  different edges, and an initial value its asynchronous reset
+  contradicts (Quartus drops the initial value).
+- Proof: `io_registers_with_cell_controls` (`tests/synth.rs`) proves input
+  and output registers with every control against the RTL (26 `$equiv`)
+  and co-simulates them; `io_registers_tri_state_cell_controls`
+  co-simulates tri-state pins (their held values aren't visible to the
+  proof); `tests/ioe_controls.rs` builds a design through the whole flow
+  and checks what the bitstream writes, a bidir's three registers on one
+  reset included; `io_registers_that_cant_be_are_errors` the errors. An
+  inverted reset in the cell builder fails the proof; dropping the
+  inverter folding fails the flow test. examples/de2-ioregs (enables,
+  clear, preset, active-low enable and clear, falling edge, the bidir) is
+  Quartus byte-identical.
+- RBFs: of the 33 other DE2 examples (picorv32x24 not rebuilt), two change
+  through the packing: sdram-selftest (810 to 777 LEs) and sram-selftest
+  (606 to 539), whose controllers' enables now are the cells'. 12 more
+  change through the chip database alone (open's chipsmith on the new
+  database builds them as this branch does): crc32, de2-io,
+  de2-jtag-counter, de2-pll-counter, femtorv32, m4k-bytes, m4k-tdp, ram,
+  ram-leds, serv, sha256, vga-pattern. The new pins' pips sit on every
+  IOE tile's LAB lines, and the router breaks ties between equal-cost
+  routes differently with them in the graph. All 14 changed builds are
+  Quartus byte-identical. The other 19 (blinky-vhdl included) build to
+  the same RBF.
+
+## Fixed: PLL_4 (was gap 4)
+
+PLL_4 had never been in a Quartus design; its pins came from the routing
+database alone. Since branch de2-ioece, nine Quartus designs (cyclone2-re
+`tools/clk_jobs.txt` q4a-q4f, q1x-q3x) confirm them:
+
+- PLL_4 takes the bottom edge's clock pins: AE14, AF14, AD13 and AC13
+  (the DE2's SW[3]-SW[6]), each tried; with no location given, Quartus
+  puts a PLL on AE14 onto PLL_4 itself.
+- Left to place `PLL_OUT` itself, Quartus puts each PLL's counter 2 on
+  AA7 (PLL_1), F21 (PLL_2), E5 (PLL_3) and V21 (PLL_4).
+- All nine assemble byte-identically in `cram roundtrip` with no change to
+  the database. chipsmith builds a PLL from AE14 with CLK2 on V21 on
+  PLL_4 through its own clock output, Quartus byte-identical
+  (`pll_4_from_a_bottom_clock_pin_to_its_own_pin` in `tests/gclk_data.rs`).
 
 ## Fixed: a global clock as data (was gap 1)
 
@@ -222,11 +301,13 @@ register stage in front of the pins. Since branch de2-ioreg:
   registers in the pin buffers' models (28 `$equiv`), then co-simulates
   10,000 cycles. Swapping the enable's polarity in `next_state` fails the
   proof.
-- Still errors, since every `registers` entry is an explicit request (the
+- Still errors then (until branch de2-ioece, above), since every
+  `registers` entry is an explicit request (the
   manifest has no "if possible"): an asynchronous reset or load and a
   falling-edge clock (a mux on D acts only on an edge; the I/O cell's
   clear isn't modelled). The error now says why and what to write.
-- Input registers still must be plain. The same trick isn't the same
+- Input registers still had to be plain (until branch de2-ioece, above).
+  The same trick isn't the same
   there: the I/O register would sample the pin every edge, and the enable
   and reset would have to be retimed over it (the controls registered
   too, the held value in an LE register, a LUT after the pin's register).
@@ -296,15 +377,17 @@ small PLL designs with Quartus and reading their post-fit atoms
    the only check. Boundary-scan SAMPLE would read every pin's state
    without a camera, but the EP2C35F672 BSDL isn't in the Quartus
    install, and bsdl.info needs a browser session.
-2. **Input registers with an enable or reset.** An I/O cell's input
-   register must still be a plain one (see "Fixed" above for why the
-   output-side trick isn't used); a design samples the pin first. The fix
-   is the IOE register's clock enable and clear in cyclone2-re (phase 5),
-   which also lets Quartus-style asynchronous clears into I/O cells.
-3. **Untested DE2 peripherals:** the 4 MB flash, the
+2. **Untested DE2 peripherals:** the 4 MB flash, the
    WM8731 audio codec (I2C plus I2S; its master clock, AUD_XCK, builds
    now), the
    ADV7181 TV decoder, the ISP1362 USB, the DM9000A Ethernet, the SD
    card, PS/2, IrDA and the 16x2 LCD.
-4. **PLL_4** has never been seen in a Quartus design. E5, F21 and V21
-   are inferred from the routing database alone.
+3. **An active-low asynchronous reset on LE registers.** `always @(posedge
+   clk or negedge rst_n)` on a counter doesn't fit: each register gets an
+   inverter of its own for its clear (15 clear nets for 15 registers in a
+   draft of examples/de2-ioregs, on branch open too), and a carry chain's
+   LEs can't share a LAB then. cyclone2-re hasn't decoded the LAB's clear
+   inversion. Write the reset active high (`wire rst = ~rst_n`) meanwhile.
+   An I/O cell's register takes an active-low reset fine.
+4. **Not yet on the board:** examples/de2-ioregs, and sdram-selftest and
+   sram-selftest as rebuilt with the cells' enables (the DE2 is off).

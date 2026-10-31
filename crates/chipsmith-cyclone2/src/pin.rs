@@ -293,11 +293,69 @@ pub enum PowerUp {
 
 /// The cell parameters (on `CY2_IBUF`, `CY2_OBUF`, `CY2_IOBUF`) that say a
 /// pin buffer's register is used, valued `PowerUp::param`; absent, the
-/// register isn't.
+/// register isn't. `<name>_ENA` and `<name>_ARESET` (bits) say it takes
+/// the cell's clock enable (INCLKENA for the input register, OUTCLKENA,
+/// which the output and OE registers share) and its asynchronous reset
+/// (ARESET, shared by all three), which returns it to its power-up value.
 pub mod register_param {
     pub const INPUT: &str = "INPUT_REGISTER";
     pub const OUTPUT: &str = "OUTPUT_REGISTER";
     pub const OE: &str = "OE_REGISTER";
+}
+
+/// Bit parameters on a pin buffer: its I/O registers' clock edges and the
+/// polarity of the cell's register controls (each 1: inverted in the cell,
+/// so a falling-edge clock or an active-low control).
+pub mod control_param {
+    pub const INCLK_INVERT: &str = "INCLK_INVERT";
+    pub const OUTCLK_INVERT: &str = "OUTCLK_INVERT";
+    pub const INCLKENA_INVERT: &str = "INCLKENA_INVERT";
+    pub const OUTCLKENA_INVERT: &str = "OUTCLKENA_INVERT";
+    pub const ARESET_INVERT: &str = "ARESET_INVERT";
+    pub const ALL: [&str; 5] = [
+        INCLK_INVERT,
+        OUTCLK_INVERT,
+        INCLKENA_INVERT,
+        OUTCLKENA_INVERT,
+        ARESET_INVERT,
+    ];
+}
+
+/// How a pin buffer uses one of its I/O registers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IoRegMode {
+    pub power_up: PowerUp,
+    /// It takes the cell's clock enable for its side.
+    pub enable: bool,
+    /// It takes the cell's asynchronous reset, to its power-up value.
+    pub areset: bool,
+}
+
+impl IoRegMode {
+    pub fn plain(power_up: PowerUp) -> Self {
+        IoRegMode {
+            power_up,
+            enable: false,
+            areset: false,
+        }
+    }
+
+    /// `(name, value)` parameters saying so; `bit` writes a 1.
+    pub fn params<V>(self, name: &str, value: impl Fn(&str) -> V, bit: impl Fn() -> V) -> Vec<(String, V)> {
+        let mut v = vec![(name.to_string(), value(self.power_up.param()))];
+        if self.enable {
+            v.push((format!("{name}_ENA"), bit()));
+        }
+        if self.areset {
+            v.push((format!("{name}_ARESET"), bit()));
+        }
+        v
+    }
+}
+
+/// A bit parameter's value is 1 (yosys writes bits as binary strings).
+pub fn is_one(v: &str) -> bool {
+    v.trim_end().ends_with('1')
 }
 
 impl PowerUp {
@@ -322,12 +380,19 @@ impl PowerUp {
 }
 
 /// The register a buffer's parameter `name` says it uses, if any.
-pub fn register_of(params: &HashMap<String, String>, name: &str) -> Result<Option<PowerUp>> {
-    params
-        .get(name)
-        .map(|v| PowerUp::from_param(v).with_context(|| format!("{name} = {v:?}")))
-        .transpose()
+pub fn register_of(params: &HashMap<String, String>, name: &str) -> Result<Option<IoRegMode>> {
+    let Some(v) = params.get(name) else {
+        return Ok(None);
+    };
+    let power_up = PowerUp::from_param(v).with_context(|| format!("{name} = {v:?}"))?;
+    let flag = |suffix: &str| params.get(&format!("{name}_{suffix}")).is_some_and(|v| is_one(v));
+    Ok(Some(IoRegMode {
+        power_up,
+        enable: flag("ENA"),
+        areset: flag("ARESET"),
+    }))
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -379,5 +444,26 @@ mod tests {
                 .collect();
             assert!(PinSettings::from_params(&params).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn register_modes_survive_their_params() {
+        for power_up in [PowerUp::Low, PowerUp::High] {
+            for enable in [false, true] {
+                for areset in [false, true] {
+                    let m = IoRegMode {
+                        power_up,
+                        enable,
+                        areset,
+                    };
+                    let params: HashMap<String, String> = m
+                        .params(register_param::OUTPUT, str::to_string, || "1".to_string())
+                        .into_iter()
+                        .collect();
+                    assert_eq!(register_of(&params, register_param::OUTPUT).unwrap(), Some(m));
+                }
+            }
+        }
+        assert_eq!(register_of(&HashMap::new(), register_param::INPUT).unwrap(), None);
     }
 }

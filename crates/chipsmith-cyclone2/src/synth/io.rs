@@ -14,8 +14,8 @@ use chipsmith_netlist::{
 };
 use chipsmith_synth::rewrite::{inits, Gates, Namer, Subst};
 
-use super::cells::{ibuf, iobuf, obuf, Comb, IoRegs, OutRegs};
-use crate::pin::{IoRegisters, PowerUp};
+use super::cells::{ibuf, iobuf, obuf, Comb, InReg, IoRegs, OutRegs};
+use crate::pin::{IoRegMode, IoRegisters, PowerUp};
 
 /// A register bound for a pin's I/O cell, between choosing it
 /// (`registers`) and building the pin's buffer (`pads`): D, CLK, Q, and
@@ -39,13 +39,22 @@ impl Role {
     }
 }
 
-/// One I/O-cell register as `pads` reads it back.
+/// One I/O-cell register as `pads` reads it back: what it samples, its
+/// clock (either edge), output and power-up value, and the cell controls
+/// it takes, each either polarity: the side's clock enable and the cell's
+/// asynchronous reset (to the power-up value).
 #[derive(Debug, Clone, Copy)]
 struct IoReg {
     d: SigBit,
-    clk: SigBit,
+    clk: Ctrl,
     q: SigBit,
     power_up: PowerUp,
+    enable: Option<Ctrl>,
+    areset: Option<Ctrl>,
+}
+
+fn polarity_param(c: Ctrl) -> ParamValue {
+    ParamValue::Str(c.polarity.letter().to_string())
 }
 
 fn ioreg_cell(port: &str, role: Role, r: IoReg) -> CellKind {
@@ -54,21 +63,30 @@ fn ioreg_cell(port: &str, role: Role, r: IoReg) -> CellKind {
         dir: Some(dir),
         sig: vec![b],
     };
+    let mut params = BTreeMap::from([
+        ("PORT".to_string(), ParamValue::Str(port.into())),
+        ("ROLE".to_string(), ParamValue::Str(role.name().into())),
+        (
+            "POWER_UP".to_string(),
+            ParamValue::Str(r.power_up.param().into()),
+        ),
+        ("CLK_POLARITY".to_string(), polarity_param(r.clk)),
+    ]);
+    let mut ports = vec![
+        p("D", Dir::In, r.d),
+        p("CLK", Dir::In, r.clk.sig),
+        p("Q", Dir::Out, r.q),
+    ];
+    for (name, c) in [("ENA", r.enable), ("ARESET", r.areset)] {
+        if let Some(c) = c {
+            ports.push(p(name, Dir::In, c.sig));
+            params.insert(format!("{name}_POLARITY"), polarity_param(c));
+        }
+    }
     CellKind::Other(Generic {
         ty: IOREG.into(),
-        params: BTreeMap::from([
-            ("PORT".to_string(), ParamValue::Str(port.into())),
-            ("ROLE".to_string(), ParamValue::Str(role.name().into())),
-            (
-                "POWER_UP".to_string(),
-                ParamValue::Str(r.power_up.param().into()),
-            ),
-        ]),
-        ports: vec![
-            p("D", Dir::In, r.d),
-            p("CLK", Dir::In, r.clk),
-            p("Q", Dir::Out, r.q),
-        ],
+        params,
+        ports,
     })
 }
 
@@ -78,59 +96,65 @@ fn bit_name(w: &chipsmith_netlist::Wire, i: usize) -> String {
     crate::pack::bit_name(&w.name, i, w.bits.len(), w.offset, w.upto)
 }
 
-/// A rising-edge register with no enable and no reset: what an I/O cell
-/// register is, and all an input register can be. `Err` says why another
-/// one isn't.
-fn plain(ff: &Ff<Bit>) -> Result<(SigBit, SigBit), &'static str> {
-    match &ff.kind {
-        FfKind::Dff {
-            control: DffControl::Plain { en: None },
-            ..
-        } => rising(ff),
-        FfKind::Dff {
-            control: DffControl::Plain { en: Some(_) },
-            ..
-        } => Err("it has a clock enable"),
-        _ => rising(ff).and(Err("it has a reset")),
-    }
+/// How a register goes into an I/O cell, as Quartus packs them
+/// (cyclone2-re README, "I/O-cell register controls"): its clock on either
+/// edge, its enable as the cell's clock enable, an asynchronous clear or
+/// preset as the cell's reset. A synchronous reset Quartus makes into
+/// logic on D (an output or OE register; an input register's D is the pad,
+/// so Quartus leaves that one in the core): `logic`, where the copy samples
+/// the original's next state ([`next_state`]), enable included.
+#[derive(Debug, Clone, Copy)]
+struct Plan {
+    clk: Ctrl,
+    d: SigBit,
+    enable: Option<Ctrl>,
+    /// The reset and the value it gives, which is the power-up value.
+    areset: Option<(Ctrl, bool)>,
+    logic: bool,
 }
 
-/// What an output or OE register's copy can be: a rising-edge register
-/// whose enable and synchronous reset, if any, [`next_state`] makes into
-/// logic on a plain register's D. Clock and D (before that logic); `Err`
-/// says why another one isn't, and what to write instead.
-fn rising(ff: &Ff<Bit>) -> Result<(SigBit, SigBit), &'static str> {
+/// How register `ff` can go into an I/O cell as a `role` register; `Err`
+/// says why it can't, and what to write instead.
+fn plan(ff: &Ff<Bit>, role: Role) -> Result<Plan, &'static str> {
     let FfKind::Dff { clk, d, control } = &ff.kind else {
         return Err("it isn't an edge-triggered register");
     };
-    if clk.polarity != Polarity::Pos {
-        return Err("it is clocked on the falling edge, and an I/O cell register is \
-                    clocked on the rising one: clock it on the rising edge");
-    }
+    let p = |enable: Option<Ctrl>, areset, logic| Plan {
+        clk: *clk,
+        d: *d,
+        enable,
+        areset,
+        logic,
+    };
     match control {
-        DffControl::Plain { .. } | DffControl::Sync { .. } => Ok((clk.sig, *d)),
-        // A mux on D acts only on an edge; these act between edges.
-        DffControl::Async { .. } | DffControl::SetClr { .. } => Err(
-            "it has an asynchronous reset, which acts between clock edges, and the I/O cell's \
-             clear isn't modelled: make the reset synchronous (`always @(posedge clk) \
-             if (rst) q <= 0; else ...`), or put a plain register after this one",
+        DffControl::Plain { en } => Ok(p(*en, None, false)),
+        DffControl::Async { arst, value, en } => Ok(p(*en, Some((*arst, *value)), false)),
+        DffControl::Sync { .. } if role == Role::Input => Err(
+            "it has a synchronous reset, which would be logic between the pad and the register \
+             (Quartus leaves such a register in the core too): sample the pin in a register \
+             without one (`always @(posedge clk) pin_q <= PIN;`) and reset the next register",
         ),
+        DffControl::Sync { .. } => Ok(p(None, None, true)),
         DffControl::Load { .. } => Err(
-            "it has an asynchronous load, which acts between clock edges: \
+            "it has an asynchronous load, which an I/O cell register hasn't: \
              put a plain register after this one",
+        ),
+        DffControl::SetClr { .. } => Err(
+            "it has both an asynchronous set and an asynchronous clear, and an I/O cell \
+             register has one asynchronous reset: put a plain register after this one",
         ),
     }
 }
 
-/// The register's next state on a rising edge, from its D, enable,
-/// synchronous reset and its own Q: what a plain register sampling it
-/// holds, edge for edge, given the same power-up value. That's how an
-/// output or OE register with an enable or reset goes into an I/O cell
-/// whose register has neither: the LE register stays and feeds the logic
-/// its Q.
+/// The register's next state on an edge, from its D, enable, synchronous
+/// reset and its own Q: what a plain register sampling it holds, edge for
+/// edge, given the same power-up value (and the same asynchronous reset,
+/// which the cell does itself). That's how an output or OE register whose
+/// enable or synchronous reset can't be the cell's goes into the cell: the
+/// LE register stays and feeds the logic its Q.
 fn next_state(g: &mut Gates, ff: &Ff<Bit>) -> SigBit {
     let FfKind::Dff { d, control, .. } = &ff.kind else {
-        unreachable!("checked by `rising`")
+        unreachable!("checked by `plan`")
     };
     // `c` active picks `on`.
     let pick = |g: &mut Gates, c: &Ctrl, on: SigBit, off: SigBit| match c.polarity {
@@ -140,8 +164,10 @@ fn next_state(g: &mut Gates, ff: &Ff<Bit>) -> SigBit {
     let hold = |g: &mut Gates, en: &Ctrl, d: SigBit| pick(g, en, d, ff.q);
     let value = |v: &bool| if *v { SigBit::ONE } else { SigBit::ZERO };
     match control {
-        DffControl::Plain { en: None } => *d,
-        DffControl::Plain { en: Some(en) } => hold(g, en, *d),
+        DffControl::Plain { en: None } | DffControl::Async { en: None, .. } => *d,
+        DffControl::Plain { en: Some(en) } | DffControl::Async { en: Some(en), .. } => {
+            hold(g, en, *d)
+        }
         DffControl::Sync { srst, value: v, en } => match en {
             SyncEnable::Always => pick(g, srst, value(v), *d),
             SyncEnable::ResetOverEnable(en) => {
@@ -153,7 +179,7 @@ fn next_state(g: &mut Gates, ff: &Ff<Bit>) -> SigBit {
                 hold(g, en, reset)
             }
         },
-        _ => unreachable!("checked by `rising`"),
+        _ => unreachable!("checked by `plan`"),
     }
 }
 
@@ -165,22 +191,20 @@ fn next_state(g: &mut Gates, ff: &Ff<Bit>) -> SigBit {
 /// An input register is the register sampling the pin, moved. An output
 /// or OE register is a copy of the register driving the pin's data or
 /// enable: the original stays for whatever else reads it (several pins
-/// often share one enable) and goes if nothing does. An input register
-/// must be one an I/O cell has: rising edge, no enable, no reset. An
-/// output or OE register may also have an enable and a synchronous reset:
-/// the copy samples the original's next state ([`next_state`]), and the
-/// original stays to feed it its Q. Every request is the manifest's, so
-/// one that can't be met is an error, not a register left in the core.
-/// Returns how many registers went into I/O cells.
+/// often share one enable) and goes if nothing does. Either edge, an
+/// enable and an asynchronous clear or preset go into the cell as Quartus
+/// puts them there ([`plan`]); a synchronous reset on an output or OE
+/// register, and an enable the output and OE registers can't share, are
+/// logic on the copy's D ([`next_state`]), the original staying to feed it
+/// its Q. Every request is the manifest's, so one that can't be met is an
+/// error, not a register left in the core. Returns how many registers went
+/// into I/O cells.
 pub fn registers(m: &mut Module, requests: &BTreeMap<String, IoRegisters>) -> Result<usize> {
     if requests.is_empty() {
         return Ok(0);
     }
     let init = inits(m);
-    let power_up = |q: SigBit| match q.net().and_then(|n| init.get(&n)) {
-        Some(State::One) => PowerUp::High,
-        _ => PowerUp::Low,
-    };
+    let init_of = |q: SigBit| q.net().and_then(|n| init.get(&n)).copied();
     let mut bits: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for (wi, w) in m.wires.iter().enumerate() {
         if w.port.is_some() {
@@ -208,8 +232,15 @@ pub fn registers(m: &mut Module, requests: &BTreeMap<String, IoRegisters>) -> Re
             _ => {}
         }
     }
-    // (port bit, role, register cell, whether it moves rather than copies)
-    let mut chosen: Vec<(String, Role, usize, bool)> = Vec::new();
+    let ff = |ci: usize| -> &Ff<Bit> {
+        let CellKind::FfGate(ff) = &m.cells[ci].kind else {
+            unreachable!("indexed registers")
+        };
+        ff
+    };
+    // (port bit, role, register cell, its plan, whether it moves rather
+    // than copies)
+    let mut chosen: Vec<(String, Role, usize, Plan, bool)> = Vec::new();
     for (port, want) in requests {
         let &(wi, bi) = bits.get(port).with_context(|| {
             format!("{port}: I/O registers asked for a port bit the design doesn't have")
@@ -223,86 +254,72 @@ pub fn registers(m: &mut Module, requests: &BTreeMap<String, IoRegisters>) -> Re
             };
             (a[k], *en)
         });
-        let check = |ci: usize, role: Role| -> Result<()> {
-            let CellKind::FfGate(ff) = &m.cells[ci].kind else {
-                unreachable!("indexed registers")
-            };
-            let legal = match role {
-                Role::Input => plain(ff),
-                Role::Output | Role::OutputEnable => rising(ff),
-            };
-            let (_, d) = legal.map_err(|why| {
+        let check = |ci: usize, role: Role| -> Result<Plan> {
+            let pl = plan(ff(ci), role).map_err(|why| {
                 anyhow::anyhow!(
                     "{port}: its {} register {} can't go into the I/O cell: {why}",
                     role.name(),
                     m.cells[ci].name
                 )
             })?;
-            let plain_ff = matches!(
-                &ff.kind,
-                FfKind::Dff {
-                    control: DffControl::Plain { en: None },
-                    ..
-                }
-            );
             ensure!(
-                !(plain_ff && matches!(d, SigBit::Const(_))),
+                !(pl.enable.is_none()
+                    && pl.areset.is_none()
+                    && !pl.logic
+                    && matches!(pl.d, SigBit::Const(_))),
                 "{port}: its {} register {} has constant data",
                 role.name(),
                 m.cells[ci].name
             );
-            Ok(())
+            // The cell's reset restores the power-up value, so a register
+            // given another one can't go in (Quartus drops the other).
+            if let (Some((_, v)), Some(i)) = (pl.areset, init_of(ff(ci).q)) {
+                ensure!(
+                    (i == State::One) == v,
+                    "{port}: its {} register {} powers up {} but its asynchronous reset gives {}, \
+                     and an I/O cell's reset restores its power-up value: drop the initial value",
+                    role.name(),
+                    m.cells[ci].name,
+                    u8::from(i == State::One),
+                    u8::from(v)
+                );
+            }
+            Ok(pl)
         };
-        let driver = |sig: SigBit, role: Role, what: &str| -> Result<usize> {
+        let driver = |sig: SigBit, role: Role, what: &str| -> Result<(usize, Plan)> {
             let ci = sig.net().and_then(|n| ff_of[n.index()]).with_context(|| {
                 format!(
                     "{port}: an {} register is asked for, but no register drives its {what}",
                     role.name()
                 )
             })?;
-            check(ci, role)?;
-            Ok(ci)
+            Ok((ci, check(ci, role)?))
         };
+        let first = chosen.len();
         if want.input {
             ensure!(
                 dir != Dir::Out,
                 "{port}: an input register is asked for on an output"
             );
             let samples = |ci: usize| match &m.cells[ci].kind {
-                CellKind::FfGate(ff) => {
-                    matches!(&ff.kind, FfKind::Dff { d, .. } if *d == b) && plain(ff).is_ok()
-                }
+                CellKind::FfGate(ff) => matches!(&ff.kind, FfKind::Dff { d, .. } if *d == b),
                 _ => false,
             };
-            let ci = (0..m.cells.len())
-                .find(|&ci| samples(ci) && !chosen.iter().any(|c| c.2 == ci))
-                .with_context(|| {
-                    let gated = (0..m.cells.len()).any(|ci| match &m.cells[ci].kind {
-                        CellKind::FfGate(ff) => {
-                            matches!(&ff.kind, FfKind::Dff { d, .. } if *d == b)
-                        }
-                        _ => false,
-                    });
-                    if gated {
-                        // An enable or reset after the I/O register would
-                        // have to be retimed over it (the controls
-                        // registered too, the held value in an LE, a LUT
-                        // after the pin's register): sound, but not done.
-                        format!(
-                            "{port}: an input register is asked for, but the register sampling \
-                             the pin has an enable, a reset or a falling-edge clock, and the I/O \
-                             cell's clock enable and clear aren't modelled: sample the pin in a \
-                             plain register (`always @(posedge clk) pin_q <= PIN;`) and give \
-                             the next register the enable or reset"
-                        )
-                    } else {
-                        format!(
-                            "{port}: an input register is asked for, but no register \
-                             (rising edge, no enable or reset) samples the pin"
-                        )
-                    }
-                })?;
-            chosen.push((port.clone(), Role::Input, ci, true));
+            // Of the registers sampling the pin, one that can go in; else
+            // the first says why it can't.
+            let candidates: Vec<usize> = (0..m.cells.len())
+                .filter(|&ci| samples(ci) && !chosen.iter().any(|c| c.2 == ci))
+                .collect();
+            let sampler = *candidates.first().with_context(|| {
+                format!("{port}: an input register is asked for, but no register samples the pin")
+            })?;
+            let ci = candidates
+                .iter()
+                .copied()
+                .find(|&ci| check(ci, Role::Input).is_ok())
+                .unwrap_or(sampler);
+            let pl = check(ci, Role::Input)?;
+            chosen.push((port.clone(), Role::Input, ci, pl, true));
         }
         let (data, en) = match (dir, tri) {
             (Dir::In, _) if want.output || want.output_enable => {
@@ -311,43 +328,61 @@ pub fn registers(m: &mut Module, requests: &BTreeMap<String, IoRegisters>) -> Re
             (_, Some((a, en))) => (a, Some(en)),
             (_, None) => (b, None),
         };
-        let out_clk = if want.output {
-            let ci = driver(data, Role::Output, "data")?;
-            chosen.push((port.clone(), Role::Output, ci, false));
-            Some(ci)
-        } else {
-            None
-        };
+        if want.output {
+            let (ci, pl) = driver(data, Role::Output, "data")?;
+            chosen.push((port.clone(), Role::Output, ci, pl, false));
+        }
         if want.output_enable {
             let en = en.with_context(|| {
                 format!("{port}: an output-enable register is asked for, but the pin is never tri-stated")
             })?;
-            let ci = driver(en, Role::OutputEnable, "output enable")?;
-            if let Some(o) = out_clk {
-                let clk = |ci: usize| match &m.cells[ci].kind {
-                    CellKind::FfGate(ff) => rising(ff).ok().map(|(c, _)| c),
-                    _ => None,
-                };
-                ensure!(
-                    clk(o) == clk(ci),
-                    "{port}: its output and output-enable registers have different clocks, \
-                     and an I/O cell clocks both from one"
-                );
+            let (ci, pl) = driver(en, Role::OutputEnable, "output enable")?;
+            chosen.push((port.clone(), Role::OutputEnable, ci, pl, false));
+        }
+        // What the cell's registers share: the output and OE registers one
+        // clock (and edge) and one enable line, all three one reset.
+        let pin = &mut chosen[first..];
+        let out_side: Vec<usize> = (0..pin.len()).filter(|&i| pin[i].1 != Role::Input).collect();
+        if let [o, e] = out_side[..] {
+            ensure!(
+                pin[o].3.clk == pin[e].3.clk,
+                "{port}: its output and output-enable registers have different clocks or \
+                 clock edges, and an I/O cell clocks both from one"
+            );
+            // Two different enables: Quartus leaves the OE register in the
+            // core; the enables as logic keep both in the cell.
+            if let (Some(a), Some(b)) = (pin[o].3.enable, pin[e].3.enable) {
+                if a != b {
+                    for i in [o, e] {
+                        pin[i].3.logic = true;
+                        pin[i].3.enable = None;
+                    }
+                }
             }
-            chosen.push((port.clone(), Role::OutputEnable, ci, false));
+        }
+        let mut resets = pin.iter().filter_map(|c| c.3.areset.map(|(r, _)| r));
+        if let Some(r) = resets.next() {
+            ensure!(
+                resets.all(|x| x == r),
+                "{port}: its I/O registers have different asynchronous resets, and an I/O cell \
+                 has one: give them one reset, or put a plain register after one of them"
+            );
         }
     }
 
     let mut gone = vec![false; m.cells.len()];
     let mut new_cells = Vec::new();
     let mut gates = Gates::new(m, "ioreg_next");
-    for (port, role, ci, moves) in &chosen {
+    for (port, role, ci, pl, moves) in &chosen {
         let CellKind::FfGate(ff) = &gates.m.cells[*ci].kind else {
             unreachable!("chosen registers")
         };
         let ff = ff.clone();
-        let (clk, _) = rising(&ff).expect("checked");
-        let d = next_state(&mut gates, &ff);
+        let d = if pl.logic {
+            next_state(&mut gates, &ff)
+        } else {
+            pl.d
+        };
         let q = if *moves {
             gone[*ci] = true;
             ff.q
@@ -355,11 +390,17 @@ pub fn registers(m: &mut Module, requests: &BTreeMap<String, IoRegisters>) -> Re
             // The copy's output only marks it; `pads` reads its D.
             SigBit::Net(gates.m.new_net())
         };
+        let power_up = match (pl.areset, init_of(ff.q)) {
+            (Some((_, true)), _) | (None, Some(State::One)) => PowerUp::High,
+            _ => PowerUp::Low,
+        };
         let r = IoReg {
             d,
-            clk,
+            clk: pl.clk,
             q,
-            power_up: power_up(ff.q),
+            power_up,
+            enable: pl.enable,
+            areset: pl.areset.map(|(r, _)| r),
         };
         new_cells.push(ioreg_cell(port, *role, r));
     }
@@ -396,17 +437,28 @@ fn chosen_registers(m: &mut Module) -> Result<BTreeMap<(String, Role), IoReg>> {
                 .unwrap_or("")
                 .to_string()
         };
-        let sig = |p: &str| g.port(p).map(|p| p.sig[0]).context("I/O register port");
+        let sig = |p: &str| g.port(p).map(|p| p.sig[0]);
+        let ctrl = |p: &str| -> Result<Option<Ctrl>> {
+            let Some(sig) = sig(p) else { return Ok(None) };
+            let polarity = s(&format!("{p}_POLARITY"))
+                .chars()
+                .next()
+                .and_then(Polarity::from_letter)
+                .context("I/O register control polarity")?;
+            Ok(Some(Ctrl { sig, polarity }))
+        };
         let role = match s("ROLE").as_str() {
             "input" => Role::Input,
             "output" => Role::Output,
             _ => Role::OutputEnable,
         };
         let r = IoReg {
-            d: sig("D")?,
-            clk: sig("CLK")?,
-            q: sig("Q")?,
+            d: sig("D").context("I/O register port")?,
+            clk: ctrl("CLK")?.context("I/O register clock")?,
+            q: sig("Q").context("I/O register port")?,
             power_up: PowerUp::from_param(&s("POWER_UP")).context("I/O register power-up")?,
+            enable: ctrl("ENA")?,
+            areset: ctrl("ARESET")?,
         };
         out.insert((s("PORT"), role), r);
     }
@@ -479,13 +531,28 @@ pub fn pads(m: &mut Module) -> Result<()> {
                 take(Role::Output),
                 take(Role::OutputEnable),
             );
+            let mode = |r: IoReg| IoRegMode {
+                power_up: r.power_up,
+                enable: r.enable.is_some(),
+                areset: r.areset.is_some(),
+            };
+            // `registers` checked what the cell's registers share.
+            let regs = [in_reg, out_reg, oe_reg];
             let io_regs = IoRegs {
-                input: in_reg.map(|r| (r.clk, r.q, r.power_up)),
+                input: in_reg.map(|r| InReg {
+                    clk: r.clk,
+                    q: r.q,
+                    enable: r.enable,
+                    power_up: r.power_up,
+                    areset: r.areset.is_some(),
+                }),
                 output: out_reg.or(oe_reg).map(|r| OutRegs {
                     clk: r.clk,
-                    data: out_reg.map(|r| r.power_up),
-                    oe: oe_reg.map(|r| r.power_up),
+                    enable: out_reg.and_then(|r| r.enable).or(oe_reg.and_then(|r| r.enable)),
+                    data: out_reg.map(mode),
+                    oe: oe_reg.map(mode),
                 }),
+                areset: regs.iter().flatten().find_map(|r| r.areset),
             };
             // A registered output or enable is what its register samples.
             let data_of = |d: SigBit| out_reg.map_or(d, |r| r.d);

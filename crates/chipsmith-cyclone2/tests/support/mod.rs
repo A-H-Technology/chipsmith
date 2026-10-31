@@ -54,34 +54,83 @@ module LCELL_FF (input DATAIN, input CLK, input ENA, input ACLR, input SCLR, out
     if (ACLR) REGOUT <= 1'b0;
     else if (ENA) REGOUT <= SCLR ? 1'b0 : DATAIN;
 endmodule
-module CY2_IBUF (input PAD, input INCLK, output COMBOUT, output REGOUT);
-  parameter INPUT_REGISTER = "none";
-  reg q = INPUT_REGISTER == "high";
-  always @(posedge INCLK) q <= PAD;
-  assign COMBOUT = PAD;
-  assign REGOUT = q;
+// An I/O cell register (`cells.v`): on its side's clock edge
+// (`*CLK_INVERT`: falling), while its enable is active if it takes one; the
+// cell's reset, if it takes it, restores the power-up value.
+module CY2_IOREG (input CLK, input D, input ENA, input ARESET, output reg Q);
+  parameter MODE = "none";
+  parameter USE_ENA = 0;
+  parameter USE_ARESET = 0;
+  parameter CLK_INVERT = 0;
+  parameter ENA_INVERT = 0;
+  parameter ARESET_INVERT = 0;
+  initial Q = MODE == "high";
+  wire clk = CLK_INVERT ? ~CLK : CLK;
+  wire ena = !USE_ENA || (ENA_INVERT ? ~ENA : ENA);
+  wire rst = USE_ARESET && (ARESET_INVERT ? ~ARESET : ARESET);
+  always @(posedge clk, posedge rst)
+    if (rst) Q <= MODE == "high";
+    else if (ena) Q <= D;
 endmodule
-module CY2_OBUF (input DATAOUT, input OUTCLK, output PAD);
+module CY2_IBUF (input PAD, input INCLK, input INCLKENA, input ARESET,
+                 output COMBOUT, output REGOUT);
+  parameter INPUT_REGISTER = "none";
+  parameter INPUT_REGISTER_ENA = 0;
+  parameter INPUT_REGISTER_ARESET = 0;
+  parameter INCLK_INVERT = 0;
+  parameter INCLKENA_INVERT = 0;
+  parameter ARESET_INVERT = 0;
+  CY2_IOREG #(.MODE(INPUT_REGISTER), .USE_ENA(INPUT_REGISTER_ENA), .USE_ARESET(INPUT_REGISTER_ARESET),
+              .CLK_INVERT(INCLK_INVERT), .ENA_INVERT(INCLKENA_INVERT), .ARESET_INVERT(ARESET_INVERT))
+    ri (.CLK(INCLK), .D(PAD), .ENA(INCLKENA), .ARESET(ARESET), .Q(REGOUT));
+  assign COMBOUT = PAD;
+endmodule
+module CY2_OBUF (input DATAOUT, input OUTCLK, input OUTCLKENA, input ARESET, output PAD);
   parameter OUTPUT_REGISTER = "none";
-  reg q = OUTPUT_REGISTER == "high";
-  always @(posedge OUTCLK) q <= DATAOUT;
+  parameter OUTPUT_REGISTER_ENA = 0;
+  parameter OUTPUT_REGISTER_ARESET = 0;
+  parameter OUTCLK_INVERT = 0;
+  parameter OUTCLKENA_INVERT = 0;
+  parameter ARESET_INVERT = 0;
+  wire q;
+  CY2_IOREG #(.MODE(OUTPUT_REGISTER), .USE_ENA(OUTPUT_REGISTER_ENA), .USE_ARESET(OUTPUT_REGISTER_ARESET),
+              .CLK_INVERT(OUTCLK_INVERT), .ENA_INVERT(OUTCLKENA_INVERT), .ARESET_INVERT(ARESET_INVERT))
+    rd (.CLK(OUTCLK), .D(DATAOUT), .ENA(OUTCLKENA), .ARESET(ARESET), .Q(q));
   assign PAD = OUTPUT_REGISTER == "none" ? DATAOUT : q;
 endmodule
 // The checker cuts every pin (`cut_pins`): EXT is what the outside drives
 // while the buffer is off.
 module CY2_IOBUF (input DATAOUT, input OE, input INCLK, input OUTCLK, input EXT,
+                  input INCLKENA, input OUTCLKENA, input ARESET,
                   output COMBOUT, output REGOUT, output PAD);
   parameter INPUT_REGISTER = "none";
   parameter OUTPUT_REGISTER = "none";
   parameter OE_REGISTER = "none";
-  reg qi = INPUT_REGISTER == "high", qd = OUTPUT_REGISTER == "high", qe = OE_REGISTER == "high";
-  always @(posedge INCLK) qi <= PAD;
-  always @(posedge OUTCLK) begin qd <= DATAOUT; qe <= OE; end
+  parameter INPUT_REGISTER_ENA = 0;
+  parameter INPUT_REGISTER_ARESET = 0;
+  parameter OUTPUT_REGISTER_ENA = 0;
+  parameter OUTPUT_REGISTER_ARESET = 0;
+  parameter OE_REGISTER_ENA = 0;
+  parameter OE_REGISTER_ARESET = 0;
+  parameter INCLK_INVERT = 0;
+  parameter OUTCLK_INVERT = 0;
+  parameter INCLKENA_INVERT = 0;
+  parameter OUTCLKENA_INVERT = 0;
+  parameter ARESET_INVERT = 0;
+  wire qd, qe;
+  CY2_IOREG #(.MODE(INPUT_REGISTER), .USE_ENA(INPUT_REGISTER_ENA), .USE_ARESET(INPUT_REGISTER_ARESET),
+              .CLK_INVERT(INCLK_INVERT), .ENA_INVERT(INCLKENA_INVERT), .ARESET_INVERT(ARESET_INVERT))
+    ri (.CLK(INCLK), .D(PAD), .ENA(INCLKENA), .ARESET(ARESET), .Q(REGOUT));
+  CY2_IOREG #(.MODE(OUTPUT_REGISTER), .USE_ENA(OUTPUT_REGISTER_ENA), .USE_ARESET(OUTPUT_REGISTER_ARESET),
+              .CLK_INVERT(OUTCLK_INVERT), .ENA_INVERT(OUTCLKENA_INVERT), .ARESET_INVERT(ARESET_INVERT))
+    rd (.CLK(OUTCLK), .D(DATAOUT), .ENA(OUTCLKENA), .ARESET(ARESET), .Q(qd));
+  CY2_IOREG #(.MODE(OE_REGISTER), .USE_ENA(OE_REGISTER_ENA), .USE_ARESET(OE_REGISTER_ARESET),
+              .CLK_INVERT(OUTCLK_INVERT), .ENA_INVERT(OUTCLKENA_INVERT), .ARESET_INVERT(ARESET_INVERT))
+    re (.CLK(OUTCLK), .D(OE), .ENA(OUTCLKENA), .ARESET(ARESET), .Q(qe));
   wire d = OUTPUT_REGISTER == "none" ? DATAOUT : qd;
   wire e = OE_REGISTER == "none" ? OE : qe;
   assign PAD = e ? d : EXT;
   assign COMBOUT = PAD;
-  assign REGOUT = qi;
 endmodule
 // The embedded multiplier (cells.v): the product of the low A_WIDTH and
 // B_WIDTH bits, each two's complement when its *_SIGNED is set, with the
@@ -2161,3 +2210,54 @@ pub fn cosim(
         })?;
     Ok(Cosim { cycles, compared })
 }
+
+/// Builds `body` (inside `module top(...)` with `ports`) with `pins`
+/// (port, PIN_x) and the I/O registers `registers` asks for, in a scratch
+/// directory under `base` (tests pass `CARGO_TARGET_TMPDIR`), through the
+/// whole flow on the devshell's chip database (synthesis, pack, place,
+/// route, bitstream), returning the routed design.
+pub fn flow(
+    base: &Path,
+    name: &str,
+    ports: &str,
+    body: &str,
+    pins: &[(&str, &str)],
+    registers: &BTreeMap<String, chipsmith_cyclone2::pin::IoRegisters>,
+) -> (
+    chipsmith_cyclone2::bitstream::device::Device,
+    chipsmith_cyclone2::bitstream::nextpnr::Routed,
+) {
+    use chipsmith_cyclone2::place::{self, PinPlan};
+    use chipsmith_cyclone2::{bitstream, pack, route, synth};
+    let dir = scratch(base, name);
+    let src = dir.join("top.v");
+    std::fs::write(&src, format!("module top({ports});\n{body}\nendmodule\n")).unwrap();
+    let design = frontend("top", &[PathBuf::from(&src)]);
+    let out = synth::synthesize(design, registers).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+    let netlist = dir.join("netlist.json");
+    write(&out.design, &netlist);
+    let packed = dir.join("packed.json");
+    pack::pack_file(&netlist, &packed).unwrap_or_else(|e| panic!("{name}: pack: {e:#}"));
+    let graph = route::load_graph().unwrap();
+    let pins: BTreeMap<String, PinPlan> = pins
+        .iter()
+        .map(|&(port, pin)| {
+            let plan = PinPlan {
+                pin: pin.to_string(),
+                settings: Default::default(),
+            };
+            (port.to_string(), plan)
+        })
+        .collect();
+    let placed = dir.join("placed.json");
+    place::place_file(&graph, &packed, &pins, Default::default(), &placed)
+        .unwrap_or_else(|e| panic!("{name}: place: {e:#}"));
+    let routed = dir.join("routed.json");
+    route::route_file(&graph, &placed, &routed).unwrap_or_else(|e| panic!("{name}: route: {e:#}"));
+    let db = bitstream::load_db().unwrap();
+    bitstream::pack_file(&db, &routed, &dir.join("top.rbf"))
+        .unwrap_or_else(|e| panic!("{name}: bitstream: {e:#}"));
+    let r = bitstream::nextpnr::read(&db.dev, &routed).unwrap();
+    (db.dev, r)
+}
+
