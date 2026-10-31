@@ -114,8 +114,10 @@
             export CHIPSMITH_CYCLONE2_GRAPH=$PWD/target/routing-graph-${builtins.baseNameOf open.db}.bin
             export CHIPSMITH_XC7_GRAPH=$PWD/target/xc7-routing-graph-${builtins.baseNameOf xc7.prjxray-db}.bin
             # cudarc dlopens libcuda by bare name; NixOS puts the driver's
-            # copy here rather than anywhere ld.so searches.
-            export LD_LIBRARY_PATH=/run/opengl-driver/lib:${cudaToolkit}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+            # copy here rather than anywhere ld.so searches. A `--features
+            # gpu` build links the LLVM CubeCL bundles, which needs
+            # libstdc++ at run time.
+            export LD_LIBRARY_PATH=/run/opengl-driver/lib:${cudaToolkit}/lib:${pkgs.stdenv.cc.cc.lib}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
           '';
         };
       }

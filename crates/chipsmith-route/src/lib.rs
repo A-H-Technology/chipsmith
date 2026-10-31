@@ -93,6 +93,10 @@ const MAX_CRITICALITY: f32 = 0.95;
 /// Nets with a connection this critical are rerouted every iteration, not
 /// only when congested, so they can follow the timing as it changes.
 const REROUTE_CRITICALITY: f32 = 0.8;
+/// Nets with this many sinks search their sinks `SINK_GROUP` at a time
+/// side by side, when routing in batches.
+const WIDE_NET: usize = 32;
+const SINK_GROUP: usize = 8;
 
 /// What the search reads of a node for every edge into it, side by side:
 /// the search is bound by cache misses on random nodes, and one line per
@@ -488,10 +492,10 @@ impl<'a> Router<'a> {
                         .map(|&i| std::mem::take(&mut trees[i]))
                         .collect();
                     let this = &*self;
-                    let route = |s: &mut Scratch, i: usize, old: &Tree| -> (Result<Tree>, f64) {
+                    let route = |s: &mut Scratch, i: usize, old: &Tree, pool: Option<&[Mutex<Option<Scratch>>]>| -> (Result<Tree>, f64) {
                         let t_net = std::time::Instant::now();
                         let keep = (this.incremental && iteration > 1).then_some(old);
-                        let tree = this.route_net(s, i as u32, &nets[i], &crit[i], keep);
+                        let tree = this.route_net(s, i as u32, &nets[i], &crit[i], keep, pool);
                         let wide = if nets[i].sinks.len() >= 32 {
                             t_net.elapsed().as_secs_f64()
                         } else {
@@ -500,7 +504,8 @@ impl<'a> Router<'a> {
                         (tree, wide)
                     };
                     let routed: Vec<(Result<Tree>, f64)> = if batch.len() == 1 {
-                        vec![route(&mut scratch, batch[0], &olds[0])]
+                        // Alone: its sinks may go side by side instead.
+                        vec![route(&mut scratch, batch[0], &olds[0], Some(&pool))]
                     } else {
                         batch
                             .par_iter()
@@ -509,7 +514,7 @@ impl<'a> Router<'a> {
                                 let slot = rayon::current_thread_index().unwrap_or(0) % pool.len();
                                 let mut s = pool[slot].lock().expect("a router thread panicked");
                                 let s = s.get_or_insert_with(|| Scratch::new(this.db.nodes()));
-                                route(s, i, old)
+                                route(s, i, old, None)
                             })
                             .collect()
                     };
@@ -527,7 +532,7 @@ impl<'a> Router<'a> {
                         if tree.nodes.iter().any(|&n| taken[n as usize] == batch_stamp) {
                             let keep = (self.incremental && iteration > 1).then_some(old);
                             tree =
-                                self.route_net(&mut scratch, i as u32, &nets[i], &crit[i], keep)?;
+                                self.route_net(&mut scratch, i as u32, &nets[i], &crit[i], keep, Some(&pool))?;
                             repaired += 1;
                         }
                         for &n in &tree.nodes {
@@ -563,7 +568,7 @@ impl<'a> Router<'a> {
                     let t_net = std::time::Instant::now();
                     let old = std::mem::take(&mut trees[i]);
                     let keep = (self.incremental && iteration > 1).then_some(&old);
-                    trees[i] = self.route_net(&mut scratch, i as u32, net, &crit[i], keep)?;
+                    trees[i] = self.route_net(&mut scratch, i as u32, net, &crit[i], keep, None)?;
                     if net.sinks.len() >= 32 {
                         t_wide += t_net.elapsed().as_secs_f64();
                     }
@@ -644,20 +649,25 @@ impl<'a> Router<'a> {
         net: &NetReq,
         crit: &[f32],
         keep: Option<&Tree>,
+        pool: Option<&[Mutex<Option<Scratch>>]>,
     ) -> Result<Tree> {
         s.tree_generation += 1;
+        let gen = s.tree_generation;
         let mut tree = Tree {
             nodes: vec![net.source],
             pips: Vec::new(),
             sink_delay: Vec::new(),
             parent: vec![0],
         };
-        s.in_tree[net.source as usize] = s.tree_generation;
+        s.in_tree[net.source as usize] = gen;
         s.tree_pos[net.source as usize] = 0;
         s.delay_to[net.source as usize] = self.node[net.source as usize].delay;
         if let Some(old) = keep.filter(|t| !t.nodes.is_empty()) {
             self.keep_branches(s, net, crit, old, &mut tree);
         }
+        // Each tree node's delay from the source, in tree order: where a
+        // search starts from it.
+        let mut delays: Vec<Ps> = tree.nodes.iter().map(|&n| s.delay_to[n as usize]).collect();
 
         let region = self.region(net);
         // Most critical first, so they get the direct wires; then nearest.
@@ -668,31 +678,51 @@ impl<'a> Router<'a> {
                     .total_cmp(&self.distance(net.source, net.sinks[b])),
             )
         });
-        for i in order {
-            let sink = net.sinks[i];
-            if s.in_tree[sink as usize] == s.tree_generation {
-                continue;
-            }
-            self.search(s, index, &tree.nodes, sink, crit[i], region)
-                .with_context(|| format!("net {}: no route to a sink", net.name))?;
-            // Walk back from the sink to the tree, then add the branch.
-            let mut branch = Vec::new();
-            let mut n = sink;
-            while s.in_tree[n as usize] != s.tree_generation {
-                let (from, edge) = s.visit[n as usize]
-                    .via
-                    .expect("searched nodes have a predecessor");
-                branch.push((n, edge));
-                n = from;
-            }
-            let mut d = s.delay_to[n as usize];
-            let mut parent = s.tree_pos[n as usize];
-            for &(n, edge) in branch.iter().rev() {
-                d += self.node[n as usize].delay;
-                s.delay_to[n as usize] = d;
-                s.in_tree[n as usize] = s.tree_generation;
-                s.tree_pos[n as usize] = tree.nodes.len() as u32;
-                parent = add_node(&mut tree, n, edge, parent);
+        // A wide net's sinks are searched SINK_GROUP at a time side by side,
+        // each from the tree as it was when the group began; the group size
+        // is fixed, so the tree doesn't depend on the number of threads.
+        let group = match pool {
+            Some(_) if net.sinks.len() >= WIDE_NET => SINK_GROUP,
+            _ => 1,
+        };
+        for chunk in order.chunks(group) {
+            let todo: Vec<usize> = chunk
+                .iter()
+                .copied()
+                .filter(|&i| s.in_tree[net.sinks[i] as usize] != gen)
+                .collect();
+            // Per sink, its branch from the sink back to a tree node:
+            // (node, the pip into it) sink first, and the tree node.
+            let branches: Vec<Result<(Vec<(NodeId, Edge)>, NodeId)>> = match pool {
+                Some(pool) if todo.len() > 1 => todo
+                    .par_iter()
+                    .map(|&i| {
+                        let slot = rayon::current_thread_index().unwrap_or(0) % pool.len();
+                        let mut ps = pool[slot].lock().expect("a router thread panicked");
+                        let ps = ps.get_or_insert_with(|| Scratch::new(self.db.nodes()));
+                        self.search(ps, index, &tree.nodes, &delays, net.sinks[i], crit[i], region)?;
+                        Ok(walk_back(ps, net.sinks[i]))
+                    })
+                    .collect(),
+                _ => {
+                    // One at a time: each search sees the branches added
+                    // before it.
+                    for &i in &todo {
+                        let sink = net.sinks[i];
+                        if s.in_tree[sink as usize] == gen {
+                            continue;
+                        }
+                        self.search(s, index, &tree.nodes, &delays, sink, crit[i], region)
+                            .with_context(|| format!("net {}: no route to a sink", net.name))?;
+                        let (branch, seed) = walk_back(s, sink);
+                        self.graft(s, &mut tree, &mut delays, &branch, seed, gen);
+                    }
+                    Vec::new()
+                }
+            };
+            for b in branches {
+                let (branch, seed) = b.with_context(|| format!("net {}: no route to a sink", net.name))?;
+                self.graft(s, &mut tree, &mut delays, &branch, seed, gen);
             }
         }
         tree.sink_delay = net
@@ -701,6 +731,34 @@ impl<'a> Router<'a> {
             .map(|&sink| s.delay_to[sink as usize])
             .collect();
         Ok(tree)
+    }
+
+    /// Add `branch` (sink first, each node with the pip into it, starting
+    /// from tree node `seed`) to the tree, from where it meets the tree as
+    /// it is now: a branch found from an older tree may run into one added
+    /// since.
+    fn graft(&self, s: &mut Scratch, tree: &mut Tree, delays: &mut Vec<Ps>, branch: &[(NodeId, Edge)], seed: NodeId, gen: u32) {
+        let cut = branch
+            .iter()
+            .position(|&(n, _)| s.in_tree[n as usize] == gen)
+            .unwrap_or(branch.len());
+        let fresh = &branch[..cut];
+        if fresh.is_empty() {
+            return;
+        }
+        // What the first fresh node hangs off: the next node along the
+        // branch, or the tree node the search started from.
+        let attach = branch.get(cut).map_or(seed, |&(n, _)| n);
+        let mut d = s.delay_to[attach as usize];
+        let mut parent = s.tree_pos[attach as usize];
+        for &(n, edge) in fresh.iter().rev() {
+            d += self.node[n as usize].delay;
+            s.delay_to[n as usize] = d;
+            s.in_tree[n as usize] = gen;
+            s.tree_pos[n as usize] = tree.nodes.len() as u32;
+            parent = add_node(tree, n, edge, parent);
+            delays.push(d);
+        }
     }
 
     /// Copy into `tree` (holding only the source) the branches of `old`
@@ -763,16 +821,17 @@ impl<'a> Router<'a> {
         s: &mut Scratch,
         net: u32,
         tree: &[NodeId],
+        tree_delay: &[Ps],
         sink: NodeId,
         crit: f32,
         region: Option<chipdb::Box>,
     ) -> Result<()> {
         if let Some(r) = region {
-            if self.search_in(s, net, tree, sink, crit, r).is_ok() {
+            if self.search_in(s, net, tree, tree_delay, sink, crit, r).is_ok() {
                 return Ok(());
             }
         }
-        self.search_in(s, net, tree, sink, crit, chipdb::Box::EVERYWHERE)
+        self.search_in(s, net, tree, tree_delay, sink, crit, chipdb::Box::EVERYWHERE)
     }
 
     fn search_in(
@@ -780,6 +839,7 @@ impl<'a> Router<'a> {
         s: &mut Scratch,
         net: u32,
         tree: &[NodeId],
+        tree_delay: &[Ps],
         sink: NodeId,
         crit: f32,
         region: chipdb::Box,
@@ -788,9 +848,9 @@ impl<'a> Router<'a> {
         let gen = s.generation;
         let mut heap = BinaryHeap::new();
         let per_hop = 1.0 - crit + crit * HOP_DELAY_ESTIMATE / DELAY_UNIT;
-        for &n in tree {
+        for (&n, &delay) in tree.iter().zip(tree_delay) {
             s.work[0] += 1;
-            let g = crit * s.delay_to[n as usize] / DELAY_UNIT;
+            let g = crit * delay / DELAY_UNIT;
             s.visit[n as usize] = Visit {
                 cost: g,
                 stamp: gen,
@@ -840,6 +900,18 @@ impl<'a> Router<'a> {
         }
         bail!("unreachable")
     }
+}
+
+/// The branch a search left in `s` from `sink` back to the tree node it
+/// started from: (node, the pip into it) sink first, and that tree node.
+fn walk_back(s: &Scratch, sink: NodeId) -> (Vec<(NodeId, Edge)>, NodeId) {
+    let mut branch = Vec::new();
+    let mut n = sink;
+    while let Some((from, edge)) = s.visit[n as usize].via {
+        branch.push((n, edge));
+        n = from;
+    }
+    (branch, n)
 }
 
 /// Append `n`, driven by `edge` from the node at index `parent`; returns
@@ -944,5 +1016,126 @@ mod tests {
         assert!(trees[0].nodes.contains(&node("N")));
         assert!(!trees[0].nodes.contains(&node("M")));
         assert!(router.reserve(node("M"), 0).is_err());
+    }
+
+    /// A w x h grid of tiles, each with an output O, an input I and two
+    /// tracks each way: segments HL/HR between horizontal neighbours,
+    /// VB/VT between vertical ones, with pips onto, along and off them.
+    fn grid(w: u32, h: u32) -> ChipDb {
+        let mut t = format!("chip {w} {h}\ntt T\nw O W\nw I W\n");
+        for k in 0..2 {
+            for e in ["HL", "HR", "VB", "VT"] {
+                t += &format!("w {e}{k} W\n");
+            }
+        }
+        for k in 0..2 {
+            for e in ["HL", "HR", "VB", "VT"] {
+                t += &format!("p O {e}{k}\np {e}{k} I\n");
+            }
+            for (a, b) in [("HL", "HR"), ("HR", "HL"), ("VB", "VT"), ("VT", "VB"), ("HL", "VT"), ("VB", "HR")] {
+                t += &format!("p {a}{k} {b}{k}\n");
+            }
+        }
+        t += "end\n";
+        for y in 0..h {
+            for x in 0..w {
+                t += &format!("t {x} {y} T\n");
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                for k in 0..2 {
+                    if x + 1 < w {
+                        t += &format!("node {x} {y} HR{k} {} {y} HL{k}\n", x + 1);
+                    }
+                    if y + 1 < h {
+                        t += &format!("node {x} {y} VT{k} {x} {} VB{k}\n", y + 1);
+                    }
+                }
+            }
+        }
+        ChipDb::parse(t.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn batched_routing_is_the_same_on_any_number_of_threads() {
+        let (w, h) = (12u32, 12u32);
+        let db = grid(w, h);
+        let tile = |x: u32, y: u32| y * w + x;
+        let wire = |name: &str| db.tile_type(0).wire(name).unwrap();
+        let mut timing = timing::Graph::default();
+        let mut nets = Vec::new();
+        // Pseudo-random short nets on distinct sources and sinks, and one
+        // net with 40 sinks (the sink-group path).
+        let mut used_in = std::collections::HashSet::new();
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as u32
+        };
+        let wide_src = tile(0, 0);
+        let mut wide_sinks = Vec::new();
+        for i in 0..40 {
+            let t = tile(1 + i % 11, 1 + (i / 11) * 3);
+            used_in.insert(t);
+            wide_sinks.push(t);
+        }
+        let mut add = |name: String, src: u32, sinks: Vec<u32>, timing: &mut timing::Graph| NetReq {
+            driver: timing.node(&name, "O"),
+            sink_ports: (0..sinks.len()).map(|k| timing.node(&name, &format!("I{k}"))).collect(),
+            source: db.node(src, wire("O")),
+            source_wire: (src, wire("O")),
+            sinks: sinks.iter().map(|&t| db.node(t, wire("I"))).collect(),
+            direct_ports: vec![],
+            name,
+        };
+        nets.push(add("wide".into(), wide_src, wide_sinks, &mut timing));
+        for i in 0..40 {
+            let src = tile(next(w), next(h));
+            if src == wide_src {
+                continue;
+            }
+            let (sx, sy) = (src % w, src / w);
+            let mut sinks = Vec::new();
+            for _ in 0..1 + next(3) {
+                let t = tile((sx + next(5)).min(w - 1), (sy + next(5)).min(h - 1));
+                if used_in.insert(t) {
+                    sinks.push(t);
+                }
+            }
+            if !sinks.is_empty() {
+                nets.push(add(format!("n{i}"), src, sinks, &mut timing));
+            }
+        }
+        // Distinct sources: drop nets whose source another net already has.
+        let mut seen = std::collections::HashSet::new();
+        nets.retain(|n| seen.insert(n.source));
+        let design = Design {
+            nets,
+            fixed_inputs: HashSet::new(),
+            timing,
+        };
+        let route = |batching: Batching, threads: usize| -> Vec<Vec<NodeId>> {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+            pool.install(|| {
+                let mut router = Router::new(&db, &design);
+                router.batching = batching;
+                let (trees, _, _) = router.route(&design.nets).unwrap();
+                assert!(router.node.iter().all(|n| n.occ <= 1), "overused nodes left");
+                trees.into_iter().map(|t| t.nodes).collect()
+            })
+        };
+        for batching in [Batching::Regions, Batching::Fixed(4)] {
+            let one = route(batching, 1);
+            let four = route(batching, 4);
+            assert_eq!(one, four, "{batching:?}");
+            for (net, tree) in design.nets.iter().zip(&one) {
+                for sink in &net.sinks {
+                    assert!(tree.contains(sink), "{batching:?}: {} misses a sink", net.name);
+                }
+            }
+        }
     }
 }
