@@ -72,13 +72,25 @@ A PLL clock leaves the chip on its PLL's clock output pin only: CLK2
 the DE2's DRAM_CLK (cyclone2-re README, "PLLs"). chipsmith packs a
 `CY2_PLL` CLK2 driving an output pin that way, and says so when a design
 asks for CLK0/CLK1 on a pin or a pin that isn't the PLL's (PLL_2: F21,
-PLL_3: E5, PLL_4: V21). Quartus assembles it byte-identically. Negative
-phase shifts are an error (ask for the period minus the shift): Quartus
-makes them by delaying the feedback counter, which isn't modelled.
+PLL_3: E5, PLL_4: V21). Quartus assembles it byte-identically.
+
+Phase shifts are picked the way Quartus picks them: the shift rounds to
+the nearest eighth of a VCO period, and the VCO is the one that hits all
+shifts best (then nearest 800 MHz). A negative shift isn't folded into
+the period: the feedback counter waits for it and every output with it,
+so the outputs lead the input clock. A shift needing more than a preset's
+16 VCO cycles is an error (Quartus clamps it, warning 15559). For 34
+altpll designs Quartus fit from CLOCK_50 (cyclone2-re's `clk_jobs.txt`,
+-20 to +20 ns, 10 to 100 MHz), chipsmith picks the same counters
+(`pll.rs` tests), and the 46 Quartus PLL designs added 2026-10-31
+assemble byte-identically in cyclone2-re's `cram roundtrip`. The lock
+window goes by the phase detector's period (input period times n), not
+m.
 
 `examples/sdram-selftest` runs the DE2's 8 MB SDRAM (IS42S16400): a
 100 MHz controller on PLL_1's CLK0, the SDRAM clocked from CLK2 on
-DRAM_CLK at +8.5 ns, every SDRAM pin through its I/O-cell
+DRAM_CLK at -1.5 ns (the same clock as +8.5 ns, one period later; the
+board runs below were at +8.5 ns), every SDRAM pin through its I/O-cell
 registers, 8-word bursts with auto precharge at CAS latency 3. Each pass
 writes all 4M words with a 32-bit LFSR seeded from the pass number and
 reads them back. USER1 holds `"SDR!"`, the passes, the words that read
@@ -95,7 +107,9 @@ latency 4): 6,989 passes at +8.5 ns,
 200 MB/s (16 cycles per 8-word burst). Swept over DRAM_CLK's shift, 25 s
 each: 0 errors from +6 to +10.5 ns, nearly every word wrong at +5.5 and
 +11.5 ns, so +8.5 ns is the window's middle (docs/de2-periph-status.md). Quartus
-assembles chipsmith's placement and routing byte-identically. The read
+assembles chipsmith's placement and routing byte-identically, also at
+-1.5 ns (2026-10-31; not yet on the board): m 20, the feedback counter
+1.5 VCO cycles late, the counters Quartus' own altpll fit picks. The read
 latency (`RD_LAT`, FPGA clocks from the controller's READ to the input
 registers holding the first word) was found on the board: a build with
 the extra stage checking latencies 4-7 side by side read 0 errors at 4
@@ -530,7 +544,7 @@ designs itself, the RBFs no longer match the
 nextpnr's placement.
 
 The Cyclone II limits come from cyclone2-re's open flow: M4K RAM as
-above, multipliers as above, PLLs without negative phase shifts, clock
+above, multipliers as above, PLLs without clock
 switchover or reconfiguration (a PLL clock reaches a pin only through its
 clock output pin, and no global clock feeds logic as data), I/O registers
 without clock enables or clears (an output or OE register's enable and
