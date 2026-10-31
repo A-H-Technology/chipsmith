@@ -11,17 +11,19 @@ measurements behind each choice, and the verdict.
 
 In short: global placement now works on every LE (an electrostatic
 placer with one density field per resource) and runs on one thread, on
-rayon's threads or on a GPU. Its start is good enough that the
-refining anneal can run cold, and routing converges in fewer
-iterations. sha256 builds 2.3 times faster and picorv32x24 2.6 times,
-with routed critical paths as good or better (picorv32x24 9.43 ns
-against 10.65); the small designs build in about the same time. All of
-that is the algorithm. The GPU makes global placement about twice as
-fast as the CPU's threads (3 to 5 times per iteration, but it compiles
-its kernels on every run), and global placement is now 2 to 5% of a
-large build, so the GPU saves seconds.
-A GPU router was prototyped and rejected: its searches lose to A* on 8
-CPU threads.
+rayon's threads or on a GPU. Its start is good enough that the refining
+anneal does a thirty-fifth of `open`'s moves, and the routes converge in
+fewer iterations. picorv32x24 places 16 times faster and builds 4.2
+times faster (835 → 201 s), sha256 2.0 times (129 → 64 s), with routed
+critical paths within `open`'s range over five seeds (picorv32x24 9.64
+against 10.65). That is the algorithm: it holds on one thread. The GPU
+makes global placement up to 3.8 times faster than 8 threads, and runs
+the router's first-iteration batches 7 times faster than 8 threads with
+the same routes; together they take another 8% (picorv32x24 185 s)
+and 21% (sha256 51 s) off, because routing's wide nets and later
+iterations are still sequential A*. A batched detailed placer that
+would replace the anneal was built and measured; it shortens wires as
+well but not critical paths, and stays opt-in.
 
 ## Baseline
 
@@ -403,33 +405,42 @@ per run; per iteration, without the compile, 2.8 (picorv32x24) to 4.7
 
 ## Results
 
-`de2_pnr` (place, route and bitstream from the packed netlist, as
-`bench/speed.sh` times those stages), seed 0, `open` 40a29cb and this
-branch back to back for each design. The machine was shared (load
-average 6 to 17 at the end of each run, in the last column), so the
-small designs' times move by a few seconds between runs. "This branch"
-is the default (global placement on rayon, router one net at a time);
-the next two columns change only the global placement's engine.
+`de2_pnr` (place, route and bitstream from the packed netlist), seed 0,
+`open` 40a29cb and this branch back to back per design, load 4 to 7 (in
+the last column). "rayon" is the default: global placement on rayon's
+threads, the router one net at a time with A*. The other columns change
+one engine each: global placement on one thread, or on the GPU, and the
+GPU also routing the first iteration's batches.
 
-| design | `open`: place / route / total s | this branch: place / route / total s | global placement on 1 thread: total s | on the GPU: total s | routed critical ns, `open` → this branch (GPU) | load |
-|---|---|---|---|---|---|---|
-| femtorv32 | 5.2 / 6.7 / 18.8 | 7.4 / 4.1 / 17.2 | 21.6 | 12.5 | 13.43 → 12.95 (13.33) | 6 to 9 |
-| mult-selftest | 9.3 / 9.6 / 23.5 | 15.2 / 9.1 / 30.9 | 24.2 | 21.0 | 15.57 → 14.91 (15.42) | 9 to 10 |
-| picorv32 | 14.8 / 11.1 / 33.1 | 14.7 / 8.7 / 30.4 | 34.3 | 32.3 | 8.19 → 7.89 (7.94) | 12 to 15 |
-| sha256 | 165.1 / 86.2 / 256.6 | 55.1 / 50.6 / 110.9 | 107.0 | 117.3 | 20.63 → 20.49 (21.07) | 8 to 13 |
-| picorv32x24 | 1,281.8 / 242.1 / 1,531.3 | 413.2 / 160.1 / 580.3 | 554.7 | 692.3 | 10.65 → 9.43 (9.33) | 6 to 12 |
+| design | `open`: place / route / total s | rayon: place / route / total s | global placement 1 thread / rayon / GPU s | anneal s | GPU placement and router: route / total s | routed ns: `open` → rayon (GPU, GPU+router) | load |
+|---|---|---|---|---|---|---|---|
+| femtorv32 | 5.7 / 4.4 / 15.4 | 2.8 / 4.3 / 12.4 | 3.32 / 2.37 / 2.25 | 0.3 | 11.9 / 18.6 | 13.43 → 13.92 (13.06, 13.56) | 5 to 7 |
+| picorv32 | 8.9 / 7.3 / 20.7 | 3.5 / 11.0 / 21.2 | 2.74 / 2.65 / 1.93 | 0.7 | 14.8 / 21.8 | 8.19 → 8.39 (7.57, 7.89) | 5 to 8 |
+| mult-selftest | 8.1 / 8.7 / 21.1 | 4.0 / 6.3 / 14.7 | 4.23 / 2.93 / 1.93 | 0.9 | 15.1 / 22.6 | 15.57 → 14.76 (15.25, 15.50) | 4 to 5 |
+| sha256 | 67.4 / 56.8 / 129.0 | 6.4 / 52.8 / 64.0 | 6.02 / 3.21 / 2.02 | 2.6 | 40.2 / 50.7 | 20.63 → 20.86 (21.99, 21.49) | 4 to 6 |
+| picorv32x24 | 636.6 / 190.5 / 835.3 | 39.7 / 153.8 / 200.8 | 21.76 / 10.42 / 2.71 | 26.0 | 140.3 / 185.1 | 10.65 → 9.64 (9.90, 9.90) | 4 to 7 |
 
-- sha256 builds 2.3 times faster, picorv32x24 2.6 times: placement 3.0
-  and 3.1 times faster, routing 1.7 and 1.5 times, because the better
-  placement routes in 9 and 15 iterations instead of 26 and 36.
-- The small designs build in about the same time: the global placement
-  (4 to 5 s) costs what the shorter anneal saves.
-- Of picorv32x24's 413 s of placement, 10 s are global placement and
-  about 400 s the anneal (112 million moves); of sha256's 55 s, 6 and
-  45. The GPU's few seconds don't show in the totals; its picorv32x24
-  run drew a higher load (12) than the CPU's.
-- Routed critical paths are as good or better, on these single seeds as
-  over five seeds (Choosing the settings).
+- Placement is 10 times faster on sha256 and 16 times on picorv32x24
+  (636.6 → 39.7 s); builds 2.0 and 4.2 times. Routing is now most of a
+  large build, and the routes converge in fewer iterations (21 against
+  36) than `open`'s.
+- What the GPU adds: global placement 1.05 (femtorv32) to 3.8
+  (picorv32x24: 10.4 → 2.7 s) times faster than rayon's 8 threads,
+  including ~1.5 s compiling kernels, and the first iteration's batched nets 7 times
+  faster than the same search on 8 threads. With both, sha256 builds in
+  50.7 s and picorv32x24 in 185.1 s, against 64.0 and 200.8 s on the
+  CPU: the GPU's share of the remaining time is small because routing's
+  wide nets and later iterations stay sequential A*.
+- The algorithm accounts for the rest: the whole gain over `open` is
+  there on one thread (picorv32x24 225.9 s, sha256 65.9 s).
+- Critical paths here are single seeds; over five seeds the defaults
+  are within `open`'s range (Choosing the settings). The GPU's
+  placements differ from the CPU's; sha256 came out 4% slower on the
+  GPU in all three runs measured (21.99, 21.07, 21.86 against the CPU's
+  20.86, 20.49, 21.11), picorv32x24 either way (9.90, 9.33, 9.19 against
+  9.64, 9.43, 10.18). Not investigated.
+- The small designs build in about the same time as on `open` (they are
+  placed LE by LE from 700 LEs; femtorv32 and up here).
 
 ## Every DE2 example
 
@@ -502,18 +513,20 @@ place by clusters again, as on `open`.
 
 ## Left
 
-- The cold anneal is now most of placement (sha256 45 of 55 s,
-  picorv32x24 about 400 of 413 s). C2's schedule is 5 times faster but cost sha256 3%;
-  a timing-driven global placement good enough to need only C2 would
-  cut placement again.
-- Routing is the other half of a large build and stays sequential.
-  Batches don't pay on compact designs; a router whose first iteration
-  parallelises well needs a different decomposition (wide nets are most
-  of it).
-- On small designs the global placement takes longer than the old
-  anneal it shortens (femtorv32: 4 s): most of its objects are fillers
-  (7,000 against 800 real ones). Larger fillers or fewer bins for small
-  designs would help.
-- The GPU compiles its kernels on every run (~1.5 s). CubeCL can cache
-  them (its `persistence` feature), not enabled here.
+- Routing is now most of a large build. On the GPU it needs wide nets
+  (a net's sinks one after another make a long slot) and the later,
+  incremental iterations (their kept branches would be the slot's
+  starting tree); and batches whose nets see each other less: 64-net
+  batches cost picorv32x24 more iterations (20 against 17 above, 27
+  against 15 from another placement).
+- The anneal is down to 26 s on picorv32x24 (8 million moves on 8
+  threads). The batched detailed placer matches it on wirelength but not
+  on critical path; a timing-aware selection (best of several rounds, as
+  the anneal's best of 8 seeds) is the next thing to try.
+- sha256 places 4% slower on the GPU than on the CPU in three runs.
+- The global placement's fixed cost (fillers over the whole chip) keeps
+  designs under 700 LEs on the cluster flow.
+- The GPU compiles its kernels on every run (~1.5 s); CubeCL's
+  `persistence` feature would cache them.
+- HIP builds but has not run (no AMD GPU here).
 - The xc7 back end doesn't use `chipsmith-place` yet.
