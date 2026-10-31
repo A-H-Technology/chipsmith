@@ -183,7 +183,8 @@ fn an_inverter_folds_into_lut_masks_and_the_pin() {
         Kind::Ff(netlist::FfConfig {
             clk_inv: false,
             ena_inv: true,
-            sclr_inv: false
+            sclr_inv: false,
+            aclr_inv: false
         })
     );
     // The pin was fed by a buffer of the inverter: one inversion, in the IOE.
@@ -197,6 +198,56 @@ fn an_inverter_folds_into_lut_masks_and_the_pin() {
             }
         }
     );
+}
+
+/// `always @(posedge clk or negedge rst_n)`: synthesis gives each
+/// register an inverter in front of its clear; they fold into the
+/// registers' ACLR_INV, one clear net for all, as quartus_map makes
+/// `.aclr(!rst_n)`.
+#[test]
+fn inverters_in_front_of_clears_fold_into_the_lab() {
+    let (nl, stats) = packed(&[
+        (
+            "inv0",
+            "LCELL_COMB",
+            Some(!mask::BUFFERS[0]),
+            json!({"DATAA": [12], "DATAB": ["1"], "DATAC": ["1"], "DATAD": ["1"], "COMBOUT": [20]}),
+        ),
+        (
+            "inv1",
+            "LCELL_COMB",
+            Some(!mask::BUFFERS[0]),
+            json!({"DATAA": [12], "DATAB": ["1"], "DATAC": ["1"], "DATAD": ["1"], "COMBOUT": [21]}),
+        ),
+        (
+            "ff0",
+            "LCELL_FF",
+            None,
+            json!({"DATAIN": [23], "CLK": [10], "ENA": ["1"], "ACLR": [20], "SCLR": ["0"], "REGOUT": [22]}),
+        ),
+        (
+            "ff1",
+            "LCELL_FF",
+            None,
+            json!({"DATAIN": [22], "CLK": [10], "ENA": ["1"], "ACLR": [21], "SCLR": ["0"], "REGOUT": [11]}),
+        ),
+        (
+            "lut",
+            "LCELL_COMB",
+            Some(0x5555), // !A
+            json!({"DATAA": [22], "DATAB": ["1"], "DATAC": ["1"], "DATAD": ["1"], "COMBOUT": [23]}),
+        ),
+    ]);
+    assert!(find(&nl, "inv0").is_none());
+    assert!(find(&nl, "inv1").is_none());
+    assert_eq!(stats.removed_luts, 2);
+    for ff in ["ff0", "ff1"] {
+        assert_eq!(net_name(&nl, ff, Port::Aclr).as_deref(), Some("sw"));
+        let Kind::Ff(cfg) = cell(&nl, ff).kind else {
+            panic!("{ff}: not a register")
+        };
+        assert!(cfg.aclr_inv, "{ff}");
+    }
 }
 
 #[test]

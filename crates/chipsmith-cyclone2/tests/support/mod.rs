@@ -46,13 +46,24 @@ module LCELL_COMB (input DATAA, input DATAB, input DATAC, input DATAD, input CIN
   wire [1:0] k2 = DATAB ? k4[3:2] : k4[1:0];
   assign COUT = DATAA ? k2[1] : k2[0];
 endmodule
-module LCELL_FF (input DATAIN, input CLK, input ENA, input ACLR, input SCLR, output reg REGOUT);
+module LCELL_FF (input DATAIN, input CLK, input ENA, input ACLR, input SCLR, input SDATA,
+                 output reg REGOUT);
   parameter CLK_INV = 0;
+  // The packer's (`pack::to_json`; synthesis leaves them 0): the LAB's
+  // control inversions, and SDATA loaded through the LAB's sync load, tied
+  // high, in place of DATAIN.
+  parameter ENA_INV = 0;
+  parameter SCLR_INV = 0;
+  parameter ACLR_INV = 0;
+  parameter SLOAD = 0;
   initial REGOUT = 1'b0;
   wire clk = CLK_INV ? ~CLK : CLK;
-  always @(posedge clk, posedge ACLR)
-    if (ACLR) REGOUT <= 1'b0;
-    else if (ENA) REGOUT <= SCLR ? 1'b0 : DATAIN;
+  wire ena = ENA_INV ? ~ENA : ENA;
+  wire sclr = SCLR_INV ? ~SCLR : SCLR;
+  wire aclr = ACLR_INV ? ~ACLR : ACLR;
+  always @(posedge clk, posedge aclr)
+    if (aclr) REGOUT <= 1'b0;
+    else if (ena) REGOUT <= sclr ? 1'b0 : SLOAD ? SDATA : DATAIN;
 endmodule
 // An I/O cell register (`cells.v`): on its side's clock edge
 // (`*CLK_INVERT`: falling), while its enable is active if it takes one; the
@@ -310,6 +321,115 @@ pub fn write(design: &Design, path: &Path) {
         std::io::BufWriter::new(std::fs::File::create(path).unwrap()),
     )
     .unwrap();
+}
+
+/// A packed netlist (`pack::pack_file`) of a design whose pins have no
+/// I/O-cell registers, as a gate netlist `cosim` reads: pin buffers and
+/// clock controls become wires (an input port's bits the nets its buffers
+/// drive, an output port's the nets its buffers take, through an inverter
+/// LUT where the pin inverts them, `DATA_INVERT`), LEs stay
+/// `LCELL_COMB` / `LCELL_FF` with the packer's parameters, and an input the
+/// packer left unconnected takes the level it stands for (a LUT input 1,
+/// an enable 1, a clear 0).
+pub fn packed_gate(packed: &Path) -> Design {
+    use serde_json::Value;
+    let mut j: Value = serde_json::from_slice(&std::fs::read(packed).unwrap()).unwrap();
+    let m = &mut j["modules"]["top"];
+    let mut subst: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut port_bits: Vec<(String, u64, bool)> = Vec::new();
+    let cells = m["cells"].as_object_mut().unwrap();
+    cells.retain(|name, c| {
+        let net = |p: &str| c["connections"][p][0].as_u64();
+        match c["type"].as_str().unwrap() {
+            "LCELL_COMB" | "LCELL_FF" => return true,
+            "CLKCTRL" => {
+                subst.insert(net("OUTCLK").unwrap(), net("INCLK").unwrap());
+            }
+            t @ ("CY2_IBUF" | "CY2_OBUF") => {
+                let mut params = c["parameters"].as_object().unwrap().clone();
+                let invert = params.remove("DATA_INVERT").is_some_and(|v| v == "1");
+                assert!(
+                    params.is_empty(),
+                    "{name}: an I/O-cell register ({params:?})"
+                );
+                let port = c["attributes"]["PORT"].as_str().unwrap().to_string();
+                let p = if t == "CY2_IBUF" {
+                    "COMBOUT"
+                } else {
+                    "DATAOUT"
+                };
+                port_bits.push((
+                    port,
+                    net(p).unwrap_or_else(|| panic!("{name}: no {p}")),
+                    invert,
+                ));
+            }
+            t => panic!("{name}: {t} in a packed netlist co-simulation doesn't model"),
+        }
+        false
+    });
+    let resolve = |n: u64| *subst.get(&n).unwrap_or(&n);
+    let idle = |ty: &str, p: &str| match (ty, p) {
+        ("LCELL_COMB", "DATAA" | "DATAB" | "DATAC" | "DATAD" | "CIN") => Some("1"),
+        ("LCELL_FF", "ENA") => Some("1"),
+        ("LCELL_FF", "ACLR" | "SCLR" | "SDATA") => Some("0"),
+        _ => None,
+    };
+    for c in cells.values_mut() {
+        let ty = c["type"].as_str().unwrap().to_string();
+        let dirs = c["port_directions"].clone();
+        let conns = c["connections"].as_object_mut().unwrap();
+        for (p, _) in dirs.as_object().unwrap() {
+            let bits = conns.entry(p.clone()).or_insert(Value::Array(vec![]));
+            match bits.as_array().unwrap().first().and_then(Value::as_u64) {
+                Some(n) => *bits = serde_json::json!([resolve(n)]),
+                None if bits.as_array().unwrap().is_empty() => {
+                    if let Some(v) = idle(&ty, p) {
+                        *bits = serde_json::json!([v]);
+                    }
+                }
+                None => {}
+            }
+        }
+    }
+    let mut next = cells
+        .values()
+        .flat_map(|c| c["connections"].as_object().unwrap().values())
+        .filter_map(|v| v[0].as_u64())
+        .max()
+        .unwrap_or(1)
+        + 1;
+    let mut inverters = Vec::new();
+    for (port, n, invert) in port_bits {
+        let (name, bit) = match port.split_once('[') {
+            Some((n, i)) => (
+                n.to_string(),
+                i.trim_end_matches(']').parse::<usize>().unwrap(),
+            ),
+            None => (port.clone(), 0),
+        };
+        let mut n = resolve(n);
+        if invert {
+            inverters.push((
+                format!("{port}$data_invert"),
+                serde_json::json!({
+                    "type": "LCELL_COMB",
+                    "parameters": {"LUT_MASK": "0101010101010101"},
+                    "port_directions": {"DATAA": "input", "DATAB": "input", "DATAC": "input",
+                        "DATAD": "input", "CIN": "input", "COMBOUT": "output", "COUT": "output"},
+                    "connections": {"DATAA": [n], "DATAB": ["1"], "DATAC": ["1"], "DATAD": ["1"],
+                        "CIN": ["1"], "COMBOUT": [next], "COUT": []},
+                }),
+            ));
+            n = next;
+            next += 1;
+        }
+        m["ports"][&name]["bits"][bit] = serde_json::json!(n);
+    }
+    m["cells"].as_object_mut().unwrap().extend(inverters);
+    m["netnames"] = serde_json::json!({});
+    read_json(serde_json::to_vec(&j).unwrap().as_slice())
+        .unwrap_or_else(|e| panic!("{}: {e}", packed.display()))
 }
 
 pub fn read(path: &Path) -> Design {
@@ -2260,4 +2380,3 @@ pub fn flow(
     let r = bitstream::nextpnr::read(&db.dev, &routed).unwrap();
     (db.dev, r)
 }
-

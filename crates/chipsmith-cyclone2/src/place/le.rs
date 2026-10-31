@@ -40,7 +40,7 @@ pub(super) struct LeProblem {
 
 /// A register's controls as a LAB sees them: two registers with the same
 /// key can always share a LAB.
-type ControlKey = (Ctl, Ctl, Ctl, Option<NetId>, u8);
+type ControlKey = (Ctl, Ctl, Ctl, Option<(NetId, bool)>, u8);
 
 fn control_key(f: &FfCtl) -> ControlKey {
     (f.clk, f.ena, f.sclr, f.aclr, f.sync_kind)

@@ -226,6 +226,7 @@ struct Cell {
     clk_inv: bool,
     ena_inv: bool,
     sclr_inv: bool,
+    aclr_inv: bool,
     /// A multiplier's A_REG, B_REG, P_REG.
     mult_regs: [bool; 3],
     /// Pin buffers: the top-level port they serve (`LEDR[0]`).
@@ -293,7 +294,8 @@ struct FfCtl {
     clk: Ctl,
     ena: Ctl,
     sclr: Ctl,
-    aclr: Option<NetId>,
+    /// The clear net and whether it is active low.
+    aclr: Option<(NetId, bool)>,
     /// Bit 0: uses SDATA, bit 1: SCLR; a LAB's registers agree on it.
     sync_kind: u8,
 }
@@ -423,6 +425,7 @@ fn read_design(json: &Value) -> Result<Design> {
             clk_inv: flag("CLK_INV"),
             ena_inv: flag("ENA_INV"),
             sclr_inv: flag("SCLR_INV"),
+            aclr_inv: flag("ACLR_INV"),
             mult_regs: mult::Regs::PARAMS.map(flag),
             port: c["attributes"]["PORT"].as_str().map(str::to_string),
             io_regs: [
@@ -662,7 +665,7 @@ fn read_design(json: &Value) -> Result<Design> {
                     clk: (c.net(Port::Clk), c.clk_inv),
                     ena: (c.net(Port::Ena), c.ena_inv),
                     sclr: (c.net(Port::Sclr), c.sclr_inv),
-                    aclr: c.net(Port::Aclr),
+                    aclr: c.net(Port::Aclr).map(|n| (n, c.aclr_inv)),
                     sync_kind: c.net(Port::Sdata).is_some() as u8
                         | (c.net(Port::Sclr).is_some() as u8) << 1,
                 });
@@ -1350,7 +1353,7 @@ impl<'a> State<'a> {
         // A third distinct domain already fails, so three slots suffice.
         let mut domains: [((Option<NetId>, bool), Ctl); 3] = [((None, false), (None, false)); 3];
         let mut n_domains = 0;
-        let (mut ena, mut aclr, mut sclr): (Option<Ctl>, Option<NetId>, Option<Ctl>) =
+        let (mut ena, mut aclr, mut sclr): (Option<Ctl>, Option<(NetId, bool)>, Option<Ctl>) =
             (None, None, None);
         let mut sync_kind = 0;
         let mut inputs = [0 as NetId; MAX_LAB_INPUTS];
@@ -2582,7 +2585,7 @@ pub fn place_file(
                     controls.len(),
                     distinct(&|c| c.ena.0),
                     distinct(&|c| c.sclr.0),
-                    distinct(&|c| c.aclr),
+                    distinct(&|c| c.aclr.map(|a| a.0)),
                     design.chains.len(),
                     started.elapsed().as_secs_f64()
                 );
