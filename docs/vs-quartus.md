@@ -188,8 +188,24 @@ Notes on rows:
   ran for 50 minutes in *post-fitting delay annotation* without finishing,
   against 10 minutes for Quartus' whole fit of its own placement. It was
   stopped, and the gpu-pnr ones were stopped after 15 minutes.
-  A retry of `open`'s placement with a 3-hour limit and nothing else of
-  this bench running: pending.
+  A retry of `open`'s placement, with nothing else of this bench running,
+  hit its 3-hour limit in the same place. Another agent's Quartus assembly
+  of the same design was past 3 hours at the time too.
+
+Second window (`bench-out/vs1-quiet`, 2026-11-01 09:50 to 10:48, one rep,
+no cross-check). It was meant to be quieter, but other agents kept the
+load at 6 to 12. It agrees with the medians above:
+
+| design | tool | wall s | CPU s | load |
+|---|---|---|---|---|
+| sha256 | q | 205.2 | 199.9 | 6.7 |
+| sha256 | cs | 179.7 | 453.4 | 9.0 |
+| sha256 | gpu-cpu | 76.0 | 117.3 | 7.6 |
+| sha256 | gpu-cuda | 96.6 | 132.9 | 7.0 |
+| picorv32x24 | q | 890.4 | 876.3 | 6.4 |
+| picorv32x24 | cs | 1274.8 | 3975.0 | 11.8 |
+| picorv32x24 | gpu-cpu | 410.6 | 866.1 | 10.1 |
+| picorv32x24 | gpu-cuda | 420.0 | 860.6 | 11.0 |
 
 ## Quality
 

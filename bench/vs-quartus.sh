@@ -31,7 +31,8 @@
 # analysis. The 1-minute load average is sampled every 5 s during a run and
 # averaged. On rep 1, each chipsmith placement is also assembled by Quartus
 # (cyclone2-re's `cram quartus-export` and oracle, as bench/quartus-timing.sh)
-# and timed by the same quartus_sta, untimed itself.
+# and timed by the same quartus_sta, untimed itself; XCHECK=0 skips that
+# (picorv32x24's assembly hasn't finished in 3 h).
 #
 # `incr` times edit-and-rebuild: a cold build, then $REPS rebuilds, each
 # after toggling one line of logic (EDIT below) on or off, so every
@@ -276,7 +277,7 @@ full)
                 [[ -f $run/done ]] && continue
                 row=$(run_one "$tool" "$design" "$run" fresh)
                 # The untimed cross-check comes after the timed run.
-                if [[ $rep == 1 && $tool != q* && $row == *$'\tok\t'* ]]; then
+                if [[ ${XCHECK:-1} == 1 && $rep == 1 && $tool != q* && $row == *$'\tok\t'* ]]; then
                     cross_time "$run" || echo "$design $tool: Quartus cross-check failed, $run/xq" >&2
                 fi
                 echo "$row$(quality "$tool" "$run")" | tee -a "$out/runs.tsv"
