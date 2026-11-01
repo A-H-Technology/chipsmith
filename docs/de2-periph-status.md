@@ -46,7 +46,8 @@ de2-io) build to the same RBFs on the new chip database.
 - Test: each pass writes all 4M words with a 32-bit LFSR seeded from the
   pass number, then reads them back and compares.
 - Size: 777 LEs since branch de2-ioece, the controller's enables the I/O
-  cells' own (Fmax estimate 163.3 MHz; not yet on the board); 810 with
+  cells' own (Fmax estimate 147.3 MHz since gpu-pnr's placer, 163.3 at
+  de2-ioece's merge; not yet on the board); 810 with
   them as logic on D, the build the board ran (154.2 MHz); 776 with the
   extra register stage it had first. Quartus byte-identical.
 
@@ -91,7 +92,8 @@ SRAM:
   the next address (10 ns access, 2.5 ns output hold), so `RD_LAT` is 2.
 - Test: as sdram-selftest's, all 256K words a pass.
 - Size: 539 LEs since branch de2-ioece (the enables the I/O cells' own;
-  Fmax estimate 167.9 MHz; not yet on the board), 606 and 175.2 MHz with
+  Fmax estimate 166.1 MHz since gpu-pnr's placer, 167.9 at de2-ioece's
+  merge; not yet on the board), 606 and 175.2 MHz with
   them as logic, the build the board ran. Quartus byte-identical.
 - Simulated first (iverilog, a behavioural SRAM): 0 errors over 2
   passes, and one corrupted word counted once.
@@ -371,10 +373,8 @@ register stage in front of the pins. Since branch de2-ioreg:
   That is sound (the same recurrence, with the extra registers powering
   up inactive) but costs three LEs a pin, puts a LUT between the pin's
   register and the logic, and the equivalence proof by register matching
-  doesn't cover it. Not done; the error says to sample the pin in a plain
-  register and put the enable or reset on the next one. The real fix is
-  the IOE's clock enable and clear, which cyclone2-re hasn't decoded
-  (phase 5: "register clear/enable").
+  doesn't cover it. Not done: the real fix was the IOE's clock enable
+  and clear, which branch de2-ioece decoded and packs (above).
 - Cost: sdram-selftest is 810 LEs without the stage, 776 with it: the
   controller's registers stay and each pin gets a next-state LUT.
 - RBFs: only the three examples with `registers` could change. de2-io's
