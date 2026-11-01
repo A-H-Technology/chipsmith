@@ -275,7 +275,9 @@ endmodule",
         ),
         // A register file read at two addresses (femtorv32's): one block
         // per read, each written alike; the reads' registers sit behind
-        // nested enables, one of them an active-low hold.
+        // nested enables, one of them an active-low hold. This one and the
+        // next are co-simulated (`m4k_cosim_register_files`), not proven:
+        // the proof's block model takes each memory word in one block.
         (
             "two_reads_x32",
             "module top(input clk, input rst_n, input go, input busy, input we, input [4:0] wa,
