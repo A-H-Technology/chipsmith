@@ -248,6 +248,10 @@ All on the merged tree (this branch with `open` 33fb8a4) unless noted.
   i2c-master (6 I/O bits) and uart (2 I/O bits) differ, as they do on
   `open` (README, "not investigated"); in i2c-master Quartus drops two
   constant-1 LUTs that feed register data inputs. sha256 is byte-identical too.
+  (Resolved 2026-11-01, branch de2-polish: the I/O bits were the pins'
+  input delay chains, which cram's export pinned with an assignment to a
+  LUT that Quartus' netlist names `<pin>~_wirecell`; Quartus ignored it.
+  Both are byte-identical with the fixed export.)
   Placement changed every bitstream, so this is a check of new
   placements and routes, not of unchanged ones.
 - On the DE2, over JTAG (`de2_user1`), merged builds: negedge-selftest
@@ -265,11 +269,14 @@ All on the merged tree (this branch with `open` 33fb8a4) unless noted.
 
 - The xc7 back end doesn't use `chipsmith-place` yet. Its annealer could
   move into the crate as well.
-- The refining anneal is now the largest share of placement on large
+- (Done in gpu-pnr, docs/gpu-pnr.md: global placement of every LE from
+  700 LEs and a colder, shorter anneal after it, sha256's 2.6 s.) The
+  refining anneal is now the largest share of placement on large
   designs (sha256: 245 of 259 s; picorv32x24 similar). Ideas: fewer
   seeds on large designs, an incremental timing update instead of the
   full `reweight` each temperature, and moving only critical clusters.
-- With 8 anneals in parallel, placement uses all cores: on a loaded
+- (Superseded by gpu-pnr's `REFINE_LE` anneal: picorv32x24 places and
+  routes in about 200 s, docs/gpu-pnr.md.) With 8 anneals in parallel, placement uses all cores: on a loaded
   machine the small designs place no faster than with `open`'s single
   anneal, and picorv32x24 took 1,870 s. A design-size-dependent seed
   count needs its own quality sweep (4 seeds failed picorv32).
@@ -277,7 +284,8 @@ All on the merged tree (this branch with `open` 33fb8a4) unless noted.
   costs on the biggest design. Not profiled.
 - Incremental placement of the unchanged parts of a design (ADR-0011,
   considered options) needs stable cell names out of synthesis.
-- With the parallel first iteration rejected, routing is
+- (Built in gpu-pnr, opt-in: `CHIPSMITH_ROUTE_BATCH=regions`,
+  docs/gpu-pnr.md.) With the parallel first iteration rejected, routing is
   single-threaded. Spatially partitioned batches of nets, with each
   search kept inside its box, could run side by side deterministically.
 

@@ -22,7 +22,9 @@ no nextpnr, no cram. GHDL translates VHDL in front of it.
 | xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes: what yosys `synth_xilinx` and openXC7's nextpnr's packer handle, LVCMOS33 pins; chipsmith places LUT/register/carry logic, RAM32Ms, pins, BUFGs, BSCANs and the PS7 and routes the interconnect (below) | yes (2026-10-24: zybo-jtag-counter placed and routed by chipsmith, read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga) |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
-LEDs, 1,171 LEs; a build takes about 18 s (placement 9 s, routing 7 s; Compile speed, below).
+LEDs, 1,171 LEs; a build took 26.5 s on a loaded machine on 2026-11-01
+(placement 9 to 11 s, routing 11 to 12 s; place and route alone 21 s at load
+5 to 8, docs/gpu-pnr.md; Compile speed, below).
 
 Against Quartus II 13.0sp1 Web Edition on the same Verilog, pins and
 clock, to a bitstream (`bench/vs-quartus.sh`, docs/vs-quartus.md;
@@ -134,7 +136,8 @@ the errors, counter 2 the passes). The controller's registers drive the
 pins straight; their enables go into the I/O cells' clock enables and
 their synchronous resets into logic on the I/O registers' D (Manifest,
 below): 777 LEs and Quartus byte-identical since branch de2-ioece (Fmax
-estimate 163.3 MHz), not yet on the board. On the DE2 2026-10-30 (loaded
+estimate 147.3 MHz since gpu-pnr's placer, 163.3 at de2-ioece's merge),
+not yet on the board. On the DE2 2026-10-30 (loaded
 over JTAG, 810 LEs with the enables as logic too, 65 registers in I/O
 cells, chipsmith de2-ioreg): 5,145
 passes at +8.5 ns, 0 errors, 5.88 passes a second. Earlier the same day,
@@ -507,17 +510,31 @@ How it is checked (`crates/chipsmith-cyclone2/tests/synth.rs`, `mult_*`):
 - **The examples**: `examples/fir` (an 8-tap filter, eight signed
   16 x 16 products) proven around the blocks, the RTL against the stage
   before the mapping and the stage after it against the netlist with the
-  blocks cut at their pins (2,075 `$equiv`, 47 s), and co-simulated
-  (180,000 output bits). `examples/mult-selftest` co-simulated for
-  120,000 cycles (480,000 bits); with one block's operand made unsigned
-  it is caught at cycle 3,654. Its whole-design proof didn't finish (the
-  RTL against its own refined stage, before any block, ran 30 minutes).
+  blocks cut at their pins (2,075 `$equiv`, 47 s; 2,148 in 75 s on a
+  loaded machine since the products are narrowed, below), and co-simulated
+  (180,000 output bits). `examples/mult-selftest` proven around its 15
+  blocks the same way (3,460 `$equiv`, 289 s; since 2026-11-01, below)
+  and co-simulated for 120,000 cycles (480,000 bits); with one block's
+  operand made unsigned the co-simulation catches it at cycle 3,654.
+  Its proof hadn't finished before: chipsmith's front end widens a
+  product's operands to the result (Verilog's context-determined width),
+  yosys' front end doesn't, so the two `$mul`s of each product differed
+  in their parameters, and yosys' `equiv_struct` skips `$mul` cells
+  anyway: induction SAT-solved each multiplier against its twin, and the
+  RTL against its own refined stage ran 30 minutes without finishing.
+  The check now narrows both sides' products (`wreduce`), and where the
+  RTL has a product of two signals wider than 18 x 18 it lets
+  `equiv_struct` merge internal cells (`-icells`) between the two front
+  ends, so two products of proven-equal operands are one; where that
+  pairs a name-matched wire that legitimately differs, it proves again
+  without `-icells`. Narrower products SAT proves directly (`-icells`
+  cost fir's RTL step 299 s).
 - **Quartus byte-identical**: fir and mult-selftest.
 
 | design | products | blocks | LEs | critical path, estimate / Quartus |
 |---|---|---|---|---|
-| fir | 8 signed 16 x 16 | 8 | 534 | 13.45 / 13.66 ns |
-| mult-selftest | 9, one per mode below | 15 | 1,008 | 15.58 / 15.86 ns |
+| fir | 8 signed 16 x 16 | 8 | 534 | 13.69 / 13.79 ns |
+| mult-selftest | 9, one per mode below | 15 | 1,008 | 14.76 / 15.61 ns |
 
 `examples/mult-selftest` answers over JTAG like m4k-selftest: nine
 products of LFSR operands (9 x 9 unsigned and signed, 18 x 18 unsigned and
@@ -546,32 +563,37 @@ since cyclone2-re 9cfe9be, see below; 11.08 ns before) and on bidir
 (16.21 ns), ram_widths (14.80 ns) and ram-leds (14.80 ns). Those were
 yosys-synthesized. With chipsmith's own synthesis, `bench/de2-timing.sh`
 builds every DE2 example with a clock and has Quartus time the same
-placement and routing (2026-10-27; uart, spi-master, i2c-master, sha256,
-de2-jtag-counter and the multiplier examples 2026-10-29, after the
-multipliers branch's carry-chain change; 50 MHz constraint; error is the
-estimate's critical path against Quartus'):
+placement and routing (re-run 2026-11-01, branch de2-polish: gpu-pnr's
+placer, the active-low clear folding and cyclone2-re's fixed export;
+50 MHz constraint; error is the estimate's critical path against
+Quartus'):
 
 | design | estimate | Quartus | error | RBF byte-identical |
 |---|---|---|---|---|
 | blinky-verilog, blinky-vhdl | 3.37 ns | 3.35 ns | +0.5% | yes |
 | bidir | 3.37 ns | 3.36 ns | +0.3% | yes |
-| ram | 3.80 ns | 3.79 ns | +0.3% | yes |
-| ram_widths | 3.80 ns | 3.78 ns | +0.5% | yes |
-| ram-leds | 5.04 ns | 5.12 ns | -1.6% | yes |
-| de2-jtag-counter | 3.80 ns | 3.79 ns | +0.3% | yes |
-| uart | 5.85 ns | 6.37 ns | -8.2% | no (2 I/O bits) |
-| spi-master | 4.36 ns | 4.85 ns | -10.0% | yes |
-| i2c-master | 7.89 ns | 8.68 ns | -9.1% | no (6 I/O bits) |
-| femtorv32 | 13.74 ns | 14.28 ns | -3.8% | yes |
-| serv | 11.86 ns | 13.28 ns | -10.7% | yes |
-| sha256 | 24.18 ns | 26.02 ns | -7.1% | yes |
-| fir | 13.45 ns | 13.66 ns | -1.5% | yes |
-| mult-selftest | 15.58 ns | 15.86 ns | -1.8% | yes |
-| crc32 | 3.35 ns | 3.62 ns | -7.4% | yes |
-| negedge-selftest | 5.53 ns, half a period | 6.04 ns, half a period | -8.4% | yes |
+| ram | 3.80 ns | 3.78 ns | +0.5% | yes |
+| ram_widths | 3.80 ns | 3.78 ns | +0.6% | yes |
+| ram-leds | 3.54 ns | 3.82 ns | -7.2% | yes |
+| de2-jtag-counter | 3.80 ns | 3.78 ns | +0.5% | yes |
+| uart | 5.53 ns | 6.09 ns | -9.1% | yes |
+| spi-master | 3.41 ns | 3.72 ns | -8.3% | yes |
+| i2c-master | 6.92 ns | 7.59 ns | -8.8% | yes |
+| femtorv32 | 13.92 ns | 14.58 ns | -4.5% | yes |
+| serv | 10.38 ns | 10.92 ns | -5.0% | yes |
+| sha256 | 20.33 ns | 21.28 ns | -4.5% | yes |
+| fir | 13.69 ns | 13.79 ns | -0.8% | yes |
+| mult-selftest | 14.76 ns | 15.61 ns | -5.5% | yes |
+| crc32 | 3.35 ns | 3.32 ns | +0.9% | yes |
+| negedge-selftest | 6.07 ns, half a period | 6.83 ns, half a period | -11.1% | yes |
 
-Most small designs are within 2% (spi-master is 10% under); the larger
-ones run 2 to 11% slower in Quartus than estimated. Over the 355 connections of the 300 worst
+Eight designs are within 1% (blinky-verilog and -vhdl, bidir, ram,
+ram_widths, de2-jtag-counter, crc32, fir); the others run 4.5 to 9.1%
+slower in Quartus than estimated, negedge-selftest's falling-to-rising
+path 11.1%.
+(de2-timing.sh's own row for negedge-selftest compares the full-period
+path; the half-period figures are the build's report and quartus_sta's
+slack against 10 ns.) Over the 355 connections of the 300 worst
 Quartus paths of picorv32, femtorv32, serv and ram-leds that route the
 same in both (`bench/timing-calib.py`), Quartus' routing delay is 1.08
 times the model's (C4 the most: 312 ps median against the model's 285).
@@ -579,14 +601,21 @@ Scaling every routing delay by that brought the four larger designs'
 mean error from 6.6% to 5.3%, but Quartus timed three of them slower on
 the placements it led to (picorv32 8.57 to 9.07 ns, i2c-master 8.83 to
 9.89 ns), so the model stays as it is; the gap is where per-wire delays
-(fanout, wire length) would have to come in. The designs that aren't
-byte-identical are timed on Quartus' reassembly. Since cyclone2-re's
+(fanout, wire length) would have to come in. Since cyclone2-re's
 export names an inverting feeder from a register or a pin Quartus' way
 (`<src>~_wirecell`, placed in the feeder's LE; cyclone2-re f0406b4,
 2026-10-29), spi-master, sha256, de2-jtag-counter and de2-io are
-byte-identical too; uart and i2c-master are down to 2 and 6 bits in the
-I/O rows (not investigated). All 43 DE2 designs (the examples, the 16
-random M4K designs) re-validated then: 41 byte-identical.
+byte-identical too; uart and i2c-master were down to 2 and 6 bits in the
+I/O rows, and all 43 DE2 designs (the examples, the 16 random M4K
+designs) re-validated then: 41 byte-identical. Those bits were the input
+delay chains of pins read only through a `~_wirecell`: the export pinned
+each pad-to-core delay with an assignment to the feeder LUT, a name
+Quartus' netlist doesn't have, so the fitter ignored it and left the
+chain off. With the assignment on the wirecell (cyclone2-re 3cd8278,
+2026-11-01), 33 of the 34 DE2 examples re-validated byte-identical, uart
+and i2c-master included; picorv32x24 (28,449 LEs) isn't validated:
+Quartus' fit placed and routed it in minutes, then spent 7.5 hours in
+post-fit delay annotation without finishing, and was stopped.
 picorv32 has no M4K; its slack moved because cyclone2-re's synthesis
 script gained `memory_libmap`, which renames yosys' cells and nets. Same
 logic, same 1,175 LEs, but other net ids and so another placement. The
@@ -821,7 +850,8 @@ share chipsmith's own netlist IR, not Verilog.
      Weight/exponent sweep, one seed each: 8/4 8.79 ns, 32/8 8.81 ns,
      16/4 8.94 ns, 8/2 9.35 ns.
    - Compile speed (2026-10-30, docs/fast-pnr-status.md). Placement
-     clusters LEs into LAB-sized groups, places them analytically
+     (since gpu-pnr only below 700 LEs, see below) clusters LEs into
+     LAB-sized groups, places them analytically
      (`crates/chipsmith-place`, device-generic: quadratic wirelength with
      the bound-to-bound net model, CG, recursive-bisection spreading),
      legalises them onto LAB slots and refines with a short annealer: 8
@@ -841,7 +871,12 @@ share chipsmith's own netlist IR, not Verilog.
      picorv32x24 places in 39.7 s instead of 636.6 and builds 4.2 times
      faster (835 → 201 s), sha256 2.0 times (129 → 64 s), back to back,
      load 4 to 7; routed critical paths within `open`'s range over five
-     seeds. The table below is fast-pnr's, before that.
+     seeds. The whole DE2 flow is deterministic on the CPU, and a test
+     holds it to that (2026-11-01, `crates/chipsmith/tests/determinism.rs`):
+     ten examples, blinky to sha256, built three times each, twice on 8
+     threads and once on 1, give one RBF each; all 34 DE2 examples gave
+     the same RBFs on 4 and 8 threads. The table below is fast-pnr's,
+     before that.
 
      | design | LEs | place s | route s | build s | critical path ns, median of 3 seeds [range] |
      |---|---|---|---|---|---|
@@ -1062,15 +1097,21 @@ share chipsmith's own netlist IR, not Verilog.
        (`chipsmith-verilog`'s `arrays_in_functions`, proven against
        yosys). That brings Forencich's `lfsr.v` back: examples/crc32,
        Ethernet's CRC-32 through its mask function. Its elaboration is
-       proven against a textbook bitwise CRC-32 with the same top (187
-       `$equiv`; yosys' own front end takes over 20 minutes on `lfsr.v`,
-       so the reference is the oracle's RTL; a wrong polynomial in the
-       reference fails it), and the netlist is co-simulated against it
-       (270,000 output bits). Synthesis on it isn't proven: the CRC
-       register powers up all ones, synthesis keeps it inverted in an
-       unnamed register, the display register loads from that directly,
-       and the induction leaves those 27 bits open. Quartus
-       byte-identical.
+       proven against a textbook bitwise CRC-32 with the same top
+       (yosys' own front end takes over 20 minutes on `lfsr.v`, so the
+       reference is the oracle's RTL; a wrong polynomial in the reference
+       fails it), and the netlist is co-simulated against it (270,000
+       output bits). Quartus byte-identical. Synthesis on it is proven
+       too since 2026-11-01, the reference's RTL to the netlist (174
+       `$equiv`, 50 s): the CRC register powers up all ones, so synthesis
+       stores it inverted, and the display register loads from that
+       register directly. Nothing tied the stored register to the RTL's,
+       and the induction left those 27 bits open. Synthesis now names
+       each register it stores inverted after the bit it inverts
+       (`crc[3]~inv`, purged with every internal name, so no RBF
+       changes), and the check pairs it with `~crc[3]` on the RTL's
+       side. A flipped LUT bit in front of one of them fails the proof
+       (`crc32_a_wrong_crc_bit_is_caught`).
      - A register whose data is its own enable loads a 1 (quartus_map
        folds it so and drops the sync-load route the data would take,
        found on negedge-selftest's `if (p[0]) n2 <= p`); no other DE2
@@ -1088,26 +1129,28 @@ share chipsmith's own netlist IR, not Verilog.
      register made rising-edge, the error count climbs at 50.00 MHz, one
      per cycle. Quartus byte-identical; quartus_sta's worst path is a
      falling-to-rising one, 6.04 ns of data against half a period (the
-     estimate 5.53 ns).
+     estimate 5.53 ns; on 2026-11-01's placement 6.83 and 6.07 ns).
 
      A corpus of open-source cores, unmodified behind DE2 wrappers
      (`examples/<name>`, upstream and commit in each manifest), each proven
      equivalent to yosys' RTL. LEs and Fmax, chipsmith's synthesis against
      the yosys flow (`de2_synth --yosys`; both through chipsmith's back
-     end, Fmax its estimate, which runs up to 11% optimistic on the larger
-     ones, see the timing table above) and Quartus 13.0sp1's own synthesis
-     and fit (its STA, 50 MHz constraint):
+     end, Fmax its estimate, which runs up to 9% optimistic, see the
+     timing table above) and Quartus 13.0sp1's own synthesis
+     and fit (its STA, 50 MHz constraint). chipsmith and the yosys flow
+     re-measured 2026-11-01, on gpu-pnr's placer (`bench/speed.sh`,
+     `de2_synth --yosys`):
 
      | design | chipsmith | yosys flow | Quartus |
      |---|---|---|---|
-     | uart (Forencich) | 164 LEs, 170.9 MHz | 225 LEs, 154.2 MHz | |
-     | spi-master (nandland) | 130 LEs, 292.9 MHz | can't build: an asynchronous reset to 1 that powers up 0 | |
-     | i2c-master (Forencich) | 214 LEs, 126.7 MHz | 245 LEs, 118.6 MHz | |
-     | femtorv32 quark | 788 LEs, 72.8 MHz | 832 LEs, 87.5 MHz | 473 LEs + 1 M4K, 83.7 MHz |
-     | serv | 3,091 LEs, 84.3 MHz | 3,111 LEs, 78.6 MHz | 336 LEs + 1 M4K, 108.6 MHz |
+     | uart (Forencich) | 164 LEs, 180.8 MHz | 225 LEs, 144.8 MHz | |
+     | spi-master (nandland) | 130 LEs, 293.3 MHz | can't build: an asynchronous reset to 1 that powers up 0 | |
+     | i2c-master (Forencich) | 214 LEs, 144.5 MHz | 245 LEs, 141.8 MHz | |
+     | femtorv32 quark | 788 LEs, 71.8 MHz | 832 LEs, 91.1 MHz | 473 LEs + 1 M4K, 83.7 MHz |
+     | serv | 345 LEs + 1 M4K, 96.3 MHz | 3,111 LEs, 79.2 MHz | 336 LEs + 1 M4K, 108.6 MHz |
      | sha256 (secworks) | 4,242 LEs, 49.2 MHz | can't build (as spi-master) | 3,303 LEs, 63.7 MHz |
-     | picorv32 | 1,171 LEs, 123.4 MHz | 1,175 LEs, 114.4 MHz | |
-     | crc32 (Forencich's lfsr.v) | 118 LEs, 298.9 MHz | not run: yosys' front end takes over 20 minutes on it | |
+     | picorv32 | 1,171 LEs, 119.2 MHz | 1,175 LEs, 126.5 MHz | |
+     | crc32 (Forencich's lfsr.v) | 118 LEs, 298.5 MHz | not run: yosys' front end takes over 20 minutes on it | |
 
      chipsmith's uart, spi-master, i2c-master and sha256 are as of
      2026-10-29: a carry chain's low cells whose carry out is forced now
@@ -1118,9 +1161,10 @@ share chipsmith's own netlist IR, not Verilog.
      LEs off them (173 LEs at 232.2 MHz and 6,046 at 47.9 MHz on branch
      open the same day, Fmax the build's estimate).
 
-     Where Quartus is ahead, it is the register files (serv's and
-     femtorv32's go into an M4K; chipsmith's M4K mapping doesn't take their
-     shapes yet) and wide multiplexers: sha256's 16-word schedule read maps
+     Where Quartus is ahead, it is femtorv32's register file (Quartus puts
+     it in an M4K; chipsmith's M4K mapping doesn't take its shape yet;
+     serv's has been an M4K since the M4K work, 345 LEs against Quartus'
+     336) and wide multiplexers: sha256's 16-word schedule read maps
      to about 20 LUTs a bit, against Quartus' 11 (the mapper, not the
      netlist: the same read as a `$bmux` tree maps no better). Still
      rejected: `$pow` with a non-constant base, the yosys flow's own

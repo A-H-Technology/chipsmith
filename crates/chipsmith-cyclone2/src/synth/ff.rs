@@ -22,7 +22,7 @@
 use anyhow::{bail, Result};
 use chipsmith_netlist::{
     Bit, CellKind, Ctrl, DffControl, Ff, FfKind, LatchReset, Module, Net, Polarity, SigBit, State,
-    SyncEnable,
+    SyncEnable, Wire,
 };
 use chipsmith_synth::rewrite::{define_inits, inits, set_inits, Gates, Subst};
 use rustc_hash::FxHashMap;
@@ -73,8 +73,9 @@ pub fn map(m: &mut Module) -> Result<Counts> {
     }
     g.m.cells.extend(kept);
     let mut counts = Counts::default();
+    let mut inverted = Vec::new();
     for (name, ff) in regs {
-        match legalize(&mut g, &mut subst, &mut init, &name, ff)? {
+        match legalize(&mut g, &mut subst, &mut init, &mut inverted, &name, ff)? {
             Mapped::Register => counts.registers += 1,
             Mapped::Latch => counts.latches += 1,
             Mapped::Emulated => {
@@ -83,11 +84,34 @@ pub fn map(m: &mut Module) -> Result<Counts> {
             }
         }
     }
+    name_inverted(m, &inverted);
     subst.apply(m);
     // The LE register powers up 0, and every register now does.
     init.clear();
     set_inits(m, &init);
     Ok(counts)
+}
+
+/// Names each register stored inverted after the bit it holds the
+/// inverse of: `crc[3]~inv` (bit 3 from 0 of wire `crc`). Once the
+/// inverter folds into the loads, nothing else ties the register to the
+/// RTL's: synthesis' proof compares the name with `~crc[3]` on the RTL's
+/// side, and induction needs that pair to prove what the register feeds.
+/// The build purges the name with every other internal one.
+fn name_inverted(m: &mut Module, inverted: &[(Net, Net)]) {
+    if inverted.is_empty() {
+        return;
+    }
+    let inner: FxHashMap<Net, Net> = inverted.iter().copied().collect();
+    let mut named = Vec::new();
+    for w in &m.wires {
+        for (i, b) in w.bits.iter().enumerate() {
+            if let Some(&r) = b.net().and_then(|q| inner.get(&q)) {
+                named.push(Wire::new(format!("{}[{i}]~inv", w.name), vec![SigBit::Net(r)]));
+            }
+        }
+    }
+    m.wires.extend(named);
 }
 
 /// Whether a control with this polarity acts at this value.
@@ -197,6 +221,7 @@ fn legalize(
     g: &mut Gates,
     subst: &mut Subst,
     init: &mut FxHashMap<Net, State>,
+    inverted: &mut Vec<(Net, Net)>,
     name: &str,
     ff: Ff<Bit>,
 ) -> Result<Mapped> {
@@ -369,9 +394,11 @@ fn legalize(
     };
     let reg_q = if invert {
         d = g.not(d);
-        let inner = SigBit::Net(g.m.new_net());
+        let r = g.m.new_net();
+        let inner = SigBit::Net(r);
         let outer = g.not(inner);
         subst.set(q, outer);
+        inverted.push((q, r));
         inner
     } else {
         SigBit::Net(q)

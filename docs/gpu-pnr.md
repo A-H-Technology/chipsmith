@@ -492,6 +492,16 @@ place by clusters again, as on `open`.
   byte-identical `placed.json`, `routed.json` and bitstreams for
   picorv32, sha256 and picorv32x24; two CUDA runs of picorv32 give the
   same bitstream.
+- A regression test since 2026-11-01 (`crates/chipsmith/tests/determinism.rs`,
+  `cargo test --release -p chipsmith --test determinism` in the
+  devshell): blinky-verilog, uart, i2c-master, m4k-selftest,
+  mult-selftest, negedge-selftest, de2-pll-counter, de2-ioregs, picorv32
+  and sha256, each built by the `chipsmith` binary three times from a
+  fresh copy with the cache off, twice on 8 threads and once on 1, must
+  give one RBF. All pass, 13 minutes on one test thread (sha256 281 s
+  of it). Separately, all 34 DE2 examples (picorv32x24 too) built on 4
+  and on 8 threads gave the same 34 RBFs. The GPU engine isn't in the
+  test: it needs the `gpu` feature build.
 
 ## Building and running
 

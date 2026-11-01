@@ -928,46 +928,88 @@ fn active_low_clears_fold_into_the_lab() {
 }
 
 /// Forencich's lfsr.v (examples/crc32), which declares arrays inside its
-/// mask function, as Ethernet's CRC-32: its elaboration proven against a
-/// textbook bitwise CRC-32 with the same top (`designs/crc32_ref.v`; the
-/// RTL against the refined stage), and the netlist co-simulated against
-/// that reference. yosys' own front end takes over 20 minutes on lfsr.v's
-/// constant functions, so the oracle's RTL is the reference's. The refined
-/// stage against the netlist isn't proven: `crc` powers up all ones, so
-/// synthesis keeps it inverted in an unnamed register, `shown` loads from
-/// that register directly, and equiv_induct leaves `shown`'s 27 bits
-/// unproven (the co-simulation compares them every cycle). Remove the
-/// split once the check proves that step.
+/// mask function, as Ethernet's CRC-32: proven against a textbook bitwise
+/// CRC-32 with the same top (`designs/crc32_ref.v`), the reference's RTL
+/// against the refined stage and that against the netlist, and the
+/// netlist co-simulated against the reference. yosys' own front end takes
+/// over 20 minutes on lfsr.v's constant functions, so the oracle's RTL is
+/// the reference's. `crc` powers up all ones, so synthesis stores it
+/// inverted and `shown` loads from that register directly: the proof pairs
+/// the two by synthesis' `crc[i]~inv` names (`support::name_inverted`).
 #[test]
 fn crc32() {
-    let reference = Path::new(ROOT).join("crates/chipsmith-cyclone2/tests/designs/crc32_ref.v");
-    let s = synthesize_against(
-        "crc32",
-        "top",
-        &example("crc32"),
-        std::slice::from_ref(&reference),
-    );
+    let s = synthesize_crc32("crc32");
     let refined = s.stages.refined.as_ref().unwrap();
-    let proof = support::check(&s.dir, &s.rtl, refined, refined)
-        .unwrap_or_else(|e| panic!("crc32: elaboration against the reference: {e}"));
+    let cells = s.stages.cells.as_ref().unwrap();
+    let proof = support::check(&s.dir, &s.rtl, refined, cells)
+        .unwrap_or_else(|e| panic!("crc32: against the reference: {e}"));
     eprintln!(
-        "crc32: elaboration, {} $equiv proven against the reference",
+        "crc32: {} $equiv proven against the reference",
         proof.equivalences
     );
-    let sim = support::cosim(
-        &s.dir,
-        &s.rtl,
-        refined,
-        s.stages.cells.as_ref().unwrap(),
-        COSIM_CYCLES,
-        1,
-    )
-    .unwrap_or_else(|e| panic!("crc32: co-simulation: {e}"));
+    let sim = support::cosim(&s.dir, &s.rtl, refined, cells, COSIM_CYCLES, 1)
+        .unwrap_or_else(|e| panic!("crc32: co-simulation: {e}"));
     eprintln!(
         "crc32: co-simulated {} cycles, {} output bits compared",
         sim.cycles, sim.compared
     );
     pack(&s.dir, "chipsmith", &s.netlist);
+}
+
+fn synthesize_crc32(name: &str) -> Synthesized {
+    let reference = Path::new(ROOT).join("crates/chipsmith-cyclone2/tests/designs/crc32_ref.v");
+    synthesize_against(
+        name,
+        "top",
+        &example("crc32"),
+        std::slice::from_ref(&reference),
+    )
+}
+
+/// The pairing has teeth: a flipped LUT bit in the logic in front of one
+/// inverted `crc` register fails the proof (the names pair registers, the
+/// proof still proves each pair).
+#[test]
+fn crc32_a_wrong_crc_bit_is_caught() {
+    let s = synthesize_crc32("crc32-broken");
+    let mut gate = s.stages.cells.clone().unwrap();
+    let m = &mut gate.modules[0];
+    let reg = m
+        .wires
+        .iter()
+        .find(|w| w.name == "crc[5]~inv")
+        .expect("crc[5] stored inverted")
+        .bits[0];
+    let port = |c: &chipsmith_netlist::Cell, p: &str| match &c.kind {
+        CellKind::Other(g) => g.port(p).map(|p| p.sig[0]),
+        _ => None,
+    };
+    let d = m
+        .cells
+        .iter()
+        .find(|c| port(c, "REGOUT") == Some(reg))
+        .and_then(|c| port(c, "DATAIN"))
+        .expect("crc[5]'s register");
+    let lut = m
+        .cells
+        .iter_mut()
+        .find(|c| port(c, "COMBOUT") == Some(d))
+        .expect("the LUT in front of crc[5]");
+    let CellKind::Other(g) = &mut lut.kind else {
+        unreachable!()
+    };
+    let Some(ParamValue::Bits(mask)) = g.params.get_mut("LUT_MASK") else {
+        panic!("LCELL_COMB without LUT_MASK")
+    };
+    mask.0[0] = match mask.0[0] {
+        chipsmith_netlist::State::One => chipsmith_netlist::State::Zero,
+        _ => chipsmith_netlist::State::One,
+    };
+    let refined = s.stages.refined.as_ref().unwrap();
+    let dir = scratch("crc32-broken-check");
+    let err = support::check(&dir, &s.rtl, refined, &gate).expect_err("a changed LUT bit");
+    assert!(err.contains("not proven equivalent"), "{err}");
+    eprintln!("crc32, a LUT bit in front of crc[5] flipped: caught");
 }
 
 #[test]
@@ -1784,14 +1826,9 @@ m4k_shape_tests!(
     m4k_shape_shallow_x8 = "shallow_x8"
 );
 
-/// The multiplier examples, co-simulated through the blocks (as
-/// `SIM_MODELS`' CY2_MULT) and fir proven against the RTL around them
-/// (`prove`). mult-selftest isn't proven: the RTL against its own refined
-/// stage, before any block, didn't finish its induction in 30 minutes (a
-/// serial reference multiplier against nine products). It is co-simulated
-/// long enough for every slot to run many times, its error flag (LEDR[0])
-/// and pass count compared every cycle.
-fn mult_design(name: &str, proof: bool, cycles: usize) {
+/// The multiplier examples, proven against the RTL around the blocks
+/// (`prove`) and co-simulated through them (as `SIM_MODELS`' CY2_MULT).
+fn mult_design(name: &str, cycles: usize) {
     let t = std::time::Instant::now();
     let s = synthesize(name, "top", &example(name));
     let cells = s.stages.cells.as_ref().unwrap();
@@ -1801,14 +1838,12 @@ fn mult_design(name: &str, proof: bool, cycles: usize) {
         .filter(|c| c.kind.type_name() == "CY2_MULT")
         .count();
     assert!(mults > 0, "{name}: no multiplier");
-    if proof {
-        let p = prove(name, &s);
-        eprintln!(
-            "{name}: {mults} multipliers, {} $equiv proven in {:.0?}",
-            p.equivalences,
-            t.elapsed()
-        );
-    }
+    let p = prove(name, &s);
+    eprintln!(
+        "{name}: {mults} multipliers, {} $equiv proven in {:.0?}",
+        p.equivalences,
+        t.elapsed()
+    );
     let t = std::time::Instant::now();
     let sim = support::cosim(
         &s.dir,
@@ -1830,13 +1865,16 @@ fn mult_design(name: &str, proof: bool, cycles: usize) {
 
 #[test]
 fn mult_fir() {
-    mult_design("fir", true, COSIM_CYCLES);
+    mult_design("fir", COSIM_CYCLES);
 }
 
-/// 9 slots of 128 cycles a pass: 120,000 cycles are 104 passes.
+/// A serial reference multiplier against nine products. Co-simulated long
+/// enough for every slot to run many times, its error flag (LEDR[0]) and
+/// pass count compared every cycle: 9 slots of 128 cycles a pass, 120,000
+/// cycles are 104 passes.
 #[test]
 fn mult_selftest() {
-    mult_design("mult-selftest", false, 120_000);
+    mult_design("mult-selftest", 120_000);
 }
 
 /// The self-test's co-simulation has teeth: one block's operand made
