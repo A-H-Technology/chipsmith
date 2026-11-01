@@ -1130,7 +1130,37 @@ fn equiv(
     reference: &Module,
     words: bool,
 ) -> Result<usize, String> {
-    match equiv_once(dir, name, gold, gate, &[], words) {
+    // Products want equiv_struct's `-icells` (`equiv_once`). It pairs every
+    // internal cell, though, and pairs built on a name-matched wire that
+    // legitimately differs (mult-selftest's `ra`, against its narrowed
+    // stage) leave registers unproven. Both runs are whole proofs; the
+    // second is the one every design without products gets.
+    let has_mul = |p: &Path| std::fs::read_to_string(p).is_ok_and(|s| s.contains("\"$mul\""));
+    if has_mul(gold) || has_mul(gate) {
+        match equiv_matched(dir, &format!("{name}_icells"), gold, gate, reference, words, true) {
+            Ok(n) => return Ok(n),
+            Err(e) => eprintln!(
+                "{}: {name}: with -icells: {}; again without",
+                dir.display(),
+                e.lines().next().unwrap_or("")
+            ),
+        }
+    }
+    equiv_matched(dir, name, gold, gate, reference, words, false)
+}
+
+/// [`equiv`], once more without the wires that didn't match by name if
+/// that is what failed.
+fn equiv_matched(
+    dir: &Path,
+    name: &str,
+    gold: &Path,
+    gate: &Path,
+    reference: &Module,
+    words: bool,
+    icells: bool,
+) -> Result<usize, String> {
+    match equiv_once(dir, name, gold, gate, &[], words, icells) {
         Ok(n) => Ok(n),
         Err((msg, unproven)) => {
             // An internal wire synthesis gave a value only where it's
@@ -1155,6 +1185,7 @@ fn equiv(
                 gate,
                 &unproven,
                 words,
+                icells,
             )
             .map_err(|(msg, _)| msg)
         }
@@ -1191,6 +1222,7 @@ fn equiv_once(
     gate: &Path,
     unmatched: &[String],
     words: bool,
+    icells: bool,
 ) -> Result<usize, (String, Vec<String>)> {
     let blacklist = dir.join(format!("{name}.blacklist"));
     std::fs::write(&blacklist, unmatched.join("\n")).unwrap();
@@ -1207,14 +1239,24 @@ fn equiv_once(
     // the multiplier behind it. Not on the design's own registers: it also
     // folds their constant bits, which on serv's RTL leaves a constant
     // with two init values and yosys stops.
+    //
+    // Products: chipsmith's front end extends a `$mul`'s operands to the
+    // result's width (Verilog's context-determined width), yosys' doesn't,
+    // so `wreduce` cuts both to the operands' own widths, and with `icells`
+    // equiv_struct takes internal cell types like `$mul` too (it skips them
+    // by default). It then merges two products of proven-equal operands;
+    // without that, equiv_simple and equiv_induct SAT-solve one multiplier
+    // against the other, which on mult-selftest's 32 x 32 RTL against its
+    // refined stage didn't finish in 30 minutes (2 with the merge).
     let prep = "hierarchy -top top\nproc -noopt\nflatten\nopt_expr t:$mux\nopt_dff -nodffe -nosdff a:src=*cy2_sim.v*\ntribuf\nchtype -set chipsmith_mem t:$mem_v2\n\
-                chtype -set chipsmith_tribuf t:$tribuf t:$_TBUF_\nopt_clean";
+                chtype -set chipsmith_tribuf t:$tribuf t:$_TBUF_\nwreduce t:$mul\nopt_clean";
+    let icells = if icells { " -icells" } else { "" };
     let script = format!(
         "read_json {gold}\nread_verilog -overwrite {sim}\n{prep}\nrename top gold\ndesign -stash gold\n\
          read_json {gate}\nread_verilog -overwrite {sim}\n{prep}\nrename top gate\ndesign -stash gate\n\
          design -copy-from gold -as gold gold\ndesign -copy-from gate -as gate gate\n\
          equiv_make -blacklist {blacklist} gold gate equiv\nhierarchy -top equiv\nasync2sync\n\
-         equiv_struct -fwd\n{simple}equiv_induct -undef -set-assumes -ignore-unknown-cells\n\
+         equiv_struct -fwd{icells}\n{simple}equiv_induct -undef -set-assumes -ignore-unknown-cells\n\
          equiv_status -assert\n",
         // With memories as words, `equiv_simple` proves a few hundred of
         // tens of thousands of word bits (each needs the step before):
@@ -1597,6 +1639,44 @@ fn drop_stray_inits(m: &mut Module) {
     init.retain(|n, _| q.contains(n));
     if init.len() != before {
         chipsmith_synth::rewrite::set_inits(m, &init);
+    }
+}
+
+/// The registers synthesis stores inverted (to power up or reset to 1)
+/// carry the name of the bit they invert, `w[i]~inv` (synthesis' ff
+/// mapping): `refined` gets the same name on `~w[i]`, so equiv_make pairs
+/// the two and induction can use them. Without the pair, logic loading
+/// from such a register (crc32's `shown <= ~crc`) can't be proven: the
+/// RTL's register and synthesis' have no name in common.
+fn name_inverted(refined: &mut Module, gate: &Module) {
+    let bits: HashMap<String, Vec<SigBit>> = refined
+        .wires
+        .iter()
+        .map(|w| (w.name.clone(), w.bits.clone()))
+        .collect();
+    for w in &gate.wires {
+        let Some((wire, i)) = w
+            .name
+            .strip_suffix("]~inv")
+            .and_then(|n| n.rsplit_once('['))
+            .and_then(|(wire, i)| Some((wire, i.parse::<usize>().ok()?)))
+        else {
+            continue;
+        };
+        let Some(&b) = bits.get(wire).and_then(|bits| bits.get(i)) else {
+            continue;
+        };
+        let y = SigBit::Net(refined.new_net());
+        refined.add_cell(
+            format!("$inverted${}", w.name),
+            CellKind::Gate(Gate::new(GateOp::Not, &[b], y).unwrap()),
+        );
+        // Kept: nothing reads it, and the proof's `opt_clean` would sweep it.
+        let mut named = Wire::new(w.name.clone(), vec![y]);
+        named
+            .attributes
+            .insert(chipsmith_netlist::attr::KEEP.into(), chipsmith_netlist::ParamValue::bool(true));
+        refined.wires.push(named);
     }
 }
 
@@ -2050,6 +2130,7 @@ fn check_impl(
     }
     let cut_gate_path = dir.join("gate_cut.json");
     write(&cut_gate, &cut_gate_path);
+    name_inverted(top_mut(&mut mid), gate_mod);
     drop_undriven(top_mut(&mut mid));
     let sub_path = dir.join("mid_constants.json");
     write(&mid, &sub_path);

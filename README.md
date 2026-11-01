@@ -479,10 +479,20 @@ How it is checked (`crates/chipsmith-cyclone2/tests/synth.rs`, `mult_*`):
   16 x 16 products) proven around the blocks, the RTL against the stage
   before the mapping and the stage after it against the netlist with the
   blocks cut at their pins (2,075 `$equiv`, 47 s), and co-simulated
-  (180,000 output bits). `examples/mult-selftest` co-simulated for
-  120,000 cycles (480,000 bits); with one block's operand made unsigned
-  it is caught at cycle 3,654. Its whole-design proof didn't finish (the
-  RTL against its own refined stage, before any block, ran 30 minutes).
+  (180,000 output bits). `examples/mult-selftest` proven around its 15
+  blocks the same way (3,460 `$equiv`, 289 s; since 2026-11-01, below)
+  and co-simulated for 120,000 cycles (480,000 bits); with one block's
+  operand made unsigned the co-simulation catches it at cycle 3,654.
+  Its proof hadn't finished before: chipsmith's front end widens a
+  product's operands to the result (Verilog's context-determined width),
+  yosys' front end doesn't, so the two `$mul`s of each product differed
+  in their parameters, and yosys' `equiv_struct` skips `$mul` cells
+  anyway: induction SAT-solved each multiplier against its twin, and the
+  RTL against its own refined stage ran 30 minutes without finishing.
+  The check now narrows both sides' products (`wreduce`) and lets
+  `equiv_struct` merge internal cells (`-icells`), so two products of
+  proven-equal operands are one; where that pairs a name-matched wire
+  that legitimately differs, it proves again without `-icells`.
 - **Quartus byte-identical**: fir and mult-selftest.
 
 | design | products | blocks | LEs | critical path, estimate / Quartus |
@@ -1033,15 +1043,21 @@ share chipsmith's own netlist IR, not Verilog.
        (`chipsmith-verilog`'s `arrays_in_functions`, proven against
        yosys). That brings Forencich's `lfsr.v` back: examples/crc32,
        Ethernet's CRC-32 through its mask function. Its elaboration is
-       proven against a textbook bitwise CRC-32 with the same top (187
-       `$equiv`; yosys' own front end takes over 20 minutes on `lfsr.v`,
-       so the reference is the oracle's RTL; a wrong polynomial in the
-       reference fails it), and the netlist is co-simulated against it
-       (270,000 output bits). Synthesis on it isn't proven: the CRC
-       register powers up all ones, synthesis keeps it inverted in an
-       unnamed register, the display register loads from that directly,
-       and the induction leaves those 27 bits open. Quartus
-       byte-identical.
+       proven against a textbook bitwise CRC-32 with the same top
+       (yosys' own front end takes over 20 minutes on `lfsr.v`, so the
+       reference is the oracle's RTL; a wrong polynomial in the reference
+       fails it), and the netlist is co-simulated against it (270,000
+       output bits). Quartus byte-identical. Synthesis on it is proven
+       too since 2026-11-01, the reference's RTL to the netlist (174
+       `$equiv`, 50 s): the CRC register powers up all ones, so synthesis
+       stores it inverted, and the display register loads from that
+       register directly. Nothing tied the stored register to the RTL's,
+       and the induction left those 27 bits open. Synthesis now names
+       each register it stores inverted after the bit it inverts
+       (`crc[3]~inv`, purged with every internal name, so no RBF
+       changes), and the check pairs it with `~crc[3]` on the RTL's
+       side. A flipped LUT bit in front of one of them fails the proof
+       (`crc32_a_wrong_crc_bit_is_caught`).
      - A register whose data is its own enable loads a 1 (quartus_map
        folds it so and drops the sync-load route the data would take,
        found on negedge-selftest's `if (p[0]) n2 <= p`); no other DE2
