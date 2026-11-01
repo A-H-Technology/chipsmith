@@ -11,6 +11,7 @@ pub mod fsm;
 pub mod lutmap;
 pub mod memory;
 pub mod opt;
+pub mod restructure;
 pub mod rewrite;
 pub mod rom;
 pub mod techmap;

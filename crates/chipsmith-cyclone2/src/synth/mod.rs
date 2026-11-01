@@ -20,7 +20,8 @@ use anyhow::{bail, Context, Result};
 use chipsmith_netlist::{attr, is_set, CellKind, Design, Module};
 use chipsmith_synth::rewrite::define_inits;
 use chipsmith_synth::{
-    alumacc, clean, divmod, fsm, lutmap, memory, opt, rom, techmap, tribuf, undef, wreduce,
+    alumacc, clean, divmod, fsm, lutmap, memory, opt, restructure, rom, techmap, tribuf, undef,
+    wreduce,
 };
 
 use crate::pin::IoRegisters;
@@ -167,6 +168,7 @@ fn run(
     opt::lower_bitwise(m)?;
     opt::opt_seq(m, removable)?;
     obs.stage("coarse", m);
+    restructure::restructure(m);
 
     let chains = arith::map(m);
     techmap::lower(m, |k| {
