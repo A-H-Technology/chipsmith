@@ -1,5 +1,7 @@
 # chipsmith against Quartus II 13.0sp1
 
+**Since these runs** (on `open` a288925 and gpu-pnr 61ae9d7): `open` merged gpu-pnr (ba63108), so its build times are now the gpu-pnr columns', and folding active-low clears into the LAB (8ebc2e8) took sha256 from 6,046 to 4,242 LEs. Not rerun yet.
+
 Is chipsmith faster than Quartus? This note times both on the same
 Verilog, to a bitstream, on the same machine, and puts each tool's timing
 result next to its times. `bench/vs-quartus.sh` produces every number here

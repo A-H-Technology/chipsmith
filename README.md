@@ -48,6 +48,11 @@ are better: 12% to 83% fewer LEs, and 9% to 50% higher Fmax on
 femtorv32, mult-selftest, sdram-selftest and sha256. Neither tool rebuilds
 incrementally after a logic edit.
 
+These ran on `open` a288925 and gpu-pnr 61ae9d7. `open` has since merged
+gpu-pnr (ba63108), so its build times are now the gpu-pnr column's, and
+folding active-low clears into the LAB (8ebc2e8) took sha256 from 6,046 to
+4,242 LEs. The table hasn't been rerun on the current `open`.
+
 `examples/de2-jtag-counter` answers over the JTAG cable, so a load can be
 checked without watching the board: the Cyclone II's JTAG block makes it a
 64-bit USER1 register holding `"DE2!"` and a Gray-coded 50 MHz counter.
