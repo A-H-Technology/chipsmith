@@ -1104,7 +1104,7 @@ share chipsmith's own netlist IR, not Verilog.
        carry chain's LEs couldn't share a LAB (examples/de2-ioregs with
        KEY[0] as its reset didn't fit). Quartus keeps one clear net and
        the LAB inverts it, one bit per clear line (cyclone2-re README,
-       "Asynchronous resets"; 20 Quartus designs). The packer now folds
+       "Asynchronous resets"; 18 Quartus designs). The packer now folds
        the inverter into the register (`LCELL_FF`'s `ACLR_INV`), the placer
        treats the clear and its polarity as the LAB's control, and the
        bitstream sets the LAB's `LAB_CLR_INVERT_PAIR` bit. Checked by

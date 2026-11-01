@@ -159,7 +159,7 @@ university DE2 code, didn't fit: synthesis puts an inverter in front of
 each register's clear, every register got a clear net of its own, and a
 carry chain's LEs couldn't share a LAB. Since branch de2-arstn it builds
 unchanged, as Quartus builds it. cyclone2-re found how (its README,
-"Asynchronous resets"; 20 Quartus designs, a0-a12 in
+"Asynchronous resets"; 18 Quartus designs, a0-a12 and variants in
 `tools/arst_jobs.txt`):
 
 - What Quartus does: no inverter LUT. Every register's clear is the pin's
@@ -172,7 +172,7 @@ unchanged, as Quartus builds it. cyclone2-re found how (its README,
   diffs differ in that bit alone. Two clears in one LAB take one line
   each, the same pin in both polarities included; which line is the
   routing's (clear mux 0 reaches control lines 0-1, mux 1 lines 2-3). All
-  20 designs assemble byte-identically in `cram roundtrip`, and so does
+  18 designs assemble byte-identically in `cram roundtrip`, and so does
   I/O-cell design e12 (a core LAB with two clears), the one miss of the
   de2-ioece work.
 - chipsmith (`pack/mod.rs`, `place.rs`, `bitstream/logic.rs`,
