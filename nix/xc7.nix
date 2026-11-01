@@ -1,5 +1,7 @@
-# The 7-series tools chipsmith still shells out to, from openXC7's
-# toolchain-nix (one consistent set: nextpnr, prjxray, fasm, prjxray-db).
+# The 7-series tools chipsmith still shells out to (prjxray's frames and
+# .bit writers), its bitstream reader for the tests, and openXC7's nextpnr
+# as an oracle, from openXC7's toolchain-nix (one consistent set: nextpnr,
+# prjxray, fasm, prjxray-db).
 #
 # xpkgs is toolchain-nix's own nixpkgs: fasm is a CPython extension built
 # against its python312, so the interpreter that imports it must be that one.
@@ -52,7 +54,6 @@ let
 
   tools = runCommand "xc7-tools" { } ''
     mkdir -p $out/bin
-    ln -s ${nextpnr}/bin/nextpnr-himbaechel $out/bin/
     ln -s ${prjxray}/bin/xc7frames2bit $out/bin/
     ln -s ${prjxray}/bin/bitread $out/bin/
     ln -s ${prjxrayPython "fasm2frames"}/bin/fasm2frames $out/bin/
@@ -61,4 +62,9 @@ let
 in
 {
   inherit chipdb tools prjxray-db;
+  # The flow chipsmith replaced, for comparisons in the devshell.
+  nextpnr = runCommand "xc7-nextpnr" { } ''
+    mkdir -p $out/bin
+    ln -s ${nextpnr}/bin/nextpnr-himbaechel $out/bin/
+  '';
 }

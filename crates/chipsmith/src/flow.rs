@@ -7,13 +7,12 @@
 //! bitstream and its JTAG stream (`chipsmith_cyclone2`) and loading over the
 //! cable (`chipsmith_jtag`) are chipsmith's own.
 //!
-//! 7-series (Zynq-7010): openXC7's nextpnr (himbaechel xilinx) for
-//! packing, site routing and FASM, prjxray's `fasm2frames` and
-//! `xc7frames2bit`. The Verilog front end and synthesis
-//! (`chipsmith_xc7::synth`), placement (`chipsmith_xc7::place`), the
-//! interconnect routing (`chipsmith_xc7::route`) and loading over the
-//! Zybo's FT2232 cable (`chipsmith_jtag::ftdi`, `chipsmith_jtag::xc7`) are
-//! chipsmith's own.
+//! 7-series (Zynq-7010): the Verilog front end, synthesis
+//! (`chipsmith_xc7::synth`), packing, placement, routing and the FASM
+//! (`chipsmith_xc7::pnr`) and loading over the Zybo's FT2232 cable
+//! (`chipsmith_jtag::ftdi`, `chipsmith_jtag::xc7`) are chipsmith's own;
+//! prjxray's `fasm2frames` and `xc7frames2bit` turn the FASM into a `.bit`
+//! with prjxray-db's bits.
 //!
 //! Each stage is one `Step` in a `Plan`, so replacing a tool with
 //! chipsmith's own code means replacing one step.
@@ -47,9 +46,6 @@ use crate::manifest::{
 use chipsmith_cyclone2::pin::{IoRegisters, UnusedPins};
 use chipsmith_cyclone2::place::PinPlan;
 
-/// A directory of nextpnr-himbaechel xilinx chip databases,
-/// `chipdb-<die>.bin`. Set by the nix wrapper and the devshell.
-pub const XC7_CHIPDB_VAR: &str = "CHIPSMITH_XC7_CHIPDB";
 pub use chipsmith_xc7::xray::PRJXRAY_DB_VAR;
 
 /// Every artifact path of a build, in one place.
@@ -98,33 +94,11 @@ impl Layout {
     fn routed(&self) -> PathBuf {
         self.dir.join("routed.json")
     }
-    fn nextpnr_routed(&self) -> PathBuf {
-        self.dir.join("nextpnr.json")
-    }
-    /// 7-series: chipsmith's placement, as `-o preplaced` lines.
-    fn xc7_placement(&self) -> PathBuf {
-        self.dir.join("placement.txt")
-    }
-    fn preplaced(&self) -> PathBuf {
-        self.dir.join("preplaced.txt")
-    }
-    fn prerouted(&self) -> PathBuf {
-        self.dir.join("prerouted.txt")
-    }
-    fn xdc(&self) -> PathBuf {
-        self.dir.join("pins.xdc")
-    }
     fn fasm(&self) -> PathBuf {
         self.dir.join(format!("{}.fasm", self.name))
     }
-    fn timing_report(&self) -> PathBuf {
-        self.dir.join("timing.json")
-    }
     fn frames(&self) -> PathBuf {
         self.dir.join(format!("{}.frames", self.name))
-    }
-    fn log(&self, tool: &str) -> PathBuf {
-        self.dir.join(format!("{tool}.log"))
     }
 }
 
@@ -176,30 +150,20 @@ pub enum Step {
     /// RBF shifted over JTAG configures a Cyclone II that never starts up;
     /// the SVF has the JTAG framing and checks CONF_DONE.
     Svf { rbf: PathBuf, svf: PathBuf },
-    /// Report each clock's achieved frequency from nextpnr's `--report`;
-    /// fails if one misses its constraint.
-    NextpnrTiming(PathBuf),
-    /// Place nextpnr's packed 7-series netlist (`--pack-only --write`) in
-    /// process, as `-o preplaced` lines; an empty file if chipsmith can't
-    /// place the design yet, so nextpnr does.
-    Xc7Place { packed: PathBuf, placement: PathBuf },
-    /// Route a 7-series design nextpnr routed (`nextpnr`) again with
-    /// chipsmith's router, in process: its routes as nextpnr's
-    /// `-o prerouted` lines, and the placement as `-o preplaced` lines.
-    /// First checks nextpnr kept chipsmith's `placement`.
-    Xc7Route {
-        nextpnr: PathBuf,
-        placement: PathBuf,
-        prerouted: PathBuf,
-        preplaced: PathBuf,
+    /// Pack, place and route a 7-series netlist and write its FASM, in
+    /// process (`chipsmith_xc7::pnr`). `pins` maps port bits (`led[0]`) to
+    /// package pins (`M14`); each clock's critical path is reported
+    /// against `clocks` (by port bit) and fails the build if it misses.
+    Xc7Pnr {
+        netlist: PathBuf,
+        fasm: PathBuf,
+        pins: BTreeMap<String, String>,
+        clocks: BTreeMap<String, Frequency>,
     },
     /// Play an SVF over the USB-Blaster, in process.
     PlaySvf(PathBuf),
     /// Load a 7-series `.bit` over a Digilent FT2232 cable, in process.
     LoadBit(PathBuf),
-    /// Hold the fabric's interrupt lines into the Zynq's processor inactive,
-    /// in the yosys netlist, in process (`tie_off_ps7`).
-    Ps7TieOff(PathBuf),
     /// Write a `.bit`'s payload as Linux's Zynq fpga-manager takes it, in
     /// process.
     ZynqBin { bit: PathBuf, bin: PathBuf },
@@ -216,8 +180,6 @@ pub enum Step {
 /// The 7-series tools' data, resolved for one part.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Xc7Data {
-    /// nextpnr's chip database for the part's die.
-    pub chipdb: PathBuf,
     /// prjxray-db's directory for the part's family, e.g. `.../zynq7`.
     pub db: PathBuf,
 }
@@ -230,16 +192,8 @@ impl Xc7Data {
             })
         };
         let data = Xc7Data {
-            chipdb: var(XC7_CHIPDB_VAR)?.join(format!("chipdb-{}.bin", part.die)),
             db: var(PRJXRAY_DB_VAR)?.join(part.family),
         };
-        if !data.chipdb.is_file() {
-            bail!(
-                "no chip database for {} at {}",
-                part.die,
-                data.chipdb.display()
-            );
-        }
         let part_yaml = data.db.join(part.part).join("part.yaml");
         if !part_yaml.is_file() {
             bail!("prjxray-db has no {}", part_yaml.display());
@@ -258,14 +212,11 @@ impl Step {
             Step::PlaceRoute { .. } => "place and route",
             Step::Bitstream { .. } => "bitstream",
             Step::Svf { .. } => "JTAG stream",
-            Step::NextpnrTiming(_) => "nextpnr: timing",
-            Step::Xc7Place { .. } => "place (chipsmith)",
-            Step::Xc7Route { .. } => "route (chipsmith)",
+            Step::Xc7Pnr { .. } => "pack, place and route",
             Step::PlaySvf(_) => "JTAG: program over USB-Blaster",
             Step::LoadBit(_) => "JTAG: program over Digilent FT2232",
             Step::LoadBitSsh { .. } => "ssh: load through the board's fpga-manager",
             Step::ZynqBin { .. } => ".bit to .bin for Linux's fpga-manager",
-            Step::Ps7TieOff(_) => "PS7: the fabric's interrupts to the ARM cores held off",
             Step::BuildLoader(_) => "build the serial flash loader",
             Step::Epcs { op, .. } => match op {
                 EpcsOp::Program(_) => "EPCS: write and verify through the serial flash loader",
@@ -427,8 +378,7 @@ pub fn plan_cyclone2(
 }
 
 /// Every pin is LVCMOS33: the Zybo's PL banks (34, 35) are both powered at
-/// 3.3 V, and the manifest has no I/O standards yet. Clocks reach nextpnr as
-/// XDC `create_clock`s; without one it times against its default 12 MHz.
+/// 3.3 V, and the manifest has no I/O standards yet.
 pub fn plan_xc7(
     manifest: &Manifest,
     part: Xc7Part,
@@ -439,108 +389,23 @@ pub fn plan_xc7(
 ) -> Plan {
     let mut steps: Vec<Step> = Vec::new();
     let verilog = verilog_sources(manifest, layout, &mut steps);
-
     steps.push(Step::Xc7Synth {
         verilog,
         top: manifest.top.clone(),
         netlist: layout.netlist(),
     });
-    // nextpnr's packer turns yosys' cells into bel types (and splits
-    // carries, adds feed-through LUTs, places the pins from the XDC);
-    // chipsmith places what it wrote. Every later nextpnr run packs the
-    // netlist again and pins each cell to its bel (`-o preplaced`):
-    // packing is deterministic, so the cells and their names are the same.
-    steps.push(
-        Tool {
-            log: Some(layout.log("nextpnr-pack")),
-            ..Tool::new("nextpnr: pack", "nextpnr-himbaechel")
-        }
-        .args(["--device", part.part])
-        .arg("--chipdb")
-        .arg(&data.chipdb)
-        .arg("--json")
-        .arg(layout.netlist())
-        .arg("-o")
-        .arg(prefixed("xdc=", &layout.xdc()))
-        .arg("--pack-only")
-        .arg("--write")
-        .arg(layout.packed())
-        .arg("-q")
-        .arg("-l")
-        .arg(layout.log("nextpnr-pack"))
-        .into(),
-    );
-    steps.push(Step::Xc7Place {
-        packed: layout.packed(),
-        placement: layout.xc7_placement(),
+    steps.push(Step::Xc7Pnr {
+        netlist: layout.netlist(),
+        fasm: layout.fasm(),
+        pins: pins
+            .iter()
+            .map(|a| (a.port.to_string(), a.pin.to_string()))
+            .collect(),
+        clocks: clocks
+            .iter()
+            .map(|c| (c.port.to_string(), c.frequency))
+            .collect(),
     });
-    // nextpnr routes chipsmith's placement once, for the site routing (the
-    // site pins and LUT input pins each net uses) that chipsmith's router
-    // starts from.
-    steps.push(
-        Tool {
-            log: Some(layout.log("nextpnr")),
-            ..Tool::new("nextpnr: route chipsmith's placement", "nextpnr-himbaechel")
-        }
-        .args(["--device", part.part])
-        .arg("--chipdb")
-        .arg(&data.chipdb)
-        .arg("--json")
-        .arg(layout.netlist())
-        .arg("-o")
-        .arg(prefixed("xdc=", &layout.xdc()))
-        .arg("-o")
-        .arg(prefixed("preplaced=", &layout.xc7_placement()))
-        .arg("--write")
-        .arg(layout.nextpnr_routed())
-        .arg("-q")
-        .arg("-l")
-        .arg(layout.log("nextpnr"))
-        .into(),
-    );
-    // nextpnr's interconnect routing is replaced by chipsmith's; nextpnr
-    // keeps the site routing, and its FASM writer writes both. nextpnr
-    // can't load the placed design it wrote (it names bels one way when
-    // writing and another when reading), so it packs the netlist again
-    // and pins each cell to its bel (`-o preplaced`) once more.
-    steps.push(Step::Xc7Route {
-        nextpnr: layout.nextpnr_routed(),
-        placement: layout.xc7_placement(),
-        prerouted: layout.prerouted(),
-        preplaced: layout.preplaced(),
-    });
-    steps.push(
-        Tool {
-            log: Some(layout.log("nextpnr-fasm")),
-            ..Tool::new("nextpnr: FASM of chipsmith's routing", "nextpnr-himbaechel")
-        }
-        .args(["--device", part.part])
-        .arg("--chipdb")
-        .arg(&data.chipdb)
-        .arg("--json")
-        .arg(layout.netlist())
-        .arg("-o")
-        .arg(prefixed("xdc=", &layout.xdc()))
-        .arg("-o")
-        .arg(prefixed("preplaced=", &layout.preplaced()))
-        .arg("-o")
-        .arg(prefixed("prerouted=", &layout.prerouted()))
-        .arg("-o")
-        .arg(prefixed("fasm=", &layout.fasm()))
-        .arg("--write")
-        .arg(layout.routed())
-        // Timing of chipsmith's routing, not of the routing it replaced.
-        .arg("--report")
-        .arg(layout.timing_report())
-        // `Step::NextpnrTiming` fails the build instead, after printing
-        // every clock's Fmax.
-        .arg("--timing-allow-fail")
-        .arg("-q")
-        .arg("-l")
-        .arg(layout.log("nextpnr-fasm"))
-        .into(),
-    );
-    steps.push(Step::NextpnrTiming(layout.timing_report()));
     steps.push(
         Tool::new("prjxray: FASM to frames", "fasm2frames")
             .args(["--part", part.part])
@@ -573,39 +438,13 @@ pub fn plan_xc7(
 
     Plan {
         dir: Some(layout.dir.clone()),
-        files: vec![(layout.xdc(), xdc(pins, clocks))],
+        files: Vec::new(),
         steps,
     }
 }
 
 fn file_name(path: &Path) -> &std::ffi::OsStr {
     path.file_name().expect("layout paths name files")
-}
-
-fn prefixed(prefix: &str, path: &Path) -> OsString {
-    let mut s = OsString::from(prefix);
-    s.push(path);
-    s
-}
-
-fn xdc(pins: &[PinAssignment<Clg400Pin>], clocks: &[Clock]) -> String {
-    let pins = pins.iter().map(|a| {
-        format!(
-            "set_property PACKAGE_PIN {pin} [get_ports {{{port}}}]\n\
-             set_property IOSTANDARD LVCMOS33 [get_ports {{{port}}}]\n",
-            pin = a.pin,
-            port = a.port
-        )
-    });
-    // nextpnr's XDC reader ignores `-name`; the clock is named after its net.
-    let clocks = clocks.iter().map(|c| {
-        format!(
-            "create_clock -period {:.3} [get_ports {{{}}}]\n",
-            c.frequency.period_ns(),
-            c.port
-        )
-    });
-    pins.chain(clocks).collect()
 }
 
 /// What `chipsmith flash` can load.
@@ -811,28 +650,19 @@ impl Plan {
                     Ok(vec![routed.clone()])
                 })?,
                 Step::Svf { rbf, svf } => bitstream::svf_file(rbf, svf)?,
-                Step::NextpnrTiming(report) => nextpnr_timing(report)?,
-                Step::Xc7Place { packed, placement } => xc7_place(packed, placement)?,
-                Step::Xc7Route {
-                    nextpnr,
-                    placement,
-                    prerouted,
-                    preplaced,
-                } => xc7_route(nextpnr, placement, prerouted, preplaced)?,
+                Step::Xc7Pnr {
+                    netlist,
+                    fasm,
+                    pins,
+                    clocks,
+                } => stamp(step, &[fasm]).run(|| {
+                    xc7_pnr(netlist, fasm, pins, clocks)?;
+                    Ok(vec![netlist.clone()])
+                })?,
                 Step::PlaySvf(svf) => play_svf(svf)?,
                 Step::LoadBit(bit) => load_bit(bit)?,
                 Step::LoadBitSsh { bit, host } => load_bit_ssh(bit, host)?,
                 Step::ZynqBin { bit, bin } => zynq_bin(bit, bin)?,
-                Step::Ps7TieOff(netlist) => {
-                    let read = || -> Result<serde_json::Value> {
-                        Ok(serde_json::from_slice(&std::fs::read(netlist)?)?)
-                    };
-                    let mut json =
-                        read().with_context(|| format!("reading {}", netlist.display()))?;
-                    tie_off_ps7(&mut json)?;
-                    std::fs::write(netlist, serde_json::to_vec(&json)?)
-                        .with_context(|| format!("writing {}", netlist.display()))?;
-                }
                 Step::BuildLoader(dir) => build_loader(dir)?,
                 Step::Epcs { loader, op } => persist::run_epcs(loader, op)?,
             }
@@ -942,6 +772,69 @@ fn xc7_synth(verilog: &[PathBuf], top: &str, netlist: &Path) -> Result<Vec<PathB
     std::fs::write(netlist, serde_json::to_vec(&json)?)
         .with_context(|| format!("writing {}", netlist.display()))?;
     Ok(fe.files_read())
+}
+
+fn xc7_pnr(
+    netlist: &Path,
+    fasm: &Path,
+    pins: &BTreeMap<String, String>,
+    clocks: &BTreeMap<String, Frequency>,
+) -> Result<()> {
+    let part = XC7Z010CLG400_1;
+    let started = Instant::now();
+    let graph = chipsmith_xc7::xray::load(part)?;
+    say!("routing graph in {:.1} s", started.elapsed().as_secs_f64());
+    let data = Xc7Data::from_env(part)?;
+    let delays = chipsmith_xc7::delay::Delays::load(&data.db)?;
+    let r = chipsmith_xc7::pnr::run(&graph, &delays, &data.db, netlist, pins, fasm)?;
+    say!(
+        "packed {} LUTs, {} registers, {} CARRY4s, {} RAM32Ms into {} slices",
+        r.luts,
+        r.registers,
+        r.carry4s,
+        r.ram32ms,
+        r.slices
+    );
+    say!(
+        "placed {} cells, wirelength {:.0} (from {:.0}), estimated critical path {:.2} ns, {} moves on {} threads in {:.1} s",
+        r.place.cells,
+        r.place.wirelength,
+        r.place.initial_wirelength,
+        r.place.critical / 1000.0,
+        r.place.moves,
+        r.place.threads,
+        r.place_seconds
+    );
+    say!(
+        "routed {} nets, {} pips, {} iterations in {:.1} s",
+        r.nets,
+        r.pips,
+        r.iterations,
+        r.route_seconds
+    );
+    let mut failed = Vec::new();
+    for c in &r.clocks {
+        let ns = c.critical / 1000.0;
+        let fmax = if ns > 0.0 { 1e3 / ns as f64 } else { f64::INFINITY };
+        match clocks.get(&c.name) {
+            Some(f) => {
+                let slack = f.period_ns() - ns as f64;
+                say!(
+                    "clock {}: {ns:.2} ns, Fmax {fmax:.1} MHz at {} MHz, slack {slack:.3} ns (estimate)",
+                    c.name,
+                    f.mhz()
+                );
+                if slack < 0.0 {
+                    failed.push(c.name.clone());
+                }
+            }
+            None => say!("clock {}: {ns:.2} ns, Fmax {fmax:.1} MHz (estimate)", c.name),
+        }
+    }
+    if !failed.is_empty() {
+        bail!("clocks missing their frequency: {}", failed.join(", "));
+    }
+    Ok(())
 }
 
 fn pack(netlist: &Path, packed: &Path) -> Result<()> {
@@ -1117,108 +1010,6 @@ fn bitstream(db: Timed<bitstream::phys::Db>, routed: &Path, rbf: &Path) -> Resul
         s.bits,
         s.rep_bits,
         started.elapsed().as_secs_f64()
-    );
-    Ok(())
-}
-
-/// One clock's line of nextpnr's `--report` JSON (`"fmax"`).
-#[derive(Debug, PartialEq, serde::Deserialize)]
-struct NextpnrFmax {
-    /// MHz.
-    achieved: f64,
-    /// MHz.
-    constraint: f64,
-}
-
-impl NextpnrFmax {
-    fn slack_ns(&self) -> f64 {
-        1e3 / self.constraint - 1e3 / self.achieved
-    }
-}
-
-fn nextpnr_fmax(report: &str) -> Result<BTreeMap<String, NextpnrFmax>> {
-    #[derive(serde::Deserialize)]
-    struct Report {
-        fmax: BTreeMap<String, NextpnrFmax>,
-    }
-    Ok(serde_json::from_str::<Report>(report)?.fmax)
-}
-
-fn nextpnr_timing(report: &Path) -> Result<()> {
-    let text =
-        std::fs::read_to_string(report).with_context(|| format!("reading {}", report.display()))?;
-    let fmax = nextpnr_fmax(&text).with_context(|| format!("parsing {}", report.display()))?;
-    for (clock, f) in &fmax {
-        eprintln!(
-            "    clock {clock}: Fmax {:.1} MHz at {} MHz, slack {:.3} ns",
-            f.achieved,
-            f.constraint,
-            f.slack_ns()
-        );
-    }
-    let failing: Vec<&str> = fmax
-        .iter()
-        .filter(|(_, f)| f.slack_ns() < 0.0)
-        .map(|(clock, _)| clock.as_str())
-        .collect();
-    if !failing.is_empty() {
-        bail!("timing fails for clock {}", failing.join(", "));
-    }
-    Ok(())
-}
-
-fn xc7_place(packed: &Path, placement: &Path) -> Result<()> {
-    let started = Instant::now();
-    let graph = chipsmith_xc7::xray::load(XC7Z010CLG400_1)?;
-    eprintln!(
-        "    routing graph in {:.1} s",
-        started.elapsed().as_secs_f64()
-    );
-    let delays = chipsmith_xc7::delay::Delays::load(
-        &Path::new(
-            &std::env::var_os(PRJXRAY_DB_VAR)
-                .with_context(|| format!("{PRJXRAY_DB_VAR} is not set"))?,
-        )
-        .join(XC7Z010CLG400_1.family),
-    )?;
-    match chipsmith_xc7::place::place_file(&graph, Some(&delays), packed, placement)? {
-        chipsmith_xc7::place::Outcome::Placed(s) => eprintln!(
-            "    placed {} cells ({} LUT/FF pairs, {} carry chains, {} RAM32Ms), \
-             wirelength {:.0} (from {:.0}), estimated critical path {:.2} ns, \
-             {} moves on {} threads in {:.1} s",
-            s.cells,
-            s.bles,
-            s.carry_chains,
-            s.rams,
-            s.wirelength,
-            s.initial_wirelength,
-            s.critical / 1000.0,
-            s.moves,
-            s.threads,
-            s.seconds
-        ),
-        chipsmith_xc7::place::Outcome::Unsupported(u) => {
-            eprintln!("    not placed by chipsmith ({}); nextpnr places it", u.0)
-        }
-    }
-    Ok(())
-}
-
-fn xc7_route(nextpnr: &Path, placement: &Path, prerouted: &Path, preplaced: &Path) -> Result<()> {
-    let started = Instant::now();
-    let graph = chipsmith_xc7::xray::load(XC7Z010CLG400_1)?;
-    eprintln!(
-        "    routing graph in {:.1} s",
-        started.elapsed().as_secs_f64()
-    );
-    let kept = chipsmith_xc7::route::check_placement(&graph, nextpnr, placement)?;
-    if kept > 0 {
-        eprintln!("    nextpnr kept chipsmith's bel for all {kept} cells");
-    }
-    let r = chipsmith_xc7::route::route_file(&graph, nextpnr, prerouted, preplaced)?;
-    eprintln!(
-        "    routed {} segments of {} nets, {} pips (nextpnr: {}), {} iterations in {:.1} s",
-        r.segments, r.nets, r.pips, r.nextpnr_pips, r.iterations, r.route_seconds
     );
     Ok(())
 }
@@ -1451,7 +1242,6 @@ mod tests {
             unreachable!()
         };
         let data = Xc7Data {
-            chipdb: "/db/chipdb-xc7z010.bin".into(),
             db: "/xray/zynq7".into(),
         };
         plan_xc7(&m, XC7Z010CLG400_1, pins, clocks, &layout(&m), &data)
@@ -1605,18 +1395,13 @@ mod tests {
     }
 
     #[test]
-    fn the_zynq_goes_through_chipsmith_openxc7_and_prjxray_to_a_bit() {
+    fn the_zynq_goes_through_chipsmith_and_prjxray_to_a_bit() {
         let plan = xc7(Sources::Verilog(vec!["/p/src/blinky.v".into()]));
         assert_eq!(
             labels(&plan),
             [
                 "synthesis",
-                "nextpnr: pack",
-                "place (chipsmith)",
-                "nextpnr: route chipsmith's placement",
-                "route (chipsmith)",
-                "nextpnr: FASM of chipsmith's routing",
-                "nextpnr: timing",
+                "pack, place and route",
                 "prjxray: FASM to frames",
                 "prjxray: frames to .bit",
                 ".bit to .bin for Linux's fpga-manager"
@@ -1630,64 +1415,29 @@ mod tests {
                 netlist: "/p/build/netlist.json".into(),
             }
         );
-        let pack = tool(&plan.steps[1]);
-        assert_eq!(pack.program, "nextpnr-himbaechel");
-        assert!(pack
-            .args
-            .windows(2)
-            .any(|w| w == ["--device", "xc7z010clg400-1"]));
-        assert!(pack
-            .args
-            .windows(2)
-            .any(|w| w == ["--chipdb", "/db/chipdb-xc7z010.bin"]));
-        assert!(pack.args.iter().any(|a| a == "--pack-only"));
-        assert!(pack
-            .args
-            .windows(2)
-            .any(|w| w == ["--write", "/p/build/packed.json"]));
+        let Step::Xc7Pnr {
+            netlist,
+            fasm,
+            pins,
+            clocks,
+        } = &plan.steps[1]
+        else {
+            panic!("{:?} is not place and route", plan.steps[1]);
+        };
+        assert_eq!(netlist, Path::new("/p/build/netlist.json"));
+        assert_eq!(fasm, Path::new("/p/build/blinky.fasm"));
         assert_eq!(
-            plan.steps[2],
-            Step::Xc7Place {
-                packed: "/p/build/packed.json".into(),
-                placement: "/p/build/placement.txt".into(),
-            }
+            pins.iter()
+                .map(|(a, b)| (a.as_str(), b.as_str()))
+                .collect::<Vec<_>>(),
+            [("clk", "L16"), ("led[0]", "M14"), ("led[1]", "M15")]
         );
-        // nextpnr routes chipsmith's placement, with nothing left to place.
-        assert!(tool(&plan.steps[3])
-            .args
-            .windows(2)
-            .any(|w| w == ["-o", "preplaced=/p/build/placement.txt"]));
+        assert_eq!(clocks.get("clk").map(|f| f.hz()), Some(125_000_000));
         assert_eq!(
-            plan.steps[4],
-            Step::Xc7Route {
-                nextpnr: "/p/build/nextpnr.json".into(),
-                placement: "/p/build/placement.txt".into(),
-                prerouted: "/p/build/prerouted.txt".into(),
-                preplaced: "/p/build/preplaced.txt".into(),
-            }
-        );
-        let fasm = tool(&plan.steps[5]);
-        assert!(fasm
-            .args
-            .windows(2)
-            .any(|w| w == ["--report", "/p/build/timing.json"]));
-        assert_eq!(
-            plan.steps[6],
-            Step::NextpnrTiming("/p/build/timing.json".into())
-        );
-        assert!(fasm
-            .args
-            .windows(2)
-            .any(|w| w == ["-o", "preplaced=/p/build/preplaced.txt"]));
-        assert!(fasm
-            .args
-            .windows(2)
-            .any(|w| w == ["-o", "prerouted=/p/build/prerouted.txt"]));
-        assert_eq!(
-            tool(&plan.steps[7]).args.last().unwrap(),
+            tool(&plan.steps[2]).args.last().unwrap(),
             "/p/build/blinky.frames"
         );
-        let bit = tool(&plan.steps[8]);
+        let bit = tool(&plan.steps[3]);
         assert!(bit
             .args
             .windows(2)
@@ -1699,12 +1449,13 @@ mod tests {
         assert_eq!(bit.cwd.as_deref(), Some(Path::new("/p/build")));
         assert_eq!(bit.args.last().unwrap(), "/p/build/blinky.bit");
         assert_eq!(
-            plan.steps[9],
+            plan.steps[4],
             Step::ZynqBin {
                 bit: "/p/build/blinky.bit".into(),
                 bin: "/p/build/blinky.bin".into()
             }
         );
+        assert!(plan.files.is_empty());
     }
 
     #[test]
@@ -1747,38 +1498,6 @@ mod tests {
             used["modules"]["top"]["cells"]["mine"]["connections"],
             driven
         );
-    }
-
-    #[test]
-    fn zynq_pins_and_clocks_become_an_xdc() {
-        let plan = xc7(Sources::Verilog(vec![]));
-        let (path, xdc) = &plan.files[0];
-        assert_eq!(path, Path::new("/p/build/pins.xdc"));
-        assert_eq!(
-            xdc,
-            "set_property PACKAGE_PIN L16 [get_ports {clk}]\n\
-             set_property IOSTANDARD LVCMOS33 [get_ports {clk}]\n\
-             set_property PACKAGE_PIN M14 [get_ports {led[0]}]\n\
-             set_property IOSTANDARD LVCMOS33 [get_ports {led[0]}]\n\
-             set_property PACKAGE_PIN M15 [get_ports {led[1]}]\n\
-             set_property IOSTANDARD LVCMOS33 [get_ports {led[1]}]\n\
-             create_clock -period 8.000 [get_ports {clk}]\n"
-        );
-    }
-
-    #[test]
-    fn nextpnr_reports_fmax_per_clock_net() {
-        // As nextpnr-himbaechel (xilinx) writes it, trimmed.
-        let report = r#"{"utilization": {}, "fmax": {"$abc$21083$aiger$o100": {"achieved": 391.5426940917969, "constraint": 125}}, "critical_paths": []}"#;
-        let fmax = nextpnr_fmax(report).unwrap();
-        assert_eq!(
-            fmax["$abc$21083$aiger$o100"],
-            NextpnrFmax {
-                achieved: 391.5426940917969,
-                constraint: 125.0
-            }
-        );
-        assert!((fmax["$abc$21083$aiger$o100"].slack_ns() - 5.446).abs() < 1e-3);
     }
 
     fn volatile(path: &str) -> Flash {

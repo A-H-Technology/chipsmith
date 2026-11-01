@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 chipsmith-netlist.workspace = true
+chipsmith-place.workspace = true
 chipsmith-route.workspace = true
 chipsmith-synth.workspace = true
 anyhow.workspace = true

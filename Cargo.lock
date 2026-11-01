@@ -649,6 +649,7 @@ dependencies = [
  "anyhow",
  "chipsmith-cyclone2",
  "chipsmith-netlist",
+ "chipsmith-place",
  "chipsmith-route",
  "chipsmith-synth",
  "chipsmith-verilog",

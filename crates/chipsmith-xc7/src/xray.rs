@@ -18,10 +18,12 @@
 //!   dropped where the tile type has a bit database: a bitstream can't
 //!   express it. `ppips` (`always`, `default`, `hint`) need no bits and stay.
 //!
-//! Dropped, unlike nextpnr: pseudo pips (`is_pseudo` 1). They route
-//! through a site (a LUT, an IOB or OLOGIC path) and so need that site's
-//! configuration as well as a free bel; the router doesn't model sites.
-//! Routes nextpnr takes through them stay nextpnr's (`crate::route`).
+//! Pseudo pips (`is_pseudo` 1) route through a site and need its bits
+//! rather than a pip's. Kept are the ones openXC7's nextpnr configures with
+//! known bits ([`pseudo_pip_features`]): an I/O tile's ILOGIC and OLOGIC
+//! passed straight through (pins), a clock row's BUFHCE (clocks into a
+//! clock region) and the interconnect interface's output pass-throughs.
+//! The rest (LUT route-throughs, BUFGCTRL and IDELAY paths) are dropped.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -123,6 +125,57 @@ fn features(family: &Path, tile_type: &str) -> Result<Option<HashSet<String>>> {
     Ok(found.then_some(out))
 }
 
+/// The bits that make a kept pseudo pip `dst <- src` of `tile_type`, as
+/// openXC7's nextpnr sets them (`fasm.cc`, `get_pseudo_pip_data`), each a
+/// feature below the tile; `None` for a pseudo pip that isn't kept.
+pub fn pseudo_pip_features(tile_type: &str, dst: &str, src: &str) -> Option<Vec<String>> {
+    let v = |fs: &[&str]| Some(fs.iter().map(|f| f.to_string()).collect());
+    // I/O tiles: `[LR]IOI3`, its `_TBYTESRC`, `_TBYTETERM` and `_SING`
+    // variants; site index from the wire (`..._OLOGIC1_...`).
+    if let Some(side) = tile_type
+        .strip_suffix("IOI3")
+        .or_else(|| tile_type.strip_suffix("IOI3_TBYTESRC"))
+        .or_else(|| tile_type.strip_suffix("IOI3_TBYTETERM"))
+        .or_else(|| tile_type.strip_suffix("IOI3_SING"))
+        .filter(|s| *s == "L" || *s == "R")
+    {
+        for i in ["0", "1"] {
+            if dst == format!("{side}IOI_OLOGIC{i}_OQ") && src == format!("IOI_OLOGIC{i}_D1") {
+                let y = format!("OLOGIC_Y{i}");
+                return v(&[
+                    &format!("{y}.OMUX.D1"),
+                    &format!("{y}.OQUSED"),
+                    &format!("{y}.OSERDES.DATA_RATE_TQ.BUF"),
+                ]);
+            }
+            if dst == format!("IOI_ILOGIC{i}_O") && src == format!("{side}IOI_ILOGIC{i}_D") {
+                return v(&[
+                    &format!("IDELAY_Y{i}.IDELAY_TYPE_FIXED"),
+                    &format!("ILOGIC_Y{i}.ZINV_D"),
+                ]);
+            }
+            if dst == format!("{side}IOI_OLOGIC{i}_TQ") && src == format!("IOI_OLOGIC{i}_T1") {
+                return v(&[&format!("OLOGIC_Y{i}.ZINV_T1")]);
+            }
+        }
+        return None;
+    }
+    if matches!(tile_type, "CLK_HROW_TOP_R" | "CLK_HROW_BOT_R") {
+        let out = dst.strip_prefix("CLK_HROW_CK_HCLK_OUT_")?;
+        if src != format!("CLK_HROW_CK_MUX_OUT_{out}") {
+            return None;
+        }
+        let (side, i) = out.split_at(1);
+        let buf = format!("BUFHCE.BUFHCE_X{}Y{i}", if side == "R" { 1 } else { 0 });
+        return v(&[&format!("{buf}.IN_USE"), &format!("{buf}.ZINV_CE")]);
+    }
+    if let Some(c) = tile_type.strip_prefix("INT_INTERFACE_") {
+        let i = dst.strip_prefix(&format!("INT_INTERFACE_LOGIC_OUTS_{c}"))?;
+        return (src == format!("INT_INTERFACE_LOGIC_OUTS_{c}_B{i}")).then(Vec::new);
+    }
+    None
+}
+
 /// Whether a pip `dst <- src` of `tile_type` has a FASM feature.
 fn has_feature(features: &HashSet<String>, tile_type: &str, dst: &str, src: &str) -> bool {
     if features.contains(&format!("{tile_type}.{dst}.{src}")) {
@@ -199,17 +252,19 @@ fn import_tile_type(
         let (Some(&s), Some(&d)) = (index.get(src), index.get(dst)) else {
             anyhow::bail!("{name} pip {key} names an undeclared wire");
         };
-        if field("is_pseudo")? == "1" {
+        let pseudo = field("is_pseudo")? == "1";
+        if pseudo && pseudo_pip_features(name, dst, src).is_none() {
             stats.pseudo_dropped += 1;
             continue;
         }
         let expressible = |dst: &str, src: &str| {
-            features
-                .as_ref()
-                .is_none_or(|f| has_feature(f, name, dst, src))
+            pseudo
+                || features
+                    .as_ref()
+                    .is_none_or(|f| has_feature(f, name, dst, src))
         };
         let mut directions = vec![(s, d, expressible(dst, src))];
-        if field("is_directional")? == "0" {
+        if field("is_directional")? == "0" && !pseudo {
             stats.bidirectional += 1;
             directions.push((d, s, expressible(src, dst)));
         }

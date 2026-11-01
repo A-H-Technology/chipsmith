@@ -12,14 +12,16 @@ nix run github:A-H-Technology/chipsmith/open -- -C examples/zybo-jtag-counter fl
 The first run builds cyclone2-re's device database package and flattens
 its chip database into the router's graph. After that a build of blinky-vhdl takes about 6 s. A DE2 build
 runs no program but chipsmith between the Verilog and the chip: no yosys,
-no nextpnr, no cram. GHDL translates VHDL in front of it.
+no nextpnr, no cram. GHDL translates VHDL in front of it. A Zybo build
+(since 2026-11-01) runs chipsmith from the Verilog to the FASM too, then
+prjxray's `fasm2frames` and `xc7frames2bit` for the `.bit`.
 
 ## Status
 
 | device | board | build | on hardware |
 |---|---|---|---|
 | EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis): LUT/carry/register logic, M4K RAM blocks and embedded multipliers (below), global clocks from pins and from logic (a register, the JTAG block's TCK; one clock per LAB), PLLs (`CY2_PLL`; both on the board 2026-10-26, examples/de2-jtag-counter on TCK and examples/de2-pll-counter at 100 and 40 MHz from CLOCK_50; 2026-10-30 a PLL clock on its PLL's clock output pin, 2026-10-31 on any pin or into logic as data, the DE2's SDRAM run at 100 MHz with 0 errors by examples/sdram-selftest, its SRAM by examples/sram-selftest); pins input, output, tri-state, bidirectional, open drain, at 3.3-V LVTTL (any current) or LVCMOS or 2.5-V inputs, with pull-up or bus hold and I/O-cell registers (with the cell's clock enables, asynchronous clears and presets and falling-edge clocks as Quartus packs them since 2026-10-31, examples/de2-ioregs; an output or OE register's synchronous reset as logic on its D; Manifest, below) | yes (2026-10-25, chipsmith's own synthesis end to end, checked over JTAG: examples/de2-jtag-counter (its earlier CLOCK_50-sampled version) reads back `"DE2!"` at 50.00 MHz after a JTAG load and after `flash --persist` (loader synthesized by chipsmith too, EPCS written, verified and reloaded from; 2026-10-26 also after a power cycle); picorv32 with the same readback added runs its loop at 3.33 MHz. 2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
-| xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes: chipsmith's own Verilog front end and synthesis (2026-11-01: LUT1-LUT6, CARRY4, FDRE/FDSE/FDCE/FDPE, RAM32M, pin and clock buffers; "7-series synthesis", below), what openXC7's nextpnr's packer handles, LVCMOS33 pins; chipsmith places LUT/register/carry logic, RAM32Ms, pins, BUFGs, BSCANs and the PS7 and routes the interconnect (below) | yes (2026-10-24: zybo-jtag-counter placed and routed by chipsmith, read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga) |
+| xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes, with no external tool but prjxray's frames and `.bit` writers (2026-11-01: chipsmith's own Verilog front end, synthesis, packing, placement, routing and FASM; "The Zybo flow", below): LUT1-LUT6, CARRY4, FDRE/FDSE/FDCE/FDPE, RAM32M, LVCMOS33 pins, BUFGs, BSCANs and the PS7 | yes, with the earlier flow (2026-10-24, yosys and nextpnr around chipsmith's placement and routing: zybo-jtag-counter read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga). chipsmith's own flow is checked at the bitstream instead (decoded and co-simulated against the RTL, below), not yet on the board |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
 LEDs, 1,171 LEs; a build took 26.5 s on a loaded machine on 2026-11-01
@@ -640,7 +642,7 @@ from one quartus_sta path each, and so is the M4K buffer's routing delay.
 
 The Zybo examples:
 
-- `examples/zybo-blinky`: a counter on LD0-LD3. Builds in about 70 s.
+- `examples/zybo-blinky`: a counter on LD0-LD3. Builds in about 20 s.
 - `examples/zybo-jtag-counter`: the Zybo's USB-UART is wired to the
   Zynq's processor (PS MIO 48/49, Digilent's Zybo reference manual,
   section 6), not to the FPGA fabric. So without software on the ARM
@@ -648,10 +650,9 @@ The Zybo examples:
   cable instead. A BSCANE2 makes it a 64-bit USER1 register holding
   `"ZYBO"` and a Gray-coded 125 MHz counter.
   `cargo run --release --example xc7_user1` reads it twice, a second apart,
-  with chipsmith's own cable code. Builds in about 87 s with chipsmith's
-  placement and routing (three nextpnr runs, below). Two builds give the
-  same placement and the same FASM. Read back 2026-10-24, chipsmith's
-  placement and routing, loaded with `flash --ssh`:
+  with chipsmith's own cable code. Builds in about 20 s. Read back
+  2026-10-24 with the earlier flow (yosys and nextpnr around chipsmith's
+  placement and routing), loaded with `flash --ssh`:
 
   ```
   USER1 0x5a59424fd795d8f0: tag "ZYBO", count 2598801568
@@ -662,11 +663,10 @@ The Zybo examples:
   With zybo-blinky loaded instead, the same read returns all zeros.
 - `examples/zybo-picorv32`: `examples/picorv32`'s sources with its ports
   on arbitrary Zybo balls, a placement and routing bench, not for
-  hardware. Builds in about 110 s.
+  hardware. Builds in about 2 minutes.
 - `examples/zybo-sha256`: `examples/sha256`'s sources the same way, a
-  synthesis, placement and routing bench (2026-11-01: 2,539 LUTs and 1,907
-  registers; its placement took 32 minutes on a machine at a load of 25,
-  Fmax 61.0 MHz by nextpnr's STA of chipsmith's routing).
+  synthesis, placement and routing bench. Builds in about 18 minutes on a
+  machine at a load of 30, 14 of them placing.
 
 #### 7-series synthesis
 
@@ -711,38 +711,111 @@ widths, initial contents and a falling-edge write, three seeds of 3,000
 cycles; picorv32 running its loop for 20,000 cycles; and proven with
 distributed RAM off.
 
-Zybo limits, all of them inherited from the tools:
+Zybo limits:
 
-- Every pin is LVCMOS33. The manifest has no I/O standards yet, and the
-  Zybo's PL banks (34, 35) are both 3.3 V.
+- Every pin is LVCMOS33, outputs at 16 mA and slow slew (what nextpnr
+  wrote, `LVCMOS33_LVTTL.DRIVE.I12_I16`), inputs with no pull. The
+  manifest has no I/O standards yet, and the Zybo's PL banks (34, 35) are
+  both 3.3 V.
 - Pins are the package's 100 PL user I/O balls (prjxray-db's
   `package_pins.csv`). PS pins (MIO, DDR) are rejected in the manifest.
 - The PS isn't configured from the fabric side beyond one thing: every
-  design gets a PS7 whose IRQF2P inputs are tied to 0 (the build's "PS7"
-  step, or the design's own PS7 if it leaves IRQF2P open). IRQF2P[19:16]
-  are the ARM cores' FIQ and IRQ, active high, and an interconnect input
-  nothing drives reads as 1. So a design without a PS7, Vivado's
-  PL-only blinky included, holds FIQ on both cores, and the moment the
-  PL->PS level shifters come on under Linux (Linux loading it, or a JTAG
-  load while U-Boot runs) both cores spin in the FIQ handler. Observed on
-  venus, halted over JTAG: both cores in `__fiq_svc`/`ct_nmi_enter`; with
-  IRQF2P tied to 0 Linux stays up. Designs that use the PS beyond that
-  (AXI, PS clocks, interrupts to Linux) are untested.
-- Both Zybo examples declare their 125 MHz clock in `[clocks]`, which
-  reaches nextpnr as an XDC `create_clock`. nextpnr's estimate tracks
-  Vivado's. zybo-blinky through the Vivado 2026.1 oracle (xc7-re
-  `tools/oracle.sh`, same Verilog, 8 ns clock): 27 registers, 1 LUT,
-  7 CARRY4, WNS 5.438 ns, so a 2.562 ns critical path (390.3 MHz) through
-  the 7-CARRY4 chain. chipsmith's build prints nextpnr's 391.5 MHz, slack
-  5.446 ns at 125 MHz, 0.3% apart. zybo-jtag-counter: 317.2 MHz,
-  slack 4.847 ns (no Vivado number yet). Its BSCANE2's `tck` has no pin,
-  so `[clocks]` can't name it, and nextpnr times it at its default
-  12 MHz. nextpnr reports 56 LUT BELs, against Vivado's 1 LUT. That is
-  most likely route-through LUTs, not checked.
-- The flow is deterministic: two builds give the same FASM. The `.bit`
-  header still carries xc7frames2bit's build date and time.
+  design gets a PS7 with every input tied to 0 (1,770 of them; the ones
+  the fabric can reach, as nextpnr tied them). IRQF2P[19:16] are the ARM
+  cores' FIQ and IRQ, active high, and an interconnect input nothing
+  drives reads as 1. So a design without a PS7, Vivado's PL-only blinky
+  included, holds FIQ on both cores, and the moment the PL->PS level
+  shifters come on under Linux (Linux loading it, or a JTAG load while
+  U-Boot runs) both cores spin in the FIQ handler. Observed on venus,
+  halted over JTAG: both cores in `__fiq_svc`/`ct_nmi_enter`; with
+  IRQF2P tied to 0 Linux stays up. A design that connects the PS7's pins
+  is rejected (`crates/chipsmith-xc7/src/pack.rs`).
+- Cells: what synthesis makes ("7-series synthesis", above). No block
+  RAM, DSPs, SRLs, MUXF7/F8, latches or I/O-tile registers; 5LUTs only in
+  RAM32Ms.
+- Timing is chipsmith's estimate from prjxray-db's delays without wire
+  RC (`crates/chipsmith-xc7/src/pnr.rs`): 7% to 30% above Vivado's Fmax
+  for Vivado's own placement of the small designs; on sha256, 28% below
+  (below). A
+  clock's `[clocks]` frequency is checked against it; a clock with no pin
+  (a BSCANE2's TCK) is reported unconstrained.
+- The flow is deterministic: placement is the best of eight fixed seeds,
+  and the build is a function of its inputs. The `.bit` header still
+  carries xc7frames2bit's build date and time.
 - The Zybo Z7 has its clock on K17. It needs only another pin map; the
   Z7-20 (xc7z020) needs another `Device`.
+
+#### The Zybo flow
+
+Since 2026-11-01 the whole Zybo build is chipsmith's own from the Verilog
+to the FASM (ADR-0013):
+
+- **Packing** (`crates/chipsmith-xc7/src/pack.rs`): synthesis' cells into
+  the placer's design directly, in shapes legal by construction. Every
+  CARRY4 S is a LUT's O6 in that bit's 6LUT (a feed-through LUT1 where S
+  comes from anything else, which is most of a counter's), DI comes in on
+  the bit's X bypass pin, a RAM32M is eight RAMD32 LUTs owning a SLICEM,
+  and the constants are nets every sink taps from its nearest GND_WIRE or
+  VCC_WIRE. A register's CE tied 1 or SR tied 0 is no connection at all.
+- **Placement** (`place.rs`): the 7-series annealer as before; from 1,000
+  BLEs, chains and RAMs on, it starts cold from chipsmith-place's
+  electrostatic global placement (ADR-0012) instead of hot from a greedy
+  start: sha256's placement takes 860 s instead of 2,971 s (load 30), its
+  estimated Fmax 59.6 against 64.7 MHz.
+- **Site routing** (`phys.rs`): each cell port is one site pin, by rule:
+  a LUT's inputs on `<L>1..<L>k`, a register's D from the 6LUT beside it,
+  the CARRY4's sum or the `<L>X` bypass, a RAM32M's write data on `<L>I`
+  and `<L>X` with `<L>6` tied high, a pin's buffer on its IOB's `I`, `O`,
+  `T` through the I/O tile's ILOGIC and OLOGIC.
+- **Routing** (`chipsmith_route`): every net, clocks and constants
+  included, in the prjxray graph, which now keeps the pseudo pips a
+  design passes through with the bits nextpnr sets for them (an I/O
+  tile's ILOGIC and OLOGIC, a clock row's BUFHCE). A BUFG's net is
+  confined to the clock tree. Routing is timing-driven with prjxray-db's
+  delays.
+- **FASM** (`fasm.rs`): what nextpnr writes, feature for feature where
+  they configure the same thing (its `fasm.cc`), clock tree buffer enables
+  included.
+- **Frames and `.bit`**: prjxray's `fasm2frames` and `xc7frames2bit`, the
+  last outside tools.
+
+Each build is checked at the bitstream (`crates/chipsmith/tests/xc7_bitstream.rs`):
+prjxray's `bit2fasm` reads the `.bit` back, `chipsmith_xc7::decode`
+turns its bits into a netlist by the hardware's rules (every site input
+traced back through the enabled pips; each used slice half its LUTs,
+registers and carry chain, whatever of them is used), and iverilog runs
+that netlist beside the RTL. The decoder is checked first on nextpnr's
+bitstreams of blinky and jtag-counter, which ran on the board, and of
+regs_arith. On chipsmith's own, 2026-11-01:
+
+| design | checked | output bits compared |
+|---|---|---|
+| zybo-blinky | 3,000 cycles | 12,000 |
+| zybo-jtag-counter (around its BSCANE2) | 3,000 cycles | 15,000 |
+| zybo-picorv32, its loop running | 20,000 cycles | 539,028 |
+| zybo-sha256 | 3,000 cycles | 81,000 |
+| every register shape and the carry arithmetic | 3,000 cycles | 161,999 |
+| RAM32Ms of one to three read ports, contents, a falling-edge write | 3,000 cycles | 94,274 |
+
+bit2fasm reads no bits of the single-IOB (`_SING`) I/O tiles, so the
+check takes their pin paths as given (`decode.rs`). Two things the check
+found in nextpnr's own flow: its RAM32M drops initial contents (it reads
+`INITA` where yosys writes `INIT_A`), and its picorv32 bitstream (never
+run on the board) doesn't match its RTL; neither was chased.
+
+Per design, against Vivado 2026.1's own placement and routing of the same
+Verilog (xc7-re `tools/oracle.sh`, 8 ns clock; Vivado's LUTs include its
+LUTs as memory, and it uses MUXF7s, which chipsmith doesn't). chipsmith's
+LUTs are packed LUTs, feed-throughs included; its Fmax is its own
+estimate, the earlier flow's nextpnr's STA of chipsmith's routing. Builds
+on a shared machine at a load of 10 to 30:
+
+| design | LUTs chipsmith / Vivado | registers | CARRY4 | slices | build | Fmax chipsmith (estimate) / earlier flow / Vivado |
+|---|---|---|---|---|---|---|
+| zybo-blinky | 28 / 1 | 27 / 27 | 7 / 7 | 7 | 19 s | 444.8 / 391.5 / 390.3 MHz |
+| zybo-jtag-counter (clk) | 97 / 51 | 128 / 128 | 8 / 8 | 57 | 22 s | 403.6 / 352.5 / 377.8 MHz |
+| zybo-picorv32 | 656 / 589 | 335 / 375 | 58 / 51 | 242 | 121 s | 204.1 / 167.9 / 156.9 MHz |
+| zybo-sha256 | 2,641 / 2,012 | 1,907 / 1,934 | 176 / 112 | 1,101 | 1,068 s | 59.6 / 61.0 / 82.8 MHz |
 
 ### Loading a Zybo from its own Linux
 
@@ -790,28 +863,29 @@ The plan is `[ghdl,] synthesis, pack, place and route, bitstream`. yosys
 and cyclone2-re's techmap are test oracles now (ADR-0004): the devshell has
 them, the build doesn't run them.
 
-Zynq-7010 PL (xc7z010clg400-1): shell out, except the Verilog front end,
-synthesis, placement, routing and the cable.
+Zynq-7010 PL (xc7z010clg400-1): chipsmith's own from the Verilog to the
+FASM; prjxray's tools write the `.bit`.
 
 | stage | today | |
 |---|---|---|
 | VHDL → Verilog | GHDL `--synth --out=verilog` | as for Cyclone II |
 | Verilog front end | chipsmith, with the 7-series cell library (`crates/chipsmith-xc7/src/synth/cells.v`) | ours |
 | synthesis | chipsmith: chipsmith-synth's passes, LUT6 mapping, CARRY4, FD*, RAM32M, pin and clock buffers (`crates/chipsmith-xc7/src/synth`) | ours |
-| packing | openXC7's nextpnr (`nextpnr-himbaechel --pack-only`, xilinx uarch), chip database for xc7z010 built from prjxray-db in nix (2.5 min) | to replace next |
-| placement | chipsmith: simulated annealing over slices, timing-driven with prjxray-db's delays (`crates/chipsmith-xc7/src/place.rs`, `crates/chipsmith-xc7/src/delay.rs`) | ours |
-| site routing | nextpnr, routing chipsmith's placement (`-o preplaced`) | to replace |
-| interconnect routing | chipsmith: PathFinder over the prjxray-db graph (`crates/chipsmith-xc7/src/xray.rs`, `crates/chipsmith-xc7/src/route.rs`) | ours |
-| FASM | nextpnr's FASM writer, from chipsmith's routes (`-o preplaced`, `-o prerouted`) | to replace |
+| packing | chipsmith: slices, carry chains with their feed-through LUTs, RAM32M SLICEMs, pins, constants (`crates/chipsmith-xc7/src/pack.rs`) | ours |
+| placement | chipsmith: simulated annealing over slices, from 1,000 objects on starting from chipsmith-place's electrostatic global placement, timing-driven with prjxray-db's delays (`crates/chipsmith-xc7/src/place.rs`, `crates/chipsmith-xc7/src/delay.rs`) | ours |
+| site routing | chipsmith: each cell port's site pin by rule (`crates/chipsmith-xc7/src/phys.rs`) | ours |
+| routing | chipsmith: PathFinder over the prjxray-db graph, clocks and constants included (`crates/chipsmith-xc7/src/xray.rs`, `crates/chipsmith-xc7/src/pnr.rs`) | ours |
+| timing | chipsmith: prjxray-db's cell and pip delays (`crates/chipsmith-xc7/src/pnr.rs`) | ours |
+| FASM | chipsmith (`crates/chipsmith-xc7/src/fasm.rs`) | ours |
 | FASM → frames | prjxray `fasm2frames` | to replace |
 | frames → `.bit` | prjxray `xc7frames2bit` | to replace |
 | cable | chipsmith: FT2232 (MPSSE) driver and 7-series JTAG loader (`crates/chipsmith-jtag`), loads in 1.3 s with DONE checked | ours |
 
-openXC7's nextpnr, prjxray, fasm and prjxray-db come from one pinned
+prjxray, fasm and prjxray-db come from one pinned
 [openXC7/toolchain-nix](https://github.com/openXC7/toolchain-nix)
-revision (`flake.nix`). That revision is the first whose nextpnr places
-BSCANE2. Replacing a tool means replacing one step. The nix package pins
-every tool. The devshell pins them too.
+revision (`flake.nix`), with openXC7's nextpnr, which the devshell keeps to
+compare against. Replacing a tool means replacing one step. The nix
+package pins every tool. The devshell pins them too.
 
 Verilog is the input language. Anything else, VHDL today and later Chisel,
 Amaranth and the like, gets translated into it. Internally, the stages will
@@ -1329,10 +1403,19 @@ Next devices:
   Project X-Ray already documents the fabric, so owning the stages means
   importing prjxray-db, not reverse engineering. xc7-re holds the
   groundwork. Same order as for Cyclone II: router, placer, packer.
-  The flow: yosys; nextpnr packs (`--pack-only`); chipsmith places;
-  nextpnr routes that placement (`-o preplaced`, nothing left to place)
-  for the site routing; chipsmith reroutes the interconnect; nextpnr
-  writes the FASM and times it (`--report`).
+  Since 2026-11-01 every stage from the Verilog to the FASM is
+  chipsmith's ("The Zybo flow", above). The router and placer items below
+  record how they were built, against nextpnr, while the flow was: yosys;
+  nextpnr packs (`--pack-only`); chipsmith places; nextpnr routes that
+  placement (`-o preplaced`, nothing left to place) for the site routing;
+  chipsmith reroutes the interconnect; nextpnr writes the FASM and times
+  it (`--report`).
+  - Synthesis, packer, site routing and FASM (done, 2026-11-01; ADR-0013,
+    "7-series synthesis" and "The Zybo flow", above). Open: the frames and
+    `.bit` written in process (prjxray-db's segbits are data, ADR-0003);
+    block RAM, DSPs, MUXF7/F8, LUT6_2 and the 5LUTs; timing with the
+    wires' RC; the electrostatic placer timing-driven and the annealer
+    after it shorter; chipsmith's own flow on the board.
   - Router (done, interconnect only). The routing graph comes from
     prjxray-db (`tilegrid.json`, `tile_type_*.json`, `tileconn.json`, and
     `segbits`/`ppips` for which pips a bitstream can express), into the
@@ -1630,7 +1713,7 @@ A Cargo workspace, one crate per concern
 | `crates/chipsmith-synth` | device-independent synthesis: flattening, RTL optimisation, arithmetic, memories, lowering to gates, LUT mapping |
 | `crates/chipsmith-route` | what both back ends share: the routing graph (`ChipDb`), the PathFinder router, the timing graph |
 | `crates/chipsmith-cyclone2` | Cyclone II: synthesis to its cells, packing, placement, routing (nextpnr JSON in and out), M4K, hard blocks, EPCS and its serial flash loader |
-| `crates/chipsmith-xc7` | 7-series: prjxray-db import, placement, delays, routing, Zynq `.bin` |
+| `crates/chipsmith-xc7` | 7-series: synthesis, packing, prjxray-db import, placement, delays, site routing, FASM, bitstream decoding, Zynq `.bin` |
 | `crates/chipsmith-jtag` | cables (USB-Blaster, FT2232), SVF player, 7-series JTAG loader |
 
 Cargo examples sit with their crate and run from the root by name, e.g.

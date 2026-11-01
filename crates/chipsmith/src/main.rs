@@ -59,27 +59,6 @@ enum Cmd {
     /// directory (e.g. `.../zynq7`); the nix package does.
     #[command(hide = true)]
     Xc7RoutingGraph { family: PathBuf, out: PathBuf },
-    /// Route nextpnr's routed xc7 design (`--write`) again with chipsmith's
-    /// router: its `-o prerouted` and `-o preplaced` lines.
-    #[command(hide = true)]
-    Xc7Route {
-        routed: PathBuf,
-        prerouted: PathBuf,
-        preplaced: PathBuf,
-    },
-    /// Place nextpnr's packed xc7 netlist (`--pack-only --write`): its
-    /// `-o preplaced` lines. With `--reference`, also measure another
-    /// placement of it (nextpnr's `--write`) the same way.
-    #[command(hide = true)]
-    Xc7Place {
-        packed: PathBuf,
-        placement: PathBuf,
-        #[arg(long)]
-        reference: Option<PathBuf>,
-        /// Place for wirelength alone, without the timing model.
-        #[arg(long)]
-        wirelength_only: bool,
-    },
     /// Map a yosys netlist's simple gates to 4-input LUTs (in place of abc).
     #[command(hide = true)]
     Lutmap { netlist: PathBuf, mapped: PathBuf },
@@ -95,51 +74,6 @@ fn main() -> Result<()> {
             let (db, s) = xray::import(family, part.die, part.part)?;
             eprintln!("{s:?} in {:.1} s", started.elapsed().as_secs_f64());
             return db.write_cache(out);
-        }
-        Cmd::Xc7Route {
-            routed,
-            prerouted,
-            preplaced,
-        } => {
-            let started = std::time::Instant::now();
-            let db = xray::load(chipsmith::device::XC7Z010CLG400_1)?;
-            eprintln!("routing graph in {:.1} s", started.elapsed().as_secs_f64());
-            let s = chipsmith_xc7::route::route_file(&db, routed, prerouted, preplaced)?;
-            eprintln!("{s:#?}");
-            return Ok(());
-        }
-        Cmd::Xc7Place {
-            packed,
-            placement,
-            reference,
-            wirelength_only,
-        } => {
-            let started = std::time::Instant::now();
-            let db = xray::load(chipsmith::device::XC7Z010CLG400_1)?;
-            eprintln!("routing graph in {:.1} s", started.elapsed().as_secs_f64());
-            let part = chipsmith::device::XC7Z010CLG400_1;
-            let delays = chipsmith_xc7::delay::Delays::load(
-                &std::path::Path::new(
-                    &std::env::var_os(flow::PRJXRAY_DB_VAR)
-                        .ok_or_else(|| anyhow::anyhow!("{} is not set", flow::PRJXRAY_DB_VAR))?,
-                )
-                .join(part.family),
-            )?;
-            let outcome = chipsmith_xc7::place::place_file(
-                &db,
-                (!wirelength_only).then_some(&delays),
-                packed,
-                placement,
-            )?;
-            eprintln!("{outcome:#?}");
-            if let Some(reference) = reference {
-                let (wl, critical) =
-                    chipsmith_xc7::place::measure(&db, &delays, packed, reference)?;
-                eprintln!(
-                    "reference: wirelength {wl:.1}, estimated critical path {critical:.0} ps"
-                );
-            }
-            return Ok(());
         }
         Cmd::Pack { netlist, packed } => {
             let s = pack::pack_file(netlist, packed)?;
@@ -174,8 +108,6 @@ fn main() -> Result<()> {
         }
         Cmd::RoutingGraph { .. }
         | Cmd::Xc7RoutingGraph { .. }
-        | Cmd::Xc7Route { .. }
-        | Cmd::Xc7Place { .. }
         | Cmd::Pack { .. }
         | Cmd::PackDiff { .. }
         | Cmd::Lutmap { .. } => {

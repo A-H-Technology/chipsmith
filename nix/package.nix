@@ -8,7 +8,7 @@
   ghdl,
   # cyclone2-re's db package: the device and chip databases (ADR-0003).
   cyclone2-db,
-  # nix/xc7.nix: the 7-series tools, chip database and prjxray-db
+  # nix/xc7.nix: the 7-series tools and prjxray-db
   xc7,
 }:
 
@@ -96,7 +96,6 @@ runCommand "chipsmith-${unwrapped.version}"
       --set CHIPSMITH_CYCLONE2_GRAPH ${routingGraph} \
       --set CHIPSMITH_CYCLONE2_DB ${cyclone2-db} \
       --set CHIPSMITH_DE2_LOADER ${de2Loader}/loader.rbf \
-      --set CHIPSMITH_XC7_CHIPDB ${xc7.chipdb} \
       --set CHIPSMITH_XC7_GRAPH ${xc7RoutingGraph} \
       --set CHIPSMITH_PRJXRAY_DB ${xc7.prjxray-db}
   ''
