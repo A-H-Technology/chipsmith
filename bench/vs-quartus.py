@@ -5,7 +5,8 @@ chipsmith manifest, and the numbers out of either tool's logs.
     bench/vs-quartus.py project <example dir> <out dir> <flavour>
     bench/vs-quartus.py quartus-row <quartus dir>
     bench/vs-quartus.py chipsmith-row <stamped flow log> <sta summary or ->
-    bench/vs-quartus.py table <runs.tsv>
+    bench/vs-quartus.py table <runs.tsv> [fresh|edit]
+    bench/vs-quartus.py summary <runs.tsv> [fresh|edit]
 
 `project` writes <out dir>/top.qpf, top.qsf and top.sdc: the manifest's
 sources, top module, pins (3.3-V LVTTL, chipsmith's default) and clocks,
@@ -15,7 +16,8 @@ processor count), `all` (NUM_PARALLEL_PROCESSORS ALL), `fast` (Fast Fit).
 
 `quartus-row` and `chipsmith-row` print key=value pairs (LEs, critical path
 and Fmax by each tool's own timing analysis, processors Quartus used);
-`table` turns runs.tsv into the Markdown tables of docs/vs-quartus.md.
+`table` turns runs.tsv into the full Markdown table of docs/vs-quartus.md,
+`summary` into its compact wall, CPU and Fmax tables.
 """
 import glob
 import os
@@ -286,6 +288,67 @@ def table(path, kinds="fresh"):
                   f"{spread([r.get('q_fmax', '-') for r in rs])} | {stages} |")
 
 
+def summary(path, kinds="fresh"):
+    """The compact tables of docs/vs-quartus.md: wall and CPU per design
+    and tool (median [min-max]), chipsmith's speed-up over `q` (ratio of
+    medians), and each tool's Fmax by its own analysis and by quartus_sta."""
+    rows = [r for r in load_rows(path) if r["kind"].startswith(kinds) and r["status"] == "ok"]
+    failed = {(r["design"], r["tool"]) for r in load_rows(path)
+              if r["kind"].startswith(kinds) and r["status"] != "ok"}
+    designs = list(dict.fromkeys(r["design"] for r in rows))
+    tools = [t for t in ("q", "q-fast", "cs", "gpu-cpu", "gpu-cuda") if any(r["tool"] == t for r in rows)]
+
+    def of(d, t):
+        return [r for r in rows if r["design"] == d and r["tool"] == t]
+
+    def med(d, t, k):
+        xs = [float(r[k]) for r in of(d, t)]
+        return statistics.median(xs) if xs else None
+
+    def cell(d, t, k):
+        rs = of(d, t)
+        if not rs:
+            return "fails" if (d, t) in failed else "-"
+        return spread([r[k] for r in rs]) + (f" ({len(rs)})" if len(rs) != 3 else "")
+
+    les = lambda d, t: next((r["les"] for r in of(d, t)), "-")
+    for k, what in (("wall", "wall s"), ("cpu", "CPU s")):
+        print(f"| design | LEs Quartus / chipsmith | " + " | ".join(f"{t} {what}" for t in tools)
+              + " | speed-up cs | speed-up gpu-cuda |")
+        print("|---" * (len(tools) + 4) + "|")
+        for d in designs:
+            ratios = []
+            for t in ("cs", "gpu-cuda"):
+                q, c = med(d, "q", k), med(d, t, k)
+                ratios.append(f"{q / c:.1f}x" if q and c else "-")
+            print(f"| {d} | {les(d, 'q')} / {les(d, 'cs')} | " + " | ".join(cell(d, t, k) for t in tools)
+                  + " | " + " | ".join(ratios) + " |")
+        print()
+    def same(xs):
+        # Deterministic placements repeat their critical path exactly.
+        xs = [x for x in xs if x not in ("-", "")]
+        return spread(xs) if len(set(xs)) > 1 else (xs[0] if xs else "-")
+
+    print("| design | " + " | ".join(f"{t} own" for t in tools) + " | "
+          + " | ".join(f"{t} quartus_sta" for t in tools if t.startswith(("cs", "gpu"))) + " |")
+    print("|---" * (1 + len(tools) + sum(t.startswith(("cs", "gpu")) for t in tools)) + "|")
+    for d in designs:
+        own = []
+        for t in tools:
+            rs = of(d, t)
+            k = "q_fmax" if t.startswith("q") else "cs_fmax"
+            own.append(same([r.get(k, "-") for r in rs]) if rs else ("fails" if (d, t) in failed else "-"))
+        sta = [same([r.get("q_fmax", "-") for r in of(d, t)]) if of(d, t) else ("fails" if (d, t) in failed else "-")
+               for t in tools if t.startswith(("cs", "gpu"))]
+        print(f"| {d} | " + " | ".join(own) + " | " + " | ".join(sta) + " |")
+    print()
+    print("| tool | runs | load, median [min-max] |")
+    print("|---|---|---|")
+    for t in tools:
+        rs = [r for r in rows if r["tool"] == t]
+        print(f"| {t} | {len(rs)} | {spread([r['load'] for r in rs])} |")
+
+
 def main():
     cmd, *args = sys.argv[1:]
     if cmd == "project":
@@ -295,6 +358,8 @@ def main():
         print(" ".join(f"{k}={v}" for k, v in row.items()))
     elif cmd == "table":
         table(*args)
+    elif cmd == "summary":
+        summary(*args)
     else:
         sys.exit(__doc__)
 
