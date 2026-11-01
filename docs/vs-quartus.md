@@ -16,16 +16,16 @@ CPU cores (femtorv32, picorv32, mult-selftest, sdram-selftest; 470 to
 1,200 LEs), `open`'s chipsmith takes 18 to 28 s of wall time to Quartus'
 90 to 140 s, and 1.4x to 2.7x less CPU time.
 
-**At sha256 and picorv32x24 sizes, `open` stops being faster.** sha256
+**At sha256 and picorv32x24 sizes, `open` stops being clearly faster.** sha256
 (3,303 LEs in Quartus, 6,046 in chipsmith): 151 s against 190 s of wall
 time, but 2.3x Quartus' CPU time. picorv32x24 (20,240 / 28,449 LEs):
 slower, a median of 1,516 s against 1,063 s, and 4x the CPU time (4,027 s
-against 1,018 s). Its placement anneal is most of that: 644 to 1,807 s of
-wall time, at 3.4 to 5.3 cores' worth of CPU time. At load 10, the best run tied Quartus (900 s
-against 896 s). Under load, chipsmith's threads slow down far more than
+against 1,018 s). Its placement anneal is most of that: 644 to 1,807 s
+of wall time, at 2.2 to 5.3 cores' worth of CPU time. At load 10, the best
+run tied Quartus (900 s against 896 s). Under load, chipsmith's threads slow down far more than
 single-threaded Quartus does.
 
-**The gpu-pnr branch (61ae9d7) is faster at every size.** picorv32x24
+**The gpu-pnr branch (61ae9d7) is faster than Quartus at every size.** picorv32x24
 takes 393 to 505 s, 2.1x to 2.7x faster than Quartus, at about Quartus'
 CPU time (823 to 910 s against 1,018 s). sha256 takes 100 s, 1.9x faster,
 at 0.7x Quartus' CPU time. CUDA and its CPU fallback are within the noise
@@ -33,7 +33,7 @@ of each other: the gain comes from the branch's placer, not from the GPU.
 That branch can't build sdram-selftest yet: it predates `open`'s negative
 PLL phase shifts.
 
-**Quartus wins on quality, and the gap grows with logic depth.**
+**Quartus wins on quality, most on the logic-deep designs.**
 
 - **LEs:** Quartus' synthesis needs fewer of them: chipsmith uses 12%
   more on crc32, 21% on mult-selftest, 37% on sdram-selftest, 40% on
@@ -56,22 +56,21 @@ time of a cold build, in both tools (Edit and rebuild, below).
 
 **Quartus' own speed settings help little.** `FAST FIT` saves up to a
 quarter on the small designs and nothing on sha256 or picorv32x24, at
-about the same Fmax. Parallel
-compilation is disabled in the Web Edition.
+about the same Fmax. Parallel compilation is disabled in the Web Edition.
 
 So chipsmith turns a bitstream around faster on the DE2's typical designs,
-mostly because Quartus has a minute of fixed cost. Quartus' bitstream is
+mostly because Quartus has a minute of fixed cost. Quartus' designs are
 smaller, and on logic-deep designs faster. `open` doesn't win on large
 designs; gpu-pnr's placer does.
 
 ## Method
 
 **Machine.** Intel i7-4770K (4 cores, 8 threads, 3.5 GHz), 31 GB, no swap,
-NVIDIA GTX 1660, NixOS. The machine is shared: two other agents ran their own
-builds during the runs. Those included Quartus fits, Quartus Pro fits and
-the gpu-pnr branch's placer benchmark. The `load` column is the 1-minute
-load average, sampled every 5 s during each run and averaged. It ranged
-from about 4 to 13. A quiet machine would give lower wall times for the
+NVIDIA GTX 1660, NixOS. The machine is shared: other agents ran their own
+builds during the runs. Those included Quartus fits, Quartus Pro fits,
+yosys proofs and the gpu-pnr branch's placer benchmark. The `load` column
+is the 1-minute load average, sampled every 5 s during each run and
+averaged. It ranged from 4 to 41, with a median of 9 (Load, below). A quiet machine would give lower wall times for the
 multi-threaded chipsmith and changes little for single-threaded Quartus;
 see Caveats.
 
@@ -117,7 +116,7 @@ copy of the example with no `build/` and no Quartus `db/`. Before timing,
 each chipsmith binary does one untimed blinky build. That writes its
 cached routing graph, as Quartus' installed device database already is.
 
-**Quality.** Each row carries the tool's own critical path for CLOCK_50
+**Quality.** Each row carries the tool's own critical path for its slowest clock
 (chipsmith's routed estimate; Quartus' from quartus_sta, slow model, as
 `report_clock_fmax_summary`). On rep 1, each chipsmith placement and
 routing is also exported to Quartus (cyclone2-re's `cram quartus-export`),
