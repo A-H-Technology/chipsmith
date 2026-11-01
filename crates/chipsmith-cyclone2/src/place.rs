@@ -40,6 +40,13 @@ const LES_PER_LAB: usize = 16;
 /// reaching about half of them. nextpnr's cyclone2 uarch measured 34 as the
 /// most that keeps a full LAB routable on picorv32.
 const MAX_LAB_INPUTS: usize = 34;
+/// LEs a LAB may hold that pair a LUT with an unrelated SDATA register
+/// (`pack_registers`). Each pins a net to its input C and leaves the LUT
+/// A, B and D, which the LAB's lines reach only in some combinations:
+/// sha256 with every register packed had LABs of them that didn't route
+/// in 60 iterations (6 to 16 LE inputs and LAB lines overused); 8 (and
+/// 4) route it in 35 to 38 at the same LE count.
+const MAX_PACKED_PER_LAB: usize = 8;
 const LUT_INPUTS: [Port; 4] = [Port::DataA, Port::DataB, Port::DataC, Port::DataD];
 
 /// Every cell port the packed netlist uses: a closed set, so cells keep
@@ -270,6 +277,8 @@ struct Sig {
     inputs: [NetId; 8],
     n_inputs: u8,
     ff: Option<FfCtl>,
+    /// A LUT and an unrelated register on SDATA.
+    packed: bool,
 }
 
 /// Why a LAB refuses its contents.
@@ -356,6 +365,177 @@ struct Conn {
     net: Option<usize>,
     /// Needs no routing: a carry chain link, or a LUT into its own register.
     internal: bool,
+}
+
+/// The fitter's register packing within each placed LAB: a register-only
+/// LE (its register on the sync load path, SDATA on input C) moves into
+/// the slot of a LUT-only LE of the same LAB whose LUT leaves input C to
+/// it ([`leaves_c`]), one that reads the register's SDATA first. The LAB
+/// keeps its signals, so routing it is no harder; one LE fewer is used.
+/// Returns each moved register LE's new slot.
+fn merge_in_labs(state: &State) -> HashMap<usize, usize> {
+    let d = state.design;
+    let mut moved = HashMap::default();
+    for slots in &state.slots {
+        let mut luts: Vec<(usize, usize)> = slots
+            .iter()
+            .enumerate()
+            .filter_map(|(k, le)| {
+                let le = (*le)?;
+                let Le { lut, ff: None } = d.les[le] else {
+                    return None;
+                };
+                (d.chain_of[le].is_none()).then_some((k, lut?))
+            })
+            .collect();
+        for le in slots.iter().flatten().copied() {
+            let Le {
+                lut: None,
+                ff: Some(f),
+            } = d.les[le]
+            else {
+                continue;
+            };
+            let Some(sdata) = d.cells[f].net(Port::Sdata) else {
+                continue;
+            };
+            let q = d.cells[f].net(Port::Regout);
+            let fits = |&&(_, l): &&(usize, usize)| {
+                leaves_c(&d.cells[l], sdata)
+                    && !LUT_INPUTS
+                        .iter()
+                        .any(|&p| d.cells[l].net(p) == q && q.is_some())
+            };
+            let reads = |&&(_, l): &&(usize, usize)| {
+                LUT_INPUTS.iter().any(|&p| d.cells[l].net(p) == Some(sdata))
+            };
+            let pick = luts
+                .iter()
+                .filter(fits)
+                .find(reads)
+                .or_else(|| luts.iter().find(fits))
+                .copied();
+            if let Some((k, l)) = pick {
+                moved.insert(le, k);
+                luts.retain(|&(_, x)| x != l);
+            }
+        }
+    }
+    moved
+}
+
+/// Whether `lut` leaves its LE's input C to a register's `sdata`: it reads
+/// at most three nets besides that one (input C then carries `sdata` to
+/// both) and is no carry LE (whose C is the carry in).
+fn leaves_c(lut: &Cell, sdata: NetId) -> bool {
+    if lut.net(Port::Cin).is_some() {
+        return false;
+    }
+    let mut nets: Vec<NetId> = LUT_INPUTS
+        .iter()
+        .filter_map(|&p| lut.net(p))
+        .filter(|&n| n != sdata)
+        .collect();
+    nets.sort_unstable();
+    nets.dedup();
+    nets.len() < LUT_INPUTS.len()
+}
+
+/// Register packing, as the fitter does it: a register on the sync load
+/// path (SDATA, its LE's input C, with the LAB's sload tied high) needs
+/// nothing of its LE's LUT, so it shares an LE with an unrelated LUT that
+/// leaves input C to it: one reading at most three nets besides the
+/// register's SDATA (input C then carries that one to both), and no carry
+/// LE (whose C is the carry in). Each register takes the nearest such LUT
+/// over the netlist's low-fanout nets, nearest pairs first; one with none
+/// within reach keeps an LE to itself.
+fn pack_registers(
+    cells: &[Cell],
+    driver: &[Option<usize>],
+    users: &[Vec<(usize, Port)>],
+    les: &mut Vec<Le>,
+    le_of: &mut [Option<usize>],
+) {
+    /// Nets wider than this (clocks, enables, resets) say nothing about
+    /// where two cells belong.
+    const FANOUT: usize = 16;
+    /// Hops from the register, and cells looked at, per register. One
+    /// hop (a LUT on the register's own nets) packs 64 of sha256's 739
+    /// SDATA registers, three 307 (`MAX_PACKED_PER_LAB` keeps those
+    /// routable): 3,715 LEs against 3,904, at the same Fmax.
+    const REACH: u8 = 3;
+    const VISIT: usize = 256;
+    // A chain head (COUT used) is a carry LE as well.
+    let takes = |lut: usize, sdata: NetId| -> bool {
+        let c = &cells[lut];
+        leaves_c(c, sdata)
+            && c.net(Port::Cout)
+                .is_none_or(|n| users[n as usize].is_empty())
+    };
+    let mut pairs: Vec<(u8, usize, usize)> = Vec::new();
+    let mut seen: HashSet<usize> = HashSet::default();
+    for (fle, le) in les.iter().enumerate() {
+        let (None, Some(f)) = (le.lut, le.ff) else {
+            continue;
+        };
+        let Some(sdata) = cells[f].net(Port::Sdata) else {
+            continue;
+        };
+        seen.clear();
+        seen.insert(f);
+        let mut frontier = vec![f];
+        for hop in 1..=REACH {
+            let mut next = Vec::new();
+            for &c in &frontier {
+                for (_, n) in cells[c].connections() {
+                    let loads = &users[n as usize];
+                    if loads.len() > FANOUT {
+                        continue;
+                    }
+                    for x in driver[n as usize]
+                        .into_iter()
+                        .chain(loads.iter().map(|&(u, _)| u))
+                    {
+                        if seen.len() >= VISIT || !seen.insert(x) {
+                            continue;
+                        }
+                        next.push(x);
+                        if let (Kind::Lut, Some(lle)) = (cells[x].kind, le_of[x]) {
+                            if les[lle].ff.is_none() && takes(x, sdata) {
+                                pairs.push((hop, fle, lle));
+                            }
+                        }
+                    }
+                }
+            }
+            frontier = next;
+        }
+    }
+    pairs.sort_unstable();
+    let mut gone = vec![false; les.len()];
+    for (_, fle, lle) in pairs {
+        if gone[fle] || les[lle].ff.is_some() {
+            continue;
+        }
+        let f = les[fle].ff.expect("a register-only LE");
+        les[lle].ff = Some(f);
+        le_of[f] = Some(lle);
+        gone[fle] = true;
+    }
+    let mut index = vec![0; les.len()];
+    let mut kept = 0;
+    for (i, g) in gone.iter().enumerate() {
+        index[i] = kept;
+        kept += !g as usize;
+    }
+    let mut i = 0;
+    les.retain(|_| {
+        i += 1;
+        !gone[i - 1]
+    });
+    for le in le_of.iter_mut().flatten() {
+        *le = index[*le];
+    }
 }
 
 fn read_design(json: &Value) -> Result<Design> {
@@ -502,6 +682,7 @@ fn read_design(json: &Value) -> Result<Design> {
             });
         }
     }
+    pack_registers(&cells, &driver, &users, &mut les, &mut le_of);
 
     // Carry chains, from their heads (COUT used, CIN not driven).
     let mut chains = Vec::new();
@@ -644,6 +825,7 @@ fn read_design(json: &Value) -> Result<Design> {
                 inputs: [0; 8],
                 n_inputs: 0,
                 ff: None,
+                packed: lut.is_some() && ff.is_some_and(|f| cells[f].net(Port::Sdata).is_some()),
             };
             let mut add = |net: Option<NetId>| {
                 if let Some(n) = net {
@@ -1358,6 +1540,12 @@ impl<'a> State<'a> {
         let mut sync_kind = 0;
         let mut inputs = [0 as NetId; MAX_LAB_INPUTS];
         let mut n_inputs = 0;
+        let mut packed = 0;
+        // The one net each LE of the LAB sends its neighbours on its local
+        // line. An LE has one: a second of its outputs that the LAB reads
+        // (its LUT's and its register's) comes back in on a LAB line.
+        let mut local = [(u32::MAX, 0 as NetId); LES_PER_LAB];
+        let mut n_local = 0;
         let one = |slot: &mut Option<Ctl>, v: Ctl| match (v.0, *slot) {
             (None, _) => true,
             (Some(_), None) => {
@@ -1368,10 +1556,25 @@ impl<'a> State<'a> {
         };
         for le in slots.iter().flatten() {
             let sig = &d.sigs[*le];
+            packed += sig.packed as usize;
+            if packed > MAX_PACKED_PER_LAB {
+                return Err(Refusal::Inputs);
+            }
             for &n in &sig.inputs[..sig.n_inputs as usize] {
-                // Driven inside the LAB, or already counted: no new line.
-                let here = d.driver_le[n as usize].is_some_and(|le| lab_of(le as usize) == lab);
-                if here || inputs[..n_inputs].contains(&n) {
+                // Driven inside the LAB on its driver's local line, or
+                // already counted: no new line.
+                if let Some(dle) = d.driver_le[n as usize].filter(|&le| lab_of(le as usize) == lab) {
+                    match local[..n_local].iter().find(|&&(l, _)| l == dle) {
+                        None => {
+                            local[n_local] = (dle, n);
+                            n_local += 1;
+                            continue;
+                        }
+                        Some(&(_, m)) if m == n => continue,
+                        Some(_) => {}
+                    }
+                }
+                if inputs[..n_inputs].contains(&n) {
                     continue;
                 }
                 if n_inputs == MAX_LAB_INPUTS {
@@ -2704,10 +2907,12 @@ pub fn place_file(
             Value::String(unused_pins.quartus_name().into());
     }
     let cells = top["cells"].as_object_mut().context("no cells")?;
+    let merged = merge_in_labs(&state);
     for (i, c) in design.cells.iter().enumerate() {
         let (tile, bel) = match (design.le_of[i], design.block_of[i]) {
             (Some(le), _) => {
                 let (lab, k) = state.pos[le];
+                let k = merged.get(&le).copied().unwrap_or(k);
                 let half = if c.kind == Kind::Lut { "LUT" } else { "FF" };
                 (grid.tiles[lab], format!("LE{k}.{half}"))
             }
@@ -2744,7 +2949,7 @@ pub fn place_file(
     std::fs::write(placed, serde_json::to_string(&json)?)
         .with_context(|| format!("writing {}", placed.display()))?;
     Ok(Stats {
-        les: design.les.len(),
+        les: design.les.len() - merged.len(),
         chains: design.chains.len(),
         rounds,
         initial_cost,
