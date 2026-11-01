@@ -1121,7 +1121,10 @@ fn in_set(m: &mut Module, q: &[SigBit], values: &[chipsmith_netlist::Const], tag
 
 /// yosys proves `gate` equivalent to `gold` (both JSON files, the
 /// memories already as they should be compared), with x in `gold` read as
-/// "any value". Returns how many `$equiv` it proved.
+/// "any value". Returns how many `$equiv` it proved. With `front_ends`,
+/// `gold` is yosys' RTL and `gate` chipsmith's refined stage: with a
+/// product wider than 18 x 18, equiv_struct's `-icells` first
+/// (`equiv_once`).
 fn equiv(
     dir: &Path,
     name: &str,
@@ -1129,14 +1132,31 @@ fn equiv(
     gate: &Path,
     reference: &Module,
     words: bool,
+    front_ends: bool,
 ) -> Result<usize, String> {
-    // Products want equiv_struct's `-icells` (`equiv_once`). It pairs every
-    // internal cell, though, and pairs built on a name-matched wire that
-    // legitimately differs (mult-selftest's `ra`, against its narrowed
-    // stage) leave registers unproven. Both runs are whole proofs; the
-    // second is the one every design without products gets.
-    let has_mul = |p: &Path| std::fs::read_to_string(p).is_ok_and(|s| s.contains("\"$mul\""));
-    if has_mul(gold) || has_mul(gate) {
+    // SAT proves one product against its twin up to 18 x 18 (fir's
+    // 16 x 16: its whole proof in 47 s), not mult-selftest's 32 x 32;
+    // `-icells` costs fir's RTL step 299 s. And it pairs every internal
+    // cell: pairs built on a name-matched wire that legitimately differs
+    // (mult-selftest's `ra`) can leave registers unproven, so then the
+    // proof runs again without it. Both are whole proofs. Between
+    // chipsmith's own stages the products already line up: never there
+    // (fir's refined stage against its narrowed one took over 5 minutes).
+    // A constant factor (sha256's `* 32` in an index) is a shift, which
+    // SAT takes in stride.
+    let wide = reference.cells.iter().any(|c| {
+        let (mut width, mut constant) = (0, false);
+        if c.kind.type_name() == "$mul" {
+            c.kind.for_each_port(|p| {
+                if matches!(p.name, "A" | "B") {
+                    width = width.max(p.bits.len());
+                    constant |= p.bits.iter().all(|b| matches!(b, SigBit::Const(_)));
+                }
+            });
+        }
+        width > 18 && !constant
+    });
+    if front_ends && wide {
         match equiv_matched(dir, &format!("{name}_icells"), gold, gate, reference, words, true) {
             Ok(n) => return Ok(n),
             Err(e) => eprintln!(
@@ -1863,6 +1883,7 @@ fn check_impl(
             &mid_path,
             top(&gold),
             words,
+            true,
         )
     };
     let first = match rtl {
@@ -2141,6 +2162,7 @@ fn check_impl(
         &cut_gate_path,
         top(&mid),
         words,
+        false,
     )?;
     Ok(Proof {
         constant_registers: claims.len(),

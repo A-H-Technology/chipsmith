@@ -481,7 +481,8 @@ How it is checked (`crates/chipsmith-cyclone2/tests/synth.rs`, `mult_*`):
 - **The examples**: `examples/fir` (an 8-tap filter, eight signed
   16 x 16 products) proven around the blocks, the RTL against the stage
   before the mapping and the stage after it against the netlist with the
-  blocks cut at their pins (2,075 `$equiv`, 47 s), and co-simulated
+  blocks cut at their pins (2,075 `$equiv`, 47 s; 2,148 in 75 s on a
+  loaded machine since the products are narrowed, below), and co-simulated
   (180,000 output bits). `examples/mult-selftest` proven around its 15
   blocks the same way (3,460 `$equiv`, 289 s; since 2026-11-01, below)
   and co-simulated for 120,000 cycles (480,000 bits); with one block's
@@ -492,10 +493,13 @@ How it is checked (`crates/chipsmith-cyclone2/tests/synth.rs`, `mult_*`):
   in their parameters, and yosys' `equiv_struct` skips `$mul` cells
   anyway: induction SAT-solved each multiplier against its twin, and the
   RTL against its own refined stage ran 30 minutes without finishing.
-  The check now narrows both sides' products (`wreduce`) and lets
-  `equiv_struct` merge internal cells (`-icells`), so two products of
-  proven-equal operands are one; where that pairs a name-matched wire
-  that legitimately differs, it proves again without `-icells`.
+  The check now narrows both sides' products (`wreduce`), and where the
+  RTL has a product of two signals wider than 18 x 18 it lets
+  `equiv_struct` merge internal cells (`-icells`) between the two front
+  ends, so two products of proven-equal operands are one; where that
+  pairs a name-matched wire that legitimately differs, it proves again
+  without `-icells`. Narrower products SAT proves directly (`-icells`
+  cost fir's RTL step 299 s).
 - **Quartus byte-identical**: fir and mult-selftest.
 
 | design | products | blocks | LEs | critical path, estimate / Quartus |
