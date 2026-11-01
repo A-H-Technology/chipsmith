@@ -3,6 +3,7 @@
 
 pub mod decode;
 pub mod delay;
+pub mod frames;
 pub mod part;
 mod fasm;
 mod pack;

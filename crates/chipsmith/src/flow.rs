@@ -7,12 +7,12 @@
 //! bitstream and its JTAG stream (`chipsmith_cyclone2`) and loading over the
 //! cable (`chipsmith_jtag`) are chipsmith's own.
 //!
-//! 7-series (Zynq-7010): the Verilog front end, synthesis
-//! (`chipsmith_xc7::synth`), packing, placement, routing and the FASM
-//! (`chipsmith_xc7::pnr`) and loading over the Zybo's FT2232 cable
-//! (`chipsmith_jtag::ftdi`, `chipsmith_jtag::xc7`) are chipsmith's own;
-//! prjxray's `fasm2frames` and `xc7frames2bit` turn the FASM into a `.bit`
-//! with prjxray-db's bits.
+//! 7-series (Zynq-7010): no external program either. The Verilog front
+//! end, synthesis (`chipsmith_xc7::synth`), packing, placement, routing
+//! and the FASM (`chipsmith_xc7::pnr`), the frames and `.bit`
+//! (`chipsmith_xc7::frames`, from prjxray-db's bits) and loading over the
+//! Zybo's FT2232 cable (`chipsmith_jtag::ftdi`, `chipsmith_jtag::xc7`) are
+//! chipsmith's own.
 //!
 //! Each stage is one `Step` in a `Plan`, so replacing a tool with
 //! chipsmith's own code means replacing one step.
@@ -97,9 +97,6 @@ impl Layout {
     fn fasm(&self) -> PathBuf {
         self.dir.join(format!("{}.fasm", self.name))
     }
-    fn frames(&self) -> PathBuf {
-        self.dir.join(format!("{}.frames", self.name))
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,6 +157,14 @@ pub enum Step {
         pins: BTreeMap<String, String>,
         clocks: BTreeMap<String, Frequency>,
     },
+    /// Write a 7-series design's FASM as a `.bit`, in process
+    /// (`chipsmith_xc7::frames`, what prjxray's `fasm2frames` and
+    /// `xc7frames2bit` make of it); `design` names it in the header.
+    Xc7Bitstream {
+        fasm: PathBuf,
+        bit: PathBuf,
+        design: String,
+    },
     /// Play an SVF over the USB-Blaster, in process.
     PlaySvf(PathBuf),
     /// Load a 7-series `.bit` over a Digilent FT2232 cable, in process.
@@ -213,6 +218,7 @@ impl Step {
             Step::Bitstream { .. } => "bitstream",
             Step::Svf { .. } => "JTAG stream",
             Step::Xc7Pnr { .. } => "pack, place and route",
+            Step::Xc7Bitstream { .. } => "bitstream",
             Step::PlaySvf(_) => "JTAG: program over USB-Blaster",
             Step::LoadBit(_) => "JTAG: program over Digilent FT2232",
             Step::LoadBitSsh { .. } => "ssh: load through the board's fpga-manager",
@@ -257,11 +263,6 @@ impl Tool {
         }
     }
 
-    fn arg(mut self, arg: impl Into<OsString>) -> Self {
-        self.args.push(arg.into());
-        self
-    }
-
     fn args<I: IntoIterator<Item = S>, S: Into<OsString>>(mut self, args: I) -> Self {
         self.args.extend(args.into_iter().map(Into::into));
         self
@@ -285,15 +286,10 @@ pub fn plan_build(manifest: &Manifest, layout: &Layout) -> Result<Plan> {
             unused_pins,
         } => plan_cyclone2(manifest, pins, clocks, *unused_pins, layout),
         Target::Xc7z010clg400_1 { pins, clocks } => {
-            let part = XC7Z010CLG400_1;
-            plan_xc7(
-                manifest,
-                part,
-                pins,
-                clocks,
-                layout,
-                &Xc7Data::from_env(part)?,
-            )
+            // The steps read prjxray-db through the environment when they
+            // run; a missing one fails here, before any step.
+            Xc7Data::from_env(XC7Z010CLG400_1)?;
+            plan_xc7(manifest, pins, clocks, layout)
         }
     })
 }
@@ -381,11 +377,9 @@ pub fn plan_cyclone2(
 /// 3.3 V, and the manifest has no I/O standards yet.
 pub fn plan_xc7(
     manifest: &Manifest,
-    part: Xc7Part,
     pins: &[PinAssignment<Clg400Pin>],
     clocks: &[Clock],
     layout: &Layout,
-    data: &Xc7Data,
 ) -> Plan {
     let mut steps: Vec<Step> = Vec::new();
     let verilog = verilog_sources(manifest, layout, &mut steps);
@@ -406,31 +400,11 @@ pub fn plan_xc7(
             .map(|c| (c.port.to_string(), c.frequency))
             .collect(),
     });
-    steps.push(
-        Tool::new("prjxray: FASM to frames", "fasm2frames")
-            .args(["--part", part.part])
-            .arg("--db-root")
-            .arg(&data.db)
-            .arg(layout.fasm())
-            .arg(layout.frames())
-            .into(),
-    );
-    steps.push(
-        // The .bit header names the frames file as given: relative to the
-        // build directory, it doesn't depend on where the project lives.
-        Tool {
-            cwd: Some(layout.dir.clone()),
-            ..Tool::new("prjxray: frames to .bit", "xc7frames2bit")
-        }
-        .arg("--part_file")
-        .arg(data.db.join(part.part).join("part.yaml"))
-        .args(["--part_name", part.part])
-        .arg("--frm_file")
-        .arg(file_name(&layout.frames()))
-        .arg("--output_file")
-        .arg(layout.bitstream())
-        .into(),
-    );
+    steps.push(Step::Xc7Bitstream {
+        fasm: layout.fasm(),
+        bit: layout.bitstream(),
+        design: manifest.name.clone(),
+    });
     steps.push(Step::ZynqBin {
         bit: layout.bitstream(),
         bin: layout.zynq_bin(),
@@ -441,10 +415,6 @@ pub fn plan_xc7(
         files: Vec::new(),
         steps,
     }
-}
-
-fn file_name(path: &Path) -> &std::ffi::OsStr {
-    path.file_name().expect("layout paths name files")
 }
 
 /// What `chipsmith flash` can load.
@@ -659,6 +629,10 @@ impl Plan {
                     xc7_pnr(netlist, fasm, pins, clocks)?;
                     Ok(vec![netlist.clone()])
                 })?,
+                Step::Xc7Bitstream { fasm, bit, design } => stamp(step, &[bit]).run(|| {
+                    xc7_bitstream(fasm, bit, design)?;
+                    Ok(vec![fasm.clone()])
+                })?,
                 Step::PlaySvf(svf) => play_svf(svf)?,
                 Step::LoadBit(bit) => load_bit(bit)?,
                 Step::LoadBitSsh { bit, host } => load_bit_ssh(bit, host)?,
@@ -834,6 +808,23 @@ fn xc7_pnr(
     if !failed.is_empty() {
         bail!("clocks missing their frequency: {}", failed.join(", "));
     }
+    Ok(())
+}
+
+fn xc7_bitstream(fasm: &Path, bit: &Path, design: &str) -> Result<()> {
+    let started = Instant::now();
+    let part = XC7Z010CLG400_1;
+    let data = Xc7Data::from_env(part)?;
+    let text = std::fs::read_to_string(fasm).with_context(|| format!("reading {}", fasm.display()))?;
+    let frames = chipsmith_xc7::frames::Assembler::new(&data.db, part)?.frames(&text)?;
+    let bytes = chipsmith_xc7::frames::bit(&data.db, part.part, design, &frames)?;
+    std::fs::write(bit, &bytes).with_context(|| format!("writing {}", bit.display()))?;
+    say!(
+        "{} frames, {} bytes in {:.1} s",
+        frames.len(),
+        bytes.len(),
+        started.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 
@@ -1241,10 +1232,7 @@ mod tests {
         let Target::Xc7z010clg400_1 { pins, clocks } = &m.target else {
             unreachable!()
         };
-        let data = Xc7Data {
-            db: "/xray/zynq7".into(),
-        };
-        plan_xc7(&m, XC7Z010CLG400_1, pins, clocks, &layout(&m), &data)
+        plan_xc7(&m, pins, clocks, &layout(&m))
     }
 
     fn tool(step: &Step) -> &Tool {
@@ -1395,15 +1383,15 @@ mod tests {
     }
 
     #[test]
-    fn the_zynq_goes_through_chipsmith_and_prjxray_to_a_bit() {
+    fn the_zynq_build_runs_no_tool() {
         let plan = xc7(Sources::Verilog(vec!["/p/src/blinky.v".into()]));
+        assert!(!plan.steps.iter().any(|s| matches!(s, Step::Tool(_))));
         assert_eq!(
             labels(&plan),
             [
                 "synthesis",
                 "pack, place and route",
-                "prjxray: FASM to frames",
-                "prjxray: frames to .bit",
+                "bitstream",
                 ".bit to .bin for Linux's fpga-manager"
             ]
         );
@@ -1434,22 +1422,15 @@ mod tests {
         );
         assert_eq!(clocks.get("clk").map(|f| f.hz()), Some(125_000_000));
         assert_eq!(
-            tool(&plan.steps[2]).args.last().unwrap(),
-            "/p/build/blinky.frames"
+            plan.steps[2],
+            Step::Xc7Bitstream {
+                fasm: "/p/build/blinky.fasm".into(),
+                bit: "/p/build/blinky.bit".into(),
+                design: "blinky".into(),
+            }
         );
-        let bit = tool(&plan.steps[3]);
-        assert!(bit
-            .args
-            .windows(2)
-            .any(|w| w == ["--part_file", "/xray/zynq7/xc7z010clg400-1/part.yaml"]));
-        assert!(bit
-            .args
-            .windows(2)
-            .any(|w| w == ["--frm_file", "blinky.frames"]));
-        assert_eq!(bit.cwd.as_deref(), Some(Path::new("/p/build")));
-        assert_eq!(bit.args.last().unwrap(), "/p/build/blinky.bit");
         assert_eq!(
-            plan.steps[4],
+            plan.steps[3],
             Step::ZynqBin {
                 bit: "/p/build/blinky.bit".into(),
                 bin: "/p/build/blinky.bin".into()

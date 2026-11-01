@@ -9,7 +9,7 @@ mod clg400;
 pub struct Xc7Part {
     /// prjxray-db's family directory, e.g. `zynq7`.
     pub family: &'static str,
-    /// The die, which names nextpnr's chip database (`chipdb-<die>.bin`).
+    /// The die: prjxray-db's fabric directory, e.g. `xc7z010`.
     pub die: &'static str,
     /// The full part with speed grade, e.g. `xc7z010clg400-1`.
     pub part: &'static str,

@@ -1,7 +1,7 @@
-# The 7-series tools chipsmith still shells out to (prjxray's frames and
-# .bit writers), its bitstream reader for the tests, and openXC7's nextpnr
-# as an oracle, from openXC7's toolchain-nix (one consistent set: nextpnr,
-# prjxray, fasm, prjxray-db).
+# prjxray-db, which chipsmith reads, and the 7-series tools the tests use
+# as oracles (prjxray's frames and .bit writers and its bitstream reader,
+# openXC7's nextpnr), from openXC7's toolchain-nix (one consistent set:
+# nextpnr, prjxray, fasm, prjxray-db).
 #
 # xpkgs is toolchain-nix's own nixpkgs: fasm is a CPython extension built
 # against its python312, so the interpreter that imports it must be that one.

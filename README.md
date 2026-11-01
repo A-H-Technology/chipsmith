@@ -12,16 +12,16 @@ nix run github:A-H-Technology/chipsmith/open -- -C examples/zybo-jtag-counter fl
 The first run builds cyclone2-re's device database package and flattens
 its chip database into the router's graph. After that a build of blinky-vhdl takes about 6 s. A DE2 build
 runs no program but chipsmith between the Verilog and the chip: no yosys,
-no nextpnr, no cram. GHDL translates VHDL in front of it. A Zybo build
-(since 2026-11-01) runs chipsmith from the Verilog to the FASM too, then
-prjxray's `fasm2frames` and `xc7frames2bit` for the `.bit`.
+no nextpnr, no cram. GHDL translates VHDL in front of it. Since
+2026-11-02 a Zybo build runs no other program either: no yosys, no
+nextpnr, no prjxray tool, only prjxray-db's data.
 
 ## Status
 
 | device | board | build | on hardware |
 |---|---|---|---|
 | EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis): LUT/carry/register logic, M4K RAM blocks and embedded multipliers (below), global clocks from pins and from logic (a register, the JTAG block's TCK; one clock per LAB), PLLs (`CY2_PLL`; both on the board 2026-10-26, examples/de2-jtag-counter on TCK and examples/de2-pll-counter at 100 and 40 MHz from CLOCK_50; 2026-10-30 a PLL clock on its PLL's clock output pin, 2026-10-31 on any pin or into logic as data, the DE2's SDRAM run at 100 MHz with 0 errors by examples/sdram-selftest, its SRAM by examples/sram-selftest); pins input, output, tri-state, bidirectional, open drain, at 3.3-V LVTTL (any current) or LVCMOS or 2.5-V inputs, with pull-up or bus hold and I/O-cell registers (with the cell's clock enables, asynchronous clears and presets and falling-edge clocks as Quartus packs them since 2026-10-31, examples/de2-ioregs; an output or OE register's synchronous reset as logic on its D; Manifest, below) | yes (2026-10-25, chipsmith's own synthesis end to end, checked over JTAG: examples/de2-jtag-counter (its earlier CLOCK_50-sampled version) reads back `"DE2!"` at 50.00 MHz after a JTAG load and after `flash --persist` (loader synthesized by chipsmith too, EPCS written, verified and reloaded from; 2026-10-26 also after a power cycle); picorv32 with the same readback added runs its loop at 3.33 MHz. 2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
-| xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes, with no external tool but prjxray's frames and `.bit` writers (2026-11-01: chipsmith's own Verilog front end, synthesis, packing, placement, routing and FASM; "The Zybo flow", below): LUT1-LUT6, CARRY4, FDRE/FDSE/FDCE/FDPE, RAM32M, LVCMOS33 pins, BUFGs, BSCANs and the PS7 | yes, with the earlier flow (2026-10-24, yosys and nextpnr around chipsmith's placement and routing: zybo-jtag-counter read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga). chipsmith's own flow is checked at the bitstream instead (decoded and co-simulated against the RTL, below), not yet on the board |
+| xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes, with no external tool but GHDL for VHDL (2026-11-01: chipsmith's own Verilog front end, synthesis, packing, placement, routing and FASM; 2026-11-02: frames and `.bit`; "The Zybo flow", below): LUT1-LUT6, CARRY4, FDRE/FDSE/FDCE/FDPE, RAM32M, LVCMOS33 pins, BUFGs, BSCANs and the PS7 | yes, with the earlier flow (2026-10-24, yosys and nextpnr around chipsmith's placement and routing: zybo-jtag-counter read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga). chipsmith's own flow is checked at the bitstream instead (decoded and co-simulated against the RTL, below), not yet on the board |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
 LEDs, 1,171 LEs; a build took 26.5 s on a loaded machine on 2026-11-01
@@ -740,15 +740,14 @@ Zybo limits:
   clock's `[clocks]` frequency is checked against it; a clock with no pin
   (a BSCANE2's TCK) is reported unconstrained.
 - The flow is deterministic: placement is the best of eight fixed seeds,
-  and the build is a function of its inputs. The `.bit` header still
-  carries xc7frames2bit's build date and time.
+  and the `.bit` is a function of the inputs (its header carries no date).
 - The Zybo Z7 has its clock on K17. It needs only another pin map; the
   Z7-20 (xc7z020) needs another `Device`.
 
 #### The Zybo flow
 
 Since 2026-11-01 the whole Zybo build is chipsmith's own from the Verilog
-to the FASM (ADR-0013):
+to the FASM, and since 2026-11-02 to the `.bit` (ADR-0013):
 
 - **Packing** (`crates/chipsmith-xc7/src/pack.rs`): synthesis' cells into
   the placer's design directly, in shapes legal by construction. Every
@@ -776,8 +775,15 @@ to the FASM (ADR-0013):
 - **FASM** (`fasm.rs`): what nextpnr writes, feature for feature where
   they configure the same thing (its `fasm.cc`), clock tree buffer enables
   included.
-- **Frames and `.bit`**: prjxray's `fasm2frames` and `xc7frames2bit`, the
-  last outside tools.
+- **Frames and `.bit`** (`frames.rs`, since 2026-11-02): each FASM feature's
+  bits from prjxray-db's segbits into the frames of its tile's tilegrid
+  entry (through the tile's alias where it has no segbits of its own),
+  every frame of the part written in part.yaml's column order, two empty
+  frames after each row, each frame's ECC in word 50, then
+  xc7frames2bit's start-up sequence. On blinky, jtag-counter, picorv32 and
+  sha256 the frames are byte-identical to prjxray's `fasm2frames` and the
+  `.bit` payload to its `xc7frames2bit` (the header aside, theirs carrying
+  a date); the bitstream test checks that on every build. 0.8 s.
 
 Each build is checked at the bitstream (`crates/chipsmith/tests/xc7_bitstream.rs`):
 prjxray's `bit2fasm` reads the `.bit` back, `chipsmith_xc7::decode`
@@ -864,7 +870,7 @@ and cyclone2-re's techmap are test oracles now (ADR-0004): the devshell has
 them, the build doesn't run them.
 
 Zynq-7010 PL (xc7z010clg400-1): chipsmith's own from the Verilog to the
-FASM; prjxray's tools write the `.bit`.
+`.bit`, prjxray-db as data.
 
 | stage | today | |
 |---|---|---|
@@ -877,8 +883,7 @@ FASM; prjxray's tools write the `.bit`.
 | routing | chipsmith: PathFinder over the prjxray-db graph, clocks and constants included (`crates/chipsmith-xc7/src/xray.rs`, `crates/chipsmith-xc7/src/pnr.rs`) | ours |
 | timing | chipsmith: prjxray-db's cell and pip delays (`crates/chipsmith-xc7/src/pnr.rs`) | ours |
 | FASM | chipsmith (`crates/chipsmith-xc7/src/fasm.rs`) | ours |
-| FASM → frames | prjxray `fasm2frames` | to replace |
-| frames → `.bit` | prjxray `xc7frames2bit` | to replace |
+| FASM → frames → `.bit` | chipsmith, from prjxray-db's segbits, tilegrid and part.yaml, byte-identical to prjxray's `fasm2frames` and `xc7frames2bit` (`crates/chipsmith-xc7/src/frames.rs`) | ours |
 | cable | chipsmith: FT2232 (MPSSE) driver and 7-series JTAG loader (`crates/chipsmith-jtag`), loads in 1.3 s with DONE checked | ours |
 
 prjxray, fasm and prjxray-db come from one pinned
@@ -1403,7 +1408,7 @@ Next devices:
   Project X-Ray already documents the fabric, so owning the stages means
   importing prjxray-db, not reverse engineering. xc7-re holds the
   groundwork. Same order as for Cyclone II: router, placer, packer.
-  Since 2026-11-01 every stage from the Verilog to the FASM is
+  Since 2026-11-02 every stage from the Verilog to the `.bit` is
   chipsmith's ("The Zybo flow", above). The router and placer items below
   record how they were built, against nextpnr, while the flow was: yosys;
   nextpnr packs (`--pack-only`); chipsmith places; nextpnr routes that
@@ -1411,9 +1416,8 @@ Next devices:
   chipsmith reroutes the interconnect; nextpnr writes the FASM and times
   it (`--report`).
   - Synthesis, packer, site routing and FASM (done, 2026-11-01; ADR-0013,
-    "7-series synthesis" and "The Zybo flow", above). Open: the frames and
-    `.bit` written in process (prjxray-db's segbits are data, ADR-0003);
-    block RAM, DSPs, MUXF7/F8, LUT6_2 and the 5LUTs; timing with the
+    "7-series synthesis" and "The Zybo flow", above; frames and `.bit` in
+    process since 2026-11-02). Open: block RAM, DSPs, MUXF7/F8, LUT6_2 and the 5LUTs; timing with the
     wires' RC; the electrostatic placer timing-driven and the annealer
     after it shorter; chipsmith's own flow on the board.
   - Router (done, interconnect only). The routing graph comes from

@@ -3,7 +3,9 @@
 //! FASM decoded into a netlist (`chipsmith_xc7::decode`) and that netlist
 //! co-simulated against yosys' RTL of the example's Verilog
 //! (`support::cosim`, iverilog). What the bitstream does is what the RTL
-//! does, whatever the packer, placer, router and FASM writer chose.
+//! does, whatever the packer, placer, router and FASM writer chose. And
+//! prjxray's `fasm2frames` and `xc7frames2bit` make the same `.bit` of the
+//! FASM as chipsmith's own writer.
 //!
 //! `CHIPSMITH_XC7_BIT=<path>` decodes that `.bit` instead of building (for
 //! `decoder_reads_a_given_bitstream`: openXC7 nextpnr's bitstreams, which
@@ -110,6 +112,40 @@ fn build(name: &str, scratch: &Path) -> PathBuf {
     PathBuf::from(bit.trim())
 }
 
+/// prjxray's `fasm2frames` and `xc7frames2bit` make the same `.bit`
+/// payload of the build's FASM as chipsmith's writer did (the header
+/// differs: theirs carries a date).
+fn prjxray_agrees(bit: &Path, scratch: &Path) {
+    let fasm = bit.with_extension("fasm");
+    let frm = scratch.join("prjxray.frames");
+    let theirs = scratch.join("prjxray.bit");
+    let run = |cmd: &mut Command| {
+        let out = cmd.output().unwrap();
+        assert!(out.status.success(), "{cmd:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    run(Command::new("fasm2frames")
+        .args(["--part", "xc7z010clg400-1", "--db-root"])
+        .arg(family())
+        .arg(&fasm)
+        .arg(&frm));
+    run(Command::new("xc7frames2bit")
+        .arg("--part_file")
+        .arg(family().join("xc7z010clg400-1/part.yaml"))
+        .args(["--part_name", "xc7z010clg400-1", "--frm_file"])
+        .arg(&frm)
+        .arg("--output_file")
+        .arg(&theirs));
+    let payload = |b: &[u8]| -> Vec<u8> {
+        let sync = b.windows(4).position(|w| w == [0xaa, 0x99, 0x55, 0x66]).unwrap();
+        b[sync - 48..].to_vec()
+    };
+    assert!(
+        payload(&std::fs::read(bit).unwrap()) == payload(&std::fs::read(&theirs).unwrap()),
+        "{}: prjxray's .bit of the same FASM differs",
+        bit.display()
+    );
+}
+
 /// Decodes `bit` and co-simulates it against the RTL of `ex`.
 fn check(name: &str, ex: &Example, bit: &Path, scratch: &Path, cycles: usize) {
     setup();
@@ -205,6 +241,7 @@ fn built(name: &str, cycles: usize) {
     let s = scratch(name);
     let ex = example(name);
     let bit = build(name, &s);
+    prjxray_agrees(&bit, &s);
     check(name, &ex, &bit, &s, cycles);
 }
 
@@ -263,6 +300,7 @@ fn zybo_picorv32_running() {
     assert!(out.status.success(), "build failed:\n{}", String::from_utf8_lossy(&out.stderr));
     eprintln!("{}", String::from_utf8_lossy(&out.stderr));
     let bit = PathBuf::from(String::from_utf8(out.stdout).unwrap().trim());
+    prjxray_agrees(&bit, &s);
     let ex = example_at(&dir);
     check("zybo-picorv32-running", &ex, &bit, &s, 20000);
 }
@@ -323,6 +361,7 @@ fn design_built(file: &str, top: &str) {
         .unwrap();
     assert!(out.status.success(), "{top}: build failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let bit = PathBuf::from(String::from_utf8(out.stdout).unwrap().trim());
+    prjxray_agrees(&bit, &s);
     check(top, &example_at(&dir), &bit, &s, 3000);
 }
 

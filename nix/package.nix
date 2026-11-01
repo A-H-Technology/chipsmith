@@ -8,7 +8,7 @@
   ghdl,
   # cyclone2-re's db package: the device and chip databases (ADR-0003).
   cyclone2-db,
-  # nix/xc7.nix: the 7-series tools and prjxray-db
+  # nix/xc7.nix: prjxray-db (the 7-series tools are the devshell's oracles)
   xc7,
 }:
 
@@ -83,14 +83,13 @@ runCommand "chipsmith-${unwrapped.version}"
     meta.mainProgram = "chipsmith";
   }
   # Every stage chipsmith doesn't do itself yet, pinned here rather than
-  # looked up on the host. GHDL translates VHDL for both devices (ADR-0001).
-  # Neither build runs yosys: both synthesize with chipsmith's own.
+  # looked up on the host: GHDL translates VHDL for both devices (ADR-0001).
+  # Neither build runs anything else.
   ''
     makeWrapper ${lib.getExe unwrapped} $out/bin/chipsmith \
       --prefix PATH : ${
         lib.makeBinPath [
           ghdl
-          xc7.tools
         ]
       } \
       --set CHIPSMITH_CYCLONE2_GRAPH ${routingGraph} \

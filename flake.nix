@@ -9,13 +9,12 @@
     # cyclone2-re's devshell already built.
     nixpkgs.follows = "cyclone2-re/nixpkgs";
     flake-utils.follows = "cyclone2-re/flake-utils";
-    # 7-series: prjxray (fasm2frames, xc7frames2bit, bit2fasm), fasm and
-    # their prjxray-db, all one consistent set, and openXC7's nextpnr, which
-    # the build no longer runs (an oracle in the devshell). Pinned to 42323cb
+    # 7-series: prjxray-db, which the build reads, and prjxray (fasm2frames,
+    # xc7frames2bit, bit2fasm), fasm and openXC7's nextpnr, which only the
+    # tests run, as oracles; all one consistent set. Pinned to 42323cb
     # (nextpnr 3e5c2cdd, prjxray-db 517d66a3). It keeps its own nixpkgs on
     # purpose: its packages (boost, python 3.12, antlr 4.9) are only
-    # verified against that one. Bump with the rest of the set; drop once
-    # chipsmith writes the frames and the .bit itself.
+    # verified against that one. Bump with the rest of the set.
     openxc7.url = "github:openXC7/toolchain-nix/42323cb00c8b76486619695166498dfa72b1e3e2";
   };
 
