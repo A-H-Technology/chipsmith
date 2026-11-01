@@ -24,6 +24,20 @@ use chipsmith_netlist::{
 
 use crate::rewrite::{Gates, Subst};
 
+/// A comparison with a constant on this many bits or fewer stays logic:
+/// a function of that many bits is a LUT or a few (`step >= 3 && step <=
+/// 10` on 4 bits: one), where a carry chain takes an LE a bit and more for
+/// the flags. sha256: 3,706 -> 3,674 LEs; sdram-selftest 761 -> 752 and
+/// 147 -> 160 MHz (quartus_sta, two placement seeds each), the chain it
+/// had on its critical path gone.
+const SMALL_COMPARE: usize = 8;
+
+fn small_constant_compare(b: &Binary) -> bool {
+    let constant = |s: &SigSpec| s.iter().all(|x| matches!(x, SigBit::Const(_)));
+    let w = b.a.sig.len().max(b.b.sig.len());
+    w <= SMALL_COMPARE && (constant(&b.a.sig) || constant(&b.b.sig))
+}
+
 /// An `$alu` being built.
 struct Node {
     alu: Alu,
@@ -295,7 +309,7 @@ pub fn alumacc(m: &mut Module) {
                 if matches!(
                     b.op,
                     BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
-                ) =>
+                ) && !small_constant_compare(b) =>
             {
                 compares.push(b.clone())
             }
@@ -372,4 +386,56 @@ pub fn alumacc(m: &mut Module) {
     }
     g.m.cells.extend(kept);
     subst.apply(m);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn compare(m: &mut Module, op: BinaryOp, a: SigSpec, b: SigSpec) {
+        let y = m.new_sig(1);
+        let operand = |sig| Operand { sig, signed: false };
+        m.add_cell(
+            "cmp",
+            CellKind::Binary(Binary {
+                op,
+                a: operand(a),
+                b: operand(b),
+                y,
+            }),
+        );
+    }
+
+    fn alus(m: &Module) -> usize {
+        m.cells
+            .iter()
+            .filter(|c| matches!(c.kind, CellKind::Alu(_)))
+            .count()
+    }
+
+    /// A comparison with a constant on a few bits stays logic for the LUT
+    /// mapper; a wider one, or one of two signals, takes a carry chain.
+    #[test]
+    fn small_constant_compares_stay_logic() {
+        let constant = |v: usize, w: usize| -> SigSpec {
+            (0..w).map(|i| SigBit::Const(State::from(v >> i & 1 == 1))).collect()
+        };
+        let mut m = Module::new("top");
+        let step = m.new_sig(4);
+        compare(&mut m, BinaryOp::Ge, step.clone(), constant(3, 4));
+        alumacc(&mut m);
+        assert_eq!(alus(&m), 0, "4 bits against a constant");
+
+        let mut m = Module::new("top");
+        let wide = m.new_sig(10);
+        compare(&mut m, BinaryOp::Ge, wide, constant(700, 10));
+        alumacc(&mut m);
+        assert_eq!(alus(&m), 1, "10 bits against a constant");
+
+        let mut m = Module::new("top");
+        let (a, b) = (m.new_sig(4), m.new_sig(4));
+        compare(&mut m, BinaryOp::Lt, a, b);
+        alumacc(&mut m);
+        assert_eq!(alus(&m), 1, "two signals");
+    }
 }
