@@ -31,13 +31,16 @@ FLAVOURS = {
 }
 
 # chipsmith's CY2_JTAG (crates/chipsmith-cyclone2/src/synth/cells.v) as the
-# Quartus atom it becomes; quartus_map connects the dedicated JTAG pins
-# itself.
+# Quartus atom it becomes. The atom has to reach the dedicated JTAG pins
+# as top-level ports named altera_reserved_*, or quartus_map sweeps it and
+# everything that only feeds it: jtag_ports() adds them.
 JTAG_SHIM = """\
-module CY2_JTAG (input TDOUSER, output TMSUTAP, output TCKUTAP, output TDIUTAP,
+module CY2_JTAG (input TMS, input TCK, input TDI, output TDO,
+                 input TDOUSER, output TMSUTAP, output TCKUTAP, output TDIUTAP,
                  output SHIFTUSER, output CLKDRUSER, output UPDATEUSER,
                  output RUNIDLEUSER, output USR1USER);
-  cycloneii_jtag jtag (.tdouser(TDOUSER), .tmsutap(TMSUTAP), .tckutap(TCKUTAP),
+  cycloneii_jtag jtag (.tms(TMS), .tck(TCK), .tdi(TDI), .tdo(TDO),
+    .tdouser(TDOUSER), .tmsutap(TMSUTAP), .tckutap(TCKUTAP),
     .tdiutap(TDIUTAP), .shiftuser(SHIFTUSER), .clkdruser(CLKDRUSER),
     .updateuser(UPDATEUSER), .runidleuser(RUNIDLEUSER), .usr1user(USR1USER));
 endmodule
@@ -79,6 +82,20 @@ FAST_REGISTERS = {
 }
 
 
+def jtag_ports(src, top):
+    """`src` with the dedicated JTAG pins added to module `top`'s ports and
+    connected to its CY2_JTAG instance (which must be in `top`)."""
+    jtag = ["tms", "tck", "tdi", "tdo"]
+    src, n = re.subn(rf"(\bmodule\s+{top}\s*\()",
+                     r"\1" + "".join(f"{'output' if p == 'tdo' else 'input'} altera_reserved_{p}, " for p in jtag),
+                     src, count=1)
+    src, m = re.subn(r"(\bCY2_JTAG\s+\w+\s*\()",
+                     r"\1" + "".join(f".{p.upper()}(altera_reserved_{p}), " for p in jtag), src)
+    if n != 1 or m != 1:
+        sys.exit(f"CY2_JTAG: expected one instance in module {top} (ANSI ports)")
+    return src
+
+
 def pins(entries):
     """(port, pin, I/O-cell registers) from a manifest's [pins] table."""
     for port, v in entries.items():
@@ -118,7 +135,16 @@ def project(example, out, flavour):
     if any(not s.endswith(".v") for s in sources):
         sys.exit(f"{example}: Verilog sources only")
     os.makedirs(out, exist_ok=True)
-    if any("CY2_JTAG" in open(s).read() for s in sources):
+    jtag = [s for s in sources if "CY2_JTAG" in open(s).read()]
+    if jtag:
+        # A copy of the one source that instantiates it, with the JTAG pins
+        # (`incr` edits both).
+        if len(jtag) != 1:
+            sys.exit(f"{example}: CY2_JTAG in more than one source")
+        copy = os.path.join(out, os.path.basename(jtag[0]))
+        with open(copy, "w") as f:
+            f.write(jtag_ports(open(jtag[0]).read(), m["project"]["top"]))
+        sources[sources.index(jtag[0])] = copy
         with open(os.path.join(out, "cy2_jtag.v"), "w") as f:
             f.write(JTAG_SHIM)
         sources.append(os.path.join(out, "cy2_jtag.v"))
@@ -161,12 +187,14 @@ def read(path):
 
 
 def fmax_row(sta):
-    """CLOCK_50's restricted Fmax (MHz) in a report_clock_fmax_summary
-    panel (the first clock's if there is no CLOCK_50), and its period."""
+    """The slowest clock's restricted Fmax (MHz) in a
+    report_clock_fmax_summary panel, and its period: CLOCK_50's, or a PLL
+    output's when the logic runs on one (sdram-selftest at 100 MHz).
+    Unconstrained clocks (JTAG's TCK) aren't in the panel."""
     rows = re.findall(r"^;\s*[0-9.]+ MHz\s*;\s*([0-9.]+) MHz\s*;\s*(\S+)", sta, re.M)
     if not rows:
         return {"q_fmax": "-", "q_crit": "-"}
-    fmax = next((f for f, clk in rows if clk == "CLOCK_50"), rows[0][0])
+    fmax = min((f for f, _ in rows), key=float)
     return {"q_fmax": fmax, "q_crit": f"{1000 / float(fmax):.2f}"}
 
 

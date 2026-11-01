@@ -14,7 +14,8 @@
 #
 #   q        Quartus as it comes: quartus_map, quartus_fit (Auto Fit, its
 #            own NUM_PARALLEL_PROCESSORS), quartus_asm (SOF)
-#   q-all    the same with NUM_PARALLEL_PROCESSORS ALL
+#   q-all    the same with NUM_PARALLEL_PROCESSORS ALL (not in the
+#            default list: the Web Edition disables it, warning 20028)
 #   q-fast   the same with FITTER_EFFORT "FAST FIT"
 #   cs       `chipsmith build` of $CS (default: target/release/chipsmith)
 #   gpu-cpu  `chipsmith build` of $CS_GPU, CHIPSMITH_ACCEL=cpu
@@ -51,7 +52,7 @@ fi
 re=$(realpath "${CYCLONE2_RE:-/pool/dev/cyclone2-re}")
 py() { python3 "$root/bench/vs-quartus.py" "$@"; }
 REPS=${REPS:-3}
-read -r -a TOOLS <<< "${TOOLS:-q q-all q-fast cs gpu-cpu gpu-cuda}"
+read -r -a TOOLS <<< "${TOOLS:-q q-fast cs gpu-cpu gpu-cuda}"
 CS=$(realpath "${CS:-$root/target/release/chipsmith}")
 CS_GPU=${CS_GPU:+$(realpath "$CS_GPU")}
 
@@ -248,7 +249,9 @@ warm_up() {
 
 designs_or_default() {
     if [[ $# -gt 0 ]]; then printf '%s\n' "$@"; else
-        printf '%s\n' blinky-verilog crc32 femtorv32 picorv32 mult-selftest m4k-selftest sha256 picorv32x24
+        # Not m4k-selftest: Quartus 13.0 infers two of its nine memories
+        # (w32, c9) as registers, 16,296 LEs to chipsmith's 405.
+        printf '%s\n' blinky-verilog crc32 femtorv32 picorv32 mult-selftest sdram-selftest sha256 picorv32x24
     fi
 }
 
@@ -299,11 +302,15 @@ incr)
         for rep in $(seq 1 "$REPS"); do
             for tool in "${TOOLS[@]}"; do
                 run=$out/incr/$design/$tool
-                if (( rep % 2 )); then
-                    replace_once "$run/src/src/top.v" "$before" "$after"
-                else
-                    replace_once "$run/src/src/top.v" "$after" "$before"
-                fi
+                # Quartus' copy of top.v with the JTAG pins, if it has one.
+                for f in "$run/src/src/top.v" "$run/q/top.v"; do
+                    [[ -f $f ]] || continue
+                    if (( rep % 2 )); then
+                        replace_once "$f" "$before" "$after"
+                    else
+                        replace_once "$f" "$after" "$before"
+                    fi
+                done
                 echo "$(run_one "$tool" "$design" "$run" "edit$rep")$(quality "$tool" "$run")" | tee -a "$out/incr.tsv"
             done
         done
