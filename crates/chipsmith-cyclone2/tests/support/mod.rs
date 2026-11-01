@@ -27,6 +27,36 @@ use chipsmith_netlist::{
     read_json, write_json, CellKind, Design, Gate, GateOp, Module, Net, SigBit, State, Wire,
 };
 
+/// The device whose cells the synthesized netlists hold: its cell library
+/// (for the front ends) and behavioural models of the cells.
+pub struct Lib {
+    pub name: &'static str,
+    pub library: &'static str,
+    pub sim: String,
+}
+
+static LIB: std::sync::OnceLock<Lib> = std::sync::OnceLock::new();
+
+/// Checks netlists of another device's cells than the Cyclone II's, for
+/// the whole test binary: call before anything else here.
+pub fn use_lib(lib: Lib) {
+    let name = lib.name;
+    let _ = LIB.set(lib);
+    assert_eq!(
+        LIB.get().map(|l| l.name),
+        Some(name),
+        "one device library per test binary"
+    );
+}
+
+fn lib() -> &'static Lib {
+    LIB.get_or_init(|| Lib {
+        name: cells::LIBRARY_NAME,
+        library: cells::LIBRARY,
+        sim: SIM_MODELS.to_string(),
+    })
+}
+
 /// Behavioural models of the cells synthesis emits, as the packer and the
 /// hardware read them (`cells::LIBRARY`'s comments).
 pub const SIM_MODELS: &str = r#"
@@ -243,7 +273,7 @@ fn quoted(files: &[PathBuf]) -> String {
 pub fn rtl(dir: &Path, top: &str, files: &[PathBuf]) -> PathBuf {
     let json = dir.join("rtl.json");
     let lib = dir.join("cells.v");
-    std::fs::write(&lib, cells::LIBRARY).unwrap();
+    std::fs::write(&lib, self::lib().library).unwrap();
     let rename = if top == "top" {
         String::new()
     } else {
@@ -301,7 +331,7 @@ pub fn yosys_flow(dir: &Path, top: &str, files: &[PathBuf]) -> Result<PathBuf, S
 /// synthesizes), the top renamed `top` as the yosys netlists have it.
 pub fn frontend(top: &str, files: &[PathBuf]) -> Design {
     let mut fe = chipsmith_verilog::Frontend::new();
-    fe.read_library_source(cells::LIBRARY_NAME, cells::LIBRARY)
+    fe.read_library_source(lib().name, lib().library)
         .unwrap_or_else(|e| panic!("{e}"));
     for f in files {
         fe.read_file(f).unwrap_or_else(|e| panic!("{e}"));
@@ -1247,7 +1277,7 @@ fn equiv_once(
     let blacklist = dir.join(format!("{name}.blacklist"));
     std::fs::write(&blacklist, unmatched.join("\n")).unwrap();
     let sim = dir.join("cy2_sim.v");
-    std::fs::write(&sim, SIM_MODELS).unwrap();
+    std::fs::write(&sim, &lib().sim).unwrap();
     // Tri-states have no SAT model: as opaque cells, merged when their
     // inputs are proven equal (chipsmith-netlist's round-trip check does
     // the same). A pin buffer always on or always off is no tri-state:
@@ -1916,7 +1946,7 @@ fn check_impl(
         gate.clone()
     } else {
         let lib = dir.join("cells.v");
-        std::fs::write(&lib, cells::LIBRARY).unwrap();
+        std::fs::write(&lib, self::lib().library).unwrap();
         let out = dir.join("gate_nordff.json");
         let nordff: String = cut
             .iter()
@@ -2301,9 +2331,9 @@ pub fn cosim(
     let gate_json = dir.join("cosim_gate.json");
     write(gate, &gate_json);
     let sim = dir.join("cy2_sim.v");
-    std::fs::write(&sim, SIM_MODELS).unwrap();
+    std::fs::write(&sim, &lib().sim).unwrap();
     let lib = dir.join("cells.v");
-    std::fs::write(&lib, cells::LIBRARY).unwrap();
+    std::fs::write(&lib, self::lib().library).unwrap();
     let m4k_v = dir.join("cosim_m4k.v");
     std::fs::write(&m4k_v, COSIM_M4K).unwrap();
     let gold_v = dir.join("cosim_gold.v");

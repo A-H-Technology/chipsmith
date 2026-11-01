@@ -19,7 +19,7 @@ no nextpnr, no cram. GHDL translates VHDL in front of it.
 | device | board | build | on hardware |
 |---|---|---|---|
 | EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis): LUT/carry/register logic, M4K RAM blocks and embedded multipliers (below), global clocks from pins and from logic (a register, the JTAG block's TCK; one clock per LAB), PLLs (`CY2_PLL`; both on the board 2026-10-26, examples/de2-jtag-counter on TCK and examples/de2-pll-counter at 100 and 40 MHz from CLOCK_50; 2026-10-30 a PLL clock on its PLL's clock output pin, 2026-10-31 on any pin or into logic as data, the DE2's SDRAM run at 100 MHz with 0 errors by examples/sdram-selftest, its SRAM by examples/sram-selftest); pins input, output, tri-state, bidirectional, open drain, at 3.3-V LVTTL (any current) or LVCMOS or 2.5-V inputs, with pull-up or bus hold and I/O-cell registers (with the cell's clock enables, asynchronous clears and presets and falling-edge clocks as Quartus packs them since 2026-10-31, examples/de2-ioregs; an output or OE register's synchronous reset as logic on its D; Manifest, below) | yes (2026-10-25, chipsmith's own synthesis end to end, checked over JTAG: examples/de2-jtag-counter (its earlier CLOCK_50-sampled version) reads back `"DE2!"` at 50.00 MHz after a JTAG load and after `flash --persist` (loader synthesized by chipsmith too, EPCS written, verified and reloaded from; 2026-10-26 also after a power cycle); picorv32 with the same readback added runs its loop at 3.33 MHz. 2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
-| xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes: what yosys `synth_xilinx` and openXC7's nextpnr's packer handle, LVCMOS33 pins; chipsmith places LUT/register/carry logic, RAM32Ms, pins, BUFGs, BSCANs and the PS7 and routes the interconnect (below) | yes (2026-10-24: zybo-jtag-counter placed and routed by chipsmith, read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga) |
+| xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes: chipsmith's own Verilog front end and synthesis (2026-11-01: LUT1-LUT6, CARRY4, FDRE/FDSE/FDCE/FDPE, RAM32M, pin and clock buffers; "7-series synthesis", below), what openXC7's nextpnr's packer handles, LVCMOS33 pins; chipsmith places LUT/register/carry logic, RAM32Ms, pins, BUFGs, BSCANs and the PS7 and routes the interconnect (below) | yes (2026-10-24: zybo-jtag-counter placed and routed by chipsmith, read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga) |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
 LEDs, 1,171 LEs; a build took 26.5 s on a loaded machine on 2026-11-01
@@ -663,6 +663,53 @@ The Zybo examples:
 - `examples/zybo-picorv32`: `examples/picorv32`'s sources with its ports
   on arbitrary Zybo balls, a placement and routing bench, not for
   hardware. Builds in about 110 s.
+- `examples/zybo-sha256`: `examples/sha256`'s sources the same way, a
+  synthesis, placement and routing bench (2026-11-01: 2,539 LUTs and 1,907
+  registers; its placement took 32 minutes on a machine at a load of 25,
+  Fmax 61.0 MHz by nextpnr's STA of chipsmith's routing).
+
+#### 7-series synthesis
+
+Since 2026-11-01 the Zybo build runs chipsmith's own synthesis
+(`crates/chipsmith-xc7/src/synth`), not yosys' `synth_xilinx`: the
+device-independent passes are the Cyclone II's (chipsmith-synth), LUT
+mapping is the same priority-cut mapper with K = 6
+(`chipsmith_synth::lutmap::LutSize`), and what is the 7-series' own is
+small: `$alu` onto CARRY4 chains (`arith_map.v`'s mapping: propagate
+`A ^ B` in the LUT in front, generate `A` on DI), registers onto
+FDRE/FDSE/FDCE/FDPE (CE, synchronous or asynchronous reset or set, either
+clock edge, INIT; `$sdffce`'s reset gated with the enable), memories of up
+to 32 words with one write port and asynchronous reads onto RAM32Ms, every
+port bit through IBUF/OBUF/OBUFT/IOBUF and every clock through a BUFG.
+Latches and asynchronous loads aren't mapped yet; LUTs aren't packed in
+pairs (LUT6_2) and there are no MUXF7/F8.
+
+Cell counts against `synth_xilinx -flatten -abc9 -arch xc7` on the same
+Verilog (`crates/chipsmith-xc7/tests/synth.rs`, which prints both):
+
+| design | LUTs chipsmith / synth_xilinx | registers | CARRY4 | RAM32M |
+|---|---|---|---|---|
+| zybo-blinky | 1 / 1 | 27 / 27 | 7 / 7 | |
+| zybo-jtag-counter | 66 / 65 | 128 / 128 | 8 / 8 | |
+| zybo-picorv32 | 611 / 694 | 335 / 375 | 57 / 57 | 11 / 12 |
+| zybo-sha256 | 2,539 / 2,516 | 1,907 / 1,910 | 176 / 110 | |
+
+synth_xilinx's LUT counts include its INV cells. picorv32's 40 fewer
+registers are ones chipsmith's sequential optimisation finds constant or
+equal (proven, below). sha256's extra CARRY4s are its multi-operand sums:
+chipsmith's `alumacc` chains them adder by adder where yosys' makes
+some of them LUT compressors.
+
+Every design is proven equivalent to its RTL by yosys
+(`support::check`, the Cyclone II synthesis tests' check, the netlist's
+primitives read through yosys' own `xilinx/cells_sim.v`): blinky,
+jtag-counter (around its BSCANE2), a test of every register shape and
+the carry arithmetic, tri-state and bidirectional pins, and sha256 (whole,
+15 minutes). Designs with RAM32Ms are co-simulated against the RTL
+(`support::cosim`, iverilog): RAM32Ms of one to three read ports, odd
+widths, initial contents and a falling-edge write, three seeds of 3,000
+cycles; picorv32 running its loop for 20,000 cycles; and proven with
+distributed RAM off.
 
 Zybo limits, all of them inherited from the tools:
 
@@ -743,13 +790,14 @@ The plan is `[ghdl,] synthesis, pack, place and route, bitstream`. yosys
 and cyclone2-re's techmap are test oracles now (ADR-0004): the devshell has
 them, the build doesn't run them.
 
-Zynq-7010 PL (xc7z010clg400-1): shell out, except placement, routing and
-the cable.
+Zynq-7010 PL (xc7z010clg400-1): shell out, except the Verilog front end,
+synthesis, placement, routing and the cable.
 
 | stage | today | |
 |---|---|---|
 | VHDL → Verilog | GHDL `--synth --out=verilog` | as for Cyclone II |
-| synthesis | yosys `synth_xilinx -flatten -abc9 -arch xc7` | to replace |
+| Verilog front end | chipsmith, with the 7-series cell library (`crates/chipsmith-xc7/src/synth/cells.v`) | ours |
+| synthesis | chipsmith: chipsmith-synth's passes, LUT6 mapping, CARRY4, FD*, RAM32M, pin and clock buffers (`crates/chipsmith-xc7/src/synth`) | ours |
 | packing | openXC7's nextpnr (`nextpnr-himbaechel --pack-only`, xilinx uarch), chip database for xc7z010 built from prjxray-db in nix (2.5 min) | to replace next |
 | placement | chipsmith: simulated annealing over slices, timing-driven with prjxray-db's delays (`crates/chipsmith-xc7/src/place.rs`, `crates/chipsmith-xc7/src/delay.rs`) | ours |
 | site routing | nextpnr, routing chipsmith's placement (`-o preplaced`) | to replace |

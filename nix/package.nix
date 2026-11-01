@@ -6,7 +6,6 @@
   pkg-config,
   libusb1,
   ghdl,
-  yosys,
   # cyclone2-re's db package: the device and chip databases (ADR-0003).
   cyclone2-db,
   # nix/xc7.nix: the 7-series tools, chip database and prjxray-db
@@ -85,14 +84,12 @@ runCommand "chipsmith-${unwrapped.version}"
   }
   # Every stage chipsmith doesn't do itself yet, pinned here rather than
   # looked up on the host. GHDL translates VHDL for both devices (ADR-0001).
-  # yosys is only for the Zybo (synth_xilinx): the DE2 build runs chipsmith's
-  # own synthesis. It goes once the 7-series has its own synthesis too.
+  # Neither build runs yosys: both synthesize with chipsmith's own.
   ''
     makeWrapper ${lib.getExe unwrapped} $out/bin/chipsmith \
       --prefix PATH : ${
         lib.makeBinPath [
           ghdl
-          yosys
           xc7.tools
         ]
       } \

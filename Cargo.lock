@@ -647,7 +647,11 @@ name = "chipsmith-xc7"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chipsmith-cyclone2",
+ "chipsmith-netlist",
  "chipsmith-route",
+ "chipsmith-synth",
+ "chipsmith-verilog",
  "rustc-hash 2.1.3",
  "serde_json",
 ]

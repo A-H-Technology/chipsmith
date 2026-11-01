@@ -7,10 +7,11 @@
 //! bitstream and its JTAG stream (`chipsmith_cyclone2`) and loading over the
 //! cable (`chipsmith_jtag`) are chipsmith's own.
 //!
-//! 7-series (Zynq-7010): yosys `synth_xilinx`, openXC7's nextpnr
-//! (himbaechel xilinx) for packing, site routing and FASM, prjxray's
-//! `fasm2frames` and `xc7frames2bit`. Placement (`chipsmith_xc7::place`),
-//! the interconnect routing (`chipsmith_xc7::route`) and loading over the
+//! 7-series (Zynq-7010): openXC7's nextpnr (himbaechel xilinx) for
+//! packing, site routing and FASM, prjxray's `fasm2frames` and
+//! `xc7frames2bit`. The Verilog front end and synthesis
+//! (`chipsmith_xc7::synth`), placement (`chipsmith_xc7::place`), the
+//! interconnect routing (`chipsmith_xc7::route`) and loading over the
 //! Zybo's FT2232 cable (`chipsmith_jtag::ftdi`, `chipsmith_jtag::xc7`) are
 //! chipsmith's own.
 //!
@@ -85,10 +86,6 @@ impl Layout {
     fn translated(&self) -> PathBuf {
         self.dir.join("vhdl.v")
     }
-    /// 7-series: yosys' script.
-    fn synth_script(&self) -> PathBuf {
-        self.dir.join("synth.ys")
-    }
     fn netlist(&self) -> PathBuf {
         self.dir.join("netlist.json")
     }
@@ -145,6 +142,15 @@ pub enum Step {
         top: String,
         netlist: PathBuf,
         io_registers: BTreeMap<String, IoRegisters>,
+    },
+    /// Read Verilog with the 7-series cell library, elaborate `top` and
+    /// synthesize it to 7-series primitives, in process
+    /// (`chipsmith_xc7::synth`); writes the netlist as yosys JSON, its
+    /// PS7's interrupts tied off (`tie_off_ps7`).
+    Xc7Synth {
+        verilog: Vec<PathBuf>,
+        top: String,
+        netlist: PathBuf,
     },
     /// Pack a yosys JSON netlist into LEs, pins and clock controls (nextpnr's
     /// JSON), in process.
@@ -247,6 +253,7 @@ impl Step {
         match self {
             Step::Tool(tool) => tool.label,
             Step::Synth { .. } => "synthesis",
+            Step::Xc7Synth { .. } => "synthesis",
             Step::Pack { .. } => "pack",
             Step::PlaceRoute { .. } => "place and route",
             Step::Bitstream { .. } => "bitstream",
@@ -433,19 +440,11 @@ pub fn plan_xc7(
     let mut steps: Vec<Step> = Vec::new();
     let verilog = verilog_sources(manifest, layout, &mut steps);
 
-    steps.push(
-        Tool {
-            log: Some(layout.log("yosys")),
-            ..Tool::new("yosys: synthesis (synth_xilinx)", "yosys")
-        }
-        .arg("-q")
-        .arg("-l")
-        .arg(layout.log("yosys"))
-        .arg("-s")
-        .arg(layout.synth_script())
-        .into(),
-    );
-    steps.push(Step::Ps7TieOff(layout.netlist()));
+    steps.push(Step::Xc7Synth {
+        verilog,
+        top: manifest.top.clone(),
+        netlist: layout.netlist(),
+    });
     // nextpnr's packer turns yosys' cells into bel types (and splits
     // carries, adds feed-through LUTs, places the pins from the XDC);
     // chipsmith places what it wrote. Every later nextpnr run packs the
@@ -574,13 +573,7 @@ pub fn plan_xc7(
 
     Plan {
         dir: Some(layout.dir.clone()),
-        files: vec![
-            (
-                layout.synth_script(),
-                xc7_synth_script(&verilog, &manifest.top, &layout.netlist()),
-            ),
-            (layout.xdc(), xdc(pins, clocks)),
-        ],
+        files: vec![(layout.xdc(), xdc(pins, clocks))],
         steps,
     }
 }
@@ -593,18 +586,6 @@ fn prefixed(prefix: &str, path: &Path) -> OsString {
     let mut s = OsString::from(prefix);
     s.push(path);
     s
-}
-
-fn xc7_synth_script(verilog: &[PathBuf], top: &str, netlist: &Path) -> String {
-    let mut script = String::new();
-    for file in verilog {
-        script += &format!("read_verilog {}\n", quoted(file));
-    }
-    // openXC7's flow (demo-projects openXC7.mk): one flat netlist, abc9 for
-    // LUT mapping with the 7-series delays.
-    script += &format!("synth_xilinx -flatten -abc9 -arch xc7 -top {top}\n");
-    script += &format!("write_json {}\n", quoted(netlist));
-    script
 }
 
 fn xdc(pins: &[PinAssignment<Clg400Pin>], clocks: &[Clock]) -> String {
@@ -768,10 +749,6 @@ pub fn plan_flash(flash: &Flash, loader: &Loader, build_dir: &Path) -> Plan {
     }
 }
 
-fn quoted(path: &Path) -> String {
-    format!("\"{}\"", path.display())
-}
-
 impl Plan {
     pub fn run(&self) -> Result<()> {
         if let Some(dir) = &self.dir {
@@ -801,6 +778,11 @@ impl Plan {
                     io_registers,
                 } => stamp(step, &[netlist])
                     .run(|| synth(verilog, top, netlist, io_registers))?,
+                Step::Xc7Synth {
+                    verilog,
+                    top,
+                    netlist,
+                } => stamp(step, &[netlist]).run(|| xc7_synth(verilog, top, netlist))?,
                 Step::Pack { netlist, packed } => stamp(step, &[packed]).run(|| {
                     pack(netlist, packed)?;
                     Ok(vec![netlist.clone()])
@@ -918,6 +900,46 @@ fn synth(
     let file = std::fs::File::create(netlist)
         .with_context(|| format!("creating {}", netlist.display()))?;
     chipsmith_netlist::write_json(&out.design, file)
+        .with_context(|| format!("writing {}", netlist.display()))?;
+    Ok(fe.files_read())
+}
+
+/// Returns every file the front end read, for the step's stamp.
+fn xc7_synth(verilog: &[PathBuf], top: &str, netlist: &Path) -> Result<Vec<PathBuf>> {
+    use chipsmith_xc7::synth::{self as xsynth, cells as xcells};
+    let started = Instant::now();
+    let mut fe = chipsmith_verilog::Frontend::new();
+    fe.read_library_source(xcells::LIBRARY_NAME, xcells::LIBRARY)?;
+    for file in verilog {
+        fe.read_file(file)?;
+    }
+    let design = fe.elaborate(top)?;
+    say!(
+        "elaborated {} modules in {:.1} s",
+        design.modules.iter().filter(|m| !m.is_blackbox()).count(),
+        started.elapsed().as_secs_f64()
+    );
+    let started = Instant::now();
+    let out = xsynth::synthesize(design)?;
+    let s = out.stats;
+    say!(
+        "{} gates ({} AIG ANDs) to {} LUTs, depth {}; {} registers, {} CARRY4s, {} RAM32Ms, {} BUFGs in {:.1} s",
+        s.lutmap.gates,
+        s.lutmap.and_nodes,
+        s.lutmap.luts,
+        s.lutmap.depth,
+        s.registers,
+        s.carry4s,
+        s.ram32ms,
+        s.bufgs,
+        started.elapsed().as_secs_f64()
+    );
+    let mut json = Vec::new();
+    chipsmith_netlist::write_json(&out.design, &mut json)?;
+    let mut json: serde_json::Value = serde_json::from_slice(&json)?;
+    tie_off_ps7(&mut json)?;
+    say!("PS7: the fabric's interrupts to the ARM cores held off");
+    std::fs::write(netlist, serde_json::to_vec(&json)?)
         .with_context(|| format!("writing {}", netlist.display()))?;
     Ok(fe.files_read())
 }
@@ -1583,13 +1605,12 @@ mod tests {
     }
 
     #[test]
-    fn the_zynq_goes_through_openxc7_and_prjxray_to_a_bit() {
+    fn the_zynq_goes_through_chipsmith_openxc7_and_prjxray_to_a_bit() {
         let plan = xc7(Sources::Verilog(vec!["/p/src/blinky.v".into()]));
         assert_eq!(
             labels(&plan),
             [
-                "yosys: synthesis (synth_xilinx)",
-                "PS7: the fabric's interrupts to the ARM cores held off",
+                "synthesis",
                 "nextpnr: pack",
                 "place (chipsmith)",
                 "nextpnr: route chipsmith's placement",
@@ -1602,10 +1623,14 @@ mod tests {
             ]
         );
         assert_eq!(
-            plan.files[0].1,
-            "read_verilog \"/p/src/blinky.v\"\nsynth_xilinx -flatten -abc9 -arch xc7 -top blinky\nwrite_json \"/p/build/netlist.json\"\n"
+            plan.steps[0],
+            Step::Xc7Synth {
+                verilog: vec!["/p/src/blinky.v".into()],
+                top: "blinky".into(),
+                netlist: "/p/build/netlist.json".into(),
+            }
         );
-        let pack = tool(&plan.steps[2]);
+        let pack = tool(&plan.steps[1]);
         assert_eq!(pack.program, "nextpnr-himbaechel");
         assert!(pack
             .args
@@ -1621,19 +1646,19 @@ mod tests {
             .windows(2)
             .any(|w| w == ["--write", "/p/build/packed.json"]));
         assert_eq!(
-            plan.steps[3],
+            plan.steps[2],
             Step::Xc7Place {
                 packed: "/p/build/packed.json".into(),
                 placement: "/p/build/placement.txt".into(),
             }
         );
         // nextpnr routes chipsmith's placement, with nothing left to place.
-        assert!(tool(&plan.steps[4])
+        assert!(tool(&plan.steps[3])
             .args
             .windows(2)
             .any(|w| w == ["-o", "preplaced=/p/build/placement.txt"]));
         assert_eq!(
-            plan.steps[5],
+            plan.steps[4],
             Step::Xc7Route {
                 nextpnr: "/p/build/nextpnr.json".into(),
                 placement: "/p/build/placement.txt".into(),
@@ -1641,13 +1666,13 @@ mod tests {
                 preplaced: "/p/build/preplaced.txt".into(),
             }
         );
-        let fasm = tool(&plan.steps[6]);
+        let fasm = tool(&plan.steps[5]);
         assert!(fasm
             .args
             .windows(2)
             .any(|w| w == ["--report", "/p/build/timing.json"]));
         assert_eq!(
-            plan.steps[7],
+            plan.steps[6],
             Step::NextpnrTiming("/p/build/timing.json".into())
         );
         assert!(fasm
@@ -1659,10 +1684,10 @@ mod tests {
             .windows(2)
             .any(|w| w == ["-o", "prerouted=/p/build/prerouted.txt"]));
         assert_eq!(
-            tool(&plan.steps[8]).args.last().unwrap(),
+            tool(&plan.steps[7]).args.last().unwrap(),
             "/p/build/blinky.frames"
         );
-        let bit = tool(&plan.steps[9]);
+        let bit = tool(&plan.steps[8]);
         assert!(bit
             .args
             .windows(2)
@@ -1674,11 +1699,7 @@ mod tests {
         assert_eq!(bit.cwd.as_deref(), Some(Path::new("/p/build")));
         assert_eq!(bit.args.last().unwrap(), "/p/build/blinky.bit");
         assert_eq!(
-            plan.steps[1],
-            Step::Ps7TieOff("/p/build/netlist.json".into())
-        );
-        assert_eq!(
-            plan.steps[10],
+            plan.steps[9],
             Step::ZynqBin {
                 bit: "/p/build/blinky.bit".into(),
                 bin: "/p/build/blinky.bin".into()
@@ -1731,7 +1752,7 @@ mod tests {
     #[test]
     fn zynq_pins_and_clocks_become_an_xdc() {
         let plan = xc7(Sources::Verilog(vec![]));
-        let (path, xdc) = &plan.files[1];
+        let (path, xdc) = &plan.files[0];
         assert_eq!(path, Path::new("/p/build/pins.xdc"));
         assert_eq!(
             xdc,
