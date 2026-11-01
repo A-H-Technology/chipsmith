@@ -851,6 +851,82 @@ fn negedge() {
     pack(&s.dir, "chipsmith", &s.netlist);
 }
 
+/// `always @(posedge clk or negedge rst_n)`, the reset of Terasic's and
+/// most university DE2 code. Quartus keeps one clear net and the LAB
+/// inverts it (`.aclr(!rst_n)`; cyclone2-re README, "Asynchronous resets");
+/// synthesis puts an inverter in front of each register's clear, and the
+/// packer folds it into the register's ACLR_INV. The proof covers
+/// synthesis; the packed netlist is co-simulated against the RTL, so a fold
+/// that drops the inverter without the inversion (or with the wrong one)
+/// fails, as this checks.
+#[test]
+fn active_low_clears_fold_into_the_lab() {
+    let f = Path::new(ROOT).join("crates/chipsmith-cyclone2/tests/designs/arst_n.v");
+    let s = synthesize("arst-n", "top", std::slice::from_ref(&f));
+    let proof = prove("arst-n", &s);
+    eprintln!("arst-n: {} $equiv proven", proof.equivalences);
+    let packed = s.dir.join("chipsmith.packed.json");
+    pack(&s.dir, "chipsmith", &s.netlist);
+    let refined = s.stages.refined.as_ref().unwrap();
+    let gate = support::packed_gate(&packed);
+    let sim = support::cosim(&s.dir, &s.rtl, refined, &gate, COSIM_CYCLES, 1)
+        .unwrap_or_else(|e| panic!("arst-n: packed co-simulation: {e}"));
+    eprintln!(
+        "arst-n: packed netlist co-simulated {} cycles, {} output bits compared",
+        sim.cycles, sim.compared
+    );
+
+    let j: serde_json::Value = serde_json::from_slice(&std::fs::read(&packed).unwrap()).unwrap();
+    let cells: Vec<&serde_json::Value> = j["modules"]["top"]["cells"]
+        .as_object()
+        .unwrap()
+        .values()
+        .collect();
+    let rst_n = cells
+        .iter()
+        .find(|c| c["attributes"]["PORT"] == "rst_n")
+        .map(|c| c["connections"]["COMBOUT"][0].clone())
+        .expect("rst_n's buffer");
+    let ffs = || cells.iter().filter(|c| c["type"] == "LCELL_FF");
+    let inverted = |c: &&&serde_json::Value| c["parameters"]["ACLR_INV"] == "1";
+    // cnt (6), pr (4, stored inverted: a clear) and ne: rst_n itself,
+    // inverted in the LAB; `both` takes it uninverted.
+    assert_eq!(ffs().filter(inverted).count(), 11);
+    assert!(ffs()
+        .filter(inverted)
+        .all(|c| c["connections"]["ACLR"][0] == rst_n));
+    assert_eq!(
+        ffs()
+            .filter(|c| !inverted(c) && c["connections"]["ACLR"][0] == rst_n)
+            .count(),
+        1
+    );
+    // No LUT is left reading rst_n: an inverter in front of a clear would.
+    assert!(cells
+        .iter()
+        .filter(|c| c["type"] == "LCELL_COMB")
+        .all(|c| c["connections"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|v| v[0] != rst_n)));
+
+    let mut dropped = gate.clone();
+    for c in dropped.modules[0].cells.iter_mut() {
+        if let CellKind::Other(g) = &mut c.kind {
+            g.params.remove("ACLR_INV");
+        }
+    }
+    let dir = scratch("arst-n-dropped");
+    match support::cosim(&dir, &s.rtl, refined, &dropped, COSIM_CYCLES, 1) {
+        Ok(_) => panic!("arst-n: the clears' inversion dropped, not caught"),
+        Err(e) => {
+            assert!(e.starts_with("MISMATCH"), "{e}");
+            eprintln!("arst-n, inversion dropped: caught ({e})");
+        }
+    }
+}
+
 /// Forencich's lfsr.v (examples/crc32), which declares arrays inside its
 /// mask function, as Ethernet's CRC-32: its elaboration proven against a
 /// textbook bitwise CRC-32 with the same top (`designs/crc32_ref.v`; the

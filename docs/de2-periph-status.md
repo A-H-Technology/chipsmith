@@ -1,4 +1,4 @@
-# DE2 peripherals: status (2026-10-31)
+# DE2 peripherals: status (2026-11-01)
 
 Before this work every DE2 example drove only LEDs, switches, JTAG, M4K
 blocks or multipliers. This note covers the SDRAM, the SRAM, the VGA DAC
@@ -151,6 +151,63 @@ which is what the board should give:
 Pressing keys and flipping switches needs someone at the board. Its
 outputs (LED drive strengths, the LED that powers up lit, HEX0) can't be
 seen without a camera on the board.
+
+## Fixed: an active-low asynchronous reset on LE registers (was gap 3)
+
+`always @(posedge clk or negedge rst_n)`, the reset of Terasic's and most
+university DE2 code, didn't fit: synthesis puts an inverter in front of
+each register's clear, every register got a clear net of its own, and a
+carry chain's LEs couldn't share a LAB. Since branch de2-arstn it builds
+unchanged, as Quartus builds it. cyclone2-re found how (its README,
+"Asynchronous resets"; 18 Quartus designs, a0-a12 and variants in
+`tools/arst_jobs.txt`):
+
+- What Quartus does: no inverter LUT. Every register's clear is the pin's
+  net, inverted at the port (`.aclr(!rst_n)`), at the same LE count as an
+  active-high reset; a free-placed 24-bit counter on `negedge KEY[0]` is 24
+  LEs, its clear on a LAB line in both LABs, not on a global.
+- The bits: a LAB has two clear lines, each a source mux and one bit of
+  `LAB_CLR_INVERT_PAIR`, set for an active-low clear from a LAB line (and
+  for an active-high one from a global, which arrives inverted). Pair
+  diffs differ in that bit alone. Two clears in one LAB take one line
+  each, the same pin in both polarities included; which line is the
+  routing's (clear mux 0 reaches control lines 0-1, mux 1 lines 2-3). All
+  18 designs assemble byte-identically in `cram roundtrip`, and so does
+  I/O-cell design e12 (a core LAB with two clears), the one miss of the
+  de2-ioece work.
+- chipsmith (`pack/mod.rs`, `place.rs`, `bitstream/logic.rs`,
+  `bitstream/nextpnr.rs`): the packer folds the inverter into the register
+  (`LCELL_FF`'s `ACLR_INV`), as quartus_map does; the placer takes the
+  clear and its polarity as one LAB control (still one clear per LAB, on
+  clear line 0); the bitstream sets the line's inversion bit. The chip
+  database is unchanged: the inversion is a register parameter, not a
+  route. cyclone2-re's Quartus export writes it as `.aclr(!rst_n)`.
+- Proof: `active_low_clears_fold_into_the_lab` (`tests/synth.rs`) proves
+  the synthesis (32 `$equiv`) and co-simulates the packed netlist against
+  the RTL (10,000 cycles: clears and a preset on `negedge rst_n`, with an
+  enable, on a falling edge, beside an active-high reset and the same pin
+  as an active-high clear); with `ACLR_INV` dropped, or folded with the
+  wrong polarity, the co-simulation fails at cycle 0. `tests/lab_clears.rs`
+  builds a 24-bit counter on `negedge RST_N` through the whole flow and
+  checks one clear net, no LUT reading it, and the inversion bit in the
+  RBF for each of its LABs (with the bit left out, it fails); the packer's
+  `inverters_in_front_of_clears_fold_into_the_lab` checks the fold alone.
+- examples/de2-ioregs now resets with KEY[0], active low, the core
+  registers too (the 24-bit divider's carry chain over two LABs): 40 LEs,
+  Quartus byte-identical. Open's chipsmith can't fit it ("the design
+  doesn't fit": 70 LUTs, the 32 inverters kept).
+- RBFs (33 DE2 examples, picorv32x24 not rebuilt; built with open's
+  chipsmith and this branch's on the same chip database, so every change
+  is the code's): three change. sha256 (secworks, `negedge reset_n` on
+  1,907 registers) goes from 6,046 to 4,242 LEs, spi-master (nandland,
+  `negedge i_Rst_L`) from 173 to 130, both Quartus byte-identical;
+  de2-ioregs changed with its source (this branch's chipsmith builds the
+  old source to open's RBF). The other 30 build to the same RBF.
+- Still one clear per LAB: a LAB's second clear line, which Quartus uses
+  for a second clear (or the same pin in the other polarity), isn't used
+  by the placer. Using it would add the routes from control lines 2-3 into
+  the registers' clears to the chip database, and with them new router
+  ties in every LAB.
 
 ## Fixed: the I/O cell's own register controls (was gap 2)
 
@@ -382,12 +439,7 @@ small PLL designs with Quartus and reading their post-fit atoms
    now), the
    ADV7181 TV decoder, the ISP1362 USB, the DM9000A Ethernet, the SD
    card, PS/2, IrDA and the 16x2 LCD.
-3. **An active-low asynchronous reset on LE registers.** `always @(posedge
-   clk or negedge rst_n)` on a counter doesn't fit: each register gets an
-   inverter of its own for its clear (15 clear nets for 15 registers in a
-   draft of examples/de2-ioregs, on branch open too), and a carry chain's
-   LEs can't share a LAB then. cyclone2-re hasn't decoded the LAB's clear
-   inversion. Write the reset active high (`wire rst = ~rst_n`) meanwhile.
-   An I/O cell's register takes an active-low reset fine.
-4. **Not yet on the board:** examples/de2-ioregs, and sdram-selftest and
+3. **Not yet on the board:** examples/de2-ioregs (since branch
+   de2-arstn with KEY[0] as its active-low reset), sha256 and spi-master
+   as rebuilt with the LAB's clear inversion, and sdram-selftest and
    sram-selftest as rebuilt with the cells' enables (the DE2 is off).

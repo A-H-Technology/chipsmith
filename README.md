@@ -174,12 +174,16 @@ as the board was. The outputs are unobserved.
 
 `examples/de2-ioregs` (2026-10-31) puts registers with the I/O cell's
 own controls on the DE2's pins: LEDR from a counter and a shift register
-whose enables and asynchronous clear and preset (SW[17]) are the cells',
+whose enables and asynchronous clear and preset are the cells',
 two LEDs sampled on the falling edge, four switches through input
 registers with an active-low enable (KEY[1]) and clear (KEY[3]), folded
 into the cells, and GPIO_0[4] driven while KEY[2] is held, its input,
-output and OE registers on one reset. Safe to load with nothing on the
-GPIO_0 header. 40 LEs; Quartus byte-identical; not yet on the board.
+output and OE registers on one reset. Since 2026-11-01 that reset is
+KEY[0], active low, written as Terasic writes it (`always @(posedge
+clk or negedge rst_n)`), and it clears the core registers too, the
+24-bit divider's carry chain across two LABs included (it was SW[17],
+active high). Safe to load with nothing on the GPIO_0 header. 40 LEs;
+Quartus byte-identical; not yet on the board.
 
 `examples/vga-pattern` puts 640x480 at 60 Hz on the VGA DAC: colour
 bars, four ramps, a white border, the DAC's inputs through I/O-cell
@@ -1068,26 +1072,52 @@ share chipsmith's own netlist IR, not Verilog.
      | design | chipsmith | yosys flow | Quartus |
      |---|---|---|---|
      | uart (Forencich) | 164 LEs, 170.9 MHz | 225 LEs, 154.2 MHz | |
-     | spi-master (nandland) | 173 LEs, 229.6 MHz | can't build: an asynchronous reset to 1 that powers up 0 | |
+     | spi-master (nandland) | 130 LEs, 292.9 MHz | can't build: an asynchronous reset to 1 that powers up 0 | |
      | i2c-master (Forencich) | 214 LEs, 126.7 MHz | 245 LEs, 118.6 MHz | |
      | femtorv32 quark | 788 LEs, 72.8 MHz | 832 LEs, 87.5 MHz | 473 LEs + 1 M4K, 83.7 MHz |
      | serv | 3,091 LEs, 84.3 MHz | 3,111 LEs, 78.6 MHz | 336 LEs + 1 M4K, 108.6 MHz |
-     | sha256 (secworks) | 6,046 LEs, 41.3 MHz | can't build (as spi-master) | 3,303 LEs, 63.7 MHz |
+     | sha256 (secworks) | 4,242 LEs, 49.2 MHz | can't build (as spi-master) | 3,303 LEs, 63.7 MHz |
      | picorv32 | 1,171 LEs, 123.4 MHz | 1,175 LEs, 114.4 MHz | |
      | crc32 (Forencich's lfsr.v) | 118 LEs, 298.9 MHz | not run: yosys' front end takes over 20 minutes on it | |
 
      chipsmith's uart, spi-master, i2c-master and sha256 are as of
      2026-10-29: a carry chain's low cells whose carry out is forced now
      get no LE (quartus_map sweeps them out of a VQM), which took 26, 6,
-     11 and 7 LEs off them (190, 179, 225 and 6,053 before).
+     11 and 7 LEs off them (190, 179, 225 and 6,053 before). spi-master
+     and sha256 are as of 2026-11-01: both reset with `negedge`, and the
+     LAB now inverts the clear (below), which took 43 and 1,804 inverter
+     LEs off them (173 LEs at 232.2 MHz and 6,046 at 47.9 MHz on branch
+     open the same day, Fmax the build's estimate).
 
-     Where Quartus is far ahead, it is the register files (serv's and
+     Where Quartus is ahead, it is the register files (serv's and
      femtorv32's go into an M4K; chipsmith's M4K mapping doesn't take their
      shapes yet) and wide multiplexers: sha256's 16-word schedule read maps
      to about 20 LUTs a bit, against Quartus' 11 (the mapper, not the
      netlist: the same read as a `$bmux` tree maps no better). Still
      rejected: `$pow` with a non-constant base, the yosys flow's own
      limits above.
+   - Gaps closed (2026-11-01):
+     - An active-low asynchronous reset, `always @(posedge clk or negedge
+       rst_n)`, the reset of Terasic's and most university DE2 code. Synthesis
+       puts an inverter in front of each register's clear, and nothing
+       folded it: a counter's every bit had a clear net of its own, and a
+       carry chain's LEs couldn't share a LAB (examples/de2-ioregs with
+       KEY[0] as its reset didn't fit). Quartus keeps one clear net and
+       the LAB inverts it, one bit per clear line (cyclone2-re README,
+       "Asynchronous resets"; 18 Quartus designs). The packer now folds
+       the inverter into the register (`LCELL_FF`'s `ACLR_INV`), the placer
+       treats the clear and its polarity as the LAB's control, and the
+       bitstream sets the LAB's `LAB_CLR_INVERT_PAIR` bit. Checked by
+       co-simulating the packed netlist against the RTL
+       (`active_low_clears_fold_into_the_lab`: 159,987 output bits; with
+       `ACLR_INV` dropped it fails at cycle 0), a flow test down to the
+       RBF's bit (`tests/lab_clears.rs`: a 24-bit counter on one inverted
+       clear over two LABs, the same pin as an active-high clear in
+       another), and Quartus: examples/de2-ioregs, sha256 and spi-master
+       byte-identical. Those three are the DE2 examples whose RBF changed:
+       sha256 4,242 LEs (6,046 before), spi-master 130 (173), de2-ioregs
+       with its source; the other 30 (picorv32x24 not rebuilt) build to
+       the same RBF as on branch open. The chip database is unchanged.
 5. **Own Verilog frontend** (done for the DE2, in the build since
    2026-10-25): the synthesizable subset that GHDL and HDL generators emit.
    - Elaboration (done, 2026-10-25, the DE2 build's front end since then): `crates/chipsmith-verilog`

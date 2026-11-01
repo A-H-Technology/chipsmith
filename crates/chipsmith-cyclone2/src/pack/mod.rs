@@ -803,7 +803,7 @@ fn push_inversion_back(nl: &mut Netlist, inverter: CellId, input: NetId) -> bool
     let takes_inversion = |&(u, p): &(CellId, Port)| match nl.cell(u).kind {
         Kind::Lut { .. } => p.lut_index().is_some(),
         Kind::Obuf { .. } | Kind::Iobuf { .. } => nl.cell(u).kind.is_ioe_in(p),
-        Kind::Ff(_) => matches!(p, Port::Ena | Port::Sclr),
+        Kind::Ff(_) => matches!(p, Port::Ena | Port::Sclr | Port::Aclr),
         _ => false,
     };
     if !loads.iter().all(takes_inversion) {
@@ -820,6 +820,7 @@ fn push_inversion_back(nl: &mut Netlist, inverter: CellId, input: NetId) -> bool
                 _ => unreachable!("a pin buffer load on a constant input"),
             },
             Kind::Ff(cfg) if p == Port::Ena => cfg.ena_inv = !cfg.ena_inv,
+            Kind::Ff(cfg) if p == Port::Aclr => cfg.aclr_inv = !cfg.aclr_inv,
             Kind::Ff(cfg) => cfg.sclr_inv = !cfg.sclr_inv,
             _ => unreachable!("checked above"),
         }
@@ -830,7 +831,9 @@ fn push_inversion_back(nl: &mut Netlist, inverter: CellId, input: NetId) -> bool
 /// quartus_map drops every one-input LUT (buffer or inverter) of an atom
 /// netlist as a "redundant logic cell" and folds the inversion into
 /// whatever it feeds: other LUTs' masks, an output pin's inverter
-/// (IO_DATA_INVERT), a LAB's clock-enable / sync-clear inversion. Doing the
+/// (IO_DATA_INVERT), a LAB's clock-enable / sync-clear / clear inversion
+/// (an `always @(posedge clk or negedge rst_n)` register is
+/// `.aclr(!rst_n)`, one LAB clear line for all of them). Doing the
 /// same keeps the netlist one Quartus would assemble unchanged. What feeds
 /// a register's data input stays: it is the register's own LUT (a feeder,
 /// which Quartus re-creates itself).
@@ -952,16 +955,19 @@ fn pack_lut1(nl: &mut Netlist, stats: &mut Stats) {
                         };
                         let params = &mut nl.cell_mut(u).params;
                         let was = params.get(name).and_then(Value::as_str).is_some_and(is_one);
-                        params.insert(name.into(), Value::String(if was { "0" } else { "1" }.into()));
+                        params.insert(
+                            name.into(),
+                            Value::String(if was { "0" } else { "1" }.into()),
+                        );
                     }
                 }
-                (Kind::Ff(_), _) if matches!(p, Port::Ena | Port::Sclr) => {
+                (Kind::Ff(_), _) if matches!(p, Port::Ena | Port::Sclr | Port::Aclr) => {
                     nl.reconnect(u, p, input);
                     if let Kind::Ff(cfg) = &mut nl.cell_mut(u).kind {
-                        if p == Port::Ena {
-                            cfg.ena_inv = inv;
-                        } else {
-                            cfg.sclr_inv = inv;
+                        match p {
+                            Port::Ena => cfg.ena_inv = inv,
+                            Port::Sclr => cfg.sclr_inv = inv,
+                            _ => cfg.aclr_inv = inv,
                         }
                     }
                 }
@@ -1199,6 +1205,9 @@ fn to_json(nl: &Netlist) -> Result<Value> {
                 }
                 if cfg.sclr_inv {
                     params.insert("SCLR_INV".into(), bit(true));
+                }
+                if cfg.aclr_inv {
+                    params.insert("ACLR_INV".into(), bit(true));
                 }
                 if cell.has_port(Port::Sdata) {
                     params.insert("SLOAD".into(), bit(true));

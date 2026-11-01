@@ -21,8 +21,8 @@ use super::io::{
     BLOCK_CLK_N, BLOCK_CLK_P,
 };
 use super::logic::{
-    clock_slots, Aclr, ClkCtrl, Ctl, Domain, GlobalClock, LabConfig, LeConfig, LeSource, Logic,
-    Lut, Reg, Sload, BLOCK_INPUT_MUX, CORE_INPUT,
+    clock_slots, Aclr, Clear, ClkCtrl, Ctl, Domain, GlobalClock, LabConfig, LeConfig, LeSource,
+    Logic, Lut, Reg, Sload, BLOCK_INPUT_MUX, CORE_INPUT,
 };
 use super::m4k::{self, Content, Controls, CtlSrc, M4k, Mode, Width};
 use super::mult::{self as bmult, DataIn, DataPin, Mult, Sign};
@@ -1031,6 +1031,14 @@ impl Routed {
                 _ => None,
             })
             .collect();
+        let aclr_inv: std::collections::HashSet<(u32, u32, u32)> = self
+            .cells
+            .values()
+            .filter_map(|c| match c.bel {
+                Bel::Ff { x, y, k } if flag(c, "ACLR_INV") => Some((x, y, k)),
+                _ => None,
+            })
+            .collect();
         for (name, c) in &self.cells {
             match (c.ty.as_str(), c.bel) {
                 ("LCELL_COMB", Bel::Lut { x, y, k }) => {
@@ -1318,14 +1326,19 @@ impl Routed {
             }
             for (&(x, y, k), d) in ff_domain.iter().filter(|((x, y, _), _)| (*x, *y) == xy) {
                 let clock = slots.iter().position(|s| *s == Some(*d)).unwrap() as u8;
-                let a = aclr.get(&(x, y, k)).copied();
+                let a = aclr.get(&(x, y, k)).map(|&src| Clear {
+                    src,
+                    inverted: aclr_inv.contains(&(x, y, k)),
+                });
                 let sc = sclr.get(&(x, y, k)).map(|&line| Ctl {
                     line,
                     inverted: sclr_inv.contains(&(x, y, k)),
                 });
+                // A cleared register takes LAB clear line 0: the placer
+                // allows one clear per LAB.
                 if let Some(a) = a {
-                    ensure!(lab.aclr.is_none_or(|o| o == a), "LAB {xy:?}: two clears");
-                    lab.aclr = Some(a);
+                    ensure!(lab.aclr[0].is_none_or(|o| o == a), "LAB {xy:?}: two clears");
+                    lab.aclr[0] = Some(a);
                 }
                 if let Some(c) = sc {
                     ensure!(
@@ -1334,8 +1347,6 @@ impl Routed {
                     );
                     lab.sync.sclr = Some(c);
                 }
-                // A cleared register takes LAB clear line 0 (the model's
-                // only one).
                 // Registers on the sync load path load SDATA (input C) every
                 // cycle through the LAB's sload, tied high.
                 let sload = sdata.contains(&(x, y, k));

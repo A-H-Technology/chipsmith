@@ -150,6 +150,8 @@ pub struct FfConfig {
     pub clk_inv: bool,
     pub ena_inv: bool,
     pub sclr_inv: bool,
+    /// Clears while ACLR is low: the LAB's clear-line inversion.
+    pub aclr_inv: bool,
 }
 
 /// What one of an IOE's inputs from the core (output data, output enable)

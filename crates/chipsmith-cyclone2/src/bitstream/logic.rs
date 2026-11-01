@@ -79,10 +79,21 @@ pub struct GlobalClock {
     pub inverted: bool,
 }
 
+/// Where a LAB clear line takes its signal: a LAB control line or a row
+/// clock buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Aclr {
     Pia(u8),
     Global(u8),
+}
+
+/// One of a LAB's two clear lines: its source and whether its registers
+/// clear while the signal is low (`always @(... or negedge rst_n)`; the
+/// LAB inverts it, Quartus' `.aclr(!rst_n)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Clear {
+    pub src: Aclr,
+    pub inverted: bool,
 }
 
 /// A LAB control signal arriving on control line `line`, possibly
@@ -116,7 +127,8 @@ pub struct LabConfig {
     pub clocks: [Option<GlobalClock>; 2],
     /// Clock enable of LAB clock j, as the control line carrying it.
     pub enables: [Option<Ctl>; 2],
-    pub aclr: Option<Aclr>,
+    /// Clear lines 0 and 1; a register's `Reg::aclr` says which it takes.
+    pub aclr: [Option<Clear>; 2],
     pub sync: Sync,
 }
 
@@ -340,33 +352,43 @@ fn lab_bits(db: &LabDb, x: u32, y: u32, l: &LabConfig, out: &mut Vec<(u32, bool)
             put(f.bit(0), encoded_setting(f, c.line as usize)? == 1)?;
         }
     }
-    match l.aclr {
-        None => {}
-        Some(Aclr::Pia(p)) => {
-            // 2-bit encoded first level: setting s sets bit s - 1.
-            let f = db.feature(arch::LAB_CLEAR_FAST_MUX, 0)?;
-            let s = encoded_setting(f, p as usize)?;
-            for (i, &off) in f.paths[0][0].iter().enumerate() {
-                put(off, s == i + 1)?;
-            }
+    // A global clear goes on both clear muxes, the second line
+    // uninverted whatever the first does (fuzz: X2Y26, X54Y16;
+    // cyclone2-re arst a7, a8).
+    let lines = match l.aclr {
+        [Some(c), None] if matches!(c.src, Aclr::Global(_)) => {
+            let second = Clear {
+                inverted: false,
+                ..c
+            };
+            [Some(c), Some(second)]
         }
-        Some(Aclr::Global(b)) => {
-            // Both clear lines take the global and the pair inversion is
-            // set (fuzz: X2Y26, X54Y16); sources 4..9 are BLK_CLK_BUFs.
-            for j in 0..2 {
-                let f = db.feature(arch::LAB_CLEAR_FAST_MUX, j)?;
-                let s = encoded_setting(f, 4 + b as usize)?;
-                for (i, &off) in f.paths[0][0].iter().enumerate() {
-                    put(off, s == i + 1)?;
-                }
-                let n = f.next.as_ref().context("clear mux second level")?[4 + b as usize];
-                ensure!(n >= 0, "global {b} unreachable");
-                put(f.paths[0][1][n as usize], true)?;
-            }
-            for &off in &db.feature(arch::LAB_CLR_INVERT_PAIR, 6)?.paths[0][0] {
-                put(off, true)?;
-            }
+        lines => lines,
+    };
+    // LAB_CLR_INVERT_PAIR 6: one bit per clear line, set for an active-low
+    // clear from a LAB line and an active-high one from a global, which
+    // arrives inverted (cyclone2-re arst pair diffs a0/a1, a8/a7, a6h/a6).
+    let invert = &db.feature(arch::LAB_CLR_INVERT_PAIR, 6)?.paths[0][0];
+    for (j, c) in lines.iter().enumerate() {
+        let Some(c) = c else { continue };
+        // 2-bit encoded first level: setting s sets bit s - 1; sources
+        // 4..9 are BLK_CLK_BUFs, reached through a second level.
+        let f = db.feature(arch::LAB_CLEAR_FAST_MUX, j as i32)?;
+        let src = match c.src {
+            Aclr::Pia(p) => p as usize,
+            Aclr::Global(b) => 4 + b as usize,
+        };
+        let s = encoded_setting(f, src)?;
+        for (i, &off) in f.paths[0][0].iter().enumerate() {
+            put(off, s == i + 1)?;
         }
+        if let Aclr::Global(b) = c.src {
+            let n = f.next.as_ref().context("clear mux second level")?[src];
+            ensure!(n >= 0, "global {b} unreachable");
+            put(f.paths[0][1][n as usize], true)?;
+        }
+        let global = matches!(c.src, Aclr::Global(_));
+        put(invert[j], c.inverted != global)?;
     }
     // LAB_ENABLE_SYNC_SIGNALS: 3 bits, MSB first, empty/none = 0b101.
     // Codes are the asmdb setting map [5, 7, 4, 6, 1, 0]; which setting is
