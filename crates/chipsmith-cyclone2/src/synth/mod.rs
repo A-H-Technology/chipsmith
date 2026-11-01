@@ -20,7 +20,7 @@ use anyhow::{bail, Context, Result};
 use chipsmith_netlist::{attr, is_set, CellKind, Design, Module};
 use chipsmith_synth::rewrite::define_inits;
 use chipsmith_synth::{
-    alumacc, clean, divmod, fsm, lutmap, memory, opt, techmap, tribuf, undef, wreduce,
+    alumacc, clean, divmod, fsm, lutmap, memory, opt, rom, techmap, tribuf, undef, wreduce,
 };
 
 use crate::pin::IoRegisters;
@@ -133,6 +133,7 @@ fn run(
     memory::merge_registers(m, |mem| !logic.contains(&mem.memid) && m4k::mappable(mem))?;
     undef::refine(m)?;
     obs.stage("refined", m);
+    rom::tables(m);
     fsm::compare_states(m);
     opt::lower_bitwise(m)?;
     opt::opt_seq(m, removable)?;

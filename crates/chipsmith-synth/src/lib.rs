@@ -12,6 +12,7 @@ pub mod lutmap;
 pub mod memory;
 pub mod opt;
 pub mod rewrite;
+pub mod rom;
 pub mod techmap;
 pub mod tribuf;
 pub mod undef;
