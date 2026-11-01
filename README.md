@@ -584,8 +584,9 @@ each pad-to-core delay with an assignment to the feeder LUT, a name
 Quartus' netlist doesn't have, so the fitter ignored it and left the
 chain off. With the assignment on the wirecell (cyclone2-re 3cd8278,
 2026-11-01), 33 of the 34 DE2 examples re-validated byte-identical, uart
-and i2c-master included; picorv32x24 (28,449 LEs) hadn't finished
-Quartus' post-fit delay annotation after 1.5 hours.
+and i2c-master included; picorv32x24 (28,449 LEs) isn't validated:
+Quartus' fit placed and routed it in minutes, then spent 7.5 hours in
+post-fit delay annotation without finishing, and was stopped.
 picorv32 has no M4K; its slack moved because cyclone2-re's synthesis
 script gained `memory_libmap`, which renames yosys' cells and nets. Same
 logic, same 1,175 LEs, but other net ids and so another placement. The
