@@ -20,6 +20,13 @@ const MIN_WIDTH: usize = 4;
 /// Nor ones of fewer multiplexers.
 const MIN_MUXES: usize = 3;
 
+/// The literals (select, value) on the way from a tree's root to a leaf.
+type Path = Vec<(SigBit, bool)>;
+
+/// A tree: its root cell, its leaves (data word and path) and every cell
+/// in it.
+type Tree = (usize, Vec<(SigSpec, Path)>, Vec<usize>);
+
 /// Rewrites the trees; returns how many.
 pub fn restructure(m: &mut Module) -> usize {
     // Each net's readers, and the `$mux` driving it.
@@ -98,9 +105,7 @@ pub fn restructure(m: &mut Module) -> usize {
             }
         }
     }
-    // (root, leaves: (data, path literals (select, value))).
-    type Path = Vec<(SigBit, bool)>;
-    let mut trees: Vec<(usize, Vec<(SigSpec, Path)>, Vec<usize>)> = Vec::new();
+    let mut trees: Vec<Tree> = Vec::new();
     for (i, c) in m.cells.iter().enumerate() {
         if !matches!(c.kind, CellKind::Mux(_) | CellKind::Pmux(_)) {
             continue;
