@@ -24,6 +24,30 @@ no nextpnr, no cram. GHDL translates VHDL in front of it.
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
 LEDs, 1,171 LEs; a build takes about 18 s (placement 9 s, routing 7 s; Compile speed, below).
 
+Against Quartus II 13.0sp1 Web Edition on the same Verilog, pins and
+clock, to a bitstream (`bench/vs-quartus.sh`, docs/vs-quartus.md;
+2026-11-01, a shared i7-4770K at load 4 to 41, median 9). Wall-time
+medians over 3 interleaved reps; Fmax is quartus_sta's for both tools'
+placements (picorv32x24: chipsmith's own estimate):
+
+| design | LEs Quartus / chipsmith | Quartus s | chipsmith `open` s | gpu-pnr (CUDA) s | Fmax MHz Quartus / `open` / gpu-pnr |
+|---|---|---|---|---|---|
+| blinky-verilog | 26 / 26 | 78 | 4.8 | 5.8 | 285 / 298 / 298 |
+| picorv32 | 839 / 1,171 | 90 | 28 | 19 | 120 / 117 / 128 |
+| femtorv32 | 473 / 788 | 105 | 18 | 13 | 81 / 67 / 71 |
+| sdram-selftest | 567 / 777 | 104 | 22 | fails | 166 / 146 / - |
+| sha256 | 3,303 / 6,046 | 190 | 151 | 101 | 65 / 45 / 43 |
+| picorv32x24 | 20,240 / 28,449 | 1,063 | 1,516 | 393 | 105 / 95 / 109 |
+
+chipsmith is 3x to 26x faster up to about a thousand LEs, where most of
+Quartus' time is a fixed minute. At sha256's size `open` is only 1.3x faster
+and uses 2.3x Quartus' CPU time. At picorv32x24's it is slower and uses 4x the
+CPU time, because Quartus 13.0 Web Edition is single-threaded. The gpu-pnr
+branch's placer is 1.9x to 2.7x faster than Quartus there. Quartus' results
+are better: 12% to 83% fewer LEs, and 9% to 50% higher Fmax on
+femtorv32, mult-selftest, sdram-selftest and sha256. Neither tool rebuilds
+incrementally after a logic edit.
+
 `examples/de2-jtag-counter` answers over the JTAG cable, so a load can be
 checked without watching the board: the Cyclone II's JTAG block makes it a
 64-bit USER1 register holding `"DE2!"` and a Gray-coded 50 MHz counter.
