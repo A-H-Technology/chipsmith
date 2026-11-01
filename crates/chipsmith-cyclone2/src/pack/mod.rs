@@ -378,6 +378,12 @@ fn pack_m4k(nl: &mut Netlist, stats: &mut Stats) -> Result<Vec<(CellId, Pin, boo
                         && matches!(shape.ports(), Ports::SimpleDual { .. });
                     let used = !idle && low_addr(s).is_some_and(|low| p >= low);
                     if used && driven.is_none() {
+                        // An address bit known on this port (a read of a
+                        // ROM-fed address): an LE drives it, as a data bit.
+                        if let Some(v) = tied(nl, net) {
+                            tied_data.push((c, lp.pin(), v));
+                            continue;
+                        }
                         bail!(
                             "M4K {name}: address pin {} is a constant; synthesis repeats \
                              another address bit there",
@@ -420,26 +426,41 @@ fn pack_m4k(nl: &mut Netlist, stats: &mut Stats) -> Result<Vec<(CellId, Pin, boo
     Ok(tied_data)
 }
 
-/// An LE for each M4K data input written as a constant (`pack_m4k`),
-/// after `pack_constants`, which would take an input-less LUT for the
-/// constant itself.
+/// The design's constant-0 LE, `~GND`: one for the whole design, as
+/// Quartus has one (cyclone2-re's export keeps it under that name where
+/// it is placed; a second one it would remove).
+const GND: &str = "~GND";
+
+/// The LE driving constant `v`, made on first use: `~GND` for 0, and
+/// likewise one LE for 1.
+fn constant_le(nl: &mut Netlist, v: bool) -> NetId {
+    let name = if v { "~VCC_LE" } else { GND };
+    if let Some(n) = nl
+        .cells()
+        .into_iter()
+        .find(|&c| nl.cell(c).name == name)
+        .and_then(|c| nl.cell(c).net(Port::Combout))
+    {
+        return n;
+    }
+    let lut = nl.create_cell(
+        name.to_string(),
+        Kind::Lut {
+            mask: if v { 0xFFFF } else { 0x0000 },
+        },
+    );
+    nl.add_port(lut, Port::Combout);
+    let n = nl.create_net(name.to_string());
+    nl.connect(lut, Port::Combout, n);
+    n
+}
+
+/// An M4K data or address input written as a constant (`pack_m4k`) is
+/// driven by the constant's LE, after `pack_constants`, which would take
+/// an input-less LUT for the constant itself.
 fn drive_tied_data(nl: &mut Netlist, tied: Vec<(CellId, Pin, bool)>) {
     for (c, pin, v) in tied {
-        let name = format!("{}${pin}", nl.cell(c).name);
-        let lut = nl.create_cell(
-            format!("{name}$const"),
-            Kind::Lut {
-                mask: if v { 0xFFFF } else { 0x0000 },
-            },
-        );
-        for p in LUT_INPUTS
-            .into_iter()
-            .chain([Port::Cin, Port::Combout, Port::Cout])
-        {
-            nl.add_port(lut, p);
-        }
-        let n = nl.create_net(format!("{name}$const_net"));
-        nl.connect(lut, Port::Combout, n);
+        let n = constant_le(nl, v);
         let port = Port::M4k(pin);
         nl.add_port(c, port);
         nl.connect(c, port, n);
@@ -582,7 +603,6 @@ fn invert_mult_pin(nl: &mut Netlist, c: CellId, pin: crate::mult::Pin) {
 /// names it `~GND` so Quartus keeps it where it is placed).
 fn unsigned_signs(nl: &mut Netlist) {
     use crate::mult::{Operand, Pin as MPin};
-    let mut gnd = None;
     for c in nl.cells() {
         let Kind::Mult(shape, _) = nl.cell(c).kind else {
             continue;
@@ -591,13 +611,7 @@ fn unsigned_signs(nl: &mut Netlist) {
             .into_iter()
             .filter(|&op| !shape.signed[op as usize])
         {
-            let net = *gnd.get_or_insert_with(|| {
-                let cell = nl.create_cell("~GND".to_string(), Kind::Lut { mask: 0 });
-                let net = nl.create_net("~GND".to_string());
-                nl.add_port(cell, Port::Combout);
-                nl.connect(cell, Port::Combout, net);
-                net
-            });
+            let net = constant_le(nl, false);
             let port = Port::Mult(MPin::Sign(op));
             nl.add_port(c, port);
             nl.connect(c, port, net);

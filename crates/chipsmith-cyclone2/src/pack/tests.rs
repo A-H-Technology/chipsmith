@@ -620,13 +620,40 @@ fn unsupported_m4k_shapes_are_refused() {
     let e = yosys::import(&x36).unwrap_err();
     assert!(format!("{e:#}").contains("packed mode"), "{e:#}");
 
-    // An address bit the block uses tied to a constant: a memory shallower
+    // An address bit the block uses left unconnected: a memory shallower
     // than its configuration.
     let mut shallow = single_port_ram(18);
-    shallow["modules"]["top"]["cells"]["ram"]["connections"]["A_ADDR"][11] = json!("0");
+    shallow["modules"]["top"]["cells"]["ram"]["connections"]["A_ADDR"][11] = json!("x");
     let mut nl = yosys::import(&shallow).unwrap();
     let e = pack(&mut nl).unwrap_err();
     assert!(e.to_string().contains("A_ADDR[11] is a constant"), "{e}");
+}
+
+/// An address bit tied to a constant (a read address from a ROM whose
+/// words agree on it) gets an LE driving it, as a constant data bit does.
+#[test]
+fn an_m4k_address_bit_tied_to_a_constant_is_driven_by_an_le() {
+    let mut d = single_port_ram(18);
+    d["modules"]["top"]["cells"]["ram"]["connections"]["A_ADDR"][11] = json!("0");
+    let mut nl = yosys::import(&d).unwrap();
+    pack(&mut nl).unwrap();
+    let out = to_json(&nl).unwrap();
+    let cells = out["modules"]["top"]["cells"].as_object().unwrap();
+    let (name, lut) = cells
+        .iter()
+        .find(|(n, _)| *n == "~GND")
+        .expect("the design's constant-0 LE");
+    assert_eq!(
+        lut["parameters"]["LUT_MASK"],
+        json!(format!("{:016b}", 0)),
+        "{name}"
+    );
+    let net = &lut["connections"]["COMBOUT"];
+    let ram = cells["ram"]["connections"].as_object().unwrap();
+    assert!(
+        ram.values().any(|v| v == net),
+        "{name} drives nothing of the block"
+    );
 }
 
 /// A register's output clocking another register (a divided clock): it

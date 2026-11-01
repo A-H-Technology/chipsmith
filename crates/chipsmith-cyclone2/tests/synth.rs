@@ -1781,7 +1781,9 @@ m4k_shape_tests!(
     m4k_shape_read_enable_held_x9 = "read_enable_held_x9",
     m4k_shape_outreg_clear_x9 = "outreg_clear_x9",
     m4k_shape_sync_reset_x18 = "sync_reset_x18",
-    m4k_shape_shallow_x8 = "shallow_x8"
+    m4k_shape_shallow_x8 = "shallow_x8",
+    m4k_shape_two_reads_x32 = "two_reads_x32",
+    m4k_shape_two_reads_new_data_x32 = "two_reads_new_data_x32"
 );
 
 /// The multiplier examples, co-simulated through the blocks (as
