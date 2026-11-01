@@ -241,28 +241,55 @@ fn permuting_pips(tt: &chipdb::TileType) -> Option<Vec<i8>> {
     any.then_some(out)
 }
 
+/// Each Cyclone II LE input node (`LE<k>.A` to `.D`, type `LE_INPUT`) and
+/// the delay its pin adds over input D (`timing::lut_pin_extra`), by tile
+/// type.
+fn pin_extras(db: &ChipDb) -> Vec<Vec<(u32, Ps)>> {
+    db.tile_types
+        .iter()
+        .map(|tt| {
+            (0..tt.wires.len() as u32)
+                .filter(|&w| db.wire_types[tt.wire_types[w as usize] as usize] == "LE_INPUT")
+                .filter_map(|w| {
+                    let (bel, pin) = tt.wires.get(w).strip_prefix("LE")?.split_once('.')?;
+                    bel.parse::<u32>().ok()?;
+                    let p = ["A", "B", "C", "D"].iter().position(|&x| x == pin)?;
+                    Some((w, timing::lut_pin_extra(p)))
+                })
+                .collect()
+        })
+        .collect()
+}
+
 impl<'a> Router<'a> {
     pub fn new(db: &'a ChipDb, design: &'a Design) -> Self {
         let n = db.nodes();
+        let mut node: Vec<NodeInfo> = {
+            let by_type: Vec<Ps> = db
+                .wire_types
+                .iter()
+                .map(|t| timing::wire_delay(t))
+                .collect();
+            db.node_type
+                .iter()
+                .zip(&db.node_box)
+                .map(|(&t, &bbox)| NodeInfo {
+                    hist: 0.0,
+                    delay: by_type[t as usize],
+                    occ: 0,
+                    bbox,
+                })
+                .collect()
+        };
+        let extras = pin_extras(db);
+        for tile in 0..db.width * db.height {
+            for &(w, extra) in &extras[db.tile_type_index(tile) as usize] {
+                node[db.node(tile, w) as usize].delay += extra;
+            }
+        }
         Router {
             db,
-            node: {
-                let by_type: Vec<Ps> = db
-                    .wire_types
-                    .iter()
-                    .map(|t| timing::wire_delay(t))
-                    .collect();
-                db.node_type
-                    .iter()
-                    .zip(&db.node_box)
-                    .map(|(&t, &bbox)| NodeInfo {
-                        hist: 0.0,
-                        delay: by_type[t as usize],
-                        occ: 0,
-                        bbox,
-                    })
-                    .collect()
-            },
+            node,
             present_factor: 0.5,
             scratch: Scratch::new(n),
             incremental: std::env::var("CHIPSMITH_ROUTE_INCREMENTAL").map_or(true, |v| v != "0"),

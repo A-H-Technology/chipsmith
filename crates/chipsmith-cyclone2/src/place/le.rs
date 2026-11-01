@@ -226,14 +226,15 @@ impl Timing for LeTiming<'_> {
                     let ((x0, y0), (x1, y1)) =
                         (self.pos(centres, c.from_cell), self.pos(centres, c.to_cell));
                     let (dx, dy) = ((x0 - x1).abs(), (y0 - y1).abs());
-                    if dx < 0.5 && dy < 0.5 {
-                        timing::wire_delay("LOCAL_LINE")
-                    } else {
-                        timing::wire_delay("LE_BUFFER")
-                            + timing::wire_delay("LOCAL_INTERCONNECT")
-                            + dx as Ps * timing::wire_delay("R4") / 4.0
-                            + dy as Ps * timing::wire_delay("C4") / 4.0
-                    }
+                    c.pin
+                        + if dx < 0.5 && dy < 0.5 {
+                            timing::wire_delay("LOCAL_LINE")
+                        } else {
+                            timing::wire_delay("LE_BUFFER")
+                                + timing::wire_delay("LOCAL_INTERCONNECT")
+                                + dx as Ps * timing::wire_delay("R4") / 4.0
+                                + dy as Ps * timing::wire_delay("C4") / 4.0
+                        }
                 };
                 Arc {
                     from: c.from,

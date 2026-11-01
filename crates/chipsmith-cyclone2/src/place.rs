@@ -365,6 +365,10 @@ struct Conn {
     net: Option<usize>,
     /// Needs no routing: a carry chain link, or a LUT into its own register.
     internal: bool,
+    /// What the LE input it ends on adds (`timing::lut_pin_extra`): known
+    /// for a carry LE's inputs and SDATA (input C), expected for a LUT
+    /// input the router may put on any pin.
+    pin: Ps,
 }
 
 /// The fitter's register packing within each placed LAB: a register-only
@@ -814,6 +818,22 @@ fn read_design(json: &Value) -> Result<Design> {
                 net: net_index[net],
                 internal: p == Port::Cin
                     || (p == Port::Datain && le_of[d].is_some() && le_of[d] == le_of[c]),
+                pin: match p {
+                    Port::DataA | Port::DataB | Port::DataC | Port::DataD
+                        if cells[c].kind == Kind::Lut =>
+                    {
+                        let at = LUT_INPUTS.iter().position(|&q| q == p).expect("a LUT input");
+                        let carry = cells[c].net(Port::Cin).is_some()
+                            || cells[c].net(Port::Cout).is_some_and(|n| !users[n as usize].is_empty());
+                        if carry {
+                            timing::lut_pin_extra(at)
+                        } else {
+                            timing::LUT_PIN_EXPECTED
+                        }
+                    }
+                    Port::Sdata => timing::lut_pin_extra(2),
+                    _ => 0.0,
+                },
             });
         }
     }
@@ -1477,9 +1497,10 @@ impl<'a> State<'a> {
         let ((x0, y0), (x1, y1)) = (self.cell_xy(c.from_cell), self.cell_xy(c.to_cell));
         let (dx, dy) = ((x0 - x1).abs() / 2, (y0 - y1).abs());
         if dx == 0 && dy == 0 {
-            return timing::wire_delay("LOCAL_LINE");
+            return c.pin + timing::wire_delay("LOCAL_LINE");
         }
-        timing::wire_delay("LE_BUFFER")
+        c.pin
+            + timing::wire_delay("LE_BUFFER")
             + timing::wire_delay("LOCAL_INTERCONNECT")
             + dx as Ps * timing::wire_delay("R4") / 4.0
             + dy as Ps * timing::wire_delay("C4") / 4.0

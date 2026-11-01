@@ -47,22 +47,47 @@ pub fn wire_delay(wire_type: &str) -> Ps {
     }
 }
 
-/// LUT input to output (DMF `LE_COMB/P2P/InOut`, worst transition) for
-/// the LE at index `le` of its LAB. The carry out is slower where the chain
-/// crosses the LAB's half-way buffer (LE 7 to 8, `CHAIN_THROUGH_LCB`) and
-/// where it leaves the LAB (LE 15, `CHAIN_ACROSS_LAB`).
+/// LUT input to output through each physical input A to D (DMF
+/// `LE_COMB/P2P/InOut`, worst transition).
+const LUT_PIN: [Ps; 4] = [438.0, 420.0, 275.0, 150.0];
+
+/// What a LUT input costs over input D, the fastest: carried by the LE
+/// input's routing node (`LE<k>.A` to `.D`), since the router picks which
+/// physical input a LUT input takes (the LUT mask is permuted to match).
+/// The LUT arcs below are input D's for every input, so a connection pays
+/// for the pin it ends on. Timed by the logical input instead, a LUT input
+/// the router put on A was 288 ps slower in quartus_sta than modelled; on
+/// the 443 LUT inputs of quartus_sta's 300 worst paths of five designs,
+/// 53 ps a LUT on average.
+pub fn lut_pin_extra(pin: usize) -> Ps {
+    LUT_PIN[pin] - LUT_PIN[3]
+}
+
+/// What a connection into a LUT's data input pays for its pin when the
+/// pin isn't known yet (placement): the mean over the four.
+pub const LUT_PIN_EXPECTED: Ps = (438.0 + 420.0 + 275.0 - 3.0 * 150.0) / 4.0;
+
+/// quartus_sta's interconnect element into a LUT's input (`|datab`, after
+/// the LAB line or local line): the mean over 9,000 of them on the 300
+/// worst paths of five designs, 27 ps (datac) to 39 ps (dataa) by input.
+/// Not in the DMF arcs; without it the routed estimate ran 2 to 3% above
+/// quartus_sta once LUT inputs were timed by their pins.
+const LUT_INPUT_IC: Ps = 32.0;
+
+/// LUT input to output for the LE at index `le` of its LAB, less the
+/// physical input's [`lut_pin_extra`], plus [`LUT_INPUT_IC`]. The carry out is slower where the
+/// chain crosses the LAB's half-way buffer (LE 7 to 8, `CHAIN_THROUGH_LCB`)
+/// and where it leaves the LAB (LE 15, `CHAIN_ACROSS_LAB`). Carry LEs
+/// keep their inputs where they are (A and B).
 fn lut_arc(input: &str, output: &str, le: u8) -> Option<Ps> {
     let crossing = le == 7 || le == 15;
     Some(match (input, output) {
-        ("DATAA", "COMBOUT") => 438.0,
-        ("DATAB", "COMBOUT") => 420.0,
-        ("DATAC", "COMBOUT") => 275.0,
-        ("DATAD", "COMBOUT") => 150.0,
+        ("DATAA" | "DATAB" | "DATAC" | "DATAD", "COMBOUT") => LUT_PIN[3] + LUT_INPUT_IC,
         ("CIN", "COMBOUT") => 410.0,
         // CHAIN_BASE; the crossing variants of DATAA aren't identified.
-        ("DATAA", "COUT") => 414.0,
-        ("DATAB", "COUT") if crossing => 485.0,
-        ("DATAB", "COUT") => 393.0,
+        ("DATAA", "COUT") => 414.0 - lut_pin_extra(0) + LUT_INPUT_IC,
+        ("DATAB", "COUT") if crossing => 485.0 - lut_pin_extra(1) + LUT_INPUT_IC,
+        ("DATAB", "COUT") => 393.0 - lut_pin_extra(1) + LUT_INPUT_IC,
         // The stored cin->cout less its inverted-carry correction:
         // 230 - 71 through the LCB, 219 - 73 across LABs, 129 - 58 otherwise.
         ("CIN", "COUT") if le == 7 => 159.0,
@@ -81,9 +106,10 @@ const TSU: Ps = -36.0;
 /// What a register input needs before the capturing clock edge.
 fn register_setup(port: &str) -> Option<Ps> {
     Some(match port {
-        // DMF `I:DATAIN B:FF` 84, `I:SDATA B:FF` 366.
+        // DMF `I:DATAIN B:FF` 84, `I:SDATA B:FF` 366. SDATA is the LE's
+        // input C, whose node carries part of that (`lut_pin_extra`).
         "DATAIN" => 84.0 + TSU,
-        "SDATA" => 366.0 + TSU,
+        "SDATA" => 366.0 - lut_pin_extra(2) + TSU,
         // LAB-wide enable and sync clear reach the register through the LAB
         // control lines; their own DMF arcs aren't identified yet, so they
         // count like SDATA. Unknown, not measured.
@@ -596,7 +622,8 @@ mod tests {
             delay: 100.0,
         };
         let t = g.analyse(&[arc(aq, xa), arc(xo, xc), arc(xo, bd)]);
-        assert_eq!(t.critical, TCO + 100.0 + 438.0 + 100.0 + 84.0 + TSU);
+        // The LUT arc is input D's; the routing carries the rest of A's.
+        assert_eq!(t.critical, TCO + 100.0 + 150.0 + LUT_INPUT_IC + 100.0 + 84.0 + TSU);
     }
 
     /// reg a -> LUT x (DATAA) -> reg b, and reg a -> reg c directly.
@@ -632,12 +659,31 @@ mod tests {
             },
         ];
         let t = g.analyse(&nets);
-        assert_eq!(t.critical, TCO + 600.0 + 438.0 + 84.0 + TSU);
+        let lut = 150.0 + LUT_INPUT_IC;
+        assert_eq!(t.critical, TCO + 600.0 + lut + 84.0 + TSU);
         assert_eq!(t.criticality(&nets[0]), 1.0);
-        // The short path has (600 + 438) - 300 of slack.
-        let slack = 600.0 + 438.0 - 300.0;
+        // The short path has (600 + the LUT) - 300 of slack.
+        let slack = 600.0 + lut - 300.0;
         assert!((t.criticality(&nets[2]) - (1.0 - slack / t.critical)).abs() < 1e-4);
         assert_eq!(t.path.first().map(|p| p.0), Some(aq));
         assert_eq!(t.path.last().map(|p| p.0), Some(bd));
+    }
+
+    /// Through each physical input a LUT takes its DMF delay: input D's
+    /// arc plus what the input's routing node adds.
+    #[test]
+    fn a_lut_input_costs_its_physical_pin() {
+        for (pin, dmf) in [438.0, 420.0, 275.0, 150.0].into_iter().enumerate() {
+            assert_eq!(
+                lut_arc("DATAA", "COMBOUT", 0).unwrap() + lut_pin_extra(pin),
+                dmf + LUT_INPUT_IC
+            );
+        }
+        // Carry LEs keep their pins: A and B's carry arcs with the pin.
+        let a = lut_arc("DATAA", "COUT", 0).unwrap() + lut_pin_extra(0);
+        assert_eq!(a, 414.0 + LUT_INPUT_IC);
+        let b = lut_arc("DATAB", "COUT", 3).unwrap() + lut_pin_extra(1);
+        assert_eq!(b, 393.0 + LUT_INPUT_IC);
+        assert_eq!(register_setup("SDATA").unwrap() + lut_pin_extra(2), 366.0 + TSU);
     }
 }
