@@ -691,12 +691,14 @@ Verilog (`crates/chipsmith-xc7/tests/synth.rs`, which prints both):
 |---|---|---|---|---|
 | zybo-blinky | 1 / 1 | 27 / 27 | 7 / 7 | |
 | zybo-jtag-counter | 66 / 65 | 128 / 128 | 8 / 8 | |
-| zybo-picorv32 | 611 / 694 | 335 / 375 | 57 / 57 | 11 / 12 |
+| zybo-picorv32 | 611 / 694 | 335 / 375 | 58 / 57 | 11 / 12 |
 | zybo-sha256 | 2,539 / 2,516 | 1,907 / 1,910 | 176 / 110 | |
 
 synth_xilinx's LUT counts include its INV cells. picorv32's 40 fewer
 registers are ones chipsmith's sequential optimisation finds constant or
-equal (proven, below). sha256's extra CARRY4s are its multi-operand sums:
+equal (proven, below). picorv32's extra CARRY4 is a chain lengthened by a bit whose sum and
+carry out are both read (one slice pin carries either). sha256's extra
+CARRY4s are its multi-operand sums:
 chipsmith's `alumacc` chains them adder by adder where yosys' makes
 some of them LUT compressors.
 
