@@ -334,6 +334,27 @@ fn cross_port_ok(r: &RdPort, w: usize) -> bool {
     r.collision_x[w] || !r.transparent[w]
 }
 
+/// A read on the other block port than write `w` that has to see the
+/// write's new data can, with logic: where the write hits the read's word
+/// on its edge, a register of the written data stands in for what the
+/// block read (Quartus' "pass-through logic"). Same clock, same word.
+fn cross_port_emulated(p: &Ports, r: usize, w: usize) -> bool {
+    let (r, w) = (&p.rd[r], &p.wr[w]);
+    r.clk == w.clk && r.factor == w.factor && r.addr.len() == w.addr.len()
+}
+
+/// The reads whose transparency to the other block port's write is
+/// [`cross_port_emulated`], with that write.
+fn emulated_reads(p: &Ports, sides: &[Use; 2]) -> Vec<(usize, usize)> {
+    (0..2)
+        .filter_map(|s| {
+            let r = sides[s].rd?;
+            let w = sides[1 - s].wr?;
+            (!cross_port_ok(&p.rd[r], w)).then_some((r, w))
+        })
+        .collect()
+}
+
 fn partial(w: &WrPort) -> bool {
     w.en.iter().any(|&e| e != w.en[0])
 }
@@ -457,7 +478,7 @@ fn roles(p: &Ports) -> Vec<(Kind, [Use; 2])> {
                     ],
                 ));
             }
-            if cross_port_ok(r, 0) && r.clk == p.wr[0].clk {
+            if (cross_port_ok(r, 0) || cross_port_emulated(p, 0, 0)) && r.clk == p.wr[0].clk {
                 out.push((
                     Kind::SimpleDual,
                     [
@@ -766,9 +787,45 @@ fn layout(mem: &Mem, p: &Ports) -> Option<Layout> {
     best
 }
 
-/// Whether the blocks take this memory.
+/// Whether the blocks take this memory, as it is or one copy per read
+/// port ([`per_read_port`]).
 pub fn mappable(mem: &Mem) -> bool {
+    fits(mem) || per_read_port(mem).is_some()
+}
+
+fn fits(mem: &Mem) -> bool {
     ports(mem).is_some_and(|p| layout(mem, &p).is_some())
+}
+
+/// A memory with more read ports than its blocks have, as one copy per
+/// read port, each with every write: how Quartus builds a register file
+/// read at two addresses (two blocks, each written alike). None if the
+/// memory fits as it is, or a copy doesn't.
+fn per_read_port(mem: &Mem) -> Option<Vec<Mem>> {
+    if fits(mem) || mem.wr.is_empty() {
+        return None;
+    }
+    // A wide read port is its first entry and the continuations after it.
+    let mut groups: Vec<Vec<MemRd>> = Vec::new();
+    for r in &mem.rd {
+        match groups.last_mut() {
+            Some(g) if r.wide_continuation => g.push(r.clone()),
+            _ => groups.push(vec![r.clone()]),
+        }
+    }
+    if groups.len() < 2 {
+        return None;
+    }
+    let copies: Vec<Mem> = groups
+        .into_iter()
+        .enumerate()
+        .map(|(k, rd)| Mem {
+            memid: format!("{}$rd{k}", mem.memid),
+            rd,
+            ..mem.clone()
+        })
+        .collect();
+    copies.iter().all(fits).then_some(copies)
 }
 
 /// A memory's declaration asks for logic (Quartus' `ramstyle`, yosys'
@@ -1110,10 +1167,11 @@ struct Realized {
 }
 
 fn realize(m: &Module, ctx: &Context, mem: &Mem, p: &Ports, l: &Layout) -> Realized {
-    let bypassed: Vec<usize> = match collision(mem, p, &l.sides) {
+    let mut bypassed: Vec<usize> = match collision(mem, p, &l.sides) {
         Ok(Some(c)) => bypassed_reads(p, &l.sides, c),
         _ => Vec::new(),
     };
+    bypassed.extend(emulated_reads(p, &l.sides).into_iter().map(|(r, _)| r));
     let side_domain = |s: usize, hw: bool| -> Option<Domain> {
         let u = l.sides[s];
         let clk = match (u.wr, u.rd) {
@@ -1452,6 +1510,19 @@ fn build(
         }
     }
 
+    for (r, wi) in emulated_reads(p, &l.sides) {
+        let (rd, wr) = (&p.rd[r], &p.wr[wi]);
+        let eq: Vec<SigBit> = rd
+            .addr
+            .iter()
+            .zip(&wr.addr)
+            .map(|(&a, &b)| g.xnor(a, b))
+            .collect();
+        let same = g.reduce(chipsmith_netlist::GateOp::And, &eq, SigBit::ONE);
+        let hit: SigSpec = wr_en[wi].iter().map(|&e| g.and(e, same)).collect();
+        fixes.insert(r, (hit, wr_data[wi].clone()));
+    }
+
     let mut blocks = Vec::new();
     let mut douts: Vec<Vec<SigSpec>> = Vec::new();
     let hits: Vec<Vec<SigBit>> = (0..2)
@@ -1705,6 +1776,27 @@ fn build(
 
 /// Maps every memory the blocks take; returns how many blocks.
 pub fn map(m: &mut Module) -> usize {
+    // Copies first, so each is a memory of its own below.
+    let mut i = 0;
+    while i < m.cells.len() {
+        let copies = match &m.cells[i].kind {
+            CellKind::Mem(mem) if !wants_logic(&m.cells[i].attributes) => per_read_port(mem),
+            _ => None,
+        };
+        let Some(copies) = copies else {
+            i += 1;
+            continue;
+        };
+        let cell = m.cells.remove(i);
+        let n = copies.len();
+        for (k, mem) in copies.into_iter().enumerate() {
+            let mut c = cell.clone();
+            c.name = format!("{}$rd{k}", cell.name);
+            c.kind = CellKind::Mem(mem);
+            m.cells.insert(i + k, c);
+        }
+        i += n;
+    }
     let ctx = Context::new(m);
     let mut work = Vec::new();
     for (i, c) in m.cells.iter().enumerate() {

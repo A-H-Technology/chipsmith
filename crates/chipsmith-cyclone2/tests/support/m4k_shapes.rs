@@ -273,5 +273,44 @@ endmodule",
 endmodule",
             1,
         ),
+        // A register file read at two addresses (femtorv32's): one block
+        // per read, each written alike; the reads' registers sit behind
+        // nested enables, one of them an active-low hold. This one and the
+        // next are co-simulated (`m4k_cosim_register_files`), not proven:
+        // the proof's block model takes each memory word in one block.
+        (
+            "two_reads_x32",
+            "module top(input clk, input rst_n, input go, input busy, input we, input [4:0] wa,
+           input [4:0] ra1, input [4:0] ra2, input [31:0] d, output reg [31:0] q1, output reg [31:0] q2,
+           output reg s);
+  reg [31:0] m [0:31];
+  always @(posedge clk) if (we && wa != 0) m[wa] <= d;
+  always @(posedge clk)
+    if (!rst_n) s <= 0;
+    else if (go) begin
+      s <= ~s;
+      if (!busy) begin q1 <= m[ra1]; q2 <= m[ra2]; end
+    end
+endmodule",
+            2,
+        ),
+        // picorv32's: reads through address registers with an enable, so
+        // the blocks read `en ? ra : a` and see a write on the same edge
+        // through LE logic (Quartus' pass-through logic).
+        (
+            "two_reads_new_data_x32",
+            "module top(input clk, input en, input we, input [4:0] wa, input [4:0] ra1, input [4:0] ra2,
+           input [31:0] d, output [31:0] q1, output [31:0] q2);
+  reg [31:0] m [0:31];
+  reg [4:0] a1, a2;
+  always @(posedge clk) begin
+    if (we) m[wa] <= d;
+    if (en) begin a1 <= ra1; a2 <= ra2; end
+  end
+  assign q1 = m[a1];
+  assign q2 = m[a2];
+endmodule",
+            2,
+        ),
     ]
 }

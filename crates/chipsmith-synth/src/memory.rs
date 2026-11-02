@@ -7,9 +7,9 @@ use std::collections::HashMap;
 
 use anyhow::{bail, ensure, Context, Result};
 use chipsmith_netlist::{
-    attr, Binary, BinaryOp, Bmux, Cell, CellKind, Const, Ctrl, DffControl, Ff, FfKind, Generic,
-    Mem, MemRd, MemRdSync, MemWr, Module, Mux, Net, Operand, ParamValue, Polarity, SigBit, SigSpec,
-    State, SyncEnable, Wire, Word,
+    attr, Binary, BinaryOp, Bmux, Cell, CellKind, Const, Ctrl, DffControl, Ff, FfKind, Gate,
+    GateOp, Generic, Mem, MemRd, MemRdSync, MemWr, Module, Mux, Net, Operand, ParamValue, Polarity,
+    SigBit, SigSpec, State, SyncEnable, Wire, Word,
 };
 
 use crate::rewrite::{inits, Namer, Subst};
@@ -289,7 +289,9 @@ fn readers(m: &Module) -> Vec<Vec<(usize, Option<usize>)>> {
 #[derive(Clone, PartialEq)]
 struct Clocking {
     clk: Ctrl,
-    en: Option<Ctrl>,
+    /// Enables that must all be active, innermost first: proc nests one
+    /// multiplexer per `if` around an assignment.
+    en: Vec<Ctrl>,
     srst: Option<(Ctrl, bool)>,
 }
 
@@ -300,14 +302,14 @@ fn clocking(ff: &Ff<Word>) -> Option<Clocking> {
     match control {
         DffControl::Plain { en } => Some(Clocking {
             clk: *clk,
-            en: *en,
+            en: en.iter().copied().collect(),
             srst: None,
         }),
         DffControl::Sync { srst, en, .. } => Some(Clocking {
             clk: *clk,
             en: match en {
-                SyncEnable::Always => None,
-                SyncEnable::EnableOverReset(c) => Some(*c),
+                SyncEnable::Always => Vec::new(),
+                SyncEnable::EnableOverReset(c) => vec![*c],
                 SyncEnable::ResetOverEnable(_) => return None,
             },
             srst: Some((*srst, matches!(en, SyncEnable::EnableOverReset(_)))),
@@ -348,7 +350,7 @@ pub fn merge_registers(m: &mut Module, accept: impl Fn(&Mem) -> bool) -> Result<
     let init = inits(m);
     let readers = readers(m);
     let mut ff_drop: HashMap<usize, Vec<bool>> = HashMap::new();
-    let mut updates: Vec<(usize, usize, MemRd)> = Vec::new();
+    let mut updates: Vec<(usize, usize, MemRd, PortLogic)> = Vec::new();
     // Driver of each net among registers' Q: (cell, bit).
     let mut q_of = vec![None; m.net_count()];
     for (i, c) in m.cells.iter().enumerate() {
@@ -371,23 +373,55 @@ pub fn merge_registers(m: &mut Module, accept: impl Fn(&Mem) -> bool) -> Result<
             if rd.sync.is_some() {
                 continue;
             }
-            if let Some(port) = output_register(m, &readers, &init, mem, rd, &mut drops) {
-                ports.push((pi, port));
+            if let Some((port, enables)) = output_register(m, &readers, &init, mem, rd, &mut drops)
+            {
+                ports.push((pi, port, (enables, Vec::new())));
                 continue;
             }
-            if let Some(port) = address_register(m, &q_of, &init, mem, rd) {
-                ports.push((pi, port));
+            if let Some((port, holds)) = address_register(m, &q_of, &init, mem, rd) {
+                ports.push((pi, port, (Vec::new(), holds)));
             }
         }
-        for (pi, port) in &ports {
+        for (pi, port, _) in &ports {
             candidate.rd[*pi] = port.clone();
         }
         if !ports.is_empty() && accept(&candidate) {
-            updates.extend(ports.into_iter().map(|(pi, p)| (ci, pi, p)));
+            updates.extend(ports.into_iter().map(|(pi, p, l)| (ci, pi, p, l)));
             ff_drop = drops;
         }
     }
-    for (ci, pi, port) in updates {
+    let mut namer = Namer::new(m, "memen");
+    for (ci, pi, mut port, (enables, holds)) in updates {
+        for h in holds {
+            let y = SigBit::Net(m.new_net());
+            let (a, b) = match h.en.polarity {
+                Polarity::Pos => (h.q, h.d),
+                Polarity::Neg => (h.d, h.q),
+            };
+            let g = Gate::new(GateOp::Mux, &[a, b, h.en.sig], y).expect("a mux's inputs");
+            m.add_cell(namer.fresh(), CellKind::Gate(g));
+            port.addr[h.bit] = y;
+        }
+        if let Some(sync) = &mut port.sync {
+            let mut en: Option<SigBit> = None;
+            for e in enables {
+                let mut gate = |op: GateOp, inputs: &[SigBit]| {
+                    let y = SigBit::Net(m.new_net());
+                    let g = Gate::new(op, inputs, y).expect("the gate's inputs");
+                    m.add_cell(namer.fresh(), CellKind::Gate(g));
+                    y
+                };
+                let term = match e.polarity {
+                    Polarity::Pos => e.sig,
+                    Polarity::Neg => gate(GateOp::Not, &[e.sig]),
+                };
+                en = Some(match en {
+                    None => term,
+                    Some(a) => gate(GateOp::And, &[a, term]),
+                });
+            }
+            sync.en = en.unwrap_or(SigBit::ONE);
+        }
         if let CellKind::Mem(mem) = &mut m.cells[ci].kind {
             mem.rd[pi] = port;
         }
@@ -417,6 +451,10 @@ type ReadRegister = (
 /// synchronous reset (`rst ? value : data`), which `opt_dff` would only
 /// later fold into the register. Returns the register, its bit, its
 /// clocking with those folded in, and the reset value.
+/// Multiplexers [`through_muxes`] follows from a read to its register:
+/// enough for a few nested `if`s, a reset and a bypass.
+const MAX_LAYERS: usize = 6;
+
 fn through_muxes(
     m: &Module,
     readers: &[Vec<(usize, Option<usize>)>],
@@ -425,7 +463,9 @@ fn through_muxes(
     enum Layer {
         En(Ctrl, SigBit),
         Srst(Ctrl, State),
-        /// `we ? wdata : data`: a write's new data, read through.
+        /// `we ? wdata : data`: a write's new data, read through; or,
+        /// with the register's own output for `wdata`, an active-low
+        /// enable (`hold ? q : data`).
         Bypass(SigBit, SigBit),
     }
     let mut layers = Vec::new();
@@ -441,8 +481,19 @@ fn through_muxes(
                     return Some((cell, bit, c, None, None));
                 }
                 // proc's registers are plain; the muxes are all there is.
-                if c.en.is_some() || c.srst.is_some() {
+                if !c.en.is_empty() || c.srst.is_some() {
                     return None;
+                }
+                for l in &mut layers {
+                    if let Layer::Bypass(hold, q) = *l {
+                        if q == ff.q[bit] {
+                            let neg = Ctrl {
+                                sig: hold,
+                                polarity: Polarity::Neg,
+                            };
+                            *l = Layer::En(neg, q);
+                        }
+                    }
                 }
                 let mut value = None;
                 let mut bypass = None;
@@ -458,10 +509,10 @@ fn through_muxes(
                             bypass = Some((we, d));
                         }
                         Layer::En(e, hold) => {
-                            if hold != ff.q[bit] || c.en.is_some() {
+                            if hold != ff.q[bit] {
                                 return None;
                             }
-                            c.en = Some(e);
+                            c.en.push(e);
                         }
                         Layer::Srst(r, v) => {
                             if c.srst.is_some() {
@@ -472,26 +523,47 @@ fn through_muxes(
                         }
                     }
                 }
-                // A reset inside the enable (`en ? (rst ? v : data) : q`)
-                // only acts on enabled edges.
-                if let ([Layer::Srst(..), Layer::En(..)], Some((r, _))) = (&layers[..], c.srst) {
-                    c.srst = Some((r, true));
+                // A reset inside the enables (`en ? (rst ? v : data) : q`)
+                // only acts on enabled edges; one outside them
+                // (`rst ? v : (en ? data : q)`) on every edge. A reset
+                // between two enables is neither.
+                if let Some((r, _)) = c.srst {
+                    let around: Vec<&Layer> = layers
+                        .iter()
+                        .filter(|l| !matches!(l, Layer::Bypass(..)))
+                        .collect();
+                    let at = around.iter().position(|l| matches!(l, Layer::Srst(..)));
+                    match at {
+                        Some(0) if around.len() > 1 => c.srst = Some((r, true)),
+                        Some(i) if i + 1 == around.len() => {}
+                        _ => return None,
+                    }
                 }
                 return Some((cell, bit, c, value, bypass));
             }
-            [(cell, None)] if layers.len() < 3 => {
+            [(cell, None)] if layers.len() < MAX_LAYERS => {
                 // usize::MAX: a module port reads it.
                 let Some(CellKind::Mux(mx)) = m.cells.get(cell).map(|c| &c.kind) else {
                     return None;
                 };
-                let s = Ctrl::pos(mx.s);
                 let me = SigBit::Net(cur);
                 let j = (0..mx.y.len()).find(|&j| mx.a[j] == me || mx.b[j] == me)?;
+                // A constant select (an `if` on a tied-off input) passes
+                // the data on or drops it.
+                if let SigBit::Const(v) = mx.s {
+                    let taken = if v == State::One { mx.b[j] } else { mx.a[j] };
+                    if taken != me {
+                        return None;
+                    }
+                    cur = mx.y[j].net()?;
+                    continue;
+                }
+                let s = Ctrl::pos(mx.s);
                 if mx.b[j] == me && mx.a[j] != me {
                     layers.push(Layer::En(s, mx.a[j]));
                 } else if let (true, SigBit::Const(v)) = (mx.a[j] == me, mx.b[j]) {
                     layers.push(Layer::Srst(s, v));
-                } else if mx.a[j] == me && layers.is_empty() {
+                } else if mx.a[j] == me {
                     layers.push(Layer::Bypass(mx.s, mx.b[j]));
                 } else {
                     return None;
@@ -510,7 +582,7 @@ fn output_register(
     mem: &Mem,
     rd: &MemRd,
     ff_drop: &mut HashMap<usize, Vec<bool>>,
-) -> Option<MemRd> {
+) -> Option<(MemRd, Vec<Ctrl>)> {
     let mut found: Vec<(usize, usize, Option<State>)> = Vec::new();
     let mut clk: Option<Clocking> = None;
     // Bypassed write ports: per write port, whether every data bit reads
@@ -542,9 +614,7 @@ fn output_register(
     }
     let clk = clk?;
     // The enable and reset must be active high for the port's signals.
-    if clk.en.is_some_and(|e| e.polarity == Polarity::Neg)
-        || clk.srst.is_some_and(|(r, _)| r.polarity == Polarity::Neg)
-    {
+    if clk.srst.is_some_and(|(r, _)| r.polarity == Polarity::Neg) {
         return None;
     }
     let mut data = Vec::new();
@@ -572,13 +642,16 @@ fn output_register(
             .entry(cell)
             .or_insert_with(|| vec![false; ff.width()])[bit] = true;
     }
-    Some(MemRd {
+    let enables = clk.en.clone();
+    let port = MemRd {
         addr: rd.addr.clone(),
         data,
         wide_continuation: false,
         sync: Some(MemRdSync {
             clk: clk.clk,
-            en: clk.en.map_or(SigBit::ONE, |e| e.sig),
+            // Anything but one active-high enable: the logic
+            // `merge_registers` makes.
+            en: enables.first().map_or(SigBit::ONE, |e| e.sig),
             arst: SigBit::ZERO,
             srst: clk.srst.map_or(SigBit::ZERO, |(r, _)| r.sig),
             ce_over_srst: clk.srst.is_some_and(|(_, ce)| ce),
@@ -588,7 +661,8 @@ fn output_register(
             transparent: bypassed.iter().map(|x| *x == Some(true)).collect(),
             collision_x: vec![false; mem.wr.len()],
         }),
-    })
+    };
+    Some((port, enables))
 }
 
 fn address_register(
@@ -597,7 +671,7 @@ fn address_register(
     init: &rustc_hash::FxHashMap<Net, State>,
     mem: &Mem,
     rd: &MemRd,
-) -> Option<MemRd> {
+) -> Option<(MemRd, Vec<AddrHold>)> {
     // A power-up address would be lost (yosys' `memory_dff` refuses too).
     if rd
         .addr
@@ -608,6 +682,7 @@ fn address_register(
     }
     let mut clk: Option<Ctrl> = None;
     let mut addr = Vec::new();
+    let mut holds = Vec::new();
     for b in &rd.addr {
         let n = match b {
             SigBit::Net(n) => *n,
@@ -624,7 +699,7 @@ fn address_register(
         let FfKind::Dff {
             clk: c,
             d,
-            control: DffControl::Plain { en: None },
+            control: DffControl::Plain { en },
         } = &ff.kind
         else {
             return None;
@@ -633,6 +708,16 @@ fn address_register(
             return None;
         }
         clk = Some(*c);
+        // An enabled register's next address is `en ? d : q`: the block
+        // reads it on every edge, as Quartus does.
+        if let Some(en) = *en {
+            holds.push(AddrHold {
+                bit: addr.len(),
+                en,
+                d: d[bit],
+                q: *b,
+            });
+        }
         addr.push(d[bit]);
     }
     let clk = clk?;
@@ -642,7 +727,7 @@ fn address_register(
         return None;
     }
     let x = Const::filled(State::X, mem.width);
-    Some(MemRd {
+    let port = MemRd {
         addr,
         data: rd.data.clone(),
         wide_continuation: false,
@@ -658,7 +743,21 @@ fn address_register(
             transparent: vec![true; mem.wr.len()],
             collision_x: vec![false; mem.wr.len()],
         }),
-    })
+    };
+    Some((port, holds))
+}
+
+/// The logic a merged read port needs in front of it: an output
+/// register's enables to AND together, an address register's holds.
+type PortLogic = (Vec<Ctrl>, Vec<AddrHold>);
+
+/// An address bit from an enabled register, which needs `en ? d : q` in
+/// front of the block (`merge_registers` makes it).
+struct AddrHold {
+    bit: usize,
+    en: Ctrl,
+    d: SigBit,
+    q: SigBit,
 }
 
 /// `memory_map`: every memory left becomes a register per word (named

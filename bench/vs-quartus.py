@@ -312,13 +312,15 @@ def summary(path, kinds="fresh"):
         return spread([r[k] for r in rs]) + (f" ({len(rs)})" if len(rs) != 3 else "")
 
     les = lambda d, t: next((r["les"] for r in of(d, t)), "-")
+    # Speed-ups of the chipsmith tools that ran.
+    fast = [t for t in ("cs", "gpu-cuda") if t in tools]
     for k, what in (("wall", "wall s"), ("cpu", "CPU s")):
         print(f"| design | LEs Quartus / chipsmith | " + " | ".join(f"{t} {what}" for t in tools)
-              + " | speed-up cs | speed-up gpu-cuda |")
-        print("|---" * (len(tools) + 4) + "|")
+              + "".join(f" | speed-up {t}" for t in fast) + " |")
+        print("|---" * (len(tools) + 2 + len(fast)) + "|")
         for d in designs:
             ratios = []
-            for t in ("cs", "gpu-cuda"):
+            for t in fast:
                 q, c = med(d, "q", k), med(d, t, k)
                 ratios.append(f"{q / c:.1f}x" if q and c else "-")
             print(f"| {d} | {les(d, 'q')} / {les(d, 'cs')} | " + " | ".join(cell(d, t, k) for t in tools)

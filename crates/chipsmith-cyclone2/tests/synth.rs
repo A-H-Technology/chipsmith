@@ -1710,6 +1710,38 @@ fn m4k_cosim_collisions() {
     }
 }
 
+/// Register files read at two addresses: one block per read, each written
+/// alike, behind nested enables (femtorv32's) or through enabled address
+/// registers with LE pass-through logic for a write on the same edge
+/// (picorv32's). Co-simulated: the proof's block model takes each memory
+/// word in one block. Fails if they leave the blocks, or read wrong.
+#[test]
+fn m4k_cosim_register_files() {
+    for name in ["two_reads_x32", "two_reads_new_data_x32"] {
+        let (_, v, blocks) = m4k_shapes::shapes()
+            .into_iter()
+            .find(|s| s.0 == name)
+            .expect("a shape");
+        let dir = scratch(&format!("m4k-regfile-{name}-src"));
+        let f = dir.join("top.v");
+        std::fs::write(&f, v).unwrap();
+        let s = synthesize(&format!("m4k-regfile-{name}"), "top", &[f]);
+        assert_eq!(blocks_in(&s.netlist), blocks, "{name}: blocks");
+        let r = support::cosim(
+            &s.dir,
+            &s.rtl,
+            s.stages.refined.as_ref().unwrap(),
+            s.stages.cells.as_ref().unwrap(),
+            COSIM_CYCLES,
+            11,
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+        // Both read words, most cycles, once the file is written.
+        assert!(r.compared > 32 * COSIM_CYCLES as u64, "{name}: {r:?}");
+        eprintln!("m4k register file {name}: {r:?}");
+    }
+}
+
 /// The co-simulation isn't vacuous: two address pins of a block swapped,
 /// or the write enables of two block rows (a wrong block select), and it
 /// fails.
