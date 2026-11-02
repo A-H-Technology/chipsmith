@@ -12,6 +12,11 @@
 # cyclone2-re checkout whose tools/cram is built.
 set -euo pipefail
 re=${CYCLONE2_RE:-$(dirname "$(realpath "$0")")/../../cyclone2-re}
+# A cram older than cyclone2-re's staleness check (b5eb9e7) doesn't know
+# source-digest; a newer one refuses to run when its checkout's sources
+# changed since it was built. Either way: not the export of this checkout.
+"$re/tools/cram/target/release/cram" source-digest > /dev/null \
+    || { echo "$re/tools/cram/target/release/cram: not built from that checkout's tools/cram; rebuild it" >&2; exit 1; }
 status=0
 for project in "$@"; do
     project=$(realpath "$project")
