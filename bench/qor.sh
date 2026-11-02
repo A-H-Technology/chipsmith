@@ -42,6 +42,8 @@ for design in "${designs[@]}"; do
     mkdir -p "$run"
     cp -r "$root/examples/$design" "$run/src"
     rm -rf "$run/src/build"
+    # picorv32x24 takes its core from ../picorv32.
+    sed -i "s|\"\.\./|\"$root/examples/|g" "$run/src/chipsmith.toml"
     name=$(sed -n 's/^name *= *"\(.*\)"/\1/p' "$run/src/chipsmith.toml" | head -1)
     dump=()
     [[ ${CALIB:-0} == 1 ]] && dump=(env "CHIPSMITH_DUMP_CONNECTIONS=$run/connections.txt")
