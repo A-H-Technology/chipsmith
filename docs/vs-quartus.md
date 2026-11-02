@@ -238,6 +238,61 @@ line: the placer counts it now, and sha256 routes in 16 iterations where
 two of three seeds didn't route in 60. At most 8 LEs of a LAB pair a LUT
 with an unrelated register.
 
+## Round 2 (branch `qor2`)
+
+### Routing
+
+**Where the time went.** quartus_sta's worst path of sha256 on `open`
+3ba072c (43.7 MHz) runs through eight carry chains, adder into adder; of
+its 22.9 ns, about 14 are routing between the chains, 1.1 to 2.9 ns a hop,
+where Quartus' own placement has 0.44 to 1.0. The hops took detours: two
+LABs side by side, whose LE output reaches the next LAB's lines directly,
+were joined by five R4/C4 wires (1.8 ns); another net went down nine rows
+and back. With chipsmith's placement and no routing, Quartus routed
+sha256 to 55.5 MHz: the router accounted for more of the gap than the
+placement. picorv32x24 showed it directly: its critical path was 9.58 ns
+at the fourth routing iteration (1,713 nodes still overused) and 12.08 ns
+once legal, its worst connection a register into an adder in the next LAB
+over 19 wires (5.5 ns).
+
+**Why.** Present congestion's cost grew 1.8x an iteration. By the last
+iterations a node another net used cost even a 0.95-critical connection
+more than a detour of ten or twenty wires, so clearing the last few
+overused nodes pushed critical connections the long way round.
+
+**Fix.** The growth is 1.2 now (VPR's default is 1.3), and once the
+routing is legal, the nets of connections at least 0.9 critical are
+rerouted for delay alone, taking other nets' wires at the cost of an R4;
+the nets they displaced reroute around them, and a repair stays only if
+the routing is legal, the net got faster and the critical path no longer.
+Picked on femtorv32, picorv32, mult-selftest, sdram-selftest and sha256,
+three placement seeds each (routed critical paths, geometric mean against
+1.8): the repair alone x0.981; growth 1.5 x0.981, 1.3 x0.966; with the
+repair, 1.4 x0.941, 1.3 x0.955, 1.2 x0.938, 1.1 as good in half again the
+iterations. Capping the present factor at 100 or 1000 instead didn't move
+picorv32x24 (12.08 to 13.10 ns).
+
+quartus_sta's Fmax of chipsmith's placement and routing (seed 0), MHz,
+every RBF byte-identical through Quartus (`bench/qor.sh`), as are the 26
+other DE2 examples (`bench/quartus-validate.sh`):
+
+| design | `open` 3ba072c | `qor2` | Quartus' own |
+|---|---|---|---|
+| sha256 | 43.65 | 51.38 | 64.80 |
+| crc32 | 268.60 | 293.00 | 267.95 |
+| sdram-selftest | 170.30 | 180.41 | 165.84 |
+| picorv32 | 125.28 | 129.85 | 119.82 |
+| mult-selftest | 62.34 | 63.98 | 70.99 |
+| femtorv32 | 70.91 | 70.84 | 80.89 |
+| blinky-verilog | 298.15 | 298.15 | 285.31 |
+
+picorv32x24, chipsmith's estimate (Quartus' assembly of it doesn't
+finish): 12.08 -> 8.84 ns, 82.8 -> 113 MHz, against Quartus' 105.3. Routing
+takes more iterations (sha256 19 against 31 at seed 0, femtorv32 16
+against 10) and the repair 5 to 40 s; the build times are in the rerun
+above. `crates/chipsmith/tests/route_quality.rs` fails if femtorv32's or
+sha256's routed critical path goes back over 14.0 or 19.6 ns.
+
 ## Method
 
 **Machine.** Intel i7-4770K (4 cores, 8 threads, 3.5 GHz), 31 GB, no swap,

@@ -89,6 +89,18 @@ const ASTAR: f32 = 1.5;
 const DELAY_UNIT: Ps = 235.0;
 /// Delay per tile of distance, for the A* estimate: an R4 spans 4 LABs.
 const HOP_DELAY_ESTIMATE: Ps = 60.0;
+/// Present congestion's cost grows by this factor each iteration. It was
+/// 1.8: by the last iterations a node another net used cost even a
+/// 0.95-critical connection more than a detour of ten or twenty wires, so
+/// the iterations that cleared the last overused nodes pushed critical
+/// connections the long way round (picorv32x24: 9.58 ns at iteration 4,
+/// 12.08 ns when legal; a register into the adder in the next LAB over 19
+/// wires, 5.5 ns). Measured with `repair_critical` on femtorv32, picorv32,
+/// mult-selftest, sdram-selftest and sha256, three placement seeds each,
+/// routed critical paths against 1.8 (geometric mean): 1.4 x0.941, 1.3
+/// x0.955, 1.2 x0.938 (sha256 x0.857, picorv32x24 8.84 ns), 1.1 about as
+/// good in half again the iterations. VPR's default is 1.3.
+const PRESENT_GROWTH: f32 = 1.2;
 /// Criticality is sharpened (VPR's `criticality_exp`) and capped below 1
 /// so even the most critical connection still sees congestion.
 const CRIT_EXP: f32 = 4.0;
@@ -96,6 +108,20 @@ const MAX_CRITICALITY: f32 = 0.95;
 /// Nets with a connection this critical are rerouted every iteration, not
 /// only when congested, so they can follow the timing as it changes.
 const REROUTE_CRITICALITY: f32 = 0.8;
+/// Critical-path repair (`Router::repair_critical`): connections at least
+/// this critical are rerouted for delay once the routing is legal.
+const REPAIR_CRITICALITY: f32 = 0.9;
+/// What taking a wire another net uses costs a repair search, in
+/// `DELAY_UNIT`s: the wire's net has to move, so a repair takes one only
+/// to save more than about an R4 wire's delay.
+const REPAIR_STEAL: f32 = 1.0;
+/// Repair rounds (each one timing analysis per attempted net) and nets
+/// tried per round, most critical first; nets wider than `WIDE_NET` aren't.
+const REPAIR_ROUNDS: usize = 8;
+const REPAIR_NETS: usize = 64;
+/// How many times the nets a repair displaced are rerouted, each time
+/// against what the previous reroute left, before the repair is undone.
+const REPAIR_DISPLACED_ROUNDS: usize = 3;
 /// Nets with this many sinks search their sinks `SINK_GROUP` at a time
 /// side by side, when routing in batches.
 const WIDE_NET: usize = 32;
@@ -206,6 +232,11 @@ pub struct Router<'a> {
     /// Nets kept to some wire types (and their own sinks), searched over
     /// the whole chip: per net, which types it may use.
     confined: std::collections::HashMap<u32, Vec<bool>>,
+    /// While repairing the critical path: searches cost delay alone, plus
+    /// this many `DELAY_UNIT`s for a node another net uses.
+    steal: Option<f32>,
+    /// `repair_critical` runs (`CHIPSMITH_ROUTE_REPAIR=0` turns it off).
+    repair: bool,
 }
 
 /// How a PathFinder iteration groups the nets it reroutes. Each group
@@ -336,6 +367,8 @@ impl<'a> Router<'a> {
             timing: &design.timing,
             owner: Vec::new(),
             confined: Default::default(),
+            steal: None,
+            repair: std::env::var("CHIPSMITH_ROUTE_REPAIR").map_or(true, |v| v != "0"),
             tile_distance: std::env::var("CHIPSMITH_TILE_DISTANCE")
                 .ok()
                 .and_then(|v| {
@@ -830,6 +863,11 @@ impl<'a> Router<'a> {
                 eprintln!("route: GPU batches so far {:.2} s, {} launches ({:.2} s uploading, {:.2} s in kernels, {:.2} s reading trees)", g.busy_s, g.batches, g.phase_s[0], g.phase_s[1], g.phase_s[2]);
             }
             if overused.is_empty() {
+                let analysis = if self.repair {
+                    self.repair_critical(&mut scratch, nets, &mut trees, &crit, analysis, trace)?
+                } else {
+                    analysis
+                };
                 self.scratch = scratch;
                 return Ok((trees, iteration, analysis));
             }
@@ -837,10 +875,170 @@ impl<'a> Router<'a> {
                 let n = &mut self.node[n];
                 n.hist += (n.occ - 1) as f32;
             }
-            self.present_factor *= 1.8;
+            self.present_factor *= PRESENT_GROWTH;
         }
         self.scratch = scratch;
         bail!("routing did not converge in {MAX_ITERATIONS} iterations")
+    }
+
+    /// Once the routing is legal: negotiation leaves some critical
+    /// connections on detours, because the wires of their direct route went
+    /// to nets that took them first and that a critical net can't displace
+    /// once present congestion has grown (sha256: a hop between adjacent
+    /// LABs over five wires, 1.8 ns, where its LE buffer reaches the next
+    /// LAB's lines directly; Quartus routing the same placement made it
+    /// 55 MHz to chipsmith's 44). Each net with a connection at least
+    /// `REPAIR_CRITICALITY` critical, most critical first, is rerouted for
+    /// delay alone, taking other nets' wires at `REPAIR_STEAL`; the nets it
+    /// displaced are rerouted around it as in negotiation. The repair stays
+    /// if every node ends up with one net, the net's critical connections
+    /// got faster and the critical path got no longer; otherwise everything
+    /// goes back as it was. Deterministic: one net at a time, in a fixed
+    /// order.
+    fn repair_critical(
+        &mut self,
+        s: &mut Scratch,
+        nets: &[NetReq],
+        trees: &mut [Tree],
+        crit: &[Vec<f32>],
+        mut analysis: timing::Analysis,
+        trace: bool,
+    ) -> Result<timing::Analysis> {
+        let started = std::time::Instant::now();
+        let before = analysis.critical;
+        let (mut tried, mut kept) = (0, 0);
+        for _ in 0..REPAIR_ROUNDS {
+            let arcs = Self::net_arcs(nets, trees);
+            // Per net, its sinks' criticalities, in `net_arcs`' order.
+            let mut k = 0;
+            let mut todo: Vec<(f32, usize, Vec<bool>)> = Vec::new();
+            for (i, net) in nets.iter().enumerate() {
+                let c: Vec<f32> = arcs[k..k + net.sinks.len()].iter().map(|a| analysis.criticality(a)).collect();
+                k += net.sinks.len();
+                let worst = c.iter().copied().fold(0.0, f32::max);
+                if worst >= REPAIR_CRITICALITY && net.sinks.len() <= WIDE_NET {
+                    todo.push((worst, i, c.iter().map(|&c| c >= REPAIR_CRITICALITY).collect()));
+                }
+            }
+            todo.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            let mut improved = false;
+            for (_, i, critical) in todo.into_iter().take(REPAIR_NETS) {
+                tried += 1;
+                if let Some(a) = self.repair_net(s, nets, trees, crit, i, &critical, analysis.critical)? {
+                    analysis = a;
+                    improved = true;
+                    kept += 1;
+                }
+            }
+            if !improved {
+                break;
+            }
+        }
+        if trace {
+            eprintln!(
+                "route: repair: {kept} of {tried} nets rerouted for delay, critical {:.2} -> {:.2} ns in {:.1} s",
+                before / 1000.0,
+                analysis.critical / 1000.0,
+                started.elapsed().as_secs_f64()
+            );
+        }
+        Ok(analysis)
+    }
+
+    /// One net of `repair_critical`: its new analysis if the repair stays.
+    #[allow(clippy::too_many_arguments)]
+    fn repair_net(
+        &mut self,
+        s: &mut Scratch,
+        nets: &[NetReq],
+        trees: &mut [Tree],
+        crit: &[Vec<f32>],
+        i: usize,
+        critical: &[bool],
+        limit: Ps,
+    ) -> Result<Option<timing::Analysis>> {
+        let worst = |t: &Tree| {
+            t.sink_delay
+                .iter()
+                .zip(critical)
+                .filter(|(_, &c)| c)
+                .map(|(&d, _)| d)
+                .fold(0.0, f32::max)
+        };
+        // (net, its tree before), to put back.
+        let mut saved: Vec<(usize, Tree)> = Vec::new();
+        let ones = vec![1.0; nets[i].sinks.len()];
+        self.lift(&trees[i]);
+        self.steal = Some(REPAIR_STEAL);
+        let routed = self.route_net(s, i as u32, &nets[i], &ones, None, None);
+        self.steal = None;
+        let old = std::mem::take(&mut trees[i]);
+        let fresh = match routed {
+            Ok(t) if worst(&t) < worst(&old) - 1.0 => t,
+            _ => {
+                self.place_tree(&old);
+                trees[i] = old;
+                return Ok(None);
+            }
+        };
+        self.place_tree(&fresh);
+        trees[i] = fresh;
+        saved.push((i, old));
+        let mut legal = false;
+        for _ in 0..REPAIR_DISPLACED_ROUNDS {
+            let displaced: Vec<usize> = (0..nets.len())
+                .filter(|&j| j != i && trees[j].nodes.iter().any(|&n| self.node[n as usize].occ > 1))
+                .collect();
+            if displaced.is_empty() {
+                legal = true;
+                break;
+            }
+            for j in displaced {
+                let old = std::mem::take(&mut trees[j]);
+                self.lift(&old);
+                let routed = self.route_net(s, j as u32, &nets[j], &crit[j], Some(&old), None);
+                if !saved.iter().any(|(k, _)| *k == j) {
+                    saved.push((j, old.clone()));
+                }
+                match routed {
+                    Ok(t) => {
+                        self.place_tree(&t);
+                        trees[j] = t;
+                    }
+                    Err(_) => {
+                        // Put it back as it was, overused: the repair is
+                        // undone below.
+                        self.place_tree(&old);
+                        trees[j] = old;
+                    }
+                }
+            }
+        }
+        if legal {
+            let a = self.timing.analyse(&Self::net_arcs(nets, trees));
+            if a.critical <= limit {
+                return Ok(Some(a));
+            }
+        }
+        for (j, old) in saved.into_iter().rev() {
+            self.lift(&trees[j]);
+            self.place_tree(&old);
+            trees[j] = old;
+        }
+        Ok(None)
+    }
+
+    /// Take a tree's nodes off the occupancy, or put them on.
+    fn lift(&mut self, tree: &Tree) {
+        for &n in &tree.nodes {
+            self.node[n as usize].occ -= 1;
+        }
+    }
+
+    fn place_tree(&mut self, tree: &Tree) {
+        for &n in &tree.nodes {
+            self.node[n as usize].occ += 1;
+        }
     }
 
     /// Route `net`, starting from what survives of `keep` (its previous
@@ -1100,9 +1298,10 @@ impl<'a> Router<'a> {
                     continue;
                 }
                 let m = e.dst as usize;
-                let g2 = g
-                    + (1.0 - crit) * self.node_cost(e.dst)
-                    + crit * self.node[m].delay / DELAY_UNIT;
+                let g2 = g + match self.steal {
+                    None => (1.0 - crit) * self.node_cost(e.dst) + crit * self.node[m].delay / DELAY_UNIT,
+                    Some(p) => self.node[m].delay / DELAY_UNIT + if self.node[m].occ > 0 { p } else { 0.0 },
+                };
                 let v = &mut s.visit[m];
                 if v.stamp == gen && v.cost <= g2 {
                     continue;
@@ -1458,3 +1657,4 @@ mod tests {
         }
     }
 }
+
