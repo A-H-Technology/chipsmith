@@ -24,7 +24,9 @@
 //! - a BUFG is a BUFGCTRL with CE0, S0, IGNORE0 on and CE1, S1, IGNORE1
 //!   off, all six pins tied to VCC and the off ones inverted, as openXC7's
 //!   nextpnr ties them;
-//! - every PS7 input is tied to 0.
+//! - every PS7 input is tied to 0;
+//! - a block RAM's pins are its site's ([`bram_pin`]: the lower RAMB18
+//!   site is a FIFO18E1 one, whose pins are named for the FIFO).
 //!
 //! Constants: each sink of the constant nets is reached from the nearest
 //! GND_WIRE or VCC_WIRE (by graph hops), one routed net per source.
@@ -97,8 +99,18 @@ pub(crate) struct PadConf {
     pub output: bool,
 }
 
+/// A used block RAM site: its tile and half (0 lower, 1 upper; a RAMB36E1
+/// both) and configuration.
+#[derive(Debug, Clone)]
+pub(crate) struct BramConf {
+    pub tile: u32,
+    pub half: Option<usize>,
+    pub config: crate::bram::Config,
+}
+
 pub(crate) struct Physical {
     pub nets: Vec<RouteNet>,
+    pub brams: Vec<BramConf>,
     pub slices: BTreeMap<String, SliceConf>,
     pub pads: Vec<PadConf>,
     pub bufgs: Vec<String>,
@@ -123,6 +135,28 @@ pub(crate) fn pin_node(db: &ChipDb, site: &str, pin: &str) -> Result<NodeId> {
     Ok(db.node(s.tile, wire))
 }
 
+/// The site pin of block RAM `site` that its RAMB18E1/RAMB36E1 pin `pin`
+/// is: the pin itself, or on the lower RAMB18 site (a FIFO18E1) the pin
+/// whose wire is named for it (`BRAM_FIFO18_<pin>`).
+pub(crate) fn bram_pin(db: &ChipDb, site: &str, pin: &str) -> Result<String> {
+    let s = db.sites.get(site).with_context(|| format!("no site {site}"))?;
+    let tt = db.tile_type(s.tile);
+    let bel = tt.bels.get(&s.relative).with_context(|| format!("site {site}"))?;
+    if bel.pins.contains_key(pin) && s.ty != "FIFO18E1" {
+        return Ok(pin.to_string());
+    }
+    let suffix = format!("_{pin}");
+    bel.pins
+        .iter()
+        .find(|(_, &w)| {
+            let name = tt.wires.get(w);
+            name.strip_prefix("BRAM_FIFO18").is_some_and(|rest| rest == suffix)
+                || name.strip_prefix("BRAM_RAMB18").is_some_and(|rest| rest == suffix)
+        })
+        .map(|(p, _)| p.clone())
+        .with_context(|| format!("block RAM site {site} has no pin for {pin}"))
+}
+
 /// Where a cell port connects: inside its site, or at a site pin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum End {
@@ -137,11 +171,16 @@ fn expand(init: u64, k: usize) -> u64 {
 }
 
 struct Builder<'a> {
+    db: &'a ChipDb,
     p: &'a Packed,
     sites: &'a [Option<(String, Bel)>],
 }
 
 impl Builder<'_> {
+    fn bram_pin(&self, site: &str, pin: &str) -> Result<String> {
+        bram_pin(self.db, site, pin)
+    }
+
     fn at(&self, c: CellId) -> Result<(&str, Bel)> {
         let (site, bel) = self.sites[c as usize]
             .as_ref()
@@ -222,6 +261,7 @@ impl Builder<'_> {
                 _ => bail!("{}: pin buffer port {port}", cell.name),
             },
             (Kind::Bufg, _) | (Kind::Bscan { .. }, _) => pin(port.to_string()),
+            (Kind::Bram { .. }, _) => pin(self.bram_pin(site, port)?),
             (kind, bel) => bail!("{}: {kind:?} at {bel:?}", cell.name),
         }
     }
@@ -246,6 +286,7 @@ impl Builder<'_> {
             }
             (Kind::Pad { site, .. }, _) => (site.clone(), "I".into(), None),
             (Kind::Bufg, _) | (Kind::Bscan { .. }, _) => (s, port.to_string(), None),
+            (Kind::Bram { .. }, _) => (s.clone(), self.bram_pin(&s, port)?, None),
             (kind, bel) => bail!("{}: output {port} of {kind:?} at {bel:?}", cell.name),
         })
     }
@@ -306,6 +347,7 @@ fn nearest_source(db: &ChipDb, name: &str) -> Vec<NodeId> {
 pub(crate) fn build(db: &ChipDb, p: &Packed, placement: &Placement, family: &std::path::Path) -> Result<Physical> {
     let d = &p.design;
     let b = Builder {
+        db,
         p,
         sites: &placement.sites,
     };
@@ -389,6 +431,7 @@ pub(crate) fn build(db: &ChipDb, p: &Packed, placement: &Placement, family: &std
     let mut bufgs = Vec::new();
     let mut bscans = Vec::new();
     let mut ps7 = false;
+    let mut brams = Vec::new();
     for (c, cell) in d.cells.iter().enumerate() {
         let c = c as CellId;
         match (&cell.kind, &p.conf[c as usize]) {
@@ -464,6 +507,20 @@ pub(crate) fn build(db: &ChipDb, p: &Packed, placement: &Placement, family: &std
             }
             (Kind::Bscan { chain }, Conf::Bscan) => bscans.push((b.at(c)?.0.to_string(), *chain)),
             (Kind::Ps7, Conf::Ps7) => ps7 = true,
+            (Kind::Bram { .. }, Conf::Bram(config)) => {
+                let (site, _) = b.at(c)?;
+                let s = &db.sites[site];
+                let half = match s.ty.as_str() {
+                    "RAMBFIFO36E1" => None,
+                    _ if s.relative.ends_with('0') => Some(0),
+                    _ => Some(1),
+                };
+                brams.push(BramConf {
+                    tile: s.tile,
+                    half,
+                    config: (**config).clone(),
+                });
+            }
             (Kind::Gnd, Conf::Gnd) | (Kind::Vcc, Conf::Vcc) => {}
             (kind, conf) => bail!("{}: {kind:?} configured as {conf:?}", cell.name),
         }
@@ -518,6 +575,7 @@ pub(crate) fn build(db: &ChipDb, p: &Packed, placement: &Placement, family: &std
 
     Ok(Physical {
         nets,
+        brams,
         slices,
         pads,
         bufgs,

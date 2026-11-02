@@ -36,7 +36,9 @@ struct Bits {
     base: u32,
     frames: u32,
     /// In words.
-    offset: u32,
+    /// In words; through an alias, below the tile's own words where the
+    /// aliased type's first bits lie (a single-IOB tile's, -2).
+    offset: i64,
     alias: Option<Alias>,
 }
 
@@ -134,7 +136,7 @@ impl Assembler {
                     buses[i] = Some(Bits {
                         base: hex(&b["baseaddr"])?,
                         frames: b["frames"].as_u64().context("frames")? as u32,
-                        offset: b["offset"].as_u64().context("offset")? as u32,
+                        offset: b["offset"].as_u64().context("offset")? as i64,
                         alias,
                     });
                 }
@@ -217,7 +219,7 @@ impl Assembler {
                 }
                 let shifted = buses.map(|b| {
                     b.map(|b| Bits {
-                        offset: b.offset - b.alias.as_ref().map_or(0, |a| a.start_offset),
+                        offset: b.offset - b.alias.as_ref().map_or(0, |a| a.start_offset as i64),
                         ..b
                     })
                 });
@@ -244,8 +246,8 @@ impl Assembler {
         let updates: Vec<((u32, u32, u32), bool)> = segbits
             .iter()
             .map(|sb| {
-                let word_bit = b.offset * 32 + sb.bit;
-                ((b.base + sb.frame, word_bit / 32, word_bit % 32), sb.set)
+                let word_bit = b.offset * 32 + sb.bit as i64;
+                ((b.base + sb.frame, (word_bit / 32) as u32, (word_bit % 32) as u32), sb.set)
             })
             .collect();
         for (k, set) in updates {
@@ -282,16 +284,21 @@ impl Assembler {
             }
             None => (feature, None),
         };
-        let value: u64 = match value {
-            None => 1,
+        // The value's bits, the lowest first (BRAM contents are 256 wide).
+        let value: Vec<bool> = match value {
+            None => vec![true],
             Some(v) => {
                 let digits = v.split_once("'b").map_or(v, |(_, d)| d);
-                u64::from_str_radix(digits, 2).with_context(|| format!("value in {line:?}"))?
+                ensure!(
+                    !digits.is_empty() && digits.chars().all(|c| c == '0' || c == '1'),
+                    "value in {line:?}"
+                );
+                digits.chars().rev().map(|c| c == '1').collect()
             }
         };
-        for i in 0..64 {
-            if value >> i & 1 == 1 {
-                let address = lo.map_or(0, |lo| lo + i);
+        for (i, &set) in value.iter().enumerate() {
+            if set {
+                let address = lo.map_or(0, |lo| lo + i as u32);
                 let feature = if lo.is_some() { base } else { feature };
                 self.enable(tile, feature, address, line)?;
             }

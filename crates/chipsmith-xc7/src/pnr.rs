@@ -40,6 +40,8 @@ pub struct Report {
     pub registers: usize,
     pub carry4s: usize,
     pub ram32ms: usize,
+    pub ramb18s: usize,
+    pub ramb36s: usize,
     /// Slices with anything in them.
     pub slices: usize,
     pub place: place::Stats,
@@ -104,6 +106,23 @@ pub fn run(
         let clock = match &c.kind {
             Kind::Ff(cs) => cs.clk,
             Kind::Lut { dram: true } => c.net("CLK"),
+            // A block RAM's pins are each on their port's clock.
+            Kind::Bram { sdp, size, .. } => {
+                let pin_clock = |port: usize| -> Option<NetId> {
+                    let base = ["CLKARDCLK", "CLKBWRCLK"][port];
+                    match size {
+                        crate::bram::Size::Full => c.net(&format!("{base}L")),
+                        crate::bram::Size::Half => c.net(base),
+                    }
+                };
+                for (port, _) in &c.pins {
+                    if let Some(clk) = pin_clock(place::bram_port(port, *sdp)) {
+                        let n = timing.graph.node(&c.name, port);
+                        timing.graph.set_clock(n, clk);
+                    }
+                }
+                None
+            }
             _ => None,
         };
         if let Some(clk) = clock {
@@ -191,6 +210,8 @@ pub fn run(
         registers: count(&|k, _| matches!(k, Kind::Ff(_))),
         carry4s: count(&|k, _| *k == Kind::Carry),
         ram32ms: d.drams.len(),
+        ramb18s: count(&|k, _| matches!(k, Kind::Bram { size: crate::bram::Size::Half, .. })),
+        ramb36s: count(&|k, _| matches!(k, Kind::Bram { size: crate::bram::Size::Full, .. })),
         slices: ph.slices.len(),
         place: placement.stats,
         place_seconds,

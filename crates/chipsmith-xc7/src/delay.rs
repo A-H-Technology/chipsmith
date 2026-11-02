@@ -3,6 +3,8 @@
 //! - cell delays from `timings/slicel.sdf` (Vivado's SDF for a SLICEL):
 //!   LUT input to O6, every CARRY4 input to every output it reaches, the
 //!   register's clock-to-Q and its setup (D, CE) and recovery (SR) times;
+//! - block RAM's clock to read data (with and without the output
+//!   register) and its inputs' setup times, from `timings/BRAM_L.sdf`;
 //! - routing estimated from distance, hop by hop: per interconnect hop the
 //!   mean intrinsic delay of the pips driving that wire class in
 //!   `tile_type_INT_L.json` (singles, doubles, quads, hexes), plus the pip
@@ -40,6 +42,71 @@ pub struct Delays {
     pub quad: Ps,
     pub hex: Ps,
     pub imux: Ps,
+    pub bram: BramDelays,
+}
+
+/// A block RAM's: clock to read data from the latch and from the output
+/// register, and setup per input, by the pin's name without its index
+/// (`ADDRARDADDR`, `DIADI`, ...).
+#[derive(Debug, Clone, Default)]
+pub struct BramDelays {
+    pub clock_to_out: Ps,
+    pub clock_to_out_reg: Ps,
+    pub setup_addr: Ps,
+    pub setup_data: Ps,
+    pub setup_we: Ps,
+    pub setup_en: Ps,
+    pub setup_regce: Ps,
+    pub setup_rst: Ps,
+}
+
+impl BramDelays {
+    /// From BRAM_L.sdf: the slowest of each kind over the block's
+    /// variants.
+    fn parse(sdf: &str) -> Result<Self> {
+        let sdf = read_sdf(sdf);
+        let mut b = BramDelays::default();
+        for ((cell, kind, from, to), &d) in &sdf {
+            let slot = match kind.as_str() {
+                "IOPATH" if from.starts_with("CLK") && to.starts_with("DO") => {
+                    if cell.contains("_REG_L_1") || cell.contains("_REG_U_1") {
+                        &mut b.clock_to_out_reg
+                    } else {
+                        &mut b.clock_to_out
+                    }
+                }
+                "SETUP" if from.starts_with("ADDR") => &mut b.setup_addr,
+                "SETUP" if from.starts_with("DI") => &mut b.setup_data,
+                "SETUP" if from.starts_with("WE") => &mut b.setup_we,
+                "SETUP" if from.starts_with("EN") => &mut b.setup_en,
+                "SETUP" if from.starts_with("REGCE") => &mut b.setup_regce,
+                "SETUP" if from.starts_with("RST") => &mut b.setup_rst,
+                _ => continue,
+            };
+            *slot = slot.max(d);
+        }
+        ensure!(b.clock_to_out > 0.0 && b.clock_to_out_reg > 0.0, "BRAM_L.sdf has no clock to DO");
+        Ok(b)
+    }
+
+    /// The setup time of input pin `pin` (site pin name, index and all).
+    pub fn setup(&self, pin: &str) -> Option<Ps> {
+        Some(if pin.starts_with("ADDR") && !pin.contains("TIEHIGH") {
+            self.setup_addr
+        } else if pin.starts_with("DI") {
+            self.setup_data
+        } else if pin.starts_with("WE") {
+            self.setup_we
+        } else if pin.starts_with("EN") {
+            self.setup_en
+        } else if pin.starts_with("REGCE") {
+            self.setup_regce
+        } else if pin.starts_with("RST") {
+            self.setup_rst
+        } else {
+            return None;
+        })
+    }
 }
 
 /// The slow-corner maximum of an SDF triple pair, `(a::b)(c::d)` -> d, or of
@@ -136,7 +203,12 @@ impl Delays {
             &std::fs::read_to_string(&int_path)
                 .with_context(|| format!("reading {}", int_path.display()))?,
         )?;
-        Self::parse(&sdf, &int)
+        let bram_path = family.join("timings").join("BRAM_L.sdf");
+        let bram = std::fs::read_to_string(&bram_path)
+            .with_context(|| format!("reading {}", bram_path.display()))?;
+        let mut d = Self::parse(&sdf, &int)?;
+        d.bram = BramDelays::parse(&bram)?;
+        Ok(d)
     }
 
     fn parse(sdf: &str, int: &Value) -> Result<Self> {
@@ -179,6 +251,7 @@ impl Delays {
             quad: hop("quad")?,
             hex: hop("hex")?,
             imux: hop("imux")?,
+            bram: BramDelays::default(),
         })
     }
 
@@ -245,6 +318,34 @@ mod tests {
             "c": pip("WW4BEG0", "0.140"), "d": pip("NN6BEG0", "0.180"),
             "e": pip("SS6BEG0", "0.200"), "f": pip("IMUX_L1", "0.150"),
         }})
+    }
+
+    #[test]
+    fn block_ram_delays_are_the_slowest_variants() {
+        let sdf = r#"
+        (CELL
+            (CELLTYPE "RAMBFIFO36E1RAM_MODE_L_FIFO18_DOA_REG_L_0_EN_ECC_READ_FALSE")
+            (DELAY (ABSOLUTE
+                (IOPATH CLKARDCLKL DOADOL (0.585::1.098)(1.353::2.454))
+            ))
+        )
+        (CELL
+            (CELLTYPE "RAMBFIFO36E1RAM_MODE_L_FIFO18_DOA_REG_L_1_EN_ECC_READ_FALSE")
+            (DELAY (ABSOLUTE
+                (IOPATH CLKARDCLKL DOADOL (0.204::0.327)(0.468::0.882))
+            ))
+            (TIMINGCHECK
+                (SETUP ADDRAU (posedge CLKARDCLKU) (-0.360::0.566))
+                (SETUP DIADIL (posedge CLKBWRCLKL) (-0.667::0.737))
+            )
+        )
+        "#;
+        let b = BramDelays::parse(sdf).unwrap();
+        assert_eq!(b.clock_to_out, 2454.0);
+        assert_eq!(b.clock_to_out_reg, 882.0);
+        assert_eq!(b.setup("ADDRARDADDR3"), Some(566.0));
+        assert_eq!(b.setup("DIPBDIP1"), Some(737.0));
+        assert_eq!(b.setup("ADDRATIEHIGH0"), None);
     }
 
     #[test]

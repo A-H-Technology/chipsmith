@@ -66,6 +66,113 @@ endmodule
   parameter [0:0] IS_WCLK_INVERTED = 0;
 endmodule
 
+// Block RAM (UG473): two ports A and B, each with its clock, enable, byte
+// write enables, register enable and resets; RAM_MODE "SDP" reads on A and
+// writes on B, the data over both ports' pins.
+(* blackbox *) module RAMB18E1 (output [15:0] DOADO, DOBDO, output [1:0] DOPADOP, DOPBDOP,
+                               input CLKARDCLK, CLKBWRCLK, ENARDEN, ENBWREN, REGCEAREGCE, REGCEB,
+                               input RSTRAMARSTRAM, RSTRAMB, RSTREGARSTREG, RSTREGB,
+                               input [13:0] ADDRARDADDR, ADDRBWRADDR, input [15:0] DIADI, DIBDI,
+                               input [1:0] DIPADIP, DIPBDIP, input [1:0] WEA, input [3:0] WEBWE);
+  parameter integer DOA_REG = 0;
+  parameter integer DOB_REG = 0;
+  parameter [17:0] INIT_A = 0;
+  parameter [17:0] INIT_B = 0;
+  parameter [17:0] SRVAL_A = 0;
+  parameter [17:0] SRVAL_B = 0;
+  parameter RAM_MODE = "TDP";
+  parameter RDADDR_COLLISION_HWCONFIG = "DELAYED_WRITE";
+  parameter integer READ_WIDTH_A = 0;
+  parameter integer READ_WIDTH_B = 0;
+  parameter integer WRITE_WIDTH_A = 0;
+  parameter integer WRITE_WIDTH_B = 0;
+  parameter WRITE_MODE_A = "WRITE_FIRST";
+  parameter WRITE_MODE_B = "WRITE_FIRST";
+  parameter RSTREG_PRIORITY_A = "RSTREG";
+  parameter RSTREG_PRIORITY_B = "RSTREG";
+  parameter SIM_COLLISION_CHECK = "ALL";
+  parameter SIM_DEVICE = "7SERIES";
+  parameter INIT_FILE = "NONE";
+  parameter [0:0] IS_CLKARDCLK_INVERTED = 0;
+  parameter [0:0] IS_CLKBWRCLK_INVERTED = 0;
+  parameter [0:0] IS_ENARDEN_INVERTED = 0;
+  parameter [0:0] IS_ENBWREN_INVERTED = 0;
+  parameter [0:0] IS_RSTRAMARSTRAM_INVERTED = 0;
+  parameter [0:0] IS_RSTRAMB_INVERTED = 0;
+  parameter [0:0] IS_RSTREGARSTREG_INVERTED = 0;
+  parameter [0:0] IS_RSTREGB_INVERTED = 0;
+  parameter [255:0] INIT_00 = 0, INIT_01 = 0, INIT_02 = 0, INIT_03 = 0, INIT_04 = 0, INIT_05 = 0, INIT_06 = 0, INIT_07 = 0;
+  parameter [255:0] INIT_08 = 0, INIT_09 = 0, INIT_0A = 0, INIT_0B = 0, INIT_0C = 0, INIT_0D = 0, INIT_0E = 0, INIT_0F = 0;
+  parameter [255:0] INIT_10 = 0, INIT_11 = 0, INIT_12 = 0, INIT_13 = 0, INIT_14 = 0, INIT_15 = 0, INIT_16 = 0, INIT_17 = 0;
+  parameter [255:0] INIT_18 = 0, INIT_19 = 0, INIT_1A = 0, INIT_1B = 0, INIT_1C = 0, INIT_1D = 0, INIT_1E = 0, INIT_1F = 0;
+  parameter [255:0] INIT_20 = 0, INIT_21 = 0, INIT_22 = 0, INIT_23 = 0, INIT_24 = 0, INIT_25 = 0, INIT_26 = 0, INIT_27 = 0;
+  parameter [255:0] INIT_28 = 0, INIT_29 = 0, INIT_2A = 0, INIT_2B = 0, INIT_2C = 0, INIT_2D = 0, INIT_2E = 0, INIT_2F = 0;
+  parameter [255:0] INIT_30 = 0, INIT_31 = 0, INIT_32 = 0, INIT_33 = 0, INIT_34 = 0, INIT_35 = 0, INIT_36 = 0, INIT_37 = 0;
+  parameter [255:0] INIT_38 = 0, INIT_39 = 0, INIT_3A = 0, INIT_3B = 0, INIT_3C = 0, INIT_3D = 0, INIT_3E = 0, INIT_3F = 0;
+  parameter [255:0] INITP_00 = 0, INITP_01 = 0, INITP_02 = 0, INITP_03 = 0, INITP_04 = 0, INITP_05 = 0, INITP_06 = 0, INITP_07 = 0;
+endmodule
+
+// Block RAM (UG473): two ports A and B, each with its clock, enable, byte
+// write enables, register enable and resets; RAM_MODE "SDP" reads on A and
+// writes on B, the data over both ports' pins.
+(* blackbox *) module RAMB36E1 (output [31:0] DOADO, DOBDO, output [3:0] DOPADOP, DOPBDOP,
+                               output CASCADEOUTA, CASCADEOUTB, DBITERR, SBITERR, output [7:0] ECCPARITY,
+                               output [8:0] RDADDRECC, input CASCADEINA, CASCADEINB, INJECTDBITERR, INJECTSBITERR,
+                               input CLKARDCLK, CLKBWRCLK, ENARDEN, ENBWREN, REGCEAREGCE, REGCEB,
+                               input RSTRAMARSTRAM, RSTRAMB, RSTREGARSTREG, RSTREGB,
+                               input [15:0] ADDRARDADDR, ADDRBWRADDR, input [31:0] DIADI, DIBDI,
+                               input [3:0] DIPADIP, DIPBDIP, input [3:0] WEA, input [7:0] WEBWE);
+  parameter integer DOA_REG = 0;
+  parameter integer DOB_REG = 0;
+  parameter [35:0] INIT_A = 0;
+  parameter [35:0] INIT_B = 0;
+  parameter [35:0] SRVAL_A = 0;
+  parameter [35:0] SRVAL_B = 0;
+  parameter RAM_MODE = "TDP";
+  parameter RDADDR_COLLISION_HWCONFIG = "DELAYED_WRITE";
+  parameter integer READ_WIDTH_A = 0;
+  parameter integer READ_WIDTH_B = 0;
+  parameter integer WRITE_WIDTH_A = 0;
+  parameter integer WRITE_WIDTH_B = 0;
+  parameter WRITE_MODE_A = "WRITE_FIRST";
+  parameter WRITE_MODE_B = "WRITE_FIRST";
+  parameter RSTREG_PRIORITY_A = "RSTREG";
+  parameter RSTREG_PRIORITY_B = "RSTREG";
+  parameter SIM_COLLISION_CHECK = "ALL";
+  parameter SIM_DEVICE = "7SERIES";
+  parameter INIT_FILE = "NONE";
+  parameter EN_ECC_READ = "FALSE";
+  parameter EN_ECC_WRITE = "FALSE";
+  parameter RAM_EXTENSION_A = "NONE";
+  parameter RAM_EXTENSION_B = "NONE";
+  parameter [0:0] IS_CLKARDCLK_INVERTED = 0;
+  parameter [0:0] IS_CLKBWRCLK_INVERTED = 0;
+  parameter [0:0] IS_ENARDEN_INVERTED = 0;
+  parameter [0:0] IS_ENBWREN_INVERTED = 0;
+  parameter [0:0] IS_RSTRAMARSTRAM_INVERTED = 0;
+  parameter [0:0] IS_RSTRAMB_INVERTED = 0;
+  parameter [0:0] IS_RSTREGARSTREG_INVERTED = 0;
+  parameter [0:0] IS_RSTREGB_INVERTED = 0;
+  parameter [255:0] INIT_00 = 0, INIT_01 = 0, INIT_02 = 0, INIT_03 = 0, INIT_04 = 0, INIT_05 = 0, INIT_06 = 0, INIT_07 = 0;
+  parameter [255:0] INIT_08 = 0, INIT_09 = 0, INIT_0A = 0, INIT_0B = 0, INIT_0C = 0, INIT_0D = 0, INIT_0E = 0, INIT_0F = 0;
+  parameter [255:0] INIT_10 = 0, INIT_11 = 0, INIT_12 = 0, INIT_13 = 0, INIT_14 = 0, INIT_15 = 0, INIT_16 = 0, INIT_17 = 0;
+  parameter [255:0] INIT_18 = 0, INIT_19 = 0, INIT_1A = 0, INIT_1B = 0, INIT_1C = 0, INIT_1D = 0, INIT_1E = 0, INIT_1F = 0;
+  parameter [255:0] INIT_20 = 0, INIT_21 = 0, INIT_22 = 0, INIT_23 = 0, INIT_24 = 0, INIT_25 = 0, INIT_26 = 0, INIT_27 = 0;
+  parameter [255:0] INIT_28 = 0, INIT_29 = 0, INIT_2A = 0, INIT_2B = 0, INIT_2C = 0, INIT_2D = 0, INIT_2E = 0, INIT_2F = 0;
+  parameter [255:0] INIT_30 = 0, INIT_31 = 0, INIT_32 = 0, INIT_33 = 0, INIT_34 = 0, INIT_35 = 0, INIT_36 = 0, INIT_37 = 0;
+  parameter [255:0] INIT_38 = 0, INIT_39 = 0, INIT_3A = 0, INIT_3B = 0, INIT_3C = 0, INIT_3D = 0, INIT_3E = 0, INIT_3F = 0;
+  parameter [255:0] INIT_40 = 0, INIT_41 = 0, INIT_42 = 0, INIT_43 = 0, INIT_44 = 0, INIT_45 = 0, INIT_46 = 0, INIT_47 = 0;
+  parameter [255:0] INIT_48 = 0, INIT_49 = 0, INIT_4A = 0, INIT_4B = 0, INIT_4C = 0, INIT_4D = 0, INIT_4E = 0, INIT_4F = 0;
+  parameter [255:0] INIT_50 = 0, INIT_51 = 0, INIT_52 = 0, INIT_53 = 0, INIT_54 = 0, INIT_55 = 0, INIT_56 = 0, INIT_57 = 0;
+  parameter [255:0] INIT_58 = 0, INIT_59 = 0, INIT_5A = 0, INIT_5B = 0, INIT_5C = 0, INIT_5D = 0, INIT_5E = 0, INIT_5F = 0;
+  parameter [255:0] INIT_60 = 0, INIT_61 = 0, INIT_62 = 0, INIT_63 = 0, INIT_64 = 0, INIT_65 = 0, INIT_66 = 0, INIT_67 = 0;
+  parameter [255:0] INIT_68 = 0, INIT_69 = 0, INIT_6A = 0, INIT_6B = 0, INIT_6C = 0, INIT_6D = 0, INIT_6E = 0, INIT_6F = 0;
+  parameter [255:0] INIT_70 = 0, INIT_71 = 0, INIT_72 = 0, INIT_73 = 0, INIT_74 = 0, INIT_75 = 0, INIT_76 = 0, INIT_77 = 0;
+  parameter [255:0] INIT_78 = 0, INIT_79 = 0, INIT_7A = 0, INIT_7B = 0, INIT_7C = 0, INIT_7D = 0, INIT_7E = 0, INIT_7F = 0;
+  parameter [255:0] INITP_00 = 0, INITP_01 = 0, INITP_02 = 0, INITP_03 = 0, INITP_04 = 0, INITP_05 = 0, INITP_06 = 0, INITP_07 = 0;
+  parameter [255:0] INITP_08 = 0, INITP_09 = 0, INITP_0A = 0, INITP_0B = 0, INITP_0C = 0, INITP_0D = 0, INITP_0E = 0, INITP_0F = 0;
+endmodule
+
 (* blackbox *) module IBUF (output O, input I);
 endmodule
 (* blackbox *) module OBUF (output O, input I);

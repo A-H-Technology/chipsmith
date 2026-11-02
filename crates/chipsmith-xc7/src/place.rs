@@ -19,7 +19,9 @@
 //!   CARRY4 k-1 (the next one on the COUT -> CIN wire), its S LUTs in the
 //!   `x6LUT`s, and registers fed straight from a sum output in the `xFF` of
 //!   that bit;
-//! - a RAM32M (eight RAMD32 LUTs) owns a whole SLICEM.
+//! - a RAM32M (eight RAMD32 LUTs) owns a whole SLICEM;
+//! - a block RAM goes in a BRAM tile: a RAMB18E1 in either half, a
+//!   RAMB36E1 in the whole tile; block RAMs move by swapping places.
 //!
 //! Carry chains and RAMs go in the even slice of a tile (X0, the SLICEM of a
 //! CLBLM). Pins are where the manifest put them; the BSCAN for USER<n> is
@@ -77,6 +79,13 @@ pub(crate) enum Kind {
     },
     /// The Zynq's processor system, as seen from the fabric.
     Ps7,
+    /// A block RAM; `reg`: its output register is on, per port (SDP: port
+    /// A's for the whole read); `sdp`: port A reads all, port B writes all.
+    Bram {
+        size: crate::bram::Size,
+        reg: [bool; 2],
+        sdp: bool,
+    },
     Gnd,
     Vcc,
 }
@@ -135,6 +144,8 @@ pub(crate) struct Design {
     pub bles: Vec<Ble>,
     pub carries: Vec<Vec<CarrySlice>>,
     pub drams: Vec<Dram>,
+    /// Block RAM cells.
+    pub brams: Vec<CellId>,
     /// Each BLE's register's control set, numbered densely.
     pub ble_cs: Vec<Option<u32>>,
 }
@@ -151,8 +162,12 @@ pub(crate) fn build(cells: Vec<Cell>, nets: Vec<Net>) -> Result<Design> {
         bles: Vec::new(),
         carries: Vec::new(),
         drams: Vec::new(),
+        brams: Vec::new(),
         ble_cs: Vec::new(),
     };
+    d.brams = (0..d.cells.len() as CellId)
+        .filter(|&c| matches!(d.cells[c as usize].kind, Kind::Bram { .. }))
+        .collect();
     // Which object each LUT and register went into.
     let mut taken = vec![false; d.cells.len()];
     let lut_driver = |d: &Design, net: Option<NetId>| -> Option<CellId> {
@@ -465,6 +480,24 @@ impl Timing {
                         }
                     }
                 }
+                Kind::Bram { reg, sdp, .. } => {
+                    for &p in &ports {
+                        let n = node(&mut g, p);
+                        if p.starts_with("DO") {
+                            let port = bram_port(p, *sdp);
+                            g.set_launch(
+                                n,
+                                if reg[port] {
+                                    delays.bram.clock_to_out_reg
+                                } else {
+                                    delays.bram.clock_to_out
+                                },
+                            );
+                        } else if let Some(setup) = delays.bram.setup(p) {
+                            g.set_setup(n, setup);
+                        }
+                    }
+                }
                 // Pins, the BSCAN, the PS7 and clock buffers neither launch nor
                 // capture: like Quartus' and nextpnr's reports with only a
                 // clock constraint, paths run register to register.
@@ -506,6 +539,31 @@ impl Timing {
     }
 }
 
+/// Which port (0 A, 1 B) of a block RAM a site pin belongs to, for its
+/// clock: SDP writes `{B, A}` on port B's clock and reads it on A's.
+pub(crate) fn bram_port(pin: &str, sdp: bool) -> usize {
+    if sdp && pin.starts_with("DI") {
+        return 1;
+    }
+    if sdp && pin.starts_with("DO") {
+        return 0;
+    }
+    const A: [&str; 11] = [
+        "CLKARDCLK", "REGCLKARDRCLK", "ENARDEN", "REGCEAREGCE", "RSTRAMARSTRAM", "RSTREGARSTREG",
+        "ADDRARDADDR", "ADDRATIEHIGH", "WEA", "DIADI", "DIPADIP",
+    ];
+    let a = A.iter().any(|p| pin.starts_with(p)) || pin.starts_with("DOADO") || pin.starts_with("DOPADOP");
+    usize::from(!a)
+}
+
+/// One BRAM tile: its two RAMB18 sites (lower, upper) and its RAMB36.
+#[derive(Debug, Clone)]
+struct BramTile {
+    xy: Xy,
+    half: [String; 2],
+    full: String,
+}
+
 /// One slice site.
 #[derive(Debug, Clone)]
 struct Slice {
@@ -531,12 +589,15 @@ struct Grid {
     y_max: i32,
     /// BUFGCTRL sites: (site, position).
     bufgs: Vec<(String, Xy)>,
+    brams: Vec<BramTile>,
 }
 
 impl Grid {
     fn new(db: &ChipDb) -> Result<Self> {
         let mut slices: Vec<Slice> = Vec::new();
         let mut bufgs = Vec::new();
+        let mut bram_sites: HashMap<u32, (Option<String>, Option<String>, Option<String>)> =
+            HashMap::default();
         let xy_of = |tile: u32| {
             let (x, y) = db.tile_xy(tile);
             (x as i32, y as i32)
@@ -554,6 +615,19 @@ impl Grid {
                     col: 0,
                 }),
                 "BUFGCTRL" => bufgs.push((name.clone(), xy_of(s.tile))),
+                // Block RAM sites by relative name: RAMB18_X0Y0 (the FIFO18E1
+                // site, lower), RAMB18_X0Y1, RAMB36_X0Y0.
+                "FIFO18E1" | "RAMB18E1" | "RAMBFIFO36E1" => {
+                    let e = bram_sites.entry(s.tile).or_default();
+                    let slot = if s.ty == "RAMBFIFO36E1" {
+                        &mut e.2
+                    } else if s.relative.ends_with('0') {
+                        &mut e.0
+                    } else {
+                        &mut e.1
+                    };
+                    *slot = Some(name.clone());
+                }
                 _ => {}
             }
         }
@@ -593,12 +667,24 @@ impl Grid {
             .map(|(i, s)| ((s.col, s.xy.1, s.even), i as u32))
             .collect();
         let y_max = slices.iter().map(|s| s.xy.1).max().unwrap_or(0);
+        let mut brams: Vec<BramTile> = bram_sites
+            .into_iter()
+            .filter_map(|(tile, (lo, hi, full))| {
+                Some(BramTile {
+                    xy: xy_of(tile),
+                    half: [lo?, hi?],
+                    full: full?,
+                })
+            })
+            .collect();
+        brams.sort_by_key(|b| (b.xy.0, b.xy.1));
         Ok(Grid {
             cols: xs.len() as u32,
             y_max,
             slices,
             at,
             bufgs,
+            brams,
         })
     }
 
@@ -626,6 +712,9 @@ enum Obj {
     Ble(u32),
     Carry(u32),
     Dram(u32),
+    /// Block RAM k of `Design::brams`; its position a slot, BRAM tile `t`
+    /// half `h` as `2t + h` (a RAMB36E1 at half 0).
+    Bram(u32),
 }
 
 const SLOTS: usize = 4;
@@ -641,6 +730,9 @@ struct State<'a> {
     /// Carry chain -> its first slice.
     carry_root: Vec<u32>,
     dram_slice: Vec<u32>,
+    bram_slot: Vec<u32>,
+    /// Per BRAM slot, the block RAM in it (a RAMB36E1 in both halves).
+    bram_occ: Vec<Option<u32>>,
     occ: Vec<Occ>,
     /// Which macro owns a slice.
     slice_macro: Vec<Option<Obj>>,
@@ -737,6 +829,26 @@ impl<'a> State<'a> {
             Obj::Ble(b) => self.ble_slot[b as usize],
             Obj::Carry(c) => self.carry_root[c as usize],
             Obj::Dram(r) => self.dram_slice[r as usize],
+            Obj::Bram(b) => self.bram_slot[b as usize],
+        }
+    }
+
+    fn bram_full(&self, b: u32) -> bool {
+        matches!(
+            self.d.cells[self.d.brams[b as usize] as usize].kind,
+            Kind::Bram { size: crate::bram::Size::Full, .. }
+        )
+    }
+
+    /// The BRAM slots block RAM `b` takes at `slot`; None where it can't go.
+    fn bram_slots(&self, b: u32, slot: u32) -> Option<Vec<u32>> {
+        if slot as usize >= self.bram_occ.len() {
+            return None;
+        }
+        if self.bram_full(b) {
+            (slot % 2 == 0).then(|| vec![slot, slot + 1])
+        } else {
+            Some(vec![slot])
         }
     }
 
@@ -745,6 +857,7 @@ impl<'a> State<'a> {
             Obj::Ble(_) => Some(vec![pos / SLOTS as u32]),
             Obj::Carry(c) => self.g.chain(pos, self.d.carries[c as usize].len()),
             Obj::Dram(_) => Some(vec![pos]),
+            Obj::Bram(_) => Some(Vec::new()),
         }
     }
 
@@ -758,6 +871,12 @@ impl<'a> State<'a> {
                     let s = &mut self.slice_cs[slot / SLOTS];
                     let (cs, n) = s.expect("a register's slice has a control set");
                     *s = (n > 1).then_some((cs, n - 1));
+                }
+            }
+            Obj::Bram(b) => {
+                let slots = self.bram_slots(b, self.bram_slot[b as usize]).expect("placed legally");
+                for k in slots {
+                    self.bram_occ[k as usize] = None;
                 }
             }
             Obj::Carry(_) | Obj::Dram(_) => {
@@ -798,6 +917,20 @@ impl<'a> State<'a> {
                 }
                 true
             }
+            Obj::Bram(b) => {
+                let Some(slots) = self.bram_slots(b, pos) else {
+                    return false;
+                };
+                if slots.iter().any(|&k| self.bram_occ[k as usize].is_some()) {
+                    return false;
+                }
+                for &k in &slots {
+                    self.bram_occ[k as usize] = Some(b);
+                }
+                self.bram_slot[b as usize] = pos;
+                self.cell_xy[d.brams[b as usize] as usize] = self.g.brams[pos as usize / 2].xy;
+                true
+            }
             Obj::Carry(_) | Obj::Dram(_) => {
                 let Some(slices) = self.slices_of(o, pos) else {
                     return false;
@@ -831,7 +964,7 @@ impl<'a> State<'a> {
                             let r = &d.drams[r as usize];
                             r.lut6.iter().chain(&r.lut5).copied().collect()
                         }
-                        Obj::Ble(_) => unreachable!(),
+                        Obj::Ble(_) | Obj::Bram(_) => unreachable!(),
                     };
                     for c in cells {
                         self.cell_xy[c as usize] = xy;
@@ -840,7 +973,7 @@ impl<'a> State<'a> {
                 match o {
                     Obj::Carry(c) => self.carry_root[c as usize] = pos,
                     Obj::Dram(r) => self.dram_slice[r as usize] = pos,
-                    Obj::Ble(_) => unreachable!(),
+                    Obj::Ble(_) | Obj::Bram(_) => unreachable!(),
                 }
                 true
             }
@@ -894,6 +1027,7 @@ impl<'a> State<'a> {
                 let r = &d.drams[r as usize];
                 out.extend(r.lut6.iter().chain(&r.lut5));
             }
+            Obj::Bram(b) => out.push(d.brams[b as usize]),
         }
     }
 
@@ -924,6 +1058,24 @@ impl<'a> State<'a> {
             return None;
         }
         match o {
+            // Swapped with what is there: a block RAM of the same size, or
+            // a RAMB18E1 with the other half of a free tile.
+            Obj::Bram(b) => {
+                let mine = self.bram_slots(b, pos)?;
+                let mut others: Vec<u32> = mine.iter().filter_map(|&k| self.bram_occ[k as usize]).collect();
+                others.sort_unstable();
+                others.dedup();
+                others.retain(|&x| x != b);
+                let mut moves = vec![(o, pos)];
+                match others[..] {
+                    [] => {}
+                    [x] if self.bram_full(x) == self.bram_full(b) && self.bram_slot[x as usize] == pos => {
+                        moves.push((Obj::Bram(x), from))
+                    }
+                    _ => return None,
+                }
+                Some(moves)
+            }
             Obj::Ble(_) => match self.occ[pos as usize] {
                 Occ::Free => Some(vec![(o, pos)]),
                 Occ::Ble(other) => Some(vec![(o, pos), (Obj::Ble(other), from)]),
@@ -989,6 +1141,8 @@ fn initial_empty<'a>(d: &'a Design, g: &'a Grid, timing: Option<&'a Timing>) -> 
         ble_slot: vec![u32::MAX; d.bles.len()],
         carry_root: vec![u32::MAX; d.carries.len()],
         dram_slice: vec![u32::MAX; d.drams.len()],
+        bram_slot: vec![u32::MAX; d.brams.len()],
+        bram_occ: vec![None; 2 * g.brams.len()],
         occ: vec![Occ::Free; n_slices * SLOTS],
         slice_macro: vec![None; n_slices],
         slice_cs: vec![None; n_slices],
@@ -1031,6 +1185,7 @@ fn initial<'a>(d: &'a Design, g: &'a Grid, timing: Option<&'a Timing>) -> Result
         let ok = by_distance.iter().any(|&sl| s.place(Obj::Dram(r), sl));
         ensure!(ok, "no SLICEM left for a RAM32M");
     }
+    place_brams(&mut s, |_| (cx, cy))?;
 
     // Registers grouped by control set, then lone LUTs into what is left.
     let mut order: Vec<u32> = (0..d.bles.len() as u32).collect();
@@ -1095,6 +1250,7 @@ fn anneal(s: &mut State, rng: &mut Rng, start: Start) -> u64 {
         .map(Obj::Ble)
         .chain((0..d.carries.len() as u32).map(Obj::Carry))
         .chain((0..d.drams.len() as u32).map(Obj::Dram))
+        .chain((0..d.brams.len() as u32).map(Obj::Bram))
         .collect();
     if objects.is_empty() {
         return 0;
@@ -1116,7 +1272,21 @@ fn anneal(s: &mut State, rng: &mut Rng, start: Start) -> u64 {
     let mut attempt = |s: &mut State, rng: &mut Rng, r: f64, t: f64| -> Option<f64> {
         let o = objects[rng.below(objects.len())];
         let ri = r.max(1.0) as i32;
+        let pos = if let Obj::Bram(b) = o {
+            // A BRAM slot within range of where it is, columns counted as
+            // the slices' are (in grid x, two per interconnect column).
+            let (x, y) = s.g.brams[s.bram_slot[b as usize] as usize / 2].xy;
+            let t = rng.below(s.g.brams.len());
+            let (tx, ty) = s.g.brams[t].xy;
+            if (tx - x).abs() / 2 > ri || (ty - y).abs() > ri {
+                return None;
+            }
+            (2 * t + rng.below(2)) as u32
+        } else {
+            u32::MAX
+        };
         let from = s.g.slices[(match o {
+            Obj::Bram(_) => 0,
             Obj::Ble(b) => s.ble_slot[b as usize] / SLOTS as u32,
             _ => s.pos(o),
         }) as usize]
@@ -1127,10 +1297,10 @@ fn anneal(s: &mut State, rng: &mut Rng, start: Start) -> u64 {
             Obj::Ble(_) => rng.below(2) == 0,
             _ => true,
         };
-        let &slice = s.g.at.get(&(u32::try_from(col).ok()?, y, even))?;
         let pos = match o {
-            Obj::Ble(_) => slice * SLOTS as u32 + rng.below(SLOTS) as u32,
-            _ => slice,
+            Obj::Bram(_) => pos,
+            Obj::Ble(_) => *s.g.at.get(&(u32::try_from(col).ok()?, y, even))? * SLOTS as u32 + rng.below(SLOTS) as u32,
+            _ => *s.g.at.get(&(u32::try_from(col).ok()?, y, even))?,
         };
         let moves = s.moves_to(o, pos)?;
         s.nets_of(&moves, &mut cells, &mut nets);
@@ -1255,10 +1425,38 @@ fn sites(d: &Design, g: &Grid, s: &State, fixed: &[(CellId, String, Xy)]) -> Vec
             out[ram.lut5[k] as usize] = Some((site(slice), Bel::Lut5(k)));
         }
     }
+    for (b, &c) in d.brams.iter().enumerate() {
+        let slot = s.bram_slot[b] as usize;
+        let tile = &g.brams[slot / 2];
+        let site = match d.cells[c as usize].kind {
+            Kind::Bram { size: crate::bram::Size::Full, .. } => tile.full.clone(),
+            _ => tile.half[slot % 2].clone(),
+        };
+        out[c as usize] = Some((site, Bel::Site));
+    }
     for (c, site, _) in fixed {
         out[*c as usize] = Some((site.clone(), Bel::Site));
     }
     out
+}
+
+/// Each block RAM in the free BRAM slot nearest where `target` wants it,
+/// RAMB36E1s first.
+fn place_brams(s: &mut State, target: impl Fn(u32) -> Xy) -> Result<()> {
+    let g = s.g;
+    let mut order: Vec<u32> = (0..s.d.brams.len() as u32).collect();
+    order.sort_by_key(|&b| (!s.bram_full(b), b));
+    for b in order {
+        let (x, y) = target(b);
+        let mut slots: Vec<u32> = (0..2 * g.brams.len() as u32).collect();
+        slots.sort_by_key(|&k| {
+            let (tx, ty) = g.brams[k as usize / 2].xy;
+            ((tx - x).abs() / 2 + (ty - y).abs(), k)
+        });
+        let ok = slots.into_iter().any(|k| s.place(Obj::Bram(b), k));
+        ensure!(ok, "no block RAM site left: the design has {} block RAMs", s.d.brams.len());
+    }
+    Ok(())
 }
 
 /// The cells that don't move: pins, BSCANs, the PS7, and BUFGCTRLs (each
@@ -1417,6 +1615,15 @@ fn global<'a>(
         }
         objects.push(Obj::Dram(r as u32));
     }
+    // Block RAMs: an object each, of a BRAM tile's five rows and a slice
+    // column's area, taking none of the BLEs' room (they have sites of
+    // their own).
+    let mut bram_obj = Vec::new();
+    for &c in &d.brams {
+        let o = p.add_object(5, &[(0, 0.0)]);
+        obj_of[c as usize] = Some(o);
+        bram_obj.push(o);
+    }
     let mut fixed_of: HashMap<CellId, u32> = HashMap::default();
     for (c, _, xy) in fixed {
         fixed_of.insert(*c, p.add_fixed(((xy.0 / 2) as f32 + 0.5, xy.1 as f32 + 0.5)));
@@ -1469,6 +1676,7 @@ fn global<'a>(
         let ok = near(target(o)).into_iter().any(|sl| s.place(objects[o], sl));
         ensure!(ok, "no room for {:?}", objects[o]);
     }
+    place_brams(&mut s, |b| target(bram_obj[b as usize] as usize))?;
     // BLEs: a ring search outward from the target, slot by slot.
     let col_of_x = |x: i32| {
         g.slices
@@ -1516,7 +1724,7 @@ pub(crate) fn place(db: &ChipDb, delays: Option<&Delays>, d: &Design) -> Result<
     let g = Grid::new(db)?;
     let timing = delays.map(|delays| Timing::new(d, delays));
     let fixed = fixed_sites(db, d, &g)?;
-    let objects = d.bles.len() + d.carries.len() + d.drams.len();
+    let objects = d.bles.len() + d.carries.len() + d.drams.len() + d.brams.len();
     let electro = match std::env::var("CHIPSMITH_XC7_PLACER").as_deref() {
         Ok("anneal") => false,
         Ok("electro") => true,
@@ -1599,6 +1807,7 @@ mod tests {
             cols: 1,
             y_max: n as i32 - 1,
             bufgs: Vec::new(),
+            brams: Vec::new(),
         }
     }
 
@@ -1619,6 +1828,7 @@ mod tests {
             bles,
             carries,
             drams: Vec::new(),
+            brams: Vec::new(),
             ble_cs: Vec::new(),
         };
         d.ble_cs = d

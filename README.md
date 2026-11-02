@@ -21,7 +21,7 @@ nextpnr, no prjxray tool, only prjxray-db's data.
 | device | board | build | on hardware |
 |---|---|---|---|
 | EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis): LUT/carry/register logic, M4K RAM blocks and embedded multipliers (below), global clocks from pins and from logic (a register, the JTAG block's TCK; one clock per LAB), PLLs (`CY2_PLL`; both on the board 2026-10-26, examples/de2-jtag-counter on TCK and examples/de2-pll-counter at 100 and 40 MHz from CLOCK_50; 2026-10-30 a PLL clock on its PLL's clock output pin, 2026-10-31 on any pin or into logic as data, the DE2's SDRAM run at 100 MHz with 0 errors by examples/sdram-selftest, its SRAM by examples/sram-selftest); pins input, output, tri-state, bidirectional, open drain, at 3.3-V LVTTL (any current) or LVCMOS or 2.5-V inputs, with pull-up or bus hold and I/O-cell registers (with the cell's clock enables, asynchronous clears and presets and falling-edge clocks as Quartus packs them since 2026-10-31, examples/de2-ioregs; an output or OE register's synchronous reset as logic on its D; Manifest, below) | yes (2026-10-25, chipsmith's own synthesis end to end, checked over JTAG: examples/de2-jtag-counter (its earlier CLOCK_50-sampled version) reads back `"DE2!"` at 50.00 MHz after a JTAG load and after `flash --persist` (loader synthesized by chipsmith too, EPCS written, verified and reloaded from; 2026-10-26 also after a power cycle); picorv32 with the same readback added runs its loop at 3.33 MHz. 2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
-| xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes, with no external tool but GHDL for VHDL (2026-11-01: chipsmith's own Verilog front end, synthesis, packing, placement, routing and FASM; 2026-11-02: frames and `.bit`; "The Zybo flow", below): LUT1-LUT6, CARRY4, FDRE/FDSE/FDCE/FDPE, RAM32M, LVCMOS33 pins, BUFGs, BSCANs and the PS7 | yes, with the earlier flow (2026-10-24, yosys and nextpnr around chipsmith's placement and routing: zybo-jtag-counter read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga). chipsmith's own flow is checked at the bitstream instead (decoded and co-simulated against the RTL, below), not yet on the board |
+| xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes, with no external tool but GHDL for VHDL (2026-11-01: chipsmith's own Verilog front end, synthesis, packing, placement, routing and FASM; 2026-11-02: frames and `.bit`; "The Zybo flow", below): LUT1-LUT6, CARRY4, FDRE/FDSE/FDCE/FDPE, RAM32M, block RAM (RAMB18E1, since 2026-11-02; "7-series block RAM", below), LVCMOS33 pins, BUFGs, BSCANs and the PS7 | yes, with the earlier flow (2026-10-24, yosys and nextpnr around chipsmith's placement and routing: zybo-jtag-counter read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga). chipsmith's own flow is checked at the bitstream instead (decoded and co-simulated against the RTL, below), not yet on the board |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
 LEDs, 971 LEs and two M4Ks (its register file); a build takes 27 to 47 s
@@ -679,8 +679,9 @@ small: `$alu` onto CARRY4 chains (`arith_map.v`'s mapping: propagate
 `A ^ B` in the LUT in front, generate `A` on DI), registers onto
 FDRE/FDSE/FDCE/FDPE (CE, synchronous or asynchronous reset or set, either
 clock edge, INIT; `$sdffce`'s reset gated with the enable), memories of up
-to 32 words with one write port and asynchronous reads onto RAM32Ms, every
-port bit through IBUF/OBUF/OBUFT/IOBUF and every clock through a BUFG.
+to 32 words with one write port and asynchronous reads onto RAM32Ms,
+memories with synchronous reads onto block RAM (below), every port bit
+through IBUF/OBUF/OBUFT/IOBUF and every clock through a BUFG.
 Latches and asynchronous loads aren't mapped yet; LUTs aren't packed in
 pairs (LUT6_2) and there are no MUXF7/F8.
 
@@ -713,6 +714,84 @@ widths, initial contents and a falling-edge write, three seeds of 3,000
 cycles; picorv32 running its loop for 20,000 cycles; and proven with
 distributed RAM off.
 
+#### 7-series block RAM
+
+Since 2026-11-02 every memory with synchronous reads that a block can take
+goes into RAMB18E1s (`crates/chipsmith-xc7/src/synth/bram.rs`, ADR-0014),
+to the DE2's M4K standard: the M4K mapper's analysis of the ports
+(mixed widths, single, simple and true dual port, two writes on one
+word resolved in logic, memories deeper and wider than a block), with
+what the 7-series block does on top:
+
+- each port's write mode follows from the RTL: READ_FIRST where the
+  other port reads the word's old data on the same edge (UG473: the other
+  port's read is defined only then), WRITE_FIRST where its own read sees
+  its new data; where both hold, READ_FIRST and the port's own read of
+  its write a register of the written data in logic. A read held while
+  its port writes (`if (we) m[a] <= d; else q <= m[a];`) is NO_CHANGE;
+- byte enables, two clocks (either edge, as the block's clock inversion),
+  the read data's power-up value (INIT) and a synchronous reset of it
+  gated by the read enable (RSTRAM, to SRVAL), a register after the
+  read data with its own enable and synchronous reset (the output
+  register, REGCE and RSTREG);
+- SDP mode where a side is x36 (read on port A, written on port B), and a
+  single port wider than x18 split over both ports at adjacent words
+  (512 x 36 in one RAMB18E1, both ports x18 WRITE_FIRST, as Vivado
+  builds it).
+
+Not mapped: an asynchronous reset of the read data (logic), memories of 64
+words or fewer (registers; Vivado puts them in LUT RAM), RAMB36E1s
+(two RAMB18E1s take what one would, in the same BRAM tile; Vivado reports
+a RAMB36E1 there), a READ_FIRST write of some of its bytes read on the same
+edge by a narrower port (logic: UG473 says old data, Vivado's own model
+new). A RAMB36E1 instantiated in a design is built.
+
+Checked (ADR-0014):
+
+- **chipsmith's block model** (`crates/chipsmith-xc7/src/sim.v`, yosys'
+  `cells_sim.v` having RAMB18E1 only as a timing blackbox) against
+  Vivado's unisim models (`crates/chipsmith-xc7/tests/models.rs`, run
+  with `CHIPSMITH_UNISIMS` pointing at Vivado's `data/verilog/src`): 40
+  runs of six random RAMB18E1/RAMB36E1 configurations, 600 cycles each,
+  2,843,576 output bits compared, none different; 2,277 x in chipsmith's
+  model where Vivado's has a value (collisions it calls undefined);
+- **every shape synthesized** (`crates/chipsmith-xc7/tests/designs/bram`,
+  `block_ram_shapes` in `tests/synth.rs`), co-simulated against its RTL,
+  three seeds of 3,000 cycles;
+- **every shape through the bitstream** (`block_ram` in
+  `crates/chipsmith/tests/xc7_bitstream.rs`): built, prjxray's
+  `fasm2frames`/`xc7frames2bit` making the same `.bit` of the FASM,
+  decoded (`chipsmith_xc7::decode`, a RAMB18E1 per half of a BRAM tile)
+  and co-simulated;
+- **the decoder on Vivado's bitstreams** of the same RTL: ten of twelve
+  co-simulate against the RTL. The other two: Vivado's true dual port,
+  both ports WRITE_FIRST, reads x where the other port writes the word on
+  the same edge (undefined in the block; the RTL reads the old data,
+  which chipsmith's build gives), and Vivado's LUT RAM for a 64-word
+  memory, which the decoder doesn't read. The block's INIT and SRVAL bits
+  come bit-reversed in an x18 layout, found with one-hot INIT values in a
+  Vivado bitstream.
+
+| shape | memory | chipsmith | Vivado | co-simulated (synthesis) | through the bitstream | Vivado's bitstream decoded |
+|---|---|---|---|---|---|---|
+| sp_read_first | 1024 x 18, old data | 1 RAMB18 | 1 RAMB18 | 77,652 bits | 25,974 bits | 25,974 bits |
+| sp_write_first | 512 x 36, new data, port enable | 1 RAMB18 (both ports x18), 1 LUT | 1 RAMB18 (both ports x18) | 237,780 | 79,416 | 79,416 |
+| sp_no_change | 2048 x 9, held while writing | 1 RAMB18 | 1 RAMB18 | 24,129 | 7,965 | 7,965 |
+| sdp | 512 x 32, simple dual port | 1 RAMB18 (SDP) | 1 RAMB18 (SDP) | 197,280 | 66,912 | 66,912 |
+| sdp_x72 | 512 x 72 | 2 RAMB18 (SDP) | (too many pins for the board) | 441,072 | | |
+| dualclock | 1024 x 16, two clocks, read enable | 1 RAMB18 | 1 RAMB18 | 71,888 | 22,560 | 22,560 |
+| tdp | 1024 x 16, true dual port | 1 RAMB18, 34 FFs, 39 LUTs | 1 RAMB18 | 241,664 | 80,704 | x on same-edge cross reads |
+| rom | 1024 x 16, contents, read enable | 1 RAMB18 | 1 RAMB18 | 144,000 | 48,000 | 48,000 |
+| bytes | 1024 x 32, byte enables | 2 RAMB18 | 1 RAMB36 | 137,864 | 46,520 | (no bitstream) |
+| outreg | 2048 x 8, output register (enable, reset) | 1 RAMB18 | 1 RAMB18 | 72,000 | 24,000 | 24,000 |
+| mixed | written x32, read x8 | 1 RAMB18 (SDP) | 1 RAMB18 (SDP) | 59,704 | 19,736 | 19,736 |
+| deep | 16384 x 4 | 4 RAMB18 | 2 RAMB36 | 1,720 | 600 | 600 |
+| srst | 1024 x 18, reset and enable on the read, power-up value | 1 RAMB18 | 1 RAMB18 | 119,016 | 39,726 | 39,726 |
+| tiny | 64 x 8 | 520 FFs, 232 LUTs | 12 LUTs as memory, 8 FFs | 68,696 | | (LUT RAM) |
+
+The bit counts are output bits the RTL defines, compared every cycle;
+`deep` reads mostly unwritten words. On the board: owed.
+
 Zybo limits:
 
 - Every pin is LVCMOS33, outputs at 16 mA and slow slew (what nextpnr
@@ -732,8 +811,8 @@ Zybo limits:
   halted over JTAG: both cores in `__fiq_svc`/`ct_nmi_enter`; with
   IRQF2P tied to 0 Linux stays up. A design that connects the PS7's pins
   is rejected (`crates/chipsmith-xc7/src/pack.rs`).
-- Cells: what synthesis makes ("7-series synthesis", above). No block
-  RAM, DSPs, SRLs, MUXF7/F8, latches or I/O-tile registers; 5LUTs only in
+- Cells: what synthesis makes ("7-series synthesis", above). No DSPs,
+  SRLs, MUXF7/F8, latches or I/O-tile registers; 5LUTs only in
   RAM32Ms.
 - Timing is chipsmith's estimate from prjxray-db's delays without wire
   RC (`crates/chipsmith-xc7/src/pnr.rs`): 7% to 30% above Vivado's Fmax
@@ -880,7 +959,7 @@ Zynq-7010 PL (xc7z010clg400-1): chipsmith's own from the Verilog to the
 |---|---|---|
 | VHDL → Verilog | GHDL `--synth --out=verilog` | as for Cyclone II |
 | Verilog front end | chipsmith, with the 7-series cell library (`crates/chipsmith-xc7/src/synth/cells.v`) | ours |
-| synthesis | chipsmith: chipsmith-synth's passes, LUT6 mapping, CARRY4, FD*, RAM32M, pin and clock buffers (`crates/chipsmith-xc7/src/synth`) | ours |
+| synthesis | chipsmith: chipsmith-synth's passes, LUT6 mapping, CARRY4, FD*, RAM32M, RAMB18E1, pin and clock buffers (`crates/chipsmith-xc7/src/synth`) | ours |
 | packing | chipsmith: slices, carry chains with their feed-through LUTs, RAM32M SLICEMs, pins, constants (`crates/chipsmith-xc7/src/pack.rs`) | ours |
 | placement | chipsmith: simulated annealing over slices, from 1,000 objects on starting from chipsmith-place's electrostatic global placement, timing-driven with prjxray-db's delays (`crates/chipsmith-xc7/src/place.rs`, `crates/chipsmith-xc7/src/delay.rs`) | ours |
 | site routing | chipsmith: each cell port's site pin by rule (`crates/chipsmith-xc7/src/phys.rs`) | ours |
@@ -1421,7 +1500,7 @@ Next devices:
   it (`--report`).
   - Synthesis, packer, site routing and FASM (done, 2026-11-01; ADR-0013,
     "7-series synthesis" and "The Zybo flow", above; frames and `.bit` in
-    process since 2026-11-02). Open: block RAM, DSPs, MUXF7/F8, LUT6_2 and the 5LUTs; timing with the
+    process since 2026-11-02; block RAM 2026-11-02, ADR-0014). Open: DSPs, MUXF7/F8, LUT6_2 and the 5LUTs; timing with the
     wires' RC; the electrostatic placer timing-driven and the annealer
     after it shorter; chipsmith's own flow on the board.
   - Router (done, interconnect only). The routing graph comes from

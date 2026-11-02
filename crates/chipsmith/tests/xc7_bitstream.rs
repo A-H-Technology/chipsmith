@@ -29,7 +29,10 @@ fn setup() {
     support::use_lib(support::Lib {
         name: chipsmith_xc7::synth::cells::LIBRARY_NAME,
         library: chipsmith_xc7::synth::cells::LIBRARY,
-        sim: std::fs::read_to_string(share.join("xilinx/cells_sim.v")).unwrap(),
+        sim: chipsmith_xc7::synth::cells::yosys_sim_without_models(
+            &std::fs::read_to_string(share.join("xilinx/cells_sim.v")).unwrap(),
+        ),
+        models: chipsmith_xc7::synth::cells::MODELS,
     });
 }
 
@@ -314,6 +317,7 @@ const BALLS: &str = "A20 B19 B20 C20 D18 D19 D20 E17 E18 E19 F16 F17 F19 F20 G14
 fn design_project(file: &str, top: &str, dir: &Path) {
     setup();
     let src = Path::new(ROOT).join("crates/chipsmith-xc7/tests/designs").join(file);
+    let file = Path::new(file).file_name().unwrap();
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::copy(&src, dir.join("src").join(file)).unwrap();
     let d = support::frontend(top, &[src]);
@@ -375,6 +379,27 @@ fn registers_and_arithmetic() {
 #[test]
 fn distributed_ram() {
     design_built("lutram.v", "lutram");
+}
+
+/// Every block RAM shape (`chipsmith-xc7/tests/designs/bram`) whose ports
+/// fit the package, through the bitstream; `CHIPSMITH_BRAM_SHAPE` picks
+/// one.
+#[test]
+fn block_ram() {
+    let mut failures = Vec::new();
+    for top in [
+        "bytes", "deep", "dualclock", "mixed", "outreg", "rom", "sdp", "sp_no_change", "sp_read_first",
+        "sp_write_first", "srst", "tdp",
+    ] {
+        if std::env::var("CHIPSMITH_BRAM_SHAPE").is_ok_and(|s| s != top) {
+            continue;
+        }
+        let r = std::panic::catch_unwind(|| design_built(&format!("bram/{top}.v"), top));
+        if r.is_err() {
+            failures.push(top);
+        }
+    }
+    assert!(failures.is_empty(), "failed: {failures:?}");
 }
 
 /// `CHIPSMITH_XC7_BIT=<.bit> CHIPSMITH_XC7_EXAMPLE=<example>`: decode a

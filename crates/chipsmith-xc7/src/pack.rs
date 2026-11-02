@@ -16,6 +16,13 @@
 //!   data bit 0, out on O5) of one SLICEM;
 //! - each pin buffer (IBUF, OBUF, OBUFT, IOBUF) becomes the pin's IOB site,
 //!   from the manifest's pin and prjxray-db's package pins;
+//! - a block RAM (RAMB18E1, RAMB36E1) becomes its site's pins, as openXC7's
+//!   nextpnr maps them (`pack.cc`, `pack_bram`): a RAMB18E1's WEA[i] on
+//!   two pins (WEA2i, WEA2i+1), WEBWE[i] on one (two in SDP), WEBWE4-7
+//!   and the unused WEAs 0, the ADDR*TIEHIGH pins high; a RAMB36E1's
+//!   controls, addresses and write enables on both halves' pins (`L`,
+//!   `U`), ADDR[15] on `L15` alone. The output register's clock
+//!   (REGCLK) is the port's, where the register is used;
 //! - constants are two nets, driven by [`Conf::Gnd`] and [`Conf::Vcc`]
 //!   cells that sit nowhere: the router ties each sink to its interconnect
 //!   tile's GND_WIRE or VCC_WIRE. A register's CE tied 1 and SR tied 0 are
@@ -49,6 +56,8 @@ pub(crate) enum Conf {
     /// A pin's IOB, with its buffer: pins `O` (to the fabric), `I` (to the
     /// pin), `T` (high releases it), as the buffer has them.
     Pad,
+    /// A block RAM; its pins are its site's.
+    Bram(Box<crate::bram::Config>),
     Bufg,
     Bscan,
     Ps7,
@@ -75,6 +84,7 @@ fn drives(kind: &Kind, pin: &str) -> bool {
         Kind::Bufg => pin == "O",
         Kind::Bscan { .. } => pin != "TDO",
         Kind::Ps7 => false,
+        Kind::Bram { .. } => pin.starts_with("DO"),
         Kind::Gnd | Kind::Vcc => true,
     }
 }
@@ -334,6 +344,30 @@ pub(crate) fn pack(netlist: &Netlist, pins: &BTreeMap<String, String>, db: &Chip
                     }
                 }
             }
+            "RAMB18E1" | "RAMB36E1" => {
+                let r = crate::synth::cells::Ramb::from_generic(g).with_context(|| format!("block RAM {name}"))?;
+                let pins = bram_pins(&r)
+                    .into_iter()
+                    .map(|(pin, b, out)| match (out, b) {
+                        (true, SigBit::Net(n)) => Some((pin, p.net(n))),
+                        (true, _) => None,
+                        (false, b) => Some((pin, p.sig(b))),
+                    })
+                    .flatten()
+                    .collect();
+                let c = &r.config;
+                let reg = if c.sdp {
+                    [c.ports[0].out_reg; 2]
+                } else {
+                    [c.ports[0].out_reg, c.ports[1].out_reg]
+                };
+                let kind = Kind::Bram {
+                    size: c.size,
+                    reg,
+                    sdp: c.sdp,
+                };
+                p.push(name, kind, pins, Conf::Bram(Box::new(r.config)));
+            }
             "IBUF" | "OBUF" | "OBUFT" | "IOBUF" => {
                 let pad_port = match g.ty.as_str() {
                     "IBUF" => "I",
@@ -477,4 +511,112 @@ fn feed_throughs(p: &mut Packer, carries: &[CellId]) {
             }
         }
     }
+}
+
+/// A block RAM's site pins and what each carries: (pin, signal, output).
+fn bram_pins(r: &crate::synth::cells::Ramb) -> Vec<(String, SigBit, bool)> {
+    use crate::bram::Size;
+    let c = &r.config;
+    let full = c.size == Size::Full;
+    let mut out: Vec<(String, SigBit, bool)> = Vec::new();
+    // A RAMB36E1's controls and addresses go to both halves.
+    let both = |out: &mut Vec<(String, SigBit, bool)>, base: &str, l: &str, u: &str, b: SigBit| {
+        if full {
+            out.push((format!("{base}{l}"), b, false));
+            out.push((format!("{base}{u}"), b, false));
+        } else {
+            out.push((base.to_string(), b, false));
+        }
+    };
+    let pairs = [("CLKARDCLK", "CLKBWRCLK"), ("ENARDEN", "ENBWREN"), ("REGCEAREGCE", "REGCEB"), ("RSTREGARSTREG", "RSTREGB")];
+    let sigs = [r.clk, r.en, r.regce, r.rstreg];
+    for ((a, b), v) in pairs.into_iter().zip(sigs) {
+        both(&mut out, a, "L", "U", v[0]);
+        both(&mut out, b, "L", "U", v[1]);
+    }
+    // RAMB36's port A RSTRAM pin is named oddly.
+    both(&mut out, "RSTRAMARSTRAM", "LRST", "U", r.rstram[0]);
+    both(&mut out, "RSTRAMB", "L", "U", r.rstram[1]);
+    // The output registers' clocks.
+    let reg = [c.ports[0].out_reg, c.ports[1].out_reg || (c.sdp && c.ports[0].out_reg)];
+    if reg[0] {
+        both(&mut out, "REGCLKARDRCLK", "L", "U", r.clk[0]);
+    }
+    if reg[1] {
+        // SDP's read register runs on the read clock, port A's.
+        let clk = if c.sdp { r.clk[0] } else { r.clk[1] };
+        both(&mut out, "REGCLKB", "L", "U", clk);
+    }
+    for (k, name) in ["ADDRARDADDR", "ADDRBWRADDR"].into_iter().enumerate() {
+        for (i, &b) in r.addr[k].iter().enumerate() {
+            if full && i == 15 {
+                out.push((format!("{name}L15"), b, false));
+            } else if full {
+                out.push((format!("{name}L{i}"), b, false));
+                out.push((format!("{name}U{i}"), b, false));
+            } else {
+                out.push((format!("{name}{i}"), b, false));
+            }
+        }
+    }
+    if !full {
+        for pin in ["ADDRATIEHIGH0", "ADDRATIEHIGH1", "ADDRBTIEHIGH0", "ADDRBTIEHIGH1"] {
+            out.push((pin.into(), SigBit::ONE, false));
+        }
+    }
+    // Write enables.
+    let wide_write = c.sdp && c.ports[1].write == Some(c.size.sdp());
+    if full {
+        for (i, &b) in r.we[0].iter().enumerate() {
+            let b = if c.sdp { SigBit::ZERO } else { b };
+            out.push((format!("WEAL{i}"), b, false));
+            out.push((format!("WEAU{i}"), b, false));
+        }
+        for (i, &b) in r.we[1].iter().enumerate() {
+            let b = if i >= 4 && !wide_write { SigBit::ZERO } else { b };
+            out.push((format!("WEBWEL{i}"), b, false));
+            out.push((format!("WEBWEU{i}"), b, false));
+        }
+    } else {
+        for (i, &b) in r.we[0].iter().enumerate() {
+            let b = if c.sdp { SigBit::ZERO } else { b };
+            out.push((format!("WEA{}", 2 * i), b, false));
+            out.push((format!("WEA{}", 2 * i + 1), b, false));
+        }
+        if wide_write {
+            for (i, &b) in r.we[1].iter().enumerate() {
+                out.push((format!("WEBWE{}", 2 * i), b, false));
+                out.push((format!("WEBWE{}", 2 * i + 1), b, false));
+            }
+        } else {
+            for (i, &b) in r.we[1].iter().enumerate() {
+                out.push((format!("WEBWE{i}"), b, false));
+            }
+            for i in 4..8 {
+                out.push((format!("WEBWE{i}"), SigBit::ZERO, false));
+            }
+        }
+    }
+    for (k, (di, dip, dout, doutp)) in [("DIADI", "DIPADIP", "DOADO", "DOPADOP"), ("DIBDI", "DIPBDIP", "DOBDO", "DOPBDOP")]
+        .into_iter()
+        .enumerate()
+    {
+        // A port that never writes takes no data (SDP's wide write is on
+        // both ports' pins).
+        if c.ports[k].write.is_some() || (wide_write && k == 0) {
+            for (i, &b) in r.di[k].iter().enumerate() {
+                out.push((format!("{di}{i}"), b, false));
+            }
+            for (i, &b) in r.dip[k].iter().enumerate() {
+                out.push((format!("{dip}{i}"), b, false));
+            }
+        }
+        for (i, &b) in r.dout[k].iter().enumerate() {
+            out.push((format!("{dout}{i}"), b, true));
+        }
+        for (i, &b) in r.doutp[k].iter().enumerate() {
+            out.push((format!("{doutp}{i}"), b, true));
+        }
+    }
+    out
 }

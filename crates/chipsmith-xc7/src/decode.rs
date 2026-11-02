@@ -13,6 +13,11 @@
 //! openXC7's nextpnr write, so it can be checked on nextpnr's bitstreams,
 //! which have run on the board, before it judges chipsmith's.
 //!
+//! Block RAM is read per RAMB18 half: a RAMB36E1 is its two halves with
+//! the data bits interleaved (its DIADI 2i is the lower half's DIADI i, 2i+1
+//! the upper's, the same tile wires), so each half in use becomes a
+//! RAMB18E1 with the pins and bits of its own (`bram_half`).
+//!
 //! Not decoded: BSCANs beyond their ports (each output becomes an input
 //! port `__bscan_<PORT>`, TDO an output port `__bscan_TDO`, as the synthesis
 //! tests cut them), the PS7, and slices whose LUTs are anything but logic or
@@ -33,7 +38,8 @@ const LETTERS: [char; 4] = ['A', 'B', 'C', 'D'];
 /// (bits from index `lo`).
 struct Feature {
     name: String,
-    value: Option<(u32, u64)>,
+    /// Bits from index `lo`, the lowest first.
+    value: Option<(u32, Vec<bool>)>,
 }
 
 fn parse(fasm: &str) -> Result<BTreeMap<String, Vec<Feature>>> {
@@ -58,12 +64,13 @@ fn parse(fasm: &str) -> Result<BTreeMap<String, Vec<Feature>>> {
                     .context("range")?
                     .parse()?;
                 let bits = v.split_once("'b").context("a vector value")?.1;
-                (base.to_string(), Some((lo, u64::from_str_radix(bits, 2)?)))
+                anyhow::ensure!(bits.chars().all(|c| c == '0' || c == '1'), "FASM value {v}");
+                (base.to_string(), Some((lo, bits.chars().rev().map(|c| c == '1').collect())))
             }
             // A single set bit of a vector: `ALUT.INIT[17]`.
             None => match rest.strip_suffix(']').and_then(|r| r.rsplit_once('[')) {
                 Some((base, bit)) if bit.chars().all(|c| c.is_ascii_digit()) => {
-                    (base.to_string(), Some((bit.parse()?, 1)))
+                    (base.to_string(), Some((bit.parse()?, vec![true])))
                 }
                 _ => (rest.to_string(), None),
             },
@@ -237,6 +244,7 @@ pub fn decode(
     let mut iobs: Vec<(String, bool, bool)> = Vec::new();
     let mut bufgs: Vec<String> = Vec::new();
     let mut bscans: Vec<String> = Vec::new();
+    let mut rams: BTreeMap<(u32, usize), RamHalf> = BTreeMap::new();
     for (tname, feats) in &tiles {
         let Some(&tile) = tile_of.get(tname.as_str()) else {
             continue;
@@ -280,10 +288,12 @@ pub fn decode(
                 let key = format!("{tname}.{half}");
                 let h = halves.entry(key).or_default();
                 let letter = |s: &str| LETTERS.iter().position(|&c| s.starts_with(c));
-                match (&parts[1..], f.value) {
+                match (&parts[1..], f.value.as_ref()) {
                     ([lut, "INIT"], Some((lo, v))) if lut.ends_with("LUT") => {
                         if let Some(k) = letter(lut) {
-                            h.init[k] |= v << lo;
+                            for (i, &b) in v.iter().enumerate() {
+                                h.init[k] |= u64::from(b) << (*lo as usize + i);
+                            }
                         }
                     }
                     ([lut, "RAM"], None) if lut.ends_with("LUT") => {
@@ -352,6 +362,10 @@ pub fn decode(
                     }
                     None => iobs.push((site, input, output)),
                 }
+            } else if let Some(y) = half.strip_prefix("RAMB18_Y") {
+                let h: usize = y.parse()?;
+                let b = rams.entry((tile, h)).or_default();
+                b.read(&parts[1..], f.value.as_ref());
             } else if half == "BUFGCTRL" && parts.get(2) == Some(&"IN_USE") {
                 let site = db
                     .sites
@@ -444,6 +458,11 @@ pub fn decode(
         }
         slice_nets.insert(key.clone(), (site, n));
     }
+    rams.retain(|_, r| r.in_use);
+    let mut ram_out: BTreeMap<(u32, usize), [Vec<SigBit>; 4]> = BTreeMap::new();
+    for &(tile, h) in rams.keys() {
+        ram_out.insert((tile, h), bram_sources(&mut d, tile, h)?);
+    }
     let mut port_bits: Vec<(String, Dir, SigBit)> = Vec::new();
     let site_port: HashMap<&str, &str> = {
         let site_of_pin: HashMap<&str, &str> =
@@ -453,6 +472,13 @@ pub fn decode(
             .collect()
     };
     let mut pad_nets: HashMap<String, SigBit> = HashMap::new();
+    // An input-only pin no port names (Vivado always configures PUDC_B as
+    // one) drives nothing the check compares; anything it did drive would
+    // read 1 and show.
+    if let Some((site, ..)) = iobs.iter().find(|(s, _, out)| *out && !site_port.contains_key(s.as_str())) {
+        bail!("pin {site} drives out but has no port");
+    }
+    iobs.retain(|(site, _, _)| site_port.contains_key(site.as_str()));
     for (site, input, output) in &iobs {
         let port = site_port
             .get(site.as_str())
@@ -616,6 +642,9 @@ pub fn decode(
             );
         }
     }
+    for ((tile, h), r) in &rams {
+        bram_half(&mut d, *tile, *h, r, &ram_out[&(*tile, *h)])?;
+    }
     for (site, o) in bufgs.iter().zip(&bufg_out) {
         let i = d.resolve_pin(site, "I0")?;
         d.m.add_cell(format!("bufg_{site}"), cells::bufg(i, *o));
@@ -691,4 +720,218 @@ pub fn decode(
         chipsmith_netlist::ParamValue::int(1),
     );
     Ok(Design { modules: vec![m] })
+}
+
+/// One RAMB18 half's features.
+#[derive(Default)]
+struct RamHalf {
+    in_use: bool,
+    /// Per port: read and write widths from their bits (none set: x1).
+    read: [Option<u32>; 2],
+    write: [Option<u32>; 2],
+    sdp_read: bool,
+    sdp_write: bool,
+    out_reg: [bool; 2],
+    mode: [crate::bram::WriteMode; 2],
+    rstreg_regce: [bool; 2],
+    /// ZINV_<pin>: not inverted.
+    zinv: HashSet<String>,
+    zinit: [u64; 2],
+    zsrval: [u64; 2],
+    /// The half's data then parity bits.
+    contents: Vec<bool>,
+}
+
+impl RamHalf {
+    fn read(&mut self, parts: &[&str], value: Option<&(u32, Vec<bool>)>) {
+        use crate::bram::WriteMode;
+        if self.contents.is_empty() {
+            self.contents = vec![false; 16384 + 2048];
+        }
+        let port = |s: &str| usize::from(s.ends_with('B'));
+        let bits = |v: Option<&(u32, Vec<bool>)>| -> u64 {
+            v.map_or(0, |(lo, b)| b.iter().enumerate().fold(0u64, |a, (i, &x)| a | u64::from(x) << (*lo as usize + i)))
+        };
+        match parts {
+            ["IN_USE"] => self.in_use = true,
+            ["SDP_READ_WIDTH_36"] => self.sdp_read = true,
+            ["SDP_WRITE_WIDTH_36"] => self.sdp_write = true,
+            [f] if f.starts_with("DO") && f.ends_with("_REG") => self.out_reg[usize::from(f.starts_with("DOB"))] = true,
+            [f] if f.starts_with("READ_WIDTH_") || f.starts_with("WRITE_WIDTH_") => {
+                let (name, w) = f.rsplit_once('_').expect("matched");
+                let w: u32 = w.parse().unwrap_or(1);
+                let k = port(name);
+                if w > 1 {
+                    if name.starts_with("READ") {
+                        self.read[k] = Some(w);
+                    } else {
+                        self.write[k] = Some(w);
+                    }
+                }
+            }
+            [f] if f.starts_with("WRITE_MODE_") => {
+                let k = usize::from(f.starts_with("WRITE_MODE_B"));
+                if f.ends_with("READ_FIRST") {
+                    self.mode[k] = WriteMode::ReadFirst;
+                } else if f.ends_with("NO_CHANGE") {
+                    self.mode[k] = WriteMode::NoChange;
+                }
+            }
+            [f] if f.starts_with("RSTREG_PRIORITY_") && f.ends_with("_REGCE") => {
+                self.rstreg_regce[usize::from(f.starts_with("RSTREG_PRIORITY_B"))] = true;
+            }
+            [f] if f.starts_with("ZINV_") => {
+                self.zinv.insert(f["ZINV_".len()..].to_string());
+            }
+            [f] if f.starts_with("ZINIT_") => self.zinit[port(f)] = bits(value),
+            [f] if f.starts_with("ZSRVAL_") => self.zsrval[port(f)] = bits(value),
+            [f] if f.starts_with("INIT_") || f.starts_with("INITP_") => {
+                let (pre, i) = f.split_once('_').expect("matched");
+                let Ok(i) = usize::from_str_radix(i, 16) else { return };
+                let base = if pre == "INITP" { 16384 } else { 0 } + 256 * i;
+                if let Some((lo, v)) = value {
+                    for (k, &b) in v.iter().enumerate() {
+                        if let Some(slot) = self.contents.get_mut(base + *lo as usize + k) {
+                            *slot = b;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The site of half `h` of BRAM tile `tile`, and of the tile's RAMB36.
+fn bram_sites(db: &ChipDb, tile: u32, h: usize) -> Result<(String, Option<String>)> {
+    let half = db
+        .sites
+        .iter()
+        .find(|(_, s)| s.tile == tile && s.relative == format!("RAMB18_X0Y{h}"))
+        .map(|(n, _)| n.clone())
+        .with_context(|| format!("tile {}: no RAMB18 half {h}", db.tile_names[tile as usize]))?;
+    let full = db
+        .sites
+        .iter()
+        .find(|(_, s)| s.tile == tile && s.ty == "RAMBFIFO36E1")
+        .map(|(n, _)| n.clone());
+    Ok((half, full))
+}
+
+/// Fresh nets for half `h`'s read data (DOADO, DOBDO, DOPADOP, DOPBDOP),
+/// each the source of its RAMB18 site pin and of the RAMB36 pin that is
+/// the same output (bit 2i + h of the RAMB36's).
+fn bram_sources(d: &mut Decoder, tile: u32, h: usize) -> Result<[Vec<SigBit>; 4]> {
+    let (half, full) = bram_sites(d.db, tile, h)?;
+    let mut out: [Vec<SigBit>; 4] = Default::default();
+    for (k, (name, n)) in [("DOADO", 16), ("DOBDO", 16), ("DOPADOP", 2), ("DOPBDOP", 2)].into_iter().enumerate() {
+        for i in 0..n {
+            let net = d.net();
+            out[k].push(net);
+            let pin = crate::phys::bram_pin(d.db, &half, &format!("{name}{i}"))?;
+            d.source.insert(d.pin(&half, &pin)?, net);
+            if let Some(full) = &full {
+                if let Ok(node) = d.pin(full, &format!("{name}{}", 2 * i + h)) {
+                    d.source.insert(node, net);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Half `h` of a BRAM tile as a RAMB18E1, its pins traced back like any
+/// site's (`nextpnr`'s mapping of the primitive's pins, read backwards).
+fn bram_half(d: &mut Decoder, tile: u32, h: usize, r: &RamHalf, dout: &[Vec<SigBit>; 4]) -> Result<()> {
+    use crate::bram::{Config, Inversions, Port, Size, Width};
+    let (site, _) = bram_sites(d.db, tile, h)?;
+    let name = format!("{}.ramb18_y{h}", d.db.tile_names[tile as usize]);
+    let pin = |d: &Decoder, p: &str| -> Result<SigBit> {
+        let sp = crate::phys::bram_pin(d.db, &site, p)?;
+        d.resolve_pin(&site, &sp)
+    };
+    let width = |w: Option<u32>| Width::from_bits(w.unwrap_or(1) as usize).context("a block RAM width");
+    let sdp = r.sdp_read || r.sdp_write;
+    let mut ports = [Port::unused(), Port::unused()];
+    for k in 0..2 {
+        ports[k].read = Some(width(r.read[k])?);
+        ports[k].write = Some(width(r.write[k])?);
+        ports[k].mode = r.mode[k];
+        ports[k].out_reg = r.out_reg[k];
+        ports[k].rstreg_first = !r.rstreg_regce[k];
+        // In the read width's layout; SDP's wide read is each port's x18.
+        let w = if r.sdp_read { Width::X18 } else { width(r.read[k])? };
+        ports[k].init = crate::bram::from_half_bits(!r.zinit[k] & 0x3ffff, w);
+        ports[k].srval = crate::bram::from_half_bits(!r.zsrval[k] & 0x3ffff, w);
+    }
+    if sdp {
+        ports[0].read = Some(if r.sdp_read { Width::X36 } else { width(r.read[0])? });
+        ports[1].write = Some(if r.sdp_write { Width::X36 } else { width(r.write[1])? });
+        ports[0].write = None;
+        ports[1].read = None;
+        anyhow::ensure!(r.out_reg[0] == r.out_reg[1], "{name}: an SDP block with DOA_REG and DOB_REG apart");
+        ports[1].out_reg = false;
+    }
+    let inv = |p: &str| !r.zinv.contains(p);
+    let config = Config {
+        size: Size::Half,
+        sdp,
+        ports,
+        inv: Inversions {
+            clk: [inv("CLKARDCLK"), inv("CLKBWRCLK")],
+            en: [inv("ENARDEN"), inv("ENBWREN")],
+            rstram: [inv("RSTRAMARSTRAM"), inv("RSTRAMB")],
+            rstreg: [inv("RSTREGARSTREG"), inv("RSTREGB")],
+        },
+        contents: r.contents.clone(),
+    };
+    config.check().with_context(|| name.clone())?;
+    let mut cell = crate::synth::cells::Ramb::new(config, [dout[0].clone(), dout[1].clone()], [dout[2].clone(), dout[3].clone()]);
+    for (k, (clk, en, regce, rstram, rstreg, regclk)) in [
+        ("CLKARDCLK", "ENARDEN", "REGCEAREGCE", "RSTRAMARSTRAM", "RSTREGARSTREG", "REGCLKARDRCLK"),
+        ("CLKBWRCLK", "ENBWREN", "REGCEB", "RSTRAMB", "RSTREGB", "REGCLKB"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        cell.clk[k] = pin(d, clk)?;
+        cell.en[k] = pin(d, en)?;
+        cell.regce[k] = pin(d, regce)?;
+        cell.rstram[k] = pin(d, rstram)?;
+        cell.rstreg[k] = pin(d, rstreg)?;
+        // The output register runs on REGCLK; the models on the port's
+        // clock, so they must be one. (SDP: REGCLKB's register is the
+        // read's, port A's.)
+        let reg_on = if sdp { r.out_reg[0] } else { r.out_reg[k] };
+        if reg_on {
+            let want = if sdp { cell.clk[0] } else { cell.clk[k] };
+            let got = pin(d, regclk)?;
+            anyhow::ensure!(got == want, "{name}: {regclk} isn't the port's clock");
+            anyhow::ensure!(
+                inv(regclk) == if sdp { inv("CLKARDCLK") } else { [inv("CLKARDCLK"), inv("CLKBWRCLK")][k] },
+                "{name}: {regclk} inverted apart from the clock"
+            );
+        }
+        for i in 0..14 {
+            cell.addr[k][i] = pin(d, &format!("{}{i}", ["ADDRARDADDR", "ADDRBWRADDR"][k]))?;
+        }
+        for i in 0..16 {
+            cell.di[k][i] = pin(d, &format!("{}{i}", ["DIADI", "DIBDI"][k]))?;
+        }
+        for i in 0..2 {
+            cell.dip[k][i] = pin(d, &format!("{}{i}", ["DIPADIP", "DIPBDIP"][k]))?;
+        }
+    }
+    // Write enables, nextpnr's mapping backwards: WEA[i] on WEA2i (and
+    // 2i+1), WEBWE[i] on WEBWE i, or 2i in SDP's wide write.
+    for i in 0..2 {
+        cell.we[0][i] = pin(d, &format!("WEA{}", 2 * i))?;
+    }
+    for i in 0..4 {
+        let p = if r.sdp_write { 2 * i } else { i };
+        cell.we[1][i] = pin(d, &format!("WEBWE{p}"))?;
+    }
+    let kind = cell.cell();
+    d.m.add_cell(name, kind);
+    Ok(())
 }
