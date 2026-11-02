@@ -4,51 +4,46 @@ Is chipsmith faster than Quartus, and are its results as good? This note
 times both on the same Verilog, to a bitstream, on the same machine, and
 puts each tool's timing result next to its times. `bench/vs-quartus.sh`
 produces every number here and can reproduce them; the raw rows are in
-`bench-out/vs2/runs.tsv` (not committed; the tables below come from it
+`bench-out/vs3/runs.tsv` (not committed; the tables below come from it
 through `bench/vs-quartus.sh table` and `bench/vs-quartus.py summary`).
-This run (2026-11-02) is branch `qor` at 7b03ae2. The first run
-(2026-11-01, `open` a288925 and gpu-pnr 61ae9d7) is kept below for
-comparison.
+This run (2026-11-02/03) is branch `qor2` at 16c6b23. The second run
+(2026-11-02, branch `qor` at 7b03ae2) and the first (2026-11-01, `open`
+a288925 and gpu-pnr 61ae9d7) are kept below for comparison.
 
 ## Verdict
 
-**chipsmith is 2x to 16x faster than Quartus in wall time, at every
-size, and uses 2.2x to 10x less CPU time.** Quartus has a fixed floor:
-about 100 s for a 26-LE blinky (map, fit, assembler), where chipsmith
-takes 9 s. On the CPU cores (femtorv32, picorv32, mult-selftest,
-sdram-selftest; 500 to 1,000 LEs) chipsmith takes 25 to 40 s to
-Quartus' 123 to 162 s. sha256 takes 133 s against 296 s, and
-picorv32x24 (20,240 LEs in Quartus) 416 s against 1,247 s. In the first
-run `open` was slower than Quartus on picorv32x24 (1,516 s): since then
-`open` has merged the gpu-pnr branch's LE-level placer.
+**chipsmith is 1.5x to 19x faster than Quartus in wall time, at every
+size, and uses 1.3x to 8x less CPU time.** Quartus has a fixed floor:
+about 65 s for a 26-LE blinky (map, fit, assembler), where chipsmith
+takes 7 s. On the CPU cores (femtorv32, picorv32, mult-selftest,
+sdram-selftest; 500 to 1,000 LEs) chipsmith takes 13 to 39 s to
+Quartus' 72 to 111 s. sha256 takes 108 s against 166 s, and picorv32x24
+(20,240 LEs in Quartus) 556 s against 1,105 s. The machine was quieter
+than in the second run (load median 9 against 17), which helped Quartus
+more than chipsmith (blinky 65 s against 100); chipsmith's routing also
+takes more iterations since `qor2` (Round 2, below): picorv32x24's 413 s
+against 250 s.
 
-**Quartus still wins on LEs, by much less.** chipsmith uses 8.5% more on
-femtorv32 (was 67%), 11% on sha256 (83% on a288925, 28% on 61762d1),
-14% on sdram-selftest (37%), 16% on picorv32 and picorv32x24 (40% each),
-17% on mult-selftest (21%), and 13% fewer on crc32 (it used 12% more).
-Closing the gap, below, has what was lost where and what each fix gave
-back.
+**Quartus still wins on LEs**, unchanged since the second run: chipsmith
+uses 8.5% more on femtorv32, 11% on sha256, 14% on sdram-selftest, 16% on
+picorv32 and picorv32x24, 17% on mult-selftest, and 13% fewer on crc32.
+Where the rest of picorv32's goes is in Round 2, below.
 
 **Fmax, both placements under quartus_sta:**
 
-- **chipsmith ahead:** picorv32 (125 against 120 MHz), sdram-selftest
-  (170 against 166), blinky (298 against 285); crc32 even (269 against
-  268).
-- **Quartus ahead:** by 14% on femtorv32 (81 against 71 MHz) and on
-  mult-selftest (71 against 62), and by 48% on sha256 (65 against 44).
-- **picorv32x24:** chipsmith's own estimate is 83 MHz against Quartus'
-  105. Its register files are in 48 M4Ks now, as in Quartus, and pull the
-  24 cores' logic toward the M4K columns; chipsmith's placement handles
-  that worse than Quartus' (`open` 61762d1, register files in logic:
-  105 MHz by the earlier timing model; with them in M4Ks and nothing else
-  changed, 77).
-- **chipsmith's own estimate** is within -1.4% to +3.4% of what
-  quartus_sta finds for its placement (it ran up to 12% above in the
-  first run).
+- **chipsmith ahead:** picorv32 (130 against 120 MHz), sdram-selftest
+  (180 against 166), crc32 (293 against 268), blinky (298 against 285),
+  and picorv32x24 by chipsmith's estimate (113 against Quartus' 105).
+- **Quartus ahead:** by 11% on mult-selftest (71 against 64 MHz), 14% on
+  femtorv32 (81 against 71) and 26% on sha256 (65 against 51; 48% in the
+  second run).
+- **chipsmith's own estimate** is within -1.4% to +5.2% of what
+  quartus_sta finds for its placement.
 
-So chipsmith turns a bitstream around faster at every size in this run.
-Quartus' designs are 8% to 16% smaller, and faster on the deepest logic
-(sha256) and two of the CPUs.
+So chipsmith turns a bitstream around faster at every size, and its
+placements are as fast as Quartus' or faster on five of the eight
+designs. Quartus' are 8% to 17% smaller, and faster on the deepest logic
+(sha256), femtorv32 and mult-selftest.
 
 ## Full builds
 
@@ -60,27 +55,27 @@ Wall time, s:
 
 | design | LEs Quartus / chipsmith | q wall s | cs wall s | speed-up cs |
 |---|---|---|---|---|
-| blinky-verilog | 26 / 26 | 99.8 [87.0-128.5] | 8.7 [8.1-17.4] | 11.5x |
-| crc32 | 105 / 91 | 131.9 [125.1-338.2] | 8.1 [6.7-23.6] | 16.2x |
-| femtorv32 | 473 / 513 | 138.3 [117.4-152.9] | 25.3 [12.9-28.7] | 5.5x |
-| picorv32 | 839 / 971 | 138.2 [115.2-160.3] | 40.0 [26.9-47.0] | 3.5x |
-| mult-selftest | 833 / 972 | 162.2 [128.9-165.9] | 38.8 [38.7-52.3] | 4.2x |
-| sdram-selftest | 567 / 645 | 123.3 [119.1-133.3] | 29.8 [16.3-31.5] | 4.1x |
-| sha256 | 3303 / 3674 | 295.5 [279.1-328.4] | 132.5 [107.7-137.8] | 2.2x |
-| picorv32x24 | 20240 / 23527 | 1247.3 [1239.6-1288.9] | 416.2 [341.9-424.6] | 3.0x |
+| blinky-verilog | 26 / 26 | 64.9 [55.0-76.0] | 6.9 [6.0-7.2] | 9.4x |
+| crc32 | 105 / 91 | 94.8 [88.7-104.1] | 5.0 [4.1-6.2] | 19.0x |
+| femtorv32 | 473 / 513 | 72.2 [68.5-99.9] | 16.5 [10.1-17.8] | 4.4x |
+| picorv32 | 839 / 971 | 107.3 [77.7-109.6] | 19.9 [16.1-22.9] | 5.4x |
+| mult-selftest | 833 / 972 | 111.4 [92.8-122.5] | 38.6 [24.7-40.5] | 2.9x |
+| sdram-selftest | 567 / 645 | 78.9 [66.0-98.5] | 13.2 [9.7-21.6] | 6.0x |
+| sha256 | 3303 / 3674 | 165.5 [151.1-207.2] | 108.2 [106.2-142.9] | 1.5x |
+| picorv32x24 | 20240 / 23527 | 1104.8 [949.6-1159.8] | 555.9 [486.7-662.1] | 2.0x |
 
 CPU time (user + sys of the run's cgroup), s:
 
 | design | LEs Quartus / chipsmith | q CPU s | cs CPU s | speed-up cs |
 |---|---|---|---|---|
-| blinky-verilog | 26 / 26 | 83.3 [80.9-86.0] | 9.8 [9.8-10.0] | 8.5x |
-| crc32 | 105 / 91 | 119.8 [118.7-131.9] | 12.0 [11.4-12.6] | 10.0x |
-| femtorv32 | 473 / 513 | 110.3 [110.2-111.0] | 27.9 [26.1-28.2] | 3.9x |
-| picorv32 | 839 / 971 | 125.4 [112.0-126.0] | 37.9 [35.9-38.1] | 3.3x |
-| mult-selftest | 833 / 972 | 129.8 [120.4-130.1] | 40.9 [40.6-42.5] | 3.2x |
-| sdram-selftest | 567 / 645 | 105.9 [105.7-107.6] | 33.3 [31.7-34.4] | 3.2x |
-| sha256 | 3303 / 3674 | 242.0 [239.0-242.1] | 111.2 [111.0-115.2] | 2.2x |
-| picorv32x24 | 20240 / 23527 | 1108.0 [1107.8-1116.7] | 466.6 [443.9-473.9] | 2.4x |
+| blinky-verilog | 26 / 26 | 62.1 [54.2-65.3] | 9.9 [9.4-10.0] | 6.3x |
+| crc32 | 105 / 91 | 92.2 [86.7-98.7] | 11.1 [9.9-12.4] | 8.3x |
+| femtorv32 | 473 / 513 | 71.0 [67.6-94.0] | 29.1 [25.6-29.7] | 2.4x |
+| picorv32 | 839 / 971 | 103.2 [76.8-107.5] | 34.6 [33.7-34.8] | 3.0x |
+| mult-selftest | 833 / 972 | 105.5 [90.2-116.8] | 47.5 [45.7-53.3] | 2.2x |
+| sdram-selftest | 567 / 645 | 76.4 [65.2-93.8] | 32.4 [30.6-36.4] | 2.4x |
+| sha256 | 3303 / 3674 | 159.5 [148.9-199.2] | 127.0 [125.9-148.3] | 1.3x |
+| picorv32x24 | 20240 / 23527 | 1023.3 [902.3-1037.7] | 585.8 [585.1-629.4] | 1.7x |
 
 ## Quality
 
@@ -89,25 +84,29 @@ CLOCK_50's (sdram-selftest: the 100 MHz PLL clock's) Fmax, MHz.
 the routed estimate for chipsmith. "quartus_sta" is chipsmith's
 placement and routing assembled by Quartus and timed by the same
 quartus_sta (rep 1); every one of those assemblies came out byte-identical
-to chipsmith's RBF but sha256's (below). chipsmith's placement is
-deterministic, so its values repeat across reps.
+to chipsmith's RBF. chipsmith's placement is deterministic, so its values
+repeat across reps.
 
 | design | q own | cs own | cs quartus_sta |
 |---|---|---|---|
 | blinky-verilog | 285.31 | 294.1 | 298.15 |
-| crc32 | 267.95 | 274.7 | 268.6 |
-| femtorv32 | 80.89 | 72.2 | 70.91 |
-| picorv32 | 119.82 | 128.5 | 125.28 |
-| mult-selftest | 70.99 | 64.2 | 62.34 |
-| sdram-selftest | 165.84 | 176.1 | 170.3 |
-| sha256 | 64.8 | 44.3 | 43.65 |
-| picorv32x24 | 105.27 | 83.1 | - |
+| crc32 | 267.95 | 302.1 | 293.0 |
+| femtorv32 | 80.89 | 72.7 | 70.84 |
+| picorv32 | 119.82 | 130.2 | 129.85 |
+| mult-selftest | 70.99 | 65.1 | 63.98 |
+| sdram-selftest | 165.84 | 189.8 | 180.41 |
+| sha256 | 64.8 | 51.9 | 51.38 |
+| picorv32x24 | 105.27 | 113.1 | - |
 
-sha256's RBF differs from Quartus' assembly in 260 bits, one a LAB: the
+sha256's RBF differed from Quartus' assembly in 260 bits, one a LAB: the
 LAB's clear-line inversion (`LAB_CLR_INVERT_PAIR`) for its active-low
-reset, set by chipsmith and clear in Quartus. It did on `open` 61762d1
-too, since the LAB took over active-low clears (8ebc2e8); not looked into
-further here.
+reset. chipsmith was right: the cram that exported it to Quartus was the
+nix build of cyclone2-re e6aa597, from before de2-arstn taught the export
+the inversion (de3386a kept the previous outputHash for its chipsmith
+dependency, so `nix build .#cram` failed on master and `result/` still
+held the old build). With a current cram sha256 is byte-identical
+(`qor2`), and cram now refuses to run from a checkout whose sources it
+wasn't built from (cyclone2-re b5eb9e7).
 
 ## Load
 
@@ -115,8 +114,8 @@ The 1-minute load average during each run (8 hardware threads):
 
 | tool | runs | load, median [min-max] |
 |---|---|---|
-| q | 24 | 17.1 [10.8-46.2] |
-| cs | 24 | 16.4 [9.6-49.4] |
+| q | 24 | 8.6 [4.0-17.3] |
+| cs | 24 | 9.3 [4.1-18.9] |
 
 ## Closing the gap (branch `qor`)
 
@@ -238,6 +237,117 @@ line: the placer counts it now, and sha256 routes in 16 iterations where
 two of three seeds didn't route in 60. At most 8 LEs of a LAB pair a LUT
 with an unrelated register.
 
+## Round 2 (branch `qor2`)
+
+### Routing
+
+**Where the time went.** quartus_sta's worst path of sha256 on `open`
+3ba072c (43.7 MHz) runs through eight carry chains, adder into adder; of
+its 22.9 ns, about 14 are routing between the chains, 1.1 to 2.9 ns a hop,
+where Quartus' own placement has 0.44 to 1.0. The hops took detours: two
+LABs side by side, whose LE output reaches the next LAB's lines directly,
+were joined by five R4/C4 wires (1.8 ns); another net went down nine rows
+and back. With chipsmith's placement and no routing, Quartus routed
+sha256 to 55.5 MHz: the router accounted for more of the gap than the
+placement. picorv32x24 showed it directly: its critical path was 9.58 ns
+at the fourth routing iteration (1,713 nodes still overused) and 12.08 ns
+once legal, its worst connection a register into an adder in the next LAB
+over 19 wires (5.5 ns).
+
+**Why.** Present congestion's cost grew 1.8x an iteration. By the last
+iterations a node another net used cost even a 0.95-critical connection
+more than a detour of ten or twenty wires, so clearing the last few
+overused nodes pushed critical connections the long way round.
+
+**Fix.** The growth is 1.2 now (VPR's default is 1.3), and once the
+routing is legal, the nets of connections at least 0.9 critical are
+rerouted for delay alone, taking other nets' wires at the cost of an R4;
+the nets they displaced reroute around them, and a repair stays only if
+the routing is legal, the net got faster and the critical path no longer.
+Picked on femtorv32, picorv32, mult-selftest, sdram-selftest and sha256,
+three placement seeds each (routed critical paths, geometric mean against
+1.8): the repair alone x0.981; growth 1.5 x0.981, 1.3 x0.966; with the
+repair, 1.4 x0.941, 1.3 x0.955, 1.2 x0.938, 1.1 as good in half again the
+iterations. Capping the present factor at 100 or 1000 instead didn't move
+picorv32x24 (12.08 to 13.10 ns).
+
+quartus_sta's Fmax of chipsmith's placement and routing (seed 0), MHz,
+every RBF byte-identical through Quartus (`bench/qor.sh`), as are the 26
+other DE2 examples (`bench/quartus-validate.sh`):
+
+| design | `open` 3ba072c | `qor2` | Quartus' own |
+|---|---|---|---|
+| sha256 | 43.65 | 51.38 | 64.80 |
+| crc32 | 268.60 | 293.00 | 267.95 |
+| sdram-selftest | 170.30 | 180.41 | 165.84 |
+| picorv32 | 125.28 | 129.85 | 119.82 |
+| mult-selftest | 62.34 | 63.98 | 70.99 |
+| femtorv32 | 70.91 | 70.84 | 80.89 |
+| blinky-verilog | 298.15 | 298.15 | 285.31 |
+
+picorv32x24, chipsmith's estimate (Quartus' assembly of it doesn't
+finish): 12.08 -> 8.84 ns, 82.8 -> 113 MHz, against Quartus' 105.3. Routing
+takes more iterations (sha256 19 against 31 at seed 0, femtorv32 16
+against 10) and the repair 5 to 40 s; the build times are in the rerun
+above. `crates/chipsmith/tests/route_quality.rs` fails if femtorv32's or
+sha256's routed critical path goes back over 14.0 or 19.6 ns.
+
+### Where picorv32's LEs still go
+
+Quartus' map report credits its multiplexer restructuring with 297 of
+picorv32's LEs, most of them `reg_op1`'s 14:1 multiplexer (261 LEs before,
+116 after). That is against Quartus' own unrestructured baseline, not
+chipsmith: the LUTs that feed only `reg_op1`'s registers are 132 in
+chipsmith for 32 bits, Quartus' 116 for 29. Comparing, per register, the
+LUTs whose whole fanout ends in it (chipsmith's netlist against Quartus'
+post-fit one):
+
+| registers | chipsmith | Quartus |
+|---|---|---|
+| `reg_next_pc` (30) | 123 | 66 |
+| `alu_out_q` (32) | 153 | 128 |
+| `reg_out` (32) | 113 | 89 |
+| shared by several | 168 | 83 |
+
+Quartus builds `reg_next_pc` one LE a bit: one adder for both `current_pc
++ 4` and `current_pc + imm_j` (resource sharing, an operand multiplexed),
+the register in the adder's LE, and `current_pc` on its synchronous load
+(SDATA through input C, which arithmetic mode leaves free). chipsmith
+builds two adders and a multiplexer LUT after them. Two attempts, neither
+merged:
+
+- **The LAB's synchronous load** under a multiplexer with an adder on one
+  leg (branches `qor2-sload` in both repositories: chip database SLOAD
+  pins, synthesis, packer, placer, timing, bitstream import, Quartus
+  export, a proven and co-simulated test): real designs barely have the
+  pattern as it stands (sha256 -6 LEs, the CPUs none), and the new pins
+  change the routing graph, so every RBF would need revalidating. picorv32
+  needs its adders shared first, and sha256's 540 synchronous loads in
+  Quartus load constants (`digest_init ? H0 : H + a`).
+- **Sharing two additions under a multiplexer:** picorv32's two have been
+  narrowed differently by then (30 and 31 bits, bit 0 of one unread), so
+  the multiplexer reads a slice of one; matching them needs the
+  narrowing aligned.
+
+femtorv32's worst path under quartus_sta starts at its register file's
+M4K (3.0 ns clock to output) and crosses LUTs and a carry chain with
+short routing (0.2 to 0.4 ns an element): the router has nothing to give
+there, and its Fmax didn't move.
+
+### Co-simulation
+
+femtorv32's and picorv32's co-simulations compared no output bits: the
+RTL's registers and memories without an initial value started x, so the
+LED register loaded through an x enable at the first edge (and
+femtorv32's x0, never written, read x), and their reset button, redrawn
+every cycle, kept the CPUs in reset. The RTL's registers and memories now
+power up 0 as the device's do (its x constants stay don't-cares), the
+block model reads an undefined INIT bit as 0 as the bitstream writes it,
+and the CPUs' KEY[0] is a button pressed one cycle in 256. Both compare
+270,000 bits now, and swapping two of a register file's read address
+pins fails both (`cpu_cosim_catches_a_wrong_register`); every M4K design
+compares more (README, M4K table).
+
 ## Method
 
 **Machine.** Intel i7-4770K (4 cores, 8 threads, 3.5 GHz), 31 GB, no swap,
@@ -254,7 +364,7 @@ give lower wall times for both tools; see Caveats.
 | tool | what |
 |---|---|
 | `q` | Quartus II 13.0sp1 Web Edition (13.0.1 build 232): `quartus_map`, `quartus_fit` (Auto Fit), `quartus_asm` (SOF) |
-| `cs` | `chipsmith build`, branch `qor` at 7b03ae2 (`open` 61762d1, which has gpu-pnr merged, and the commits of Closing the gap), on CPU threads |
+| `cs` | `chipsmith build`, branch `qor2` at 16c6b23 (`open` 0fd5991, which has `qor` merged, and the commits of Round 2), on CPU threads |
 
 The first run also had `q-fast` (`FITTER_EFFORT "FAST FIT"`), `q-all`
 (`NUM_PARALLEL_PROCESSORS ALL`, which the Web Edition disables: warning
@@ -304,6 +414,49 @@ Quartus rebuilds in the same project directory, keeping `db/` and
 `incremental_db/`. chipsmith rebuilds in the same `build/`, where it
 skips every step whose inputs haven't changed (ADR-0011).
 
+
+## Second run (2026-11-02, `qor` 7b03ae2)
+
+At load 10 to 49 (median 17), `cs` the `qor` branch. LEs as in this run.
+
+Wall time, s:
+
+| design | LEs Quartus / chipsmith | q wall s | cs wall s | speed-up cs |
+|---|---|---|---|---|
+| blinky-verilog | 26 / 26 | 99.8 [87.0-128.5] | 8.7 [8.1-17.4] | 11.5x |
+| crc32 | 105 / 91 | 131.9 [125.1-338.2] | 8.1 [6.7-23.6] | 16.2x |
+| femtorv32 | 473 / 513 | 138.3 [117.4-152.9] | 25.3 [12.9-28.7] | 5.5x |
+| picorv32 | 839 / 971 | 138.2 [115.2-160.3] | 40.0 [26.9-47.0] | 3.5x |
+| mult-selftest | 833 / 972 | 162.2 [128.9-165.9] | 38.8 [38.7-52.3] | 4.2x |
+| sdram-selftest | 567 / 645 | 123.3 [119.1-133.3] | 29.8 [16.3-31.5] | 4.1x |
+| sha256 | 3303 / 3674 | 295.5 [279.1-328.4] | 132.5 [107.7-137.8] | 2.2x |
+| picorv32x24 | 20240 / 23527 | 1247.3 [1239.6-1288.9] | 416.2 [341.9-424.6] | 3.0x |
+
+CPU time (user + sys of the run's cgroup), s:
+
+| design | LEs Quartus / chipsmith | q CPU s | cs CPU s | speed-up cs |
+|---|---|---|---|---|
+| blinky-verilog | 26 / 26 | 83.3 [80.9-86.0] | 9.8 [9.8-10.0] | 8.5x |
+| crc32 | 105 / 91 | 119.8 [118.7-131.9] | 12.0 [11.4-12.6] | 10.0x |
+| femtorv32 | 473 / 513 | 110.3 [110.2-111.0] | 27.9 [26.1-28.2] | 3.9x |
+| picorv32 | 839 / 971 | 125.4 [112.0-126.0] | 37.9 [35.9-38.1] | 3.3x |
+| mult-selftest | 833 / 972 | 129.8 [120.4-130.1] | 40.9 [40.6-42.5] | 3.2x |
+| sdram-selftest | 567 / 645 | 105.9 [105.7-107.6] | 33.3 [31.7-34.4] | 3.2x |
+| sha256 | 3303 / 3674 | 242.0 [239.0-242.1] | 111.2 [111.0-115.2] | 2.2x |
+| picorv32x24 | 20240 / 23527 | 1108.0 [1107.8-1116.7] | 466.6 [443.9-473.9] | 2.4x |
+
+Fmax, MHz:
+
+| design | q own | cs own | cs quartus_sta |
+|---|---|---|---|
+| blinky-verilog | 285.31 | 294.1 | 298.15 |
+| crc32 | 267.95 | 274.7 | 268.6 |
+| femtorv32 | 80.89 | 72.2 | 70.91 |
+| picorv32 | 119.82 | 128.5 | 125.28 |
+| mult-selftest | 70.99 | 64.2 | 62.34 |
+| sdram-selftest | 165.84 | 176.1 | 170.3 |
+| sha256 | 64.8 | 44.3 | 43.65 |
+| picorv32x24 | 105.27 | 83.1 | - |
 
 ## First run (2026-11-01)
 
@@ -467,23 +620,23 @@ picorv32x24 was left out: about 4 hours to show the same thing.
 
 ## Appendix: every column
 
-Full builds (`bench/vs-quartus.sh table bench-out/vs2`):
+Full builds (`bench/vs-quartus.sh table bench-out/vs3`):
 
 | design | tool | runs | LEs | wall s | CPU s | CPU/wall | load | own critical ns | quartus_sta Fmax MHz | stages, median wall/CPU s |
 |---|---|---|---|---|---|---|---|---|---|---|
-| blinky-verilog | q | 3 | 26 | 99.8 [87.0-128.5] | 83.3 [80.9-86.0] | 0.83 | 19.0 [16.2-46.2] | 3.50 [3.50-3.50] | 285.3 [285.3-285.3] | map 23.1/18.0, fit 50.6/42.4, asm 26.2/22.9, sta 11.5/10.0 |
-| blinky-verilog | cs | 3 | 26 | 8.7 [8.1-17.4] | 9.8 [9.8-10.0] | 1.13 | 22.3 [13.3-49.4] | 3.40 [3.40-3.40] | 298.1 | elaborate 0.2/0.3, synth 0.1/0.1, pack 0.1/0.1, graph 1.5/1.4, place 1.7/2.6, route 0.9/1.2, timing 0.1/0.1, bitstream 4.5/3.9 |
-| crc32 | q | 3 | 105 | 131.9 [125.1-338.2] | 119.8 [118.7-131.9] | 0.91 | 18.5 [10.8-37.4] | 3.73 [3.73-3.73] | 267.9 [267.9-267.9] | map 55.9/51.2, fit 51.2/46.2, asm 24.9/22.5, sta 15.1/10.4 |
-| crc32 | cs | 3 | 91 | 8.1 [6.7-23.6] | 12.0 [11.4-12.6] | 1.47 | 17.8 [9.6-34.5] | 3.64 [3.64-3.64] | 268.6 | elaborate 2.3/3.8, synth 0.2/0.3, pack 0.1/0.1, graph 0.1/0.1, place 1.1/1.9, route 1.9/3.3, timing 0.1/0.1, bitstream 2.5/2.3 |
-| femtorv32 | q | 3 | 473 | 138.3 [117.4-152.9] | 110.3 [110.2-111.0] | 0.80 | 17.5 [11.1-21.0] | 12.36 [12.36-12.36] | 80.9 [80.9-80.9] | map 36.4/28.9, fit 73.6/59.0, asm 26.2/23.1, sta 12.6/10.7 |
-| femtorv32 | cs | 3 | 513 | 25.3 [12.9-28.7] | 27.9 [26.1-28.2] | 1.10 | 20.9 [12.3-22.0] | 13.86 [13.86-13.86] | 70.9 | elaborate 0.3/0.5, synth 1.6/2.4, pack 0.2/0.5, graph 0.1/0.1, place 13.7/15.6, route 7.5/7.8, timing 0.1/0.1, bitstream 0.9/0.8 |
-| picorv32 | q | 3 | 839 | 138.2 [115.2-160.3] | 125.4 [112.0-126.0] | 0.91 | 14.3 [11.4-18.0] | 8.35 [8.35-8.35] | 119.8 [119.8-119.8] | map 44.1/35.6, fit 70.6/66.9, asm 23.5/22.3, sta 11.5/10.8 |
-| picorv32 | cs | 3 | 971 | 40.0 [26.9-47.0] | 37.9 [35.9-38.1] | 0.95 | 17.7 [11.1-23.1] | 7.78 [7.78-7.78] | 125.3 | elaborate 0.6/0.7, synth 3.3/4.5, pack 0.8/0.9, graph 0.1/0.1, place 13.3/14.8, route 19.8/15.9, timing 0.1/0.1, bitstream 1.1/0.9 |
-| mult-selftest | q | 3 | 833 | 162.2 [128.9-165.9] | 129.8 [120.4-130.1] | 0.80 | 14.7 [10.9-26.7] | 14.09 [14.09-14.09] | 71.0 [71.0-71.0] | map 42.8/33.9, fit 87.8/73.2, asm 27.2/22.6, sta 14.6/11.6 |
-| mult-selftest | cs | 3 | 972 | 38.8 [38.7-52.3] | 40.9 [40.6-42.5] | 1.05 | 12.9 [12.2-29.1] | 15.57 [15.57-15.57] | 62.3 | elaborate 0.3/0.6, synth 2.3/4.0, pack 0.6/0.8, graph 0.1/0.1, place 17.1/19.1, route 18.6/15.6, timing 0.1/0.1, bitstream 1.1/0.9 |
-| sdram-selftest | q | 3 | 567 | 123.3 [119.1-133.3] | 105.9 [105.7-107.6] | 0.86 | 14.0 [13.6-18.7] | 6.03 [6.03-6.03] | 165.8 [165.8-165.8] | map 30.6/26.0, fit 64.4/57.7, asm 26.9/22.6, sta 13.4/10.9 |
-| sdram-selftest | cs | 3 | 645 | 29.8 [16.3-31.5] | 33.3 [31.7-34.4] | 1.12 | 17.1 [13.2-23.6] | 5.68 [5.68-5.68] | 170.3 | elaborate 0.3/0.5, synth 1.3/1.8, pack 0.9/1.0, graph 0.1/0.1, place 20.2/25.5, route 4.8/3.5, timing 0.1/0.1, bitstream 1.0/0.9 |
-| sha256 | q | 3 | 3303 | 295.5 [279.1-328.4] | 242.0 [239.0-242.1] | 0.82 | 19.2 [19.0-20.0] | 15.43 [15.43-15.43] | 64.8 [64.8-64.8] | map 101.1/76.7, fit 166.1/140.7, asm 28.8/23.9, sta 15.8/13.5 |
-| sha256 | cs | 3 | 3674 | 132.5 [107.7-137.8] | 111.2 [111.0-115.2] | 0.87 | 15.6 [15.5-18.3] | 22.58 [22.58-22.58] | 43.6 | elaborate 0.5/0.6, synth 14.2/15.4, pack 2.3/1.8, graph 0.1/0.1, place 19.3/21.3, route 86.2/72.2, timing 0.1/0.1, bitstream 1.6/1.3 |
-| picorv32x24 | q | 3 | 20240 | 1247.3 [1239.6-1288.9] | 1108.0 [1107.8-1116.7] | 0.89 | 16.2 [14.3-16.6] | 9.50 [9.50-9.50] | 105.3 [105.3-105.3] | map 401.6/341.4, fit 837.3/737.4, asm 33.6/30.5, sta 32.7/29.2 |
-| picorv32x24 | cs | 3 | 23527 | 416.2 [341.9-424.6] | 466.6 [443.9-473.9] | 1.12 | 12.0 [10.6-14.3] | 12.03 [12.03-12.03] | - | elaborate 0.7/0.9, synth 43.0/43.8, pack 9.6/9.0, graph 0.1/0.1, place 104.0/176.6, route 250.2/229.1, timing 0.1/0.1, bitstream 5.3/5.0 |
+| blinky-verilog | q | 3 | 26 | 64.9 [55.0-76.0] | 62.1 [54.2-65.3] | 0.96 | 10.3 [4.0-11.9] | 3.50 [3.50-3.50] | 285.3 [285.3-285.3] | map 15.2/13.3, fit 30.5/29.9, asm 19.2/18.8, sta 9.9/9.6 |
+| blinky-verilog | cs | 3 | 26 | 6.9 [6.0-7.2] | 9.9 [9.4-10.0] | 1.43 | 11.8 [5.3-11.9] | 3.40 [3.40-3.40] | 298.1 | elaborate 0.2/0.3, synth 0.1/0.1, pack 0.1/0.1, graph 0.8/1.7, place 1.0/2.7, route 0.6/1.0, timing 0.1/0.1, bitstream 3.9/3.6 |
+| crc32 | q | 3 | 105 | 94.8 [88.7-104.1] | 92.2 [86.7-98.7] | 0.97 | 8.3 [6.6-11.4] | 3.73 [3.73-3.73] | 267.9 [267.9-267.9] | map 42.5/41.3, fit 39.1/38.3, asm 15.6/15.4, sta 6.7/6.7 |
+| crc32 | cs | 3 | 91 | 5.0 [4.1-6.2] | 11.1 [9.9-12.4] | 2.22 | 8.4 [6.3-9.9] | 3.31 [3.31-3.31] | 293.0 | elaborate 1.2/3.5, synth 0.1/0.3, pack 0.1/0.1, graph 0.0/0.1, place 0.4/1.8, route 2.1/4.1, timing 0.0/0.1, bitstream 0.5/0.6 |
+| femtorv32 | q | 3 | 473 | 72.2 [68.5-99.9] | 71.0 [67.6-94.0] | 0.98 | 6.3 [5.8-10.0] | 12.36 [12.36-12.36] | 80.9 [80.9-80.9] | map 18.5/18.3, fit 39.2/38.4, asm 14.6/14.4, sta 7.5/7.5 |
+| femtorv32 | cs | 3 | 513 | 16.5 [10.1-17.8] | 29.1 [25.6-29.7] | 1.76 | 8.0 [5.1-8.4] | 13.76 [13.76-13.76] | 70.8 | elaborate 0.1/0.4, synth 0.7/2.3, pack 0.2/0.5, graph 0.1/0.1, place 4.5/15.2, route 8.4/9.5, timing 0.1/0.1, bitstream 0.8/0.8 |
+| picorv32 | q | 3 | 839 | 107.3 [77.7-109.6] | 103.2 [76.8-107.5] | 0.98 | 8.2 [4.4-8.8] | 8.35 [8.35-8.35] | 119.8 [119.8-119.8] | map 32.2/31.5, fit 51.5/50.1, asm 18.6/18.0, sta 9.3/9.1 |
+| picorv32 | cs | 3 | 971 | 19.9 [16.1-22.9] | 34.6 [33.7-34.8] | 1.74 | 9.2 [4.1-10.3] | 7.68 [7.68-7.68] | 129.8 | elaborate 0.2/0.6, synth 1.2/3.2, pack 0.2/0.5, graph 0.0/0.1, place 5.3/17.8, route 11.8/11.7, timing 0.1/0.1, bitstream 0.6/0.6 |
+| mult-selftest | q | 3 | 833 | 111.4 [92.8-122.5] | 105.5 [90.2-116.8] | 0.95 | 8.4 [8.4-14.5] | 14.09 [14.09-14.09] | 71.0 [71.0-71.0] | map 35.3/32.8, fit 60.7/58.2, asm 17.1/16.8, sta 7.9/7.8 |
+| mult-selftest | cs | 3 | 972 | 38.6 [24.7-40.5] | 47.5 [45.7-53.3] | 1.32 | 9.5 [7.3-12.1] | 15.35 [15.35-15.35] | 64.0 | elaborate 0.3/0.7, synth 1.9/3.1, pack 0.4/0.6, graph 0.0/0.1, place 7.2/22.4, route 21.2/20.9, timing 0.0/0.0, bitstream 0.6/0.7 |
+| sdram-selftest | q | 3 | 567 | 78.9 [66.0-98.5] | 76.4 [65.2-93.8] | 0.97 | 10.2 [5.0-14.1] | 6.03 [6.03-6.03] | 165.8 [165.8-165.8] | map 25.5/23.8, fit 38.4/37.8, asm 15.1/14.9, sta 7.5/7.4 |
+| sdram-selftest | cs | 3 | 645 | 13.2 [9.7-21.6] | 32.4 [30.6-36.4] | 2.45 | 10.8 [4.4-11.7] | 5.27 [5.27-5.27] | 180.4 | elaborate 0.1/0.4, synth 0.5/1.5, pack 0.3/1.0, graph 0.1/0.1, place 6.1/22.6, route 5.4/5.9, timing 0.0/0.1, bitstream 0.8/0.8 |
+| sha256 | q | 3 | 3303 | 165.5 [151.1-207.2] | 159.5 [148.9-199.2] | 0.96 | 6.1 [5.6-11.5] | 15.43 [15.43-15.43] | 64.8 [64.8-64.8] | map 55.8/54.4, fit 94.5/90.1, asm 15.2/15.0, sta 8.7/8.6 |
+| sha256 | cs | 3 | 3674 | 108.2 [106.2-142.9] | 127.0 [125.9-148.3] | 1.17 | 7.6 [7.4-12.4] | 19.27 [19.27-19.27] | 51.4 | elaborate 0.2/0.6, synth 5.9/11.8, pack 1.1/1.1, graph 0.0/0.0, place 5.5/21.0, route 96.2/93.2, timing 0.0/0.1, bitstream 0.8/0.9 |
+| picorv32x24 | q | 3 | 20240 | 1104.8 [949.6-1159.8] | 1023.3 [902.3-1037.7] | 0.93 | 15.1 [10.5-17.3] | 9.50 [9.50-9.50] | 105.3 [105.3-105.3] | map 320.4/300.1, fit 751.1/693.9, asm 33.4/29.3, sta 35.3/29.2 |
+| picorv32x24 | cs | 3 | 23527 | 555.9 [486.7-662.1] | 585.8 [585.1-629.4] | 1.05 | 17.8 [15.4-18.9] | 8.84 [8.84-8.84] | - | elaborate 0.8/0.9, synth 44.5/44.7, pack 10.6/9.4, graph 0.1/0.1, place 133.2/179.5, route 412.7/381.9, timing 0.1/0.1, bitstream 6.0/5.2 |
