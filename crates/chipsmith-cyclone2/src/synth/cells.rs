@@ -3,7 +3,9 @@
 
 use std::collections::BTreeMap;
 
-use chipsmith_netlist::{CellKind, Const, Ctrl, Dir, Generic, GenericPort, ParamValue, Polarity, SigBit, State};
+use chipsmith_netlist::{
+    CellKind, Const, Ctrl, Dir, Generic, GenericPort, ParamValue, Polarity, SigBit, State,
+};
 
 use crate::pin::{control_param, register_param, IoRegMode, PowerUp};
 

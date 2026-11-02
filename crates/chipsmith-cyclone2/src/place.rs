@@ -109,9 +109,27 @@ impl Port {
 
     /// The netlist's name of each port, in `FIXED` order.
     const NAMES: [&'static str; 21] = [
-        "DATAA", "DATAB", "DATAC", "DATAD", "CIN", "COUT", "COMBOUT", "DATAIN", "SDATA", "CLK",
-        "ENA", "ACLR", "SCLR", "REGOUT", "INCLK", "OUTCLK", "DATAOUT", "OE", "INCLKENA",
-        "OUTCLKENA", "ARESET",
+        "DATAA",
+        "DATAB",
+        "DATAC",
+        "DATAD",
+        "CIN",
+        "COUT",
+        "COMBOUT",
+        "DATAIN",
+        "SDATA",
+        "CLK",
+        "ENA",
+        "ACLR",
+        "SCLR",
+        "REGOUT",
+        "INCLK",
+        "OUTCLK",
+        "DATAOUT",
+        "OE",
+        "INCLKENA",
+        "OUTCLKENA",
+        "ARESET",
     ];
 
     fn parse(name: &str) -> Option<Port> {
@@ -822,9 +840,14 @@ fn read_design(json: &Value) -> Result<Design> {
                     Port::DataA | Port::DataB | Port::DataC | Port::DataD
                         if cells[c].kind == Kind::Lut =>
                     {
-                        let at = LUT_INPUTS.iter().position(|&q| q == p).expect("a LUT input");
+                        let at = LUT_INPUTS
+                            .iter()
+                            .position(|&q| q == p)
+                            .expect("a LUT input");
                         let carry = cells[c].net(Port::Cin).is_some()
-                            || cells[c].net(Port::Cout).is_some_and(|n| !users[n as usize].is_empty());
+                            || cells[c]
+                                .net(Port::Cout)
+                                .is_some_and(|n| !users[n as usize].is_empty());
                         if carry {
                             timing::lut_pin_extra(at)
                         } else {
@@ -1584,7 +1607,8 @@ impl<'a> State<'a> {
             for &n in &sig.inputs[..sig.n_inputs as usize] {
                 // Driven inside the LAB on its driver's local line, or
                 // already counted: no new line.
-                if let Some(dle) = d.driver_le[n as usize].filter(|&le| lab_of(le as usize) == lab) {
+                if let Some(dle) = d.driver_le[n as usize].filter(|&le| lab_of(le as usize) == lab)
+                {
                     match local[..n_local].iter().find(|&&(l, _)| l == dle) {
                         None => {
                             local[n_local] = (dle, n);

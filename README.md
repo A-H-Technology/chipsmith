@@ -409,42 +409,42 @@ design built to the same RBF before and after it; m4k-tdp, m4k-random-1,
 -5 and m4k-selftest changed and are Quartus byte-identical. Per design, below: the
 check around the blocks (time of the proof), the co-simulation (output
 bits compared, time with the build), and for the random designs the
-co-simulation with the memory's ports on the design's. A low bit count
-means the RTL leaves most outputs x (memories read before they are
-written). Weakly covered by co-simulation as shipped: `ram` (108 bits),
-m4k-mixed (60), m4k-random-4 (1,080), m4k-dualclock (1,512) and m4k-bytes
-(2,136); their memories' shapes are co-simulated well only in separate
-designs (the large memories: 2048 x 9 over four blocks 56,142 bits,
-8192 x 2 20,000, 256 x 40 389,680, write x32 read x8 78,096, write x8
-read x32 286,968, write x2 read x1 6,254; and the ports-direct column). serv, m4k-selftest and every design below are
-Quartus byte-identical.
+co-simulation with the memory's ports on the design's. Registers and
+memories without an initial value start at 0 in the RTL's simulation, as
+the device powers them up (branch `qor2`; the co-simulation columns and
+proof times are from its rerun). Before, they started x, and a memory read
+before it was written left the outputs x and uncompared: `ram` compared
+108 bits, m4k-mixed 60, m4k-random-4 1,080, m4k-dualclock 1,512, m4k-bytes
+2,136, and femtorv32 and picorv32 none. Now every design below compares
+every output bit nearly every cycle. serv, m4k-selftest and every design
+below are Quartus byte-identical.
 
 | design | memories | M4Ks | Quartus | proven around the blocks | co-simulated | co-simulated, ports direct |
 |---|---|---|---|---|---|---|
-| m4k-bytes | byte enables: 256 x 16 (2), 128 x 32 (4) | 2 | byte-identical | 1356 $equiv, 5s | 2,136 bits, 15s |  |
-| m4k-deep | 2048 x 9 over 4 blocks, 8192 x 2 ROM over 4, 256 x 40 over 3 | 11 | byte-identical | 1804 $equiv, 27s | 179,982 bits, 37s |  |
-| m4k-dualclock | written on CLOCK_50, read on CLOCK_27 (x9; x36 as two x18) | 3 | byte-identical | 1104 $equiv, 4s | 1,512 bits, 16s |  |
-| m4k-enables | clock enable, read enables on ENA0/ENA1, one held in LEs | 4 | byte-identical | 990 $equiv, 7s | 80,562 bits, 13s |  |
-| m4k-mixed | write x32 read x8, write x8 read x32, write x2 read x1 | 3 | byte-identical | 1080 $equiv, 5s | 60 bits, 14s |  |
-| m4k-outreg | output registers: plain, cleared, own enable; a synchronous reset | 4 | byte-identical | 1102 $equiv, 6s | 67,356 bits, 19s |  |
-| m4k-shallow | 64 x 8, 32 x 36, 16 x 4 ROM | 3 | byte-identical | 912 $equiv, 4s | 7,776 bits, 15s |  |
-| m4k-tdp | true dual port x9/x9 and x4/x18 | 2 | byte-identical | 994 $equiv, 6s | 247,662 bits, 13s |  |
-| m4k-random-1 | TrueDual 600 x 5, colliding writes | 2 | byte-identical | 720 $equiv, 7s | 257,015 bits, 14s | 76,425 bits |
-| m4k-random-2 | SimpleDual 16 x 24, byte enables, two clocks | 2 | byte-identical | 957 $equiv, 4s | 44,600 bits, 12s | 237,824 bits |
-| m4k-random-3 | SimpleDual 16 x 5, write x1 read x4 words | 1 | byte-identical | 497 $equiv, 3s | 82,545 bits, 8s | 199,515 bits |
-| m4k-random-4 | SimpleDual 1024 x 32, byte enables, output register (plain) | 8 | byte-identical | 1915 $equiv, 7s | 1,080 bits, 21s | 201,472 bits |
-| m4k-random-5 | TrueDual 2048 x 2, colliding writes | 1 | byte-identical | 564 $equiv, 7s | 268,536 bits, 9s | 35,982 bits |
-| m4k-random-6 | Rom 1024 x 32, contents, output register (cleared) | 8 | byte-identical | 1072 $equiv, 6s | 269,973 bits, 22s | 320,000 bits |
-| m4k-random-7 | SimpleDual 1024 x 36, read enable, write under it, sync reset | 8 | byte-identical | 1481 $equiv, 10s | 67,635 bits, 23s | 292,536 bits |
-| m4k-random-8 | SingleNew 1024 x 36, contents | 8 | byte-identical | 1344 $equiv, 8s | 270,000 bits, 24s | 360,000 bits |
-| m4k-random-9 | SingleNew 64 x 32 | 2 | byte-identical | 680 $equiv, 3s | 269,892 bits, 11s | 318,592 bits |
-| m4k-random-10 | SimpleDual 512 x 4, write x2 read x1 words, output register (cleared) | 1 | byte-identical | 534 $equiv, 5s | 244,912 bits, 8s | 39,560 bits |
-| m4k-random-11 | SimpleDual 4096 x 9, contents | 8 | byte-identical | 1238 $equiv, 19s | 270,000 bits, 26s | 90,000 bits |
-| m4k-random-12 | SingleNew 600 x 36, contents | 6 | byte-identical | 1148 $equiv, 8s | 203,148 bits, 25s | 208,692 bits |
-| m4k-random-13 | SingleNew 4096 x 8 | 8 | byte-identical | 1117 $equiv, 4s | 269,712 bits, 17s | 56,576 bits |
-| m4k-random-14 | SingleNew 16 x 4 | 1 | byte-identical | 349 $equiv, 3s | 269,984 bits, 6s | 39,900 bits |
-| m4k-random-15 | SingleOld 2048 x 18, read enable, write under it, output register (plain) | 8 | byte-identical | 1317 $equiv, 6s | 268,956 bits, 23s | 77,058 bits |
-| m4k-random-16 | SimpleDual 512 x 5, write x2 read x1 words, output register (plain) | 1 | byte-identical | 548 $equiv, 3s | 220,410 bits, 7s | 47,285 bits |
+| m4k-bytes | byte enables: 256 x 16 (2), 128 x 32 (4) | 2 | byte-identical | 1356 $equiv, 7s | 270,000 bits, 28s |  |
+| m4k-deep | 2048 x 9 over 4 blocks, 8192 x 2 ROM over 4, 256 x 40 over 3 | 11 | byte-identical | 1804 $equiv, 65s | 270,000 bits, 57s |  |
+| m4k-dualclock | written on CLOCK_50, read on CLOCK_27 (x9; x36 as two x18) | 3 | byte-identical | 1104 $equiv, 15s | 270,000 bits, 38s |  |
+| m4k-enables | clock enable, read enables on ENA0/ENA1, one held in LEs | 4 | byte-identical | 990 $equiv, 10s | 270,000 bits, 15s |  |
+| m4k-mixed | write x32 read x8, write x8 read x32, write x2 read x1 | 3 | byte-identical | 1080 $equiv, 8s | 270,000 bits, 16s |  |
+| m4k-outreg | output registers: plain, cleared, own enable; a synchronous reset | 4 | byte-identical | 1102 $equiv, 6s | 270,000 bits, 26s |  |
+| m4k-shallow | 64 x 8, 32 x 36, 16 x 4 ROM | 3 | byte-identical | 912 $equiv, 7s | 270,000 bits, 28s |  |
+| m4k-tdp | true dual port x9/x9 and x4/x18 | 2 | byte-identical | 994 $equiv, 10s | 270,000 bits, 20s |  |
+| m4k-random-1 | TrueDual 600 x 5, colliding writes | 2 | byte-identical | 720 $equiv, 5s | 260,580 bits, 11s | 79,635 bits |
+| m4k-random-2 | SimpleDual 16 x 24, byte enables, two clocks | 2 | byte-identical | 957 $equiv, 7s | 270,000 bits, 25s | 240,000 bits |
+| m4k-random-3 | SimpleDual 16 x 5, write x1 read x4 words | 1 | byte-identical | 497 $equiv, 5s | 270,000 bits, 18s | 200,000 bits |
+| m4k-random-4 | SimpleDual 1024 x 32, byte enables, output register (plain) | 8 | byte-identical | 1915 $equiv, 10s | 270,000 bits, 47s | 320,000 bits |
+| m4k-random-5 | TrueDual 2048 x 2, colliding writes | 1 | byte-identical | 564 $equiv, 9s | 270,000 bits, 16s | 40,000 bits |
+| m4k-random-6 | Rom 1024 x 32, contents, output register (cleared) | 8 | byte-identical | 1072 $equiv, 13s | 270,000 bits, 61s | 320,000 bits |
+| m4k-random-7 | SimpleDual 1024 x 36, read enable, write under it, sync reset | 8 | byte-identical | 1481 $equiv, 17s | 270,000 bits, 48s | 360,000 bits |
+| m4k-random-8 | SingleNew 1024 x 36, contents | 8 | byte-identical | 1344 $equiv, 12s | 270,000 bits, 63s | 360,000 bits |
+| m4k-random-9 | SingleNew 64 x 32 | 1 | byte-identical | 603 $equiv, 7s | 270,000 bits, 20s | 320,000 bits |
+| m4k-random-10 | SimpleDual 512 x 4, write x2 read x1 words, output register (cleared) | 1 | byte-identical | 534 $equiv, 6s | 270,000 bits, 13s | 40,000 bits |
+| m4k-random-11 | SimpleDual 4096 x 9, contents | 8 | byte-identical | 1238 $equiv, 34s | 270,000 bits, 74s | 90,000 bits |
+| m4k-random-12 | SingleNew 600 x 36, contents | 5 | byte-identical | 1051 $equiv, 16s | 203,067 bits, 82s | 208,728 bits |
+| m4k-random-13 | SingleNew 4096 x 8 | 8 | byte-identical | 1117 $equiv, 7s | 270,000 bits, 37s | 80,000 bits |
+| m4k-random-14 | SingleNew 16 x 4 | 1 | byte-identical | 349 $equiv, 5s | 270,000 bits, 11s | 40,000 bits |
+| m4k-random-15 | SingleOld 2048 x 18, read enable, write under it, output register (plain) | 8 | byte-identical | 1317 $equiv, 13s | 270,000 bits, 45s | 180,000 bits |
+| m4k-random-16 | SimpleDual 512 x 5, write x2 read x1 words, output register (plain) | 1 | byte-identical | 548 $equiv, 6s | 270,000 bits, 11s | 50,000 bits |
 
 A memory bit written as a constant gets an LE driving the block's data
 input: the block doesn't read an unconnected data input as 0, and Quartus
