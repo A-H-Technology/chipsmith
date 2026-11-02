@@ -739,8 +739,10 @@ Zybo limits:
   (below). A
   clock's `[clocks]` frequency is checked against it; a clock with no pin
   (a BSCANE2's TCK) is reported unconstrained.
-- The flow is deterministic: placement is the best of eight fixed seeds,
-  and the `.bit` is a function of the inputs (its header carries no date).
+- The flow is deterministic: two builds, and builds on 1 and 8 threads,
+  give the same `.bit` byte for byte (`crates/chipsmith/tests/determinism.rs`:
+  zybo-jtag-counter, zybo-picorv32 with and without the electrostatic
+  start); the header carries no date.
 - The Zybo Z7 has its clock on K17. It needs only another pin map; the
   Z7-20 (xc7z020) needs another `Device`.
 
