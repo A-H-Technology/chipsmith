@@ -4,6 +4,7 @@
 pub mod bram;
 pub mod decode;
 pub mod delay;
+pub mod dsp;
 pub mod frames;
 pub mod part;
 mod fasm;

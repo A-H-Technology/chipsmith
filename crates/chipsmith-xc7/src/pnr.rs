@@ -40,8 +40,12 @@ pub struct Report {
     pub registers: usize,
     pub carry4s: usize,
     pub ram32ms: usize,
+    /// LUT6 sites in use (Vivado's "Slice LUTs"): a pair of LUTs on O6
+    /// and O5 is one, as is a RAM32M's.
+    pub lut_sites: usize,
     pub ramb18s: usize,
     pub ramb36s: usize,
+    pub dsps: usize,
     /// Slices with anything in them.
     pub slices: usize,
     pub place: place::Stats,
@@ -210,8 +214,14 @@ pub fn run(
         registers: count(&|k, _| matches!(k, Kind::Ff(_))),
         carry4s: count(&|k, _| *k == Kind::Carry),
         ram32ms: d.drams.len(),
+        lut_sites: ph
+            .slices
+            .values()
+            .map(|s| (0..4).filter(|&k| s.lut_init[k].is_some() || s.lut5_init[k].is_some()).count())
+            .sum(),
         ramb18s: count(&|k, _| matches!(k, Kind::Bram { size: crate::bram::Size::Half, .. })),
         ramb36s: count(&|k, _| matches!(k, Kind::Bram { size: crate::bram::Size::Full, .. })),
+        dsps: count(&|k, _| matches!(k, Kind::Dsp { .. })),
         slices: ph.slices.len(),
         place: placement.stats,
         place_seconds,
@@ -338,6 +348,12 @@ fn clock_timing(
         })
         .collect();
     let _ = conf;
+    // CHIPSMITH_XC7_PATH=1: the critical path, node by node, on stderr.
+    if std::env::var("CHIPSMITH_XC7_PATH").is_ok_and(|v| v == "1") {
+        for (node, at) in timing.graph.analyse(&arcs).path {
+            eprintln!("  {at:8.0} ps  {}", timing.graph.name(node));
+        }
+    }
     let name_of = |clk: NetId| -> String {
         // A clock through a BUFG is named after what feeds the BUFG.
         let mut net = clk;

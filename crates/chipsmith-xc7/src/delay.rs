@@ -43,6 +43,49 @@ pub struct Delays {
     pub hex: Ps,
     pub imux: Ps,
     pub bram: BramDelays,
+    pub dsp: DspDelays,
+}
+
+/// A DSP48E1 multiplying A by B (no D port, no pattern detect), from
+/// DSP_L.sdf: A to P through the multiplier and the ALU, A's setup into
+/// each register stage it may first reach, clock to P from each stage.
+#[derive(Debug, Clone, Default)]
+pub struct DspDelays {
+    pub a_to_p: Ps,
+    pub setup_areg: Ps,
+    pub setup_mreg: Ps,
+    pub setup_preg: Ps,
+    pub clock_areg_to_p: Ps,
+    pub clock_mreg_to_p: Ps,
+    pub clock_preg_to_p: Ps,
+    /// A register stage's enable or reset.
+    pub setup_control: Ps,
+}
+
+impl DspDelays {
+    fn parse(sdf: &str) -> Result<Self> {
+        let sdf = read_sdf(sdf);
+        let get = |cell: &str, kind: &str, from: &str, to: &str| -> Result<Ps> {
+            sdf.get(&(cell.into(), kind.into(), from.into(), to.into()))
+                .copied()
+                .with_context(|| format!("DSP_L.sdf has no {kind} {from} {to} of {cell}"))
+        };
+        Ok(DspDelays {
+            a_to_p: get("DSP48E1_AREG_0_A_INPUT_DIRECT_MREG_0_PREG_0_USE_DPORT_FALSE_USE_MULT_MULTIPLY", "IOPATH", "A", "P")?,
+            setup_areg: get("DSP48E1_AREG_1_A_INPUT_DIRECT", "SETUP", "A", "")?,
+            setup_mreg: get("DSP48E1_AREG_0_A_INPUT_DIRECT_MREG_1_USE_DPORT_FALSE_USE_MULT_MULTIPLY", "SETUP", "A", "")?,
+            setup_preg: get(
+                "DSP48E1_AREG_0_A_INPUT_DIRECT_MREG_0_PREG_1_USE_DPORT_FALSE_USE_MULT_MULTIPLY_USE_PATTERN_DETECT_NO_PATDET",
+                "SETUP",
+                "A",
+                "",
+            )?,
+            clock_areg_to_p: get("DSP48E1_AREG_1_MREG_0_PREG_0_USE_DPORT_FALSE_USE_MULT_MULTIPLY", "IOPATH", "CLK", "P")?,
+            clock_mreg_to_p: get("DSP48E1_MREG_1_PREG_0", "IOPATH", "CLK", "P")?,
+            clock_preg_to_p: get("DSP48E1_PREG_1", "IOPATH", "CLK", "P")?,
+            setup_control: get("DSP48E1_PREG_1", "SETUP", "CEP", "")?,
+        })
+    }
 }
 
 /// A block RAM's: clock to read data from the latch and from the output
@@ -206,8 +249,12 @@ impl Delays {
         let bram_path = family.join("timings").join("BRAM_L.sdf");
         let bram = std::fs::read_to_string(&bram_path)
             .with_context(|| format!("reading {}", bram_path.display()))?;
+        let dsp_path = family.join("timings").join("DSP_L.sdf");
+        let dsp = std::fs::read_to_string(&dsp_path)
+            .with_context(|| format!("reading {}", dsp_path.display()))?;
         let mut d = Self::parse(&sdf, &int)?;
         d.bram = BramDelays::parse(&bram)?;
+        d.dsp = DspDelays::parse(&dsp)?;
         Ok(d)
     }
 
@@ -252,6 +299,7 @@ impl Delays {
             hex: hop("hex")?,
             imux: hop("imux")?,
             bram: BramDelays::default(),
+            dsp: DspDelays::default(),
         })
     }
 

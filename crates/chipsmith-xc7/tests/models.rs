@@ -382,3 +382,158 @@ fn block_ram_models_match_vivados() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A testbench of `n` random DSP48E1 multipliers, yosys' model (renamed
+/// `CS_DSP48E1`) beside Vivado's, `cycles` long: the configurations
+/// synthesis and the decoder make (A and B of 0 to 2 stages, M, P and the
+/// control registers on or off, either clock edge (Vivado's
+/// IS_CLK_INVERTED against yosys' model on the inverted clock, the
+/// decoder's reading), P = A * B or Vivado's
+/// cascaded sum P = A * B + PCIN >>> 17), random data, enables and resets.
+fn dsp_testbench(seed: u64, n: usize, cycles: usize) -> String {
+    let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
+    let mut tb = String::from(
+        "`timescale 1ps/1ps\nmodule tb;\n  reg clk = 0;\n  integer cyc = 0, bad = 0, compared = 0, stricter = 0, i;\n",
+    );
+    let (mut draw, mut check) = (String::new(), String::new());
+    for k in 0..n {
+        let areg = rng.below(3);
+        let breg = rng.below(3);
+        let acasc = if areg == 2 && rng.chance(0.5) { 1 } else { areg };
+        let bcasc = if breg == 2 && rng.chance(0.5) { 1 } else { breg };
+        let inverted = rng.chance(0.3);
+        let mut params = format!(".AREG({areg}), .BREG({breg}), .ACASCREG({acasc}), .BCASCREG({bcasc})");
+        for p in [
+            "MREG", "PREG", "INMODEREG", "OPMODEREG", "ALUMODEREG", "CARRYINREG", "CARRYINSELREG", "CREG",
+            "ADREG", "DREG",
+        ] {
+            let _ = write!(params, ", .{p}({})", rng.below(2));
+        }
+        let opmode = rng.pick(&["7'b0000101", "7'b1010101"]);
+        for r in [
+            "a", "b", "c", "d", "pcin", "cea1", "cea2", "ceb1", "ceb2", "cem", "cep", "cectrl", "ceinmode",
+            "cealumode", "cecarryin", "rsta", "rstb", "rstm", "rstp", "rstctrl", "rstinmode", "rstalumode",
+            "rstallcarryin",
+        ] {
+            let w = match r {
+                "a" => 30,
+                "b" => 18,
+                "c" | "pcin" => 48,
+                "d" => 25,
+                _ => 1,
+            };
+            let v = if r.starts_with("ce") {
+                "($random % 8 != 0)"
+            } else if r.starts_with("rst") {
+                "($random % 16 == 0)"
+            } else {
+                "{$random, $random}"
+            };
+            let _ = writeln!(tb, "  reg [{}:0] {r}{k} = 0;", w - 1);
+            let _ = writeln!(draw, "    {r}{k} <= {v};");
+        }
+        let _ = writeln!(tb, "  wire [47:0] p_c{k}, p_v{k};");
+        let ports = |p: &str, clk: &str| {
+            format!(
+                ".CLK({clk}), .A(a{k}), .B(b{k}), .C(c{k}), .D(d{k}), .PCIN(pcin{k}), .ACIN(30'b0), .BCIN(18'b0), \
+                 .CARRYCASCIN(1'b0), .MULTSIGNIN(1'b0), .OPMODE({opmode}), .ALUMODE(4'b0), .INMODE(5'b0), \
+                 .CARRYIN(1'b0), .CARRYINSEL(3'b0), .CEA1(cea1{k}), .CEA2(cea2{k}), .CEB1(ceb1{k}), .CEB2(ceb2{k}), \
+                 .CEC(1'b1), .CED(1'b1), .CEAD(1'b1), .CEM(cem{k}), .CEP(cep{k}), .CECTRL(cectrl{k}), \
+                 .CEINMODE(ceinmode{k}), .CEALUMODE(cealumode{k}), .CECARRYIN(cecarryin{k}), \
+                 .RSTA(rsta{k}), .RSTB(rstb{k}), .RSTC(1'b0), .RSTD(1'b0), .RSTM(rstm{k}), .RSTP(rstp{k}), \
+                 .RSTCTRL(rstctrl{k}), .RSTINMODE(rstinmode{k}), .RSTALUMODE(rstalumode{k}), \
+                 .RSTALLCARRYIN(rstallcarryin{k}), .P({p}{k})"
+            )
+        };
+        // yosys' model has no IS_CLK_INVERTED: its clock is inverted
+        // instead, as the decoder folds it.
+        let (yosys_clk, vivado_inv) = if inverted { ("!clk", "1") } else { ("clk", "0") };
+        let _ = writeln!(tb, "  CS_DSP48E1 #({params}) yosys{k} ({});", ports("p_c", yosys_clk));
+        let _ = writeln!(
+            tb,
+            "  DSP48E1 #({params}, .IS_CLK_INVERTED(1'b{vivado_inv})) vivado{k} ({});",
+            ports("p_v", "clk")
+        );
+        let _ = writeln!(
+            check,
+            "    for (i = 0; i < 48; i = i + 1) if (p_v{k}[i] !== 1'bx) begin compared = compared + 1; \
+             if (p_c{k}[i] === 1'bx) stricter = stricter + 1; else if (p_c{k}[i] !== p_v{k}[i]) begin bad = bad + 1; \
+             if (bad < 10) $display(\"MISMATCH dsp {k} cycle %0d p[%0d] vivado %b yosys %b\", cyc, i, p_v{k}[i], p_c{k}[i]); end end"
+        );
+    }
+    // GSR holds unisim's registers for its first 100 ns; the stimulus
+    // starts after it.
+    let _ = write!(
+        tb,
+        "  always #5000 clk = !clk;\n  always @(negedge clk) begin #100; if ($time > 200000) begin\n{draw}  end end\n\
+         always @(posedge clk) begin #4500; if ($time > 300000) begin\n{check}  end\n    cyc = cyc + 1;\n    \
+         if (cyc == {cycles}) begin $display(\"DONE %0d %0d %0d\", bad, compared, stricter); $finish; end\n  end\n"
+    );
+    tb + "endmodule\n"
+}
+
+/// yosys' DSP48E1 model (`xilinx/cells_sim.v`), which the co-simulations
+/// use, against Vivado's: `CHIPSMITH_MODELS_SEEDS` runs of six blocks.
+#[test]
+fn dsp_model_matches_vivados() {
+    let Ok(unisims) = std::env::var("CHIPSMITH_UNISIMS") else {
+        eprintln!("CHIPSMITH_UNISIMS unset: Vivado's models aren't here to compare against");
+        return;
+    };
+    let unisims = PathBuf::from(unisims);
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("models_dsp");
+    std::fs::create_dir_all(&dir).unwrap();
+    let datdir = Command::new("yosys-config").arg("--datdir").output().expect("yosys-config: run in the devshell");
+    let sim = std::fs::read_to_string(
+        PathBuf::from(String::from_utf8(datdir.stdout).unwrap().trim()).join("xilinx/cells_sim.v"),
+    )
+    .unwrap();
+    let start = sim.find("module DSP48E1 (").expect("cells_sim.v has a DSP48E1");
+    let end = start + sim[start..].find("endmodule").unwrap() + "endmodule".len();
+    let ours = sim[start..end].replacen("module DSP48E1 (", "module CS_DSP48E1 (", 1);
+    std::fs::write(dir.join("ours.v"), ours).unwrap();
+    let seeds: u64 = std::env::var("CHIPSMITH_MODELS_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(40);
+    let mut failures = Vec::new();
+    let (mut compared, mut stricter) = (0, 0);
+    for seed in 1..=seeds {
+        let tb = dir.join(format!("tb{seed}.v"));
+        std::fs::write(&tb, dsp_testbench(seed, 6, 600)).unwrap();
+        let vvp = dir.join(format!("tb{seed}.vvp"));
+        let out = Command::new("iverilog")
+            .args(["-g2012", "-s", "tb", "-s", "glbl", "-o"])
+            .arg(&vvp)
+            .arg(&tb)
+            .arg(dir.join("ours.v"))
+            .arg(unisims.join("unisims/DSP48E1.v"))
+            .arg(unisims.join("glbl.v"))
+            .output()
+            .expect("iverilog: run in the devshell");
+        assert!(out.status.success(), "iverilog: {}", String::from_utf8_lossy(&out.stderr));
+        let out = Command::new("vvp").arg("-n").arg(&vvp).output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        let done: Option<Vec<u64>> = text
+            .lines()
+            .find_map(|l| l.strip_prefix("DONE "))
+            .map(|l| l.split(' ').filter_map(|n| n.parse().ok()).collect());
+        match done.as_deref() {
+            Some([0, c, s]) => {
+                compared += c;
+                stricter += s;
+            }
+            _ => failures.push(format!(
+                "seed {seed}: {}",
+                text.lines()
+                    .filter(|l| l.starts_with("MISMATCH") || l.starts_with("DONE"))
+                    .take(5)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )),
+        }
+    }
+    eprintln!(
+        "{seeds} seeds of 6 DSPs, 600 cycles each: {} failed; {compared} output bits compared, \
+         {stricter} of them x in yosys' model only",
+        failures.len()
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

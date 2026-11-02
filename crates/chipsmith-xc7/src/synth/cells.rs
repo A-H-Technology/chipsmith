@@ -14,6 +14,7 @@ pub const CARRY4: &str = "CARRY4";
 pub const RAM32M: &str = "RAM32M";
 pub const RAMB18E1: &str = "RAMB18E1";
 pub const RAMB36E1: &str = "RAMB36E1";
+pub const DSP48E1: &str = "DSP48E1";
 pub const IBUF: &str = "IBUF";
 pub const OBUF: &str = "OBUF";
 pub const OBUFT: &str = "OBUFT";
@@ -54,7 +55,7 @@ pub fn yosys_sim_without_models(sim: &str) -> String {
 /// Cells that are pure functions of their inputs: unused ones go.
 pub const REMOVABLE: &[&str] = &[
     "LUT1", "LUT2", "LUT3", "LUT4", "LUT5", "LUT6", "FDRE", "FDSE", "FDCE", "FDPE", CARRY4, RAM32M,
-    RAMB18E1, RAMB36E1, BUFG,
+    RAMB18E1, RAMB36E1, DSP48E1, BUFG,
 ];
 
 /// Whether `ty` is one of [`LIBRARY`]'s cells.

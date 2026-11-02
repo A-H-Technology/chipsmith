@@ -23,6 +23,9 @@
 //!   controls, addresses and write enables on both halves' pins (`L`,
 //!   `U`), ADDR[15] on `L15` alone. The output register's clock
 //!   (REGCLK) is the port's, where the register is used;
+//! - two LUTs whose inputs fit five pins share one LUT6 ([`pair_luts`]):
+//!   one out of O6, the other out of O5 (A6 tied high), the second LUT's
+//!   register in the letter's 5FF;
 //! - constants are two nets, driven by [`Conf::Gnd`] and [`Conf::Vcc`]
 //!   cells that sit nowhere: the router ties each sink to its interconnect
 //!   tile's GND_WIRE or VCC_WIRE. A register's CE tied 1 and SR tied 0 are
@@ -58,6 +61,8 @@ pub(crate) enum Conf {
     Pad,
     /// A block RAM; its pins are its site's.
     Bram(Box<crate::bram::Config>),
+    /// A DSP48E1; its pins are its site's (`A0`, `OPMODE3`, `CLK`, ...).
+    Dsp(Box<crate::dsp::Config>),
     Bufg,
     Bscan,
     Ps7,
@@ -85,6 +90,7 @@ fn drives(kind: &Kind, pin: &str) -> bool {
         Kind::Bscan { .. } => pin != "TDO",
         Kind::Ps7 => false,
         Kind::Bram { .. } => pin.starts_with("DO"),
+        Kind::Dsp { .. } => DSP_OUTPUTS.iter().any(|o| pin.strip_prefix(o).is_some_and(|i| i.chars().all(|c| c.is_ascii_digit()))),
         Kind::Gnd | Kind::Vcc => true,
     }
 }
@@ -368,6 +374,32 @@ pub(crate) fn pack(netlist: &Netlist, pins: &BTreeMap<String, String>, db: &Chip
                 };
                 p.push(name, kind, pins, Conf::Bram(Box::new(r.config)));
             }
+            "DSP48E1" => {
+                let config = crate::dsp::Config::from_params(&g.params).with_context(|| format!("DSP {name}"))?;
+                let mut pins = Vec::new();
+                for gp in &g.ports {
+                    let output = gp.dir == Some(chipsmith_netlist::Dir::Out);
+                    for (i, &b) in gp.sig.iter().enumerate() {
+                        let pin = if gp.sig.len() > 1 { format!("{}{i}", gp.name) } else { gp.name.clone() };
+                        match (output, b) {
+                            (true, SigBit::Net(n)) => pins.push((pin, p.net(n))),
+                            (true, _) => {}
+                            (false, b) => {
+                                if matches!(b, SigBit::Const(_)) && !dsp_input_matters(&config, g, &gp.name) {
+                                    continue;
+                                }
+                                pins.push((pin, p.sig(b)));
+                            }
+                        }
+                    }
+                }
+                let kind = Kind::Dsp {
+                    inreg: [config.areg > 0, config.breg > 0],
+                    mreg: config.stage("MREG"),
+                    preg: config.stage("PREG"),
+                };
+                p.push(name, kind, pins, Conf::Dsp(Box::new(config)));
+            }
             "IBUF" | "OBUF" | "OBUFT" | "IOBUF" => {
                 let pad_port = match g.ty.as_str() {
                     "IBUF" => "I",
@@ -443,6 +475,7 @@ pub(crate) fn pack(netlist: &Netlist, pins: &BTreeMap<String, String>, db: &Chip
     }
 
     feed_throughs(&mut p, &carries);
+    let pairs = pair_luts(&mut p);
 
     let mut nets: Vec<Net> = (0..p.count).map(|_| Net::default()).collect();
     for (i, c) in p.cells.iter().enumerate() {
@@ -463,7 +496,7 @@ pub(crate) fn pack(netlist: &Netlist, pins: &BTreeMap<String, String>, db: &Chip
         }
     }
     let (gnd, vcc) = (p.gnd, p.vcc);
-    let design = build(p.cells, nets)?;
+    let design = build(p.cells, nets, &pairs)?;
     Ok(Packed {
         design,
         conf: p.conf,
@@ -619,4 +652,202 @@ fn bram_pins(r: &crate::synth::cells::Ramb) -> Vec<(String, SigBit, bool)> {
         }
     }
     out
+}
+
+/// The inputs two LUTs must share to pair. Measured on zybo-jtag-counter,
+/// zybo-picorv32 and zybo-sha256 (LUT6 sites, slices, estimated MHz; 2026-11-02):
+/// unpaired 97/57, 700/242/204.1, 2572/1076/61.1; one shared input 65/53,
+/// 651/228/169.2, 2285/990/55.5; two 96/61, 664/233/192.1, 2289/993/59.8;
+/// three 97/57, 678/244/193.7, 2413/1052/57.3. Two keeps most of the
+/// saving at a few percent of Fmax; one costs picorv32 a sixth of it.
+const PAIR_SHARED: usize = 2;
+
+/// Pairs of logic LUTs for one LUT6 each (LUT6_2): (the one out of O6, the
+/// one out of O5). Two LUTs pair when their inputs together are at most
+/// five nets, sharing at least [`PAIR_SHARED`], neither feeds a carry chain, and the O5 one's output
+/// can leave the slice: alone on the letter's MUX pin, or only into its
+/// own register (whose output then takes that pin). Their registers, if
+/// both have one, share a control set. Both LUTs' pins are rewritten to
+/// the shared inputs (A1 up), their tables with them. Greedy, most shared
+/// inputs first.
+fn pair_luts(p: &mut Packer) -> Vec<(CellId, CellId)> {
+    // Off for comparing: CHIPSMITH_XC7_PAIR=0.
+    if std::env::var("CHIPSMITH_XC7_PAIR").is_ok_and(|v| v == "0") {
+        return Vec::new();
+    }
+    let n = p.cells.len();
+    let min_shared = PAIR_SHARED;
+    let mut users: HashMap<NetId, Vec<(CellId, String)>> = HashMap::default();
+    for (i, c) in p.cells.iter().enumerate() {
+        for (pin, net) in &c.pins {
+            if !drives(&c.kind, pin) {
+                users.entry(*net).or_default().push((i as CellId, pin.clone()));
+            }
+        }
+    }
+    let output = |c: &Cell| c.net("O6");
+    let inputs = |c: &Cell| -> Vec<NetId> {
+        c.pins.iter().filter(|(pn, _)| pn.starts_with('A')).map(|&(_, net)| net).collect()
+    };
+    // The register a LUT's BLE would take (`place::build`): the first one
+    // its output drives.
+    let ff_of = |l: usize| -> Option<CellId> {
+        let o = output(&p.cells[l])?;
+        users.get(&o)?.iter().filter(|(u, pn)| pn == "D" && matches!(p.cells[*u as usize].kind, Kind::Ff(_))).map(|&(u, _)| u).min()
+    };
+    let cs = |f: CellId| match p.cells[f as usize].kind {
+        Kind::Ff(cs) => Some(cs),
+        _ => None,
+    };
+    let mut candidate = vec![false; n];
+    for (i, c) in p.cells.iter().enumerate() {
+        if c.kind != (Kind::Lut { dram: false }) {
+            continue;
+        }
+        let ins = inputs(c);
+        let feeds_carry = output(c)
+            .and_then(|o| users.get(&o))
+            .is_some_and(|us| us.iter().any(|(u, _)| p.cells[*u as usize].kind == Kind::Carry));
+        candidate[i] = !ins.is_empty() && ins.len() <= 5 && !feeds_carry && !ins.iter().any(|&x| x == p.gnd || x == p.vcc);
+    }
+    // Whether LUT l can be the O5 one.
+    let o5_ok = |l: usize| -> bool {
+        let Some(o) = output(&p.cells[l]) else { return true };
+        match ff_of(l) {
+            None => true,
+            Some(f) => users.get(&o).is_some_and(|us| us.len() == 1 && us[0].0 == f),
+        }
+    };
+    let mut by_input: HashMap<NetId, Vec<usize>> = HashMap::default();
+    for i in (0..n).filter(|&i| candidate[i]) {
+        for x in inputs(&p.cells[i]) {
+            by_input.entry(x).or_default().push(i);
+        }
+    }
+    let mut paired = vec![false; n];
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    for a in (0..n).filter(|&i| candidate[i]) {
+        if paired[a] {
+            continue;
+        }
+        let ia = inputs(&p.cells[a]);
+        let mut best: Option<(usize, usize)> = None;
+        for x in &ia {
+            for &b in by_input.get(x).into_iter().flatten() {
+                if b == a || paired[b] {
+                    continue;
+                }
+                let ib = inputs(&p.cells[b]);
+                let mut union = ia.clone();
+                union.extend(ib.iter().filter(|y| !ia.contains(y)));
+                if union.len() > 5 {
+                    continue;
+                }
+                let shared = ia.len() + ib.len() - union.len();
+                if shared < min_shared {
+                    continue;
+                }
+                if let (Some(fa), Some(fb)) = (ff_of(a), ff_of(b)) {
+                    if cs(fa) != cs(fb) {
+                        continue;
+                    }
+                }
+                if !o5_ok(a) && !o5_ok(b) {
+                    continue;
+                }
+                if best.is_none_or(|(s, c)| (shared, std::cmp::Reverse(b)) > (s, std::cmp::Reverse(c))) {
+                    best = Some((shared, b));
+                }
+            }
+        }
+        let Some((_, b)) = best else { continue };
+        paired[a] = true;
+        paired[b] = true;
+        pairs.push(if o5_ok(b) { (a, b) } else { (b, a) });
+    }
+    for &(l6, l5) in &pairs {
+        // Both on the union's pins, in order.
+        let mut union = inputs(&p.cells[l6]);
+        let i5 = inputs(&p.cells[l5]);
+        union.extend(i5.iter().filter(|y| !union.contains(y)).copied().collect::<Vec<_>>());
+        for &l in &[l6, l5] {
+            let old = inputs(&p.cells[l]);
+            let Conf::Lut { init } = p.conf[l] else { unreachable!("a logic LUT") };
+            // Bit idx of the new table: the old one at the old inputs' values.
+            let table = (0..1u64 << union.len()).fold(0u64, |t, idx| {
+                let old_idx = old.iter().enumerate().fold(0u64, |a, (k, x)| {
+                    let pos = union.iter().position(|u| u == x).expect("in the union");
+                    a | (idx >> pos & 1) << k
+                });
+                t | (init >> old_idx & 1) << idx
+            });
+            p.conf[l] = Conf::Lut { init: table };
+            let out: Vec<(String, NetId)> = p.cells[l].pins.iter().filter(|(pn, _)| !pn.starts_with('A')).cloned().collect();
+            let mut pins: Vec<(String, NetId)> = union.iter().enumerate().map(|(k, &x)| (format!("A{}", k + 1), x)).collect();
+            pins.extend(out);
+            p.cells[l].pins = pins;
+        }
+    }
+    pairs.into_iter().map(|(a, b)| (a as CellId, b as CellId)).collect()
+}
+
+/// A DSP48E1's outputs, by port name.
+const DSP_OUTPUTS: [&str; 12] = [
+    "P",
+    "PCOUT",
+    "ACOUT",
+    "BCOUT",
+    "CARRYOUT",
+    "CARRYCASCOUT",
+    "MULTSIGNOUT",
+    "OVERFLOW",
+    "UNDERFLOW",
+    "PATTERNDETECT",
+    "PATTERNBDETECT",
+    "ECCPARITY",
+];
+
+/// Whether a DSP input tied to a constant has to be routed: no where its
+/// value can't matter (a register stage that is off, the cascade inputs
+/// with A and B direct, C and PCIN where a constant OPMODE selects
+/// neither, D without the D port). Saves routing a hundred constants a DSP.
+fn dsp_input_matters(c: &crate::dsp::Config, g: &Generic, port: &str) -> bool {
+    let opmode: Option<u64> = port_const(g, "OPMODE");
+    let z = opmode.map(|o| o >> 4 & 7);
+    let y = opmode.map(|o| o >> 2 & 3);
+    let x = opmode.map(|o| o & 3);
+    let reg = |name: &str| c.stage(name);
+    match port {
+        "C" => !(z.is_some_and(|z| z != 3) && y.is_some_and(|y| y != 3)),
+        "PCIN" => !(z.is_some_and(|z| z != 1 && z != 5)),
+        "D" => c.use_dport,
+        "ACIN" => c.a_cascade,
+        "BCIN" => c.b_cascade,
+        "CARRYCASCIN" | "MULTSIGNIN" => false,
+        "CEA1" => c.areg == 2 || c.acascreg == 2,
+        "CEB1" => c.breg == 2 || c.bcascreg == 2,
+        "CEA2" | "RSTA" => c.areg > 0,
+        "CEB2" | "RSTB" => c.breg > 0,
+        "CEM" | "RSTM" => reg("MREG"),
+        "CEP" | "RSTP" => reg("PREG"),
+        "CEC" | "RSTC" => reg("CREG"),
+        "CED" | "CEAD" | "RSTD" => c.use_dport && (reg("DREG") || reg("ADREG")),
+        "CEALUMODE" | "RSTALUMODE" => reg("ALUMODEREG"),
+        "CECTRL" | "RSTCTRL" => reg("OPMODEREG") || reg("CARRYINSELREG"),
+        "CECARRYIN" | "RSTALLCARRYIN" => reg("CARRYINREG"),
+        "CEINMODE" | "RSTINMODE" => reg("INMODEREG"),
+        "CLK" => c.areg > 0 || c.breg > 0 || c.stages.iter().any(|&s| s),
+        // A, B, OPMODE, ALUMODE, INMODE, CARRYIN, CARRYINSEL.
+        _ => x.is_none_or(|x| x != 0) || !matches!(port, "A" | "B"),
+    }
+}
+
+/// A port's value, if all its bits are constants.
+fn port_const(g: &Generic, name: &str) -> Option<u64> {
+    let sig = &g.port(name)?.sig;
+    sig.iter().enumerate().try_fold(0u64, |v, (i, b)| match b {
+        SigBit::Const(State::One) => Some(v | 1 << i),
+        SigBit::Const(_) => Some(v),
+        SigBit::Net(_) => None,
+    })
 }

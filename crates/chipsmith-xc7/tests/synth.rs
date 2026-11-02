@@ -411,6 +411,48 @@ fn block_ram_shapes() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Every multiplier shape (`tests/designs/dsp`): synthesized onto
+/// DSP48E1s and co-simulated against the RTL (yosys' DSP48E1 model), three
+/// seeds; the extremes of every operand come first.
+#[test]
+fn dsp_shapes() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/designs/dsp");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "v"))
+        .map(|p| p.file_stem().unwrap().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    if let Ok(only) = std::env::var("CHIPSMITH_DSP_SHAPE") {
+        names.retain(|n| *n == only);
+    }
+    let mut failures = Vec::new();
+    for name in &names {
+        let files = vec![dir.join(format!("{name}.v"))];
+        let s = synthesize(&format!("dsp_{name}"), name, &files, Options::default());
+        let c = counts(&s.cells);
+        let mut compared = 0;
+        let mut failed = None;
+        for seed in 1..=3 {
+            match support::cosim(&s.dir, &s.rtl, &s.refined, &s.cells, 3000, seed) {
+                Ok(r) => compared += r.compared,
+                Err(e) => {
+                    failed = Some(format!("{name}, seed {seed}: {e}"));
+                    break;
+                }
+            }
+        }
+        eprintln!("{name}: {c:?}, {compared} output bits compared");
+        if let Some(f) = failed {
+            failures.push(f);
+        } else if !c.contains_key("DSP48E1") {
+            failures.push(format!("{name}: no DSP48E1"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 fn picorv32() -> Vec<PathBuf> {
     example("picorv32", &["picorv32.v", "top.v"])
 }

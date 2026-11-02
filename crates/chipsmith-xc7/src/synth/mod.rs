@@ -1,7 +1,8 @@
 //! chipsmith's synthesis for the 7-series: a flat RTL netlist (chipsmith's
 //! Verilog front end, yosys' `proc; flatten` level) to the primitives yosys'
 //! `synth_xilinx` ends in: LUT1 to LUT6, CARRY4, FDRE/FDSE/FDCE/FDPE,
-//! RAM32M, RAMB18E1/RAMB36E1 and the pin and clock buffers ([`cells`]).
+//! RAM32M, RAMB18E1/RAMB36E1, DSP48E1 and the pin and clock buffers
+//! ([`cells`]).
 //!
 //! The device-independent passes are chipsmith-synth's, run in the order
 //! the Cyclone II's synthesis runs them; what is the 7-series' own is the
@@ -11,6 +12,7 @@
 mod arith;
 mod bram;
 pub mod cells;
+mod dsp;
 mod ff;
 mod io;
 mod ram;
@@ -40,6 +42,7 @@ pub struct Stats {
     pub ram32ms: usize,
     /// Block RAM in RAMB18 halves (a RAMB36E1 is two).
     pub bram_halves: usize,
+    pub dsps: usize,
     pub bufgs: usize,
 }
 
@@ -139,6 +142,10 @@ fn run(m: &mut Module, options: Options, obs: &mut dyn Observer) -> Result<Stats
         opt::opt(m, removable);
     }
     obs.stage("wreduce", m);
+    // Before alumacc: a product split over DSPs sums its partial products
+    // with adders, which become carry chains like any other.
+    let dsps = dsp::map(m);
+    obs.stage("dsp", m);
     alumacc::alumacc(m);
     opt::opt(m, removable);
     obs.stage("alumacc", m);
@@ -181,6 +188,7 @@ fn run(m: &mut Module, options: Options, obs: &mut dyn Observer) -> Result<Stats
         carry4s,
         ram32ms,
         bram_halves,
+        dsps,
         bufgs,
     })
 }

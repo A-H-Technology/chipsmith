@@ -8,6 +8,10 @@
 //!
 //! - a logic LUT in the k-th 6LUT reads its inputs on pins `<L>1..<L>k`
 //!   (input i on pin i+1) and drives pin `<L>` from O6;
+//! - a logic LUT in the k-th 5LUT (paired with the 6LUT's, `crate::pack`)
+//!   reads the same pins, drives `<L>MUX` from O5, and `<L>6` is tied high;
+//!   the 5FF beside it takes its D from O5 (`<L>5FFMUX.IN_A`) or `<L>X`
+//!   (`IN_B`) and drives `<L>MUX` (`<L>OUTMUX.<L>5Q`);
 //! - a register's D comes from the 6LUT beside it (`<L>FFMUX.O6`), the
 //!   CARRY4's sum of its bit (`.XOR`), or the `<L>X` bypass pin; Q is
 //!   `<L>Q`; clock, CE and SR are the slice's `CLK`, `CE` and `SR`;
@@ -80,9 +84,15 @@ pub(crate) struct SliceConf {
     /// The LUT is two 32 x 1 RAMs (`RAM`, `SMALL`).
     pub lut_ram: [bool; 4],
     pub ff: [Option<FfConf>; 4],
+    /// The 5LUTs' 32-bit tables, where a logic LUT is in one.
+    pub lut5_init: [Option<u64>; 4],
+    pub ff5: [Option<FfConf>; 4],
+    /// `<L>5FFMUX`'s input: `IN_A` (O5) or `IN_B` (the bypass).
+    pub ff5mux: [Option<&'static str>; 4],
     /// `<L>FFMUX`'s input: `O6`, `XOR` or the bypass (`AX`, ...).
     pub ffmux: [Option<&'static str>; 4],
-    /// `<L>OUTMUX`'s input onto `<L>MUX`: `O5`, `XOR` or `CY`.
+    /// `<L>OUTMUX`'s input onto `<L>MUX`: `O5`, `XOR`, `CY` or `5Q` (the
+    /// 5FF's output, `<L>5Q`).
     pub outmux: [Option<&'static str>; 4],
     pub carry: Option<PreCyInit>,
     pub clkinv: bool,
@@ -108,9 +118,19 @@ pub(crate) struct BramConf {
     pub config: crate::bram::Config,
 }
 
+/// A used DSP48E1 site: its tile, which of the tile's two (`DSP_0` the
+/// lower), and configuration.
+#[derive(Debug, Clone)]
+pub(crate) struct DspConf {
+    pub tile: u32,
+    pub which: usize,
+    pub config: crate::dsp::Config,
+}
+
 pub(crate) struct Physical {
     pub nets: Vec<RouteNet>,
     pub brams: Vec<BramConf>,
+    pub dsps: Vec<DspConf>,
     pub slices: BTreeMap<String, SliceConf>,
     pub pads: Vec<PadConf>,
     pub bufgs: Vec<String>,
@@ -202,7 +222,7 @@ impl Builder<'_> {
         let (site, bel) = self.at(c)?;
         let pin = |name: String| Ok(End::Pin(site.to_string(), name));
         match (&cell.kind, bel) {
-            (Kind::Lut { dram: false }, Bel::Lut6(k)) => {
+            (Kind::Lut { dram: false }, Bel::Lut6(k) | Bel::Lut5(k)) => {
                 let i = port.strip_prefix('A').context("a LUT input")?;
                 pin(format!("{}{i}", LETTERS[k]))
             }
@@ -221,6 +241,14 @@ impl Builder<'_> {
                     }
                 }
             }
+            (Kind::Ff(_), Bel::Ff5(k)) => match port {
+                "D" if self.driven_from(net, site, Bel::Lut5(k), "O6") => Ok(End::Internal),
+                "D" => pin(format!("{}X", LETTERS[k])),
+                "CK" => pin("CLK".into()),
+                "CE" => pin("CE".into()),
+                "SR" => pin("SR".into()),
+                _ => bail!("{}: register port {port}", cell.name),
+            },
             (Kind::Ff(_), Bel::Ff(k)) => match port {
                 "D" => {
                     if self.driven_from(net, site, Bel::Lut6(k), "O6")
@@ -262,6 +290,7 @@ impl Builder<'_> {
             },
             (Kind::Bufg, _) | (Kind::Bscan { .. }, _) => pin(port.to_string()),
             (Kind::Bram { .. }, _) => pin(self.bram_pin(site, port)?),
+            (Kind::Dsp { .. }, _) => pin(port.to_string()),
             (kind, bel) => bail!("{}: {kind:?} at {bel:?}", cell.name),
         }
     }
@@ -274,7 +303,8 @@ impl Builder<'_> {
         let s = site.to_string();
         Ok(match (&cell.kind, bel) {
             (Kind::Lut { .. }, Bel::Lut6(k)) => (s, LETTERS[k].to_string(), None),
-            (Kind::Lut { dram: true }, Bel::Lut5(k)) => (s, format!("{}MUX", LETTERS[k]), Some((k, "O5"))),
+            (Kind::Lut { .. }, Bel::Lut5(k)) => (s, format!("{}MUX", LETTERS[k]), Some((k, "O5"))),
+            (Kind::Ff(_), Bel::Ff5(k)) => (s, format!("{}MUX", LETTERS[k]), Some((k, "5Q"))),
             (Kind::Ff(_), Bel::Ff(k)) => (s, format!("{}Q", LETTERS[k]), None),
             (Kind::Carry, Bel::Carry4) => {
                 let (k, mux) = if let Some(k) = port.strip_prefix("CO") {
@@ -287,6 +317,7 @@ impl Builder<'_> {
             (Kind::Pad { site, .. }, _) => (site.clone(), "I".into(), None),
             (Kind::Bufg, _) | (Kind::Bscan { .. }, _) => (s, port.to_string(), None),
             (Kind::Bram { .. }, _) => (s.clone(), self.bram_pin(&s, port)?, None),
+            (Kind::Dsp { .. }, _) => (s, port.to_string(), None),
             (kind, bel) => bail!("{}: output {port} of {kind:?} at {bel:?}", cell.name),
         })
     }
@@ -314,16 +345,17 @@ fn ps7_inputs(db: &ChipDb, family: &std::path::Path) -> Result<Vec<String>> {
 /// For every node, the nearest node whose wire is `name` (`GND_WIRE` or
 /// `VCC_WIRE`) upstream of it, by pips: a breadth-first search from all of
 /// them at once.
-fn nearest_source(db: &ChipDb, name: &str) -> Vec<NodeId> {
+fn nearest_source(db: &ChipDb, names: &[&str]) -> Vec<NodeId> {
     let mut from = vec![NodeId::MAX; db.nodes()];
     let mut queue = VecDeque::new();
-    let mut by_type: HashMap<u32, Option<u32>> = HashMap::new();
+    let mut by_type: HashMap<u32, Vec<u32>> = HashMap::new();
     for tile in 0..db.width * db.height {
         let ty = db.tile_type_index(tile);
-        let wire = *by_type
+        let wires = by_type
             .entry(ty)
-            .or_insert_with(|| db.tile_type(tile).wire(name));
-        if let Some(w) = wire {
+            .or_insert_with(|| names.iter().filter_map(|n| db.tile_type(tile).wire(n)).collect())
+            .clone();
+        for w in wires {
             let n = db.node(tile, w);
             if from[n as usize] == NodeId::MAX {
                 from[n as usize] = n;
@@ -432,17 +464,23 @@ pub(crate) fn build(db: &ChipDb, p: &Packed, placement: &Placement, family: &std
     let mut bscans = Vec::new();
     let mut ps7 = false;
     let mut brams = Vec::new();
+    let mut dsps = Vec::new();
     for (c, cell) in d.cells.iter().enumerate() {
         let c = c as CellId;
         match (&cell.kind, &p.conf[c as usize]) {
             (Kind::Lut { dram: false }, Conf::Lut { init }) => {
                 let (site, bel) = b.at(c)?;
-                let Bel::Lut6(k) = bel else {
-                    bail!("{}: a logic LUT in {bel:?}", cell.name);
-                };
                 let inputs = cell.pins.iter().filter(|(p, _)| p.starts_with('A')).count();
                 slice(&mut slices, site)?;
-                slices.get_mut(site).unwrap().lut_init[k] = Some(expand(*init, inputs));
+                let s = slices.get_mut(site).unwrap();
+                match bel {
+                    Bel::Lut6(k) => s.lut_init[k] = Some(expand(*init, inputs)),
+                    Bel::Lut5(k) => {
+                        s.lut5_init[k] = Some(expand(*init, inputs) & 0xffff_ffff);
+                        const_sinks.push((pin_node(db, site, &format!("{}6", LETTERS[k]))?, p.vcc, Vec::new()));
+                    }
+                    _ => bail!("{}: a logic LUT in {bel:?}", cell.name),
+                }
             }
             (Kind::Lut { dram: true }, Conf::RamLut { init, wclk_inv }) => {
                 let (site, bel) = b.at(c)?;
@@ -463,20 +501,33 @@ pub(crate) fn build(db: &ChipDb, p: &Packed, placement: &Placement, family: &std
             }
             (Kind::Ff(cs), Conf::Ff { init, srval }) => {
                 let (site, bel) = b.at(c)?;
-                let Bel::Ff(k) = bel else {
-                    bail!("{}: a register in {bel:?}", cell.name);
-                };
-                slice(&mut slices, site)?;
-                let s = slices.get_mut(site).unwrap();
-                s.ff[k] = Some(FfConf {
+                let conf = FfConf {
                     zini: !init,
                     zrst: !srval,
-                });
+                };
+                slice(&mut slices, site)?;
+                let dnet = cell.net("D").context("a register's D")?;
+                let k = match bel {
+                    Bel::Ff(k) => k,
+                    Bel::Ff5(k) => {
+                        let inner = b.input(c, "D", dnet)? == End::Internal;
+                        let s = slices.get_mut(site).unwrap();
+                        s.ff5[k] = Some(conf);
+                        s.ff5mux[k] = Some(if inner { "IN_A" } else { "IN_B" });
+                        s.clkinv = cs.clk_inv;
+                        s.ffsync = cs.sync;
+                        s.srused = cs.sr.is_some();
+                        s.ceused = cs.ce.is_some();
+                        continue;
+                    }
+                    _ => bail!("{}: a register in {bel:?}", cell.name),
+                };
+                let s = slices.get_mut(site).unwrap();
+                s.ff[k] = Some(conf);
                 s.clkinv = cs.clk_inv;
                 s.ffsync = cs.sync;
                 s.srused = cs.sr.is_some();
                 s.ceused = cs.ce.is_some();
-                let dnet = cell.net("D").context("a register's D")?;
                 s.ffmux[k] = Some(match b.input(c, "D", dnet)? {
                     End::Pin(..) => ["AX", "BX", "CX", "DX"][k],
                     End::Internal if b.driven_from(dnet, site, Bel::Lut6(k), "O6") => "O6",
@@ -507,6 +558,15 @@ pub(crate) fn build(db: &ChipDb, p: &Packed, placement: &Placement, family: &std
             }
             (Kind::Bscan { chain }, Conf::Bscan) => bscans.push((b.at(c)?.0.to_string(), *chain)),
             (Kind::Ps7, Conf::Ps7) => ps7 = true,
+            (Kind::Dsp { .. }, Conf::Dsp(config)) => {
+                let (site, _) = b.at(c)?;
+                let s = &db.sites[site];
+                dsps.push(DspConf {
+                    tile: s.tile,
+                    which: usize::from(!s.relative.ends_with('0')),
+                    config: (**config).clone(),
+                });
+            }
             (Kind::Bram { .. }, Conf::Bram(config)) => {
                 let (site, _) = b.at(c)?;
                 let s = &db.sites[site];
@@ -534,13 +594,17 @@ pub(crate) fn build(db: &ChipDb, p: &Packed, placement: &Placement, family: &std
     }
 
     // Constant sinks, each from its nearest source of the constant.
-    for (constant, wire) in [(p.gnd, "GND_WIRE"), (p.vcc, "VCC_WIRE")] {
+    // A DSP tile ties its own pins (DSP_GND_L, ...), as Vivado does.
+    for (constant, wire, names) in [
+        (p.gnd, "GND_WIRE", ["GND_WIRE", "DSP_GND_L", "DSP_GND_R"]),
+        (p.vcc, "VCC_WIRE", ["VCC_WIRE", "DSP_VCC_L", "DSP_VCC_R"]),
+    ] {
         let mine: Vec<&(NodeId, NetId, Vec<(CellId, String)>)> =
             const_sinks.iter().filter(|s| s.1 == constant).collect();
         if mine.is_empty() {
             continue;
         }
-        let from = nearest_source(db, wire);
+        let from = nearest_source(db, &names);
         let mut groups: HashMap<NodeId, Vec<(NodeId, Vec<(CellId, String)>)>> = HashMap::new();
         for (node, _, ports) in mine {
             let src = from[*node as usize];
@@ -576,6 +640,7 @@ pub(crate) fn build(db: &ChipDb, p: &Packed, placement: &Placement, family: &std
     Ok(Physical {
         nets,
         brams,
+        dsps,
         slices,
         pads,
         bufgs,

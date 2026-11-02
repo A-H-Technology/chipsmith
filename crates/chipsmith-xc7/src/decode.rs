@@ -167,6 +167,11 @@ struct Half {
     ffmux: [Option<String>; 4],
     zini: [bool; 4],
     zrst: [bool; 4],
+    /// The 5FFs': ZINI, ZRST, and `<L>5FFMUX` (`IN_A` O5, `IN_B` the
+    /// bypass).
+    zini5: [bool; 4],
+    zrst5: [bool; 4],
+    ff5mux: [Option<String>; 4],
     cy0_o5: [bool; 4],
     precyinit: Option<String>,
     clkinv: bool,
@@ -201,7 +206,15 @@ pub fn decode(
         why: HashMap::new(),
     };
     for tile in 0..db.width * db.height {
-        for (w, v) in [("GND_WIRE", false), ("VCC_WIRE", true)] {
+        for (w, v) in [
+            ("GND_WIRE", false),
+            ("VCC_WIRE", true),
+            // A DSP tile's own ties.
+            ("DSP_GND_L", false),
+            ("DSP_GND_R", false),
+            ("DSP_VCC_L", true),
+            ("DSP_VCC_R", true),
+        ] {
             if let Some(i) = d.wire(tile, w) {
                 d.constant.insert(db.node(tile, i), v);
             }
@@ -245,6 +258,7 @@ pub fn decode(
     let mut bufgs: Vec<String> = Vec::new();
     let mut bscans: Vec<String> = Vec::new();
     let mut rams: BTreeMap<(u32, usize), RamHalf> = BTreeMap::new();
+    let mut dsps: BTreeMap<(u32, usize), DspSite> = BTreeMap::new();
     for (tname, feats) in &tiles {
         let Some(&tile) = tile_of.get(tname.as_str()) else {
             continue;
@@ -317,6 +331,21 @@ pub fn decode(
                             h.ffmux[k] = Some(input.to_string());
                         }
                     }
+                    ([ff, "ZINI"], None) if ff.len() == 4 => {
+                        if let Some(k) = letter(ff) {
+                            h.zini5[k] = true;
+                        }
+                    }
+                    ([ff, "ZRST"], None) if ff.len() == 4 => {
+                        if let Some(k) = letter(ff) {
+                            h.zrst5[k] = true;
+                        }
+                    }
+                    ([m, input], None) if m.len() == 7 && m.ends_with("5FFMUX") => {
+                        if let Some(k) = letter(m) {
+                            h.ff5mux[k] = Some(input.to_string());
+                        }
+                    }
                     ([ff, "ZINI"], None) => {
                         if let Some(k) = letter(ff) {
                             h.zini[k] = true;
@@ -362,6 +391,9 @@ pub fn decode(
                     }
                     None => iobs.push((site, input, output)),
                 }
+            } else if half == "DSP48" && parts.len() >= 3 {
+                let k: usize = parts[1].strip_prefix("DSP_").context("a DSP site")?.parse()?;
+                dsps.entry((tile, k)).or_default().read(&parts[2..], f.value.as_ref());
             } else if let Some(y) = half.strip_prefix("RAMB18_Y") {
                 let h: usize = y.parse()?;
                 let b = rams.entry((tile, h)).or_default();
@@ -423,6 +455,7 @@ pub fn decode(
         xor: [SigBit; 4],
         cy: [SigBit; 4],
         q: [SigBit; 4],
+        q5: [SigBit; 4],
         mux: [SigBit; 4],
     }
     let mut slice_nets: BTreeMap<String, (String, Nets)> = BTreeMap::new();
@@ -438,6 +471,7 @@ pub fn decode(
             xor: new4(&mut d),
             cy: new4(&mut d),
             q: new4(&mut d),
+            q5: new4(&mut d),
             mux: new4(&mut d),
         };
         for k in 0..4 {
@@ -449,6 +483,7 @@ pub fn decode(
                 Some("O5") => n.o5[k],
                 Some("XOR") => n.xor[k],
                 Some("CY") => n.cy[k],
+                Some(m) if m.ends_with("5Q") => n.q5[k],
                 _ => n.mux[k],
             };
             d.source.insert(d.pin(&site, &format!("{l}MUX"))?, mux);
@@ -462,6 +497,10 @@ pub fn decode(
     let mut ram_out: BTreeMap<(u32, usize), [Vec<SigBit>; 4]> = BTreeMap::new();
     for &(tile, h) in rams.keys() {
         ram_out.insert((tile, h), bram_sources(&mut d, tile, h)?);
+    }
+    let mut dsp_out: BTreeMap<(u32, usize), (String, Vec<(String, SigBit)>)> = BTreeMap::new();
+    for &(tile, k) in dsps.keys() {
+        dsp_out.insert((tile, k), dsp_sources(&mut d, tile, k)?);
     }
     let mut port_bits: Vec<(String, Dir, SigBit)> = Vec::new();
     let site_port: HashMap<&str, &str> = {
@@ -640,7 +679,34 @@ pub fn decode(
                 }
                 .cell(),
             );
-        }
+
+            let d5 = match h.ff5mux[k].as_deref() {
+                Some("IN_A") => n.o5[k],
+                _ => pin(&d, format!("{}X", LETTERS[k]))?,
+            };
+            let reset5 = match (h.sync, h.zrst5[k]) {
+                (true, true) => Reset::SyncClear(sr),
+                (true, false) => Reset::SyncSet(sr),
+                (false, true) => Reset::AsyncClear(sr),
+                (false, false) => Reset::AsyncPreset(sr),
+            };
+            d.m.add_cell(
+                format!("{key}.{}5ff", LETTERS[k]),
+                Fd {
+                    d: d5,
+                    clk,
+                    clk_inv: h.clkinv,
+                    ce,
+                    reset: reset5,
+                    init: !h.zini5[k],
+                    q: n.q5[k],
+                }
+                .cell(),
+            );        }
+    }
+    for (key, s) in &dsps {
+        let (site, outs) = &dsp_out[key];
+        dsp_cell(&mut d, site, s, outs)?;
     }
     for ((tile, h), r) in &rams {
         bram_half(&mut d, *tile, *h, r, &ram_out[&(*tile, *h)])?;
@@ -933,5 +999,177 @@ fn bram_half(d: &mut Decoder, tile: u32, h: usize, r: &RamHalf, dout: &[Vec<SigB
     }
     let kind = cell.cell();
     d.m.add_cell(name, kind);
+    Ok(())
+}
+
+/// One DSP48E1 site's features.
+#[derive(Default)]
+struct DspSite {
+    /// (feature, value) as read.
+    feats: Vec<(String, u64)>,
+}
+
+impl DspSite {
+    fn read(&mut self, parts: &[&str], value: Option<&(u32, Vec<bool>)>) {
+        let v = value.map_or(1, |(lo, b)| {
+            b.iter().enumerate().fold(0u64, |a, (i, &x)| a | u64::from(x) << (*lo as usize + i))
+        });
+        let name = parts.join(".");
+        let name = name.trim_end_matches("[0]").to_string();
+        match self.feats.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, old)) => *old |= v,
+            None => self.feats.push((name, v)),
+        }
+    }
+
+    fn get(&self, name: &str) -> Option<u64> {
+        self.feats.iter().find(|(n, _)| n == name).map(|&(_, v)| v)
+    }
+
+    fn config(&self) -> crate::dsp::Config {
+        let has = |n: &str| self.get(n).is_some();
+        let reg = |n: &str| -> u8 {
+            if has(&format!("{n}_0")) {
+                0
+            } else if has(&format!("{n}_2")) {
+                2
+            } else {
+                1
+            }
+        };
+        let (areg, breg) = (reg("AREG"), reg("BREG"));
+        let mut stages = [true; 10];
+        for (s, name) in stages.iter_mut().zip(crate::dsp::STAGES) {
+            *s = !has(&format!("Z{name}"));
+        }
+        let mut inverted = [0u8; 5];
+        for (v, (pin, w)) in inverted.iter_mut().zip(crate::dsp::INVERTIBLE) {
+            let z = self.get(&format!("ZIS_{pin}_INVERTED")).unwrap_or(0);
+            *v = (!z & ((1 << w) - 1)) as u8;
+        }
+        crate::dsp::Config {
+            areg,
+            breg,
+            // ACASCREG follows AREG but where ZAREG_2_ACASCREG_1 is clear.
+            acascreg: if areg == 2 && !has("ZAREG_2_ACASCREG_1") { 1 } else { areg },
+            bcascreg: if breg == 2 && !has("ZBREG_2_BCASCREG_1") { 1 } else { breg },
+            stages,
+            a_cascade: has("A_INPUT"),
+            b_cascade: has("B_INPUT"),
+            use_dport: has("USE_DPORT"),
+            inverted,
+            mask: self.get("MASK").unwrap_or(0),
+            pattern: self.get("PATTERN").unwrap_or(0),
+        }
+    }
+}
+
+/// The DSP48E1 ports, inputs then outputs, with widths.
+const DSP_INPUTS: [(&str, usize); 38] = [
+    ("A", 30), ("ACIN", 30), ("ALUMODE", 4), ("B", 18), ("BCIN", 18), ("C", 48), ("CARRYCASCIN", 1),
+    ("CARRYIN", 1), ("CARRYINSEL", 3), ("CEA1", 1), ("CEA2", 1), ("CEAD", 1), ("CEALUMODE", 1),
+    ("CEB1", 1), ("CEB2", 1), ("CEC", 1), ("CECARRYIN", 1), ("CECTRL", 1), ("CED", 1), ("CEINMODE", 1),
+    ("CEM", 1), ("CEP", 1), ("CLK", 1), ("D", 25), ("INMODE", 5), ("MULTSIGNIN", 1), ("OPMODE", 7),
+    ("PCIN", 48), ("RSTA", 1), ("RSTALLCARRYIN", 1), ("RSTALUMODE", 1), ("RSTB", 1), ("RSTC", 1),
+    ("RSTCTRL", 1), ("RSTD", 1), ("RSTINMODE", 1), ("RSTM", 1), ("RSTP", 1),
+];
+const DSP_OUTPUTS: [(&str, usize); 11] = [
+    ("ACOUT", 30), ("BCOUT", 18), ("CARRYCASCOUT", 1), ("CARRYOUT", 4), ("MULTSIGNOUT", 1),
+    ("OVERFLOW", 1), ("P", 48), ("PATTERNBDETECT", 1), ("PATTERNDETECT", 1), ("PCOUT", 48),
+    ("UNDERFLOW", 1),
+];
+
+fn dsp_pin(name: &str, w: usize, i: usize) -> String {
+    if w > 1 {
+        format!("{name}{i}")
+    } else {
+        name.to_string()
+    }
+}
+
+/// DSP `k` of `tile`'s site and fresh nets for its outputs, each its pin's
+/// source.
+fn dsp_sources(d: &mut Decoder, tile: u32, k: usize) -> Result<(String, Vec<(String, SigBit)>)> {
+    let site = d
+        .db
+        .sites
+        .iter()
+        .find(|(_, s)| s.tile == tile && s.ty == "DSP48E1" && s.relative.ends_with(&k.to_string()))
+        .map(|(n, _)| n.clone())
+        .with_context(|| format!("tile {}: no DSP site {k}", d.db.tile_names[tile as usize]))?;
+    let mut outs = Vec::new();
+    for (name, w) in DSP_OUTPUTS {
+        let mut bits = Vec::new();
+        for i in 0..w {
+            let net = d.net();
+            if let Ok(node) = d.pin(&site, &dsp_pin(name, w, i)) {
+                d.source.insert(node, net);
+            }
+            bits.push(net);
+        }
+        for (i, b) in bits.into_iter().enumerate() {
+            outs.push((dsp_pin(name, w, i), b));
+        }
+    }
+    Ok((site, outs))
+}
+
+/// A DSP48E1 of the site's features and pins. Its pins' inversions are
+/// folded into the pins (a constant flipped, a signal through an
+/// inverter), which yosys' model needs.
+fn dsp_cell(d: &mut Decoder, site: &str, s: &DspSite, outs: &[(String, SigBit)]) -> Result<()> {
+    use chipsmith_netlist::{CellKind, Dir as PDir, Generic, GenericPort};
+    let mut config = s.config();
+    let mut ports = Vec::new();
+    let inv_of = |name: &str| -> Option<(usize, usize)> {
+        crate::dsp::INVERTIBLE.iter().position(|(p, _)| *p == name).map(|i| (i, crate::dsp::INVERTIBLE[i].1))
+    };
+    for (name, w) in DSP_INPUTS {
+        let mut sig = Vec::new();
+        for i in 0..w {
+            let mut b = d.resolve_pin(site, &dsp_pin(name, w, i))?;
+            if let Some((k, _)) = inv_of(name) {
+                if config.inverted[k] >> i & 1 == 1 {
+                    b = match b {
+                        SigBit::Const(State::One) => SigBit::ZERO,
+                        SigBit::Const(State::Zero) => SigBit::ONE,
+                        b => {
+                            let n = d.net();
+                            d.m.add_cell(format!("{site}.inv_{name}{i}"), cells::lut(&[b], 0b01, n));
+                            n
+                        }
+                    };
+                }
+            }
+            sig.push(b);
+        }
+        ports.push(GenericPort {
+            name: name.to_string(),
+            dir: Some(PDir::In),
+            sig,
+        });
+    }
+    config.inverted = [0; 5];
+    for (name, w) in DSP_OUTPUTS {
+        let sig: Vec<SigBit> = (0..w)
+            .map(|i| {
+                let pin = dsp_pin(name, w, i);
+                outs.iter().find(|(p, _)| *p == pin).map_or(SigBit::X, |(_, b)| *b)
+            })
+            .collect();
+        ports.push(GenericPort {
+            name: name.to_string(),
+            dir: Some(PDir::Out),
+            sig,
+        });
+    }
+    d.m.add_cell(
+        format!("{site}.dsp"),
+        CellKind::Other(Generic {
+            ty: "DSP48E1".into(),
+            params: config.params(),
+            ports,
+        }),
+    );
     Ok(())
 }

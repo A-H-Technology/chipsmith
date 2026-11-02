@@ -258,6 +258,25 @@ fn zybo_jtag_counter() {
     built("zybo-jtag-counter", 3000);
 }
 
+/// Two passes of writing and reading back every memory (8,192 cycles
+/// each): an error would light led[0] and count in USER1.
+#[test]
+fn zybo_bram_selftest() {
+    built("zybo-bram-selftest", 17000);
+}
+
+/// Three passes over the nine products (1,152 cycles each).
+#[test]
+fn zybo_mult_selftest() {
+    built("zybo-mult-selftest", 3600);
+}
+
+/// Two passes of the program out of block RAM (about 10,000 cycles each).
+#[test]
+fn zybo_riscv_bram() {
+    built("zybo-riscv-bram", 25000);
+}
+
 /// sha256 on Zybo pins: takes a while to place (the annealer).
 #[test]
 fn zybo_sha256() {
@@ -395,6 +414,24 @@ fn block_ram() {
             continue;
         }
         let r = std::panic::catch_unwind(|| design_built(&format!("bram/{top}.v"), top));
+        if r.is_err() {
+            failures.push(top);
+        }
+    }
+    assert!(failures.is_empty(), "failed: {failures:?}");
+}
+
+/// Every multiplier shape (`chipsmith-xc7/tests/designs/dsp`) that fits the
+/// balls through the bitstream (mul_wide's 128 port bits don't; mul_split
+/// is its several-DSP case); `CHIPSMITH_DSP_SHAPE` picks one.
+#[test]
+fn dsp() {
+    let mut failures = Vec::new();
+    for top in ["mul_comb", "mul_mixed", "mul_pipe", "mul_regs", "mul_split"] {
+        if std::env::var("CHIPSMITH_DSP_SHAPE").is_ok_and(|s| s != top) {
+            continue;
+        }
+        let r = std::panic::catch_unwind(|| design_built(&format!("dsp/{top}.v"), top));
         if r.is_err() {
             failures.push(top);
         }

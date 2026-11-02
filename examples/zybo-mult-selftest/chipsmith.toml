@@ -1,0 +1,19 @@
+# A DSP48E1 self-test read back over JTAG: products in most multiplier
+# shapes checked against a shift-and-add reference, the passes and the
+# errors in USER1. examples/mult-selftest on the Zybo.
+[project]
+name = "mult-selftest"
+top = "top"
+sources = ["src/*.v"]
+
+[target]
+device = "xc7z010clg400-1"
+
+# Original Zybo (now "Zybo (legacy)"), Digilent Zybo-Master.xdc.
+[pins]
+clk = "L16"
+led = ["M14", "M15", "G14", "D18"]
+
+# The Zybo's 125 MHz clock on L16.
+[clocks]
+clk = "125 MHz"

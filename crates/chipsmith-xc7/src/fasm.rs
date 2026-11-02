@@ -62,9 +62,6 @@ pub(crate) fn pip_lines(db: &ChipDb, e: &Edge) -> Vec<String> {
             })
             .collect();
     }
-    if tile.starts_with("DSP_L") || tile.starts_with("DSP_R") {
-        return Vec::new();
-    }
     let (mut src, mut dst) = (src.to_string(), dst.to_string());
     if sing {
         // nextpnr: prjxray-db has no ppips for these.
@@ -114,7 +111,12 @@ pub(crate) fn write(db: &ChipDb, phys: &Physical, pips: &[Edge]) -> Result<Strin
             written.insert(s.half.as_str());
             for k in 0..4 {
                 let l = LETTERS[k];
-                if let Some(init) = s.lut_init[k] {
+                // A 5LUT's table below the 6LUT's (A6 high selects the top).
+                let init = match (s.lut_init[k], s.lut5_init[k]) {
+                    (t6, Some(t5)) => Some(t6.unwrap_or(0) & 0xffff_ffff_0000_0000 | t5),
+                    (t6, None) => t6,
+                };
+                if let Some(init) = init {
                     line(format!("{p}.{l}LUT.INIT[63:0] = 64'b{init:064b}"));
                 }
                 if s.lut_ram[k] {
@@ -125,7 +127,19 @@ pub(crate) fn write(db: &ChipDb, phys: &Physical, pips: &[Edge]) -> Result<Strin
                     line(format!("{p}.{l}LUT.RAM"));
                 }
                 if let Some(m) = s.outmux[k] {
+                    let m = if m == "5Q" { format!("{l}5Q") } else { m.to_string() };
                     line(format!("{p}.{l}OUTMUX.{m}"));
+                }
+                if let Some(ff) = s.ff5[k] {
+                    if ff.zini {
+                        line(format!("{p}.{l}5FF.ZINI"));
+                    }
+                    if ff.zrst {
+                        line(format!("{p}.{l}5FF.ZRST"));
+                    }
+                }
+                if let Some(m) = s.ff5mux[k] {
+                    line(format!("{p}.{l}5FFMUX.{m}"));
                 }
                 if let Some(ff) = s.ff[k] {
                     if ff.zini {
@@ -139,7 +153,7 @@ pub(crate) fn write(db: &ChipDb, phys: &Physical, pips: &[Edge]) -> Result<Strin
                     line(format!("{p}.{l}FFMUX.{m}"));
                 }
             }
-            let has_ff = s.ff.iter().any(Option::is_some);
+            let has_ff = s.ff.iter().chain(&s.ff5).any(Option::is_some);
             if has_ff && s.ffsync {
                 line(format!("{p}.FFSYNC"));
             }
@@ -205,6 +219,11 @@ pub(crate) fn write(db: &ChipDb, phys: &Physical, pips: &[Edge]) -> Result<Strin
 
     for b in &phys.brams {
         for l in bram_lines(db, b) {
+            line(l);
+        }
+    }
+    for d in &phys.dsps {
+        for l in dsp_lines(db, d) {
             line(l);
         }
     }
@@ -434,4 +453,56 @@ pub(crate) fn half_values(c: &crate::bram::Config, k: usize, h: usize) -> (u64, 
     };
     let half = Width::from_bits(w.bits() / 2).unwrap_or(Width::X1);
     (pick(p.init), pick(p.srval), half)
+}
+
+/// One DSP48E1's features, as Vivado's bitstreams read back by bit2fasm
+/// have them (prjxray's names; "Z" ones set where the value is 0).
+pub(crate) fn dsp_lines(db: &ChipDb, d: &crate::phys::DspConf) -> Vec<String> {
+    let c = &d.config;
+    let p = format!("{}.DSP48.DSP_{}", tile_name(db, d.tile), d.which);
+    let mut out = Vec::new();
+    let mut f = |s: String| out.push(format!("{p}.{s}"));
+    match c.areg {
+        0 => f("AREG_0".into()),
+        2 => f("AREG_2".into()),
+        _ => {}
+    }
+    match c.breg {
+        0 => f("BREG_0".into()),
+        2 => f("BREG_2".into()),
+        _ => {}
+    }
+    if !(c.areg == 2 && c.acascreg == 1) {
+        f("ZAREG_2_ACASCREG_1".into());
+    }
+    if !(c.breg == 2 && c.bcascreg == 1) {
+        f("ZBREG_2_BCASCREG_1".into());
+    }
+    for (&on, name) in c.stages.iter().zip(crate::dsp::STAGES) {
+        if !on {
+            f(format!("Z{name}[0]"));
+        }
+    }
+    if c.a_cascade {
+        f("A_INPUT[0]".into());
+    }
+    if c.b_cascade {
+        f("B_INPUT[0]".into());
+    }
+    if c.use_dport {
+        f("USE_DPORT[0]".into());
+    }
+    for (&v, (pin, w)) in c.inverted.iter().zip(crate::dsp::INVERTIBLE) {
+        let z = !v & ((1 << w) - 1);
+        if w == 1 {
+            if z == 1 {
+                f(format!("ZIS_{pin}_INVERTED"));
+            }
+        } else {
+            f(format!("ZIS_{pin}_INVERTED[{}:0] = {w}'b{:0w$b}", w - 1, z, w = w));
+        }
+    }
+    f(format!("MASK[47:0] = 48'b{:048b}", c.mask));
+    f(format!("PATTERN[47:0] = 48'b{:048b}", c.pattern));
+    out
 }
