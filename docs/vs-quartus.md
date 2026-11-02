@@ -103,11 +103,15 @@ deterministic, so its values repeat across reps.
 | sha256 | 64.8 | 44.3 | 43.65 |
 | picorv32x24 | 105.27 | 83.1 | - |
 
-sha256's RBF differs from Quartus' assembly in 260 bits, one a LAB: the
+sha256's RBF differed from Quartus' assembly in 260 bits, one a LAB: the
 LAB's clear-line inversion (`LAB_CLR_INVERT_PAIR`) for its active-low
-reset, set by chipsmith and clear in Quartus. It did on `open` 61762d1
-too, since the LAB took over active-low clears (8ebc2e8); not looked into
-further here.
+reset. chipsmith was right: the cram that exported it to Quartus was the
+nix build of cyclone2-re e6aa597, from before de2-arstn taught the export
+the inversion (de3386a kept the previous outputHash for its chipsmith
+dependency, so `nix build .#cram` failed on master and `result/` still
+held the old build). With a current cram sha256 is byte-identical
+(`qor2`), and cram now refuses to run from a checkout whose sources it
+wasn't built from (cyclone2-re b5eb9e7).
 
 ## Load
 
