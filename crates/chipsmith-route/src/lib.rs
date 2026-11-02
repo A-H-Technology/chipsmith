@@ -203,6 +203,9 @@ pub struct Router<'a> {
     /// Nodes only one net may use (by index), e.g. the ends of routes
     /// another tool has fixed. Empty when nothing is reserved.
     owner: Vec<u32>,
+    /// Nets kept to some wire types (and their own sinks), searched over
+    /// the whole chip: per net, which types it may use.
+    confined: std::collections::HashMap<u32, Vec<bool>>,
 }
 
 /// How a PathFinder iteration groups the nets it reroutes. Each group
@@ -332,6 +335,7 @@ impl<'a> Router<'a> {
             },
             timing: &design.timing,
             owner: Vec::new(),
+            confined: Default::default(),
             tile_distance: std::env::var("CHIPSMITH_TILE_DISTANCE")
                 .ok()
                 .and_then(|v| {
@@ -340,6 +344,28 @@ impl<'a> Router<'a> {
                 })
                 .unwrap_or(db.tile_distance),
         }
+    }
+
+    /// Routing delays by the graph's wire types, for a device
+    /// `timing::wire_delay` doesn't know (its numbers are the Cyclone II's).
+    pub fn set_wire_delays(&mut self, delay: impl Fn(&str) -> Ps) {
+        let by_type: Vec<Ps> = self.db.wire_types.iter().map(|t| delay(t)).collect();
+        for (info, &t) in self.node.iter_mut().zip(&self.db.node_type) {
+            info.delay = by_type[t as usize];
+        }
+    }
+
+    /// Route net `net` (an index into the nets `route` takes) on the given
+    /// wire types alone, apart from its own sinks, anywhere on the chip: a
+    /// clock on the clock tree, which its bounding box may not reach.
+    pub fn confine(&mut self, net: u32, wire_types: &[&str]) {
+        let allowed = self
+            .db
+            .wire_types
+            .iter()
+            .map(|t| wire_types.contains(&t.as_str()))
+            .collect();
+        self.confined.insert(net, allowed);
     }
 
     /// Keep `node` for net `net` alone.
@@ -1019,7 +1045,7 @@ impl<'a> Router<'a> {
         crit: f32,
         region: Option<chipdb::Box>,
     ) -> Result<()> {
-        if let Some(r) = region {
+        if let Some(r) = region.filter(|_| !self.confined.contains_key(&net)) {
             if self.search_in(s, net, seeds, sink, crit, r).is_ok() {
                 return Ok(());
             }
@@ -1040,6 +1066,7 @@ impl<'a> Router<'a> {
         let gen = s.generation;
         let mut heap = BinaryHeap::new();
         let per_hop = 1.0 - crit + crit * HOP_DELAY_ESTIMATE / DELAY_UNIT;
+        let allowed = self.confined.get(&net);
         for (&n, &delay) in seeds.nodes.iter().zip(seeds.delay) {
             s.work[0] += 1;
             let g = crit * delay / DELAY_UNIT;
@@ -1066,6 +1093,9 @@ impl<'a> Router<'a> {
                 if !self.usable(e)
                     || self.reserved_for_other(e.dst, net)
                     || !self.node[e.dst as usize].bbox.overlaps(region)
+                    || allowed.is_some_and(|a| {
+                        e.dst != sink && !a[self.db.node_type[e.dst as usize] as usize]
+                    })
                 {
                     continue;
                 }

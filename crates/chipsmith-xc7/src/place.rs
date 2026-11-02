@@ -1,18 +1,14 @@
 //! chipsmith's 7-series placer: simulated annealing over slices.
 //!
-//! Input is nextpnr's packed netlist (`nextpnr-himbaechel --pack-only
-//! --write`): its packer has already turned yosys' cells into bel types
-//! (SLICE_LUTX, SLICE_FFX, CARRY4, PAD, IOB33_*, BUFGCTRL, BSCAN, PS7), split and
-//! rechained the carries, added the feed-through LUTs and placed the pins
-//! from the XDC. Which LUTs and registers share a slice, and where every
-//! slice, carry chain, RAM and clock buffer goes, is decided here. The output
-//! is one `-o preplaced` line per cell (`<cell>\t<bel>`, the bel spelled the
-//! way nextpnr reads it), so nextpnr binds the whole design and has nothing
-//! left to place.
+//! Input is the packer's design (`crate::pack`): LUTs, registers, CARRY4s
+//! with their feed-through LUTs, RAM32Ms as eight RAMD32 LUTs, pins, BUFGs,
+//! BSCANs and the PS7. Which LUTs and registers share a slice, and where
+//! every slice, carry chain, RAM and clock buffer goes, is decided here; the
+//! result is every cell's site and bel ([`Placement`]).
 //!
-//! Slices are filled in a subset of what nextpnr's `xc7_logic_tile_valid`
-//! accepts, chosen so that legality is a property of the shapes rather than
-//! something to check after each move:
+//! Slices are filled in shapes that are legal by construction, so that
+//! legality is a property of the shapes rather than something to check
+//! after each move:
 //!
 //! - a BLE (a LUT in an `x6LUT` and the register in `xFF` beside it, or
 //!   either alone) goes in any slice; the register takes its D from the LUT's
@@ -21,69 +17,60 @@
 //!   one control set (clock, CE, SR and their modes);
 //! - a carry chain owns whole slices: CARRY4 k sits in the slice above
 //!   CARRY4 k-1 (the next one on the COUT -> CIN wire), its S LUTs in the
-//!   `x6LUT`s, its DI LUTs in the `x5LUT`s (where nextpnr's packer put them
-//!   in a cluster), and registers fed straight from a sum output in the
-//!   `xFF` of that bit;
+//!   `x6LUT`s, and registers fed straight from a sum output in the `xFF` of
+//!   that bit;
 //! - a RAM32M (eight RAMD32 LUTs) owns a whole SLICEM.
 //!
 //! Carry chains and RAMs go in the even slice of a tile (X0, the SLICEM of a
-//! CLBLM), as nextpnr's packer constrains them. Pins are where the XDC put
-//! them; the BSCAN for USER<n> is BSCAN_X0Y<n-1>; the PS7 has the one PS7
-//! site; each BUFGCTRL takes the free one nearest its source.
+//! CLBLM). Pins are where the manifest put them; the BSCAN for USER<n> is
+//! BSCAN_X0Y<n-1>; the PS7 has the one PS7 site; each BUFGCTRL takes the
+//! free one nearest its source.
 //!
 //! The cost is half-perimeter wirelength, x counted at half weight: grid x
 //! advances by two or more per interconnect column (site columns are
 //! columns of their own), y by one per interconnect row. Clock nets (driven
 //! by a BUFGCTRL) and the constant nets are left out; they don't use the
 //! general interconnect.
-//!
-//! A design with anything else (block RAM, DSPs, other distributed RAM
-//! shapes, SRLs, wide muxes, I/O logic) comes back `Unsupported`, and the
-//! flow lets nextpnr place it as before.
 
-use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use rustc_hash::FxHashMap as HashMap;
-use serde_json::Value;
 
 use crate::delay::Delays;
-use crate::route::bel_name;
 use chipsmith_route::chipdb::ChipDb;
 use chipsmith_route::timing::{self, Arc, Ps};
 
-type NetId = u32;
-type CellId = u32;
+pub(crate) type NetId = u32;
+pub(crate) type CellId = u32;
 /// A position on the grid: tile x, tile y.
 type Xy = (i32, i32);
 
-/// The registers' shared configuration within a slice: nextpnr's half-tile
-/// check compares exactly these.
+/// The registers' shared configuration within a slice: the slice has one
+/// clock, CE and SR, one clock inversion and one SR mode for all eight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct ControlSet {
-    clk: Option<NetId>,
-    ce: Option<NetId>,
-    sr: Option<NetId>,
-    clk_inv: bool,
-    sr_inv: bool,
-    latch: bool,
-    sync: bool,
+pub(crate) struct ControlSet {
+    pub clk: Option<NetId>,
+    pub ce: Option<NetId>,
+    pub sr: Option<NetId>,
+    pub clk_inv: bool,
+    /// SR acts on the clock edge (FDRE, FDSE) rather than at once.
+    pub sync: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Kind {
+pub(crate) enum Kind {
     Lut {
         dram: bool,
     },
     Ff(ControlSet),
     Carry,
-    /// A package pin, placed by the XDC: its bel as nextpnr reads it.
+    /// A package pin's site (`IOB_X0Y78`) and its buffers, for the port
+    /// bit `port` (`led[2]`).
     Pad {
-        bel: String,
+        site: String,
+        port: String,
     },
-    InBuf,
-    OutBuf,
     Bufg,
     Bscan {
         chain: u32,
@@ -95,207 +82,67 @@ enum Kind {
 }
 
 #[derive(Debug)]
-struct Cell {
-    name: String,
-    kind: Kind,
-    pins: Vec<(String, NetId)>,
+pub(crate) struct Cell {
+    pub name: String,
+    pub kind: Kind,
+    pub pins: Vec<(String, NetId)>,
 }
 
 impl Cell {
-    fn net(&self, port: &str) -> Option<NetId> {
+    pub fn net(&self, port: &str) -> Option<NetId> {
         self.pins.iter().find(|(p, _)| p == port).map(|&(_, n)| n)
     }
 }
 
 #[derive(Debug, Default)]
-struct Net {
-    driver: Option<(CellId, String)>,
-    users: Vec<(CellId, String)>,
+pub(crate) struct Net {
+    pub driver: Option<(CellId, String)>,
+    pub users: Vec<(CellId, String)>,
 }
-
-/// A design chipsmith doesn't place yet, and why.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Unsupported(pub String);
 
 /// One LUT and the register beside it.
 #[derive(Debug, Clone, Copy)]
-struct Ble {
-    lut: Option<CellId>,
-    ff: Option<CellId>,
+pub(crate) struct Ble {
+    pub lut: Option<CellId>,
+    pub ff: Option<CellId>,
 }
 
-/// One slice of a carry chain: the CARRY4 and, per bit, the cells nextpnr's
+/// One slice of a carry chain: the CARRY4 and, per bit, the cells the
 /// packer tied to it.
 #[derive(Debug, Clone, Default)]
-struct CarrySlice {
-    carry: CellId,
-    lut6: [Option<CellId>; 4],
-    lut5: [Option<CellId>; 4],
-    ff: [Option<CellId>; 4],
+pub(crate) struct CarrySlice {
+    pub carry: CellId,
+    pub lut6: [Option<CellId>; 4],
+    pub lut5: [Option<CellId>; 4],
+    pub ff: [Option<CellId>; 4],
 }
 
 /// A RAM32M: per bit, the RAMD32 in the 6LUT and the one in the 5LUT.
 #[derive(Debug, Clone)]
-struct Dram {
-    lut6: [CellId; 4],
-    lut5: [CellId; 4],
+pub(crate) struct Dram {
+    pub lut6: [CellId; 4],
+    pub lut5: [CellId; 4],
 }
 
-struct Design {
-    cells: Vec<Cell>,
-    nets: Vec<Net>,
+pub(crate) struct Design {
+    pub cells: Vec<Cell>,
+    pub nets: Vec<Net>,
     /// Distinct cells of each net that counts for wirelength (empty for
     /// clock and constant nets and nets within one cell).
-    net_cells: Vec<Vec<CellId>>,
+    pub net_cells: Vec<Vec<CellId>>,
     /// Nets that count, per cell.
-    cell_nets: Vec<Vec<NetId>>,
-    bles: Vec<Ble>,
-    carries: Vec<Vec<CarrySlice>>,
-    drams: Vec<Dram>,
+    pub cell_nets: Vec<Vec<NetId>>,
+    pub bles: Vec<Ble>,
+    pub carries: Vec<Vec<CarrySlice>>,
+    pub drams: Vec<Dram>,
     /// Each BLE's register's control set, numbered densely.
-    ble_cs: Vec<Option<u32>>,
+    pub ble_cs: Vec<Option<u32>>,
 }
 
-const LETTERS: [char; 4] = ['A', 'B', 'C', 'D'];
-
-/// nextpnr's attributes are present or absent (`"1 "` when present).
-fn has_attr(cell: &Value, name: &str) -> bool {
-    cell["attributes"].get(name).is_some()
-}
-
-/// A parameter as nextpnr writes it: a binary string, or a number.
-fn param(cell: &Value, name: &str) -> u64 {
-    match &cell["parameters"][name] {
-        Value::String(s) if s.chars().all(|c| c == '0' || c == '1') && !s.is_empty() => {
-            u64::from_str_radix(s, 2).unwrap_or(0)
-        }
-        Value::String(s) => s.trim().parse().unwrap_or(0),
-        Value::Number(n) => n.as_u64().unwrap_or(0),
-        _ => 0,
-    }
-}
-
-fn top_module(json: &Value) -> Result<&Value> {
-    let modules = json["modules"].as_object().context("no modules")?;
-    modules
-        .values()
-        .find(|m| {
-            m["attributes"]["top"]
-                .as_str()
-                .is_some_and(|t| t.trim_start_matches('0') == "1")
-        })
-        .or_else(|| (modules.len() == 1).then(|| modules.values().next().unwrap()))
-        .context("no top module")
-}
-
-/// The packed netlist, or what in it chipsmith can't place yet.
-fn read_design(json: &Value) -> Result<std::result::Result<Design, Unsupported>> {
-    let top = top_module(json)?;
-    let mut net_ids: HashMap<u64, NetId> = HashMap::default();
-    let mut cells = Vec::new();
-    for (name, c) in top["cells"].as_object().context("no cells")? {
-        let ty = c["type"].as_str().context("cell type")?;
-        let mut pins = Vec::new();
-        for (port, bits) in c["connections"].as_object().context("connections")? {
-            let bits = bits.as_array().context("connection bits")?;
-            ensure!(
-                bits.len() <= 1,
-                "cell {name} port {port}: {} bits",
-                bits.len()
-            );
-            // Strings are constant bits ("0", "1", "x"); nextpnr's packer has
-            // already tied constants to its GND and VCC nets.
-            if let Some(bit) = bits.first().and_then(Value::as_u64) {
-                let next = net_ids.len() as NetId;
-                pins.push((port.clone(), *net_ids.entry(bit).or_insert(next)));
-            }
-        }
-        let net_of = |port: &str| pins.iter().find(|(p, _)| p == port).map(|&(_, n)| n);
-        let kind = match ty {
-            "SLICE_LUTX" => {
-                if has_attr(c, "X_LUT_AS_SRL") {
-                    return Ok(Err(Unsupported(format!("shift register {name}"))));
-                }
-                let dram = has_attr(c, "X_LUT_AS_DRAM");
-                // Before nextpnr's post-placement fixup every LUT drives O6
-                // (a DI feed-through moves to O5 once placed); RAMD32s in a
-                // 5LUT drive O5 already.
-                if !dram && net_of("O5").is_some() {
-                    return Ok(Err(Unsupported(format!("dual-output LUT {name}"))));
-                }
-                Kind::Lut { dram }
-            }
-            "SLICE_FFX" => Kind::Ff(ControlSet {
-                clk: net_of("CK"),
-                ce: net_of("CE"),
-                sr: net_of("SR"),
-                clk_inv: param(c, "IS_C_INVERTED") == 1,
-                sr_inv: [
-                    "IS_R_INVERTED",
-                    "IS_S_INVERTED",
-                    "IS_CLR_INVERTED",
-                    "IS_PRE_INVERTED",
-                ]
-                .iter()
-                .any(|p| param(c, p) == 1),
-                latch: has_attr(c, "X_FF_AS_LATCH"),
-                sync: has_attr(c, "X_FFSYNC"),
-            }),
-            "CARRY4" => Kind::Carry,
-            "PAD" => Kind::Pad {
-                bel: c["attributes"]["BEL"]
-                    .as_str()
-                    .with_context(|| format!("pad {name} has no pin"))?
-                    .to_string(),
-            },
-            "IOB33_INBUF_EN" => Kind::InBuf,
-            "IOB33_OUTBUF" => Kind::OutBuf,
-            "BUFGCTRL" => Kind::Bufg,
-            "BSCAN" => Kind::Bscan {
-                chain: match param(c, "JTAG_CHAIN") {
-                    0 => 1,
-                    n => n as u32,
-                },
-            },
-            "PS7_PS7" => Kind::Ps7,
-            "PSEUDO_GND" => Kind::Gnd,
-            "PSEUDO_VCC" => Kind::Vcc,
-            other => return Ok(Err(Unsupported(format!("cell {name} of type {other}")))),
-        };
-        cells.push(Cell {
-            name: name.clone(),
-            kind,
-            pins,
-        });
-    }
-
-    let mut nets: Vec<Net> = (0..net_ids.len()).map(|_| Net::default()).collect();
-    for (i, (_, c)) in top["cells"]
-        .as_object()
-        .expect("read above")
-        .iter()
-        .enumerate()
-    {
-        let dirs = &c["port_directions"];
-        for (port, net) in &cells[i].pins {
-            let n = &mut nets[*net as usize];
-            if dirs[port.as_str()].as_str() == Some("output") {
-                ensure!(n.driver.is_none(), "net {net} has two drivers");
-                n.driver = Some((i as CellId, port.clone()));
-            } else {
-                n.users.push((i as CellId, port.clone()));
-            }
-        }
-    }
-    build(cells, nets).map(|d| {
-        d.map(|mut d| {
-            d.index_nets();
-            d
-        })
-    })
-}
-
-fn build(cells: Vec<Cell>, nets: Vec<Net>) -> Result<std::result::Result<Design, Unsupported>> {
+/// Groups the packer's cells into what the placer moves: carry chains
+/// (with the LUTs and registers the packer tied to each bit), RAM32Ms and
+/// BLEs.
+pub(crate) fn build(cells: Vec<Cell>, nets: Vec<Net>) -> Result<Design> {
     let mut d = Design {
         cells,
         nets,
@@ -353,18 +200,17 @@ fn build(cells: Vec<Cell>, nets: Vec<Net>) -> Result<std::result::Result<Design,
                 carry: c,
                 ..Default::default()
             };
+            // Each S has a LUT of its own (the packer adds feed-throughs);
+            // DI comes in on the bit's X bypass.
             for k in 0..4 {
-                for (port, slot) in [("S", &mut s.lut6[k]), ("DI", &mut s.lut5[k])] {
-                    if let Some(l) = lut_driver(&d, cell.net(&format!("{port}{k}"))) {
-                        if taken[l as usize] {
-                            return Ok(Err(Unsupported(format!(
-                                "LUT {} feeds two carry bits",
-                                d.cells[l as usize].name
-                            ))));
-                        }
-                        taken[l as usize] = true;
-                        *slot = Some(l);
-                    }
+                if let Some(l) = lut_driver(&d, cell.net(&format!("S{k}"))) {
+                    ensure!(
+                        !taken[l as usize],
+                        "LUT {} feeds two carry bits",
+                        d.cells[l as usize].name
+                    );
+                    taken[l as usize] = true;
+                    s.lut6[k] = Some(l);
                 }
             }
             // A register on a sum output goes in that bit's FF: the xFFMUX
@@ -400,8 +246,8 @@ fn build(cells: Vec<Cell>, nets: Vec<Net>) -> Result<std::result::Result<Design,
         carries - chained
     );
 
-    // RAM32Ms: nextpnr's packer names the eight RAMD32s `<ram>/DPR<k>_<h>`,
-    // bit k, h = 1 in the 6LUT and 0 in the 5LUT.
+    // RAM32Ms: the packer names the eight RAMD32s `<ram>/DPR<k>_<h>`, bit
+    // k, h = 1 in the 6LUT and 0 in the 5LUT.
     let mut rams: HashMap<&str, [[Option<CellId>; 2]; 4]> = HashMap::default();
     for (i, c) in d.cells.iter().enumerate() {
         if c.kind != (Kind::Lut { dram: true }) {
@@ -412,9 +258,7 @@ fn build(cells: Vec<Cell>, nets: Vec<Net>) -> Result<std::result::Result<Design,
             let (k, h): (usize, usize) = (k.parse().ok()?, h.parse().ok()?);
             (k < 4 && h < 2).then_some((ram, k, h))
         });
-        let Some((ram, k, h)) = parsed else {
-            return Ok(Err(Unsupported(format!("distributed RAM {}", c.name))));
-        };
+        let (ram, k, h) = parsed.with_context(|| format!("distributed RAM {}", c.name))?;
         rams.entry(ram).or_default()[k][h] = Some(i as CellId);
     }
     let mut rams: Vec<_> = rams.into_iter().collect();
@@ -430,11 +274,7 @@ fn build(cells: Vec<Cell>, nets: Vec<Net>) -> Result<std::result::Result<Design,
                     dram.lut5[k] = l5;
                     dram.lut6[k] = l6;
                 }
-                _ => {
-                    return Ok(Err(Unsupported(format!(
-                        "distributed RAM {ram} isn't a RAM32M"
-                    ))))
-                }
+                _ => anyhow::bail!("distributed RAM {ram} isn't a RAM32M"),
             }
         }
         for c in dram.lut5.iter().chain(&dram.lut6) {
@@ -475,7 +315,8 @@ fn build(cells: Vec<Cell>, nets: Vec<Net>) -> Result<std::result::Result<Design,
         })
         .collect();
     d.ble_cs = ble_cs;
-    Ok(Ok(d))
+    d.index_nets();
+    Ok(d)
 }
 
 impl Design {
@@ -511,24 +352,24 @@ impl Design {
 
 /// A connection from a cell output to a cell input, for timing.
 #[derive(Debug, Clone, Copy)]
-struct Conn {
-    from_cell: CellId,
-    to_cell: CellId,
+pub(crate) struct Conn {
+    pub from_cell: CellId,
+    pub to_cell: CellId,
     /// Timing nodes of the two ports.
-    from: u32,
-    to: u32,
-    net: NetId,
+    pub from: u32,
+    pub to: u32,
+    pub net: NetId,
     /// Stays inside a slice whatever the placement: a LUT into its BLE's
     /// register, a carry chain's own LUTs and registers, CO3 into the next
     /// CIN.
-    internal: bool,
+    pub internal: bool,
 }
 
 /// The design's timing graph (cell arcs, path starts and ends) and every
 /// connection the placement decides the delay of.
-struct Timing {
-    graph: timing::Graph,
-    conns: Vec<Conn>,
+pub(crate) struct Timing {
+    pub graph: timing::Graph,
+    pub conns: Vec<Conn>,
     delays: Delays,
 }
 
@@ -541,7 +382,7 @@ const TIMING_WEIGHT: f32 = 20.0;
 const CRIT_EXP: f32 = 4.0;
 
 impl Timing {
-    fn new(d: &Design, delays: &Delays) -> Self {
+    pub(crate) fn new(d: &Design, delays: &Delays) -> Self {
         let mut g = timing::Graph::default();
         // Which object (and which slice of it) each cell is in: 0 BLE, 1
         // carry chain, 2 RAM.
@@ -671,8 +512,8 @@ struct Slice {
     /// Absolute site name, `SLICE_X30Y39`.
     site: String,
     xy: Xy,
-    /// The tile's X0 slice: where nextpnr's packer constrains carry chains
-    /// and distributed RAM.
+    /// The tile's X0 slice (the SLICEM of a CLBLM): where carry chains and
+    /// distributed RAM go.
     even: bool,
     slicem: bool,
     /// The slice whose CIN this slice's COUT drives.
@@ -1138,9 +979,10 @@ impl Rng {
 
 /// Start compact: macros first, nearest the middle of the device, then BLEs
 /// filling slices outwards, one control set at a time.
-fn initial<'a>(d: &'a Design, g: &'a Grid, timing: Option<&'a Timing>) -> Result<State<'a>> {
+/// A state with nothing placed.
+fn initial_empty<'a>(d: &'a Design, g: &'a Grid, timing: Option<&'a Timing>) -> State<'a> {
     let n_slices = g.slices.len();
-    let mut s = State {
+    State {
         d,
         g,
         timing,
@@ -1155,7 +997,14 @@ fn initial<'a>(d: &'a Design, g: &'a Grid, timing: Option<&'a Timing>) -> Result
         weight: vec![1.0; d.nets.len()],
         stamp: vec![0; d.nets.len()],
         epoch: 0,
-    };
+    }
+}
+
+/// The greedy start: chains and RAMs nearest the middle, then registers by
+/// control set and lone LUTs into what is left.
+fn initial<'a>(d: &'a Design, g: &'a Grid, timing: Option<&'a Timing>) -> Result<State<'a>> {
+    let n_slices = g.slices.len();
+    let mut s = initial_empty(d, g, timing);
     let (cx, cy) = {
         let (x0, x1) = g.slices.iter().fold((i32::MAX, i32::MIN), |(a, b), s| {
             (a.min(s.xy.0), b.max(s.xy.0))
@@ -1230,8 +1079,16 @@ pub struct Stats {
     pub threads: usize,
 }
 
+/// Where an anneal starts: hot from the greedy start, or cold from a
+/// legalised global placement, which only needs local refinement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Start {
+    Hot,
+    Cold,
+}
+
 /// One anneal from `start`; returns the moves tried.
-fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
+fn anneal(s: &mut State, rng: &mut Rng, start: Start) -> u64 {
     let d = s.d;
     let g = s.g;
     let objects: Vec<Obj> = (0..d.bles.len() as u32)
@@ -1243,8 +1100,16 @@ fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
         return 0;
     }
     let max_r = (g.cols as i32).max(g.y_max).max(1) as f64;
-    let mut r = max_r;
-    let moves_per_t = (2.0 * (objects.len() as f64).powf(4.0 / 3.0)).max(200.0) as usize;
+    // Cold: moves within a few slices of the global placement's.
+    let mut r = match start {
+        Start::Hot => max_r,
+        Start::Cold => COLD_RANGE.min(max_r),
+    };
+    let moves = match start {
+        Start::Hot => 2.0,
+        Start::Cold => COLD_MOVES,
+    };
+    let moves_per_t = (moves * (objects.len() as f64).powf(4.0 / 3.0)).max(200.0) as usize;
     let mut total_moves = 0u64;
     let (mut cells, mut nets) = (Vec::new(), Vec::new());
 
@@ -1296,7 +1161,10 @@ fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
     }
     let mean = deltas.iter().sum::<f64>() / deltas.len().max(1) as f64;
     let var = deltas.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / deltas.len().max(1) as f64;
-    let mut t = 20.0 * var.sqrt();
+    let mut t = match start {
+        Start::Hot => 20.0,
+        Start::Cold => COLD_TEMPERATURE,
+    } * var.sqrt();
     let live_nets = d.net_cells.iter().filter(|c| !c.is_empty()).count().max(1);
 
     loop {
@@ -1328,18 +1196,37 @@ fn anneal(s: &mut State, rng: &mut Rng) -> u64 {
     total_moves
 }
 
-/// Every cell's bel, as `-o preplaced` spells it.
-fn bels(db: &ChipDb, d: &Design, g: &Grid, s: &State) -> Result<Vec<(String, String)>> {
-    let mut out: Vec<(CellId, String)> = Vec::new();
-    let slice_bel = |slice: u32, bel: String| format!("{}/{bel}", g.slices[slice as usize].site);
+/// Where a cell sits in its site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Bel {
+    /// A slice's `<letter>6LUT`, `<letter>5LUT` or `<letter>FF`, letter 0
+    /// to 3 for A to D.
+    Lut6(usize),
+    Lut5(usize),
+    Ff(usize),
+    Carry4,
+    /// The site's one bel: a pin's IOB, a BUFGCTRL, a BSCAN, the PS7.
+    Site,
+}
+
+/// The placement: each cell's site (`SLICE_X30Y39`) and bel; constants have
+/// none.
+pub(crate) struct Placement {
+    pub sites: Vec<Option<(String, Bel)>>,
+    pub stats: Stats,
+}
+
+fn sites(d: &Design, g: &Grid, s: &State, fixed: &[(CellId, String, Xy)]) -> Vec<Option<(String, Bel)>> {
+    let mut out: Vec<Option<(String, Bel)>> = vec![None; d.cells.len()];
+    let site = |slice: u32| g.slices[slice as usize].site.clone();
     for (b, ble) in d.bles.iter().enumerate() {
         let slot = s.ble_slot[b];
-        let (slice, k) = (slot / SLOTS as u32, LETTERS[slot as usize % SLOTS]);
+        let (slice, k) = (slot / SLOTS as u32, slot as usize % SLOTS);
         if let Some(l) = ble.lut {
-            out.push((l, slice_bel(slice, format!("{k}6LUT"))));
+            out[l as usize] = Some((site(slice), Bel::Lut6(k)));
         }
         if let Some(f) = ble.ff {
-            out.push((f, slice_bel(slice, format!("{k}FF"))));
+            out[f as usize] = Some((site(slice), Bel::Ff(k)));
         }
     }
     for (c, chain) in d.carries.iter().enumerate() {
@@ -1347,15 +1234,15 @@ fn bels(db: &ChipDb, d: &Design, g: &Grid, s: &State) -> Result<Vec<(String, Str
             .chain(s.carry_root[c], chain.len())
             .expect("placed legally");
         for (cs, &slice) in chain.iter().zip(&slices) {
-            out.push((cs.carry, slice_bel(slice, "CARRY4".into())));
-            for (k, l) in LETTERS.iter().enumerate() {
+            out[cs.carry as usize] = Some((site(slice), Bel::Carry4));
+            for k in 0..SLOTS {
                 for (cell, bel) in [
-                    (cs.lut6[k], format!("{l}6LUT")),
-                    (cs.lut5[k], format!("{l}5LUT")),
-                    (cs.ff[k], format!("{l}FF")),
+                    (cs.lut6[k], Bel::Lut6(k)),
+                    (cs.lut5[k], Bel::Lut5(k)),
+                    (cs.ff[k], Bel::Ff(k)),
                 ] {
                     if let Some(cell) = cell {
-                        out.push((cell, slice_bel(slice, bel)));
+                        out[cell as usize] = Some((site(slice), bel));
                     }
                 }
             }
@@ -1363,100 +1250,35 @@ fn bels(db: &ChipDb, d: &Design, g: &Grid, s: &State) -> Result<Vec<(String, Str
     }
     for (r, ram) in d.drams.iter().enumerate() {
         let slice = s.dram_slice[r];
-        for (k, l) in LETTERS.iter().enumerate() {
-            out.push((ram.lut6[k], slice_bel(slice, format!("{l}6LUT"))));
-            out.push((ram.lut5[k], slice_bel(slice, format!("{l}5LUT"))));
+        for k in 0..SLOTS {
+            out[ram.lut6[k] as usize] = Some((site(slice), Bel::Lut6(k)));
+            out[ram.lut5[k] as usize] = Some((site(slice), Bel::Lut5(k)));
         }
     }
-    let mut lines: Vec<(String, String)> = out
-        .into_iter()
-        .map(|(c, bel)| Ok((d.cells[c as usize].name.clone(), bel_name(db, &bel)?)))
-        .collect::<Result<_>>()?;
-    lines.extend(
-        fixed_bels(db, d, g)?
-            .into_iter()
-            .map(|(c, bel, _)| (d.cells[c as usize].name.clone(), bel)),
-    );
-    lines.sort();
-    Ok(lines)
+    for (c, site, _) in fixed {
+        out[*c as usize] = Some((site.clone(), Bel::Site));
+    }
+    out
 }
 
-/// The cells that don't move: pins and their buffers, BSCANs, the PS7, the constant
-/// drivers, and BUFGCTRLs (each the free one nearest its source). Returns
-/// (cell, bel as nextpnr reads it, position).
-fn fixed_bels(db: &ChipDb, d: &Design, g: &Grid) -> Result<Vec<(CellId, String, Xy)>> {
-    let tile_xy = |bel: &str| -> Result<Xy> {
-        let tile = bel.split('/').next().unwrap_or_default();
-        let t = db
-            .tile_by_name(tile)
-            .with_context(|| format!("bel {bel}: no tile {tile}"))?;
-        let (x, y) = db.tile_xy(t);
+/// The cells that don't move: pins, BSCANs, the PS7, and BUFGCTRLs (each
+/// the free one nearest its source). Returns (cell, site, position).
+fn fixed_sites(db: &ChipDb, d: &Design, g: &Grid) -> Result<Vec<(CellId, String, Xy)>> {
+    let site_xy = |site: &str| -> Result<Xy> {
+        let s = db.sites.get(site).with_context(|| format!("no site {site}"))?;
+        let (x, y) = db.tile_xy(s.tile);
         Ok((x as i32, y as i32))
     };
     let mut out = Vec::new();
-    // A pin's buffer sits in the pin's site: `X<x>Y<y>/<site>.<type>.PAD`
-    // has its buffers at `X<x>Y<y>/<site>.IOB33.<bel>`, with nextpnr's
-    // `~IOB33` when the site's own type is IOB33M or IOB33S.
-    let mut pad_of_net: HashMap<NetId, &str> = HashMap::default();
     for (i, c) in d.cells.iter().enumerate() {
-        if let Kind::Pad { bel } = &c.kind {
-            out.push((i as CellId, bel.clone(), tile_xy(bel)?));
-            if let Some(n) = c.net("PAD") {
-                pad_of_net.insert(n, bel);
-            }
-        }
-    }
-    for (i, c) in d.cells.iter().enumerate() {
-        let (port, bel) = match c.kind {
-            Kind::InBuf => ("PAD", "INBUF_EN"),
-            Kind::OutBuf => ("OUT", "OUTBUF"),
+        let site = match &c.kind {
+            Kind::Pad { site, .. } => site.clone(),
+            Kind::Bscan { chain } => format!("BSCAN_X0Y{}", chain - 1),
+            Kind::Ps7 => "PS7_X0Y0".to_string(),
             _ => continue,
         };
-        let pad = c
-            .net(port)
-            .and_then(|n| pad_of_net.get(&n))
-            .with_context(|| format!("I/O buffer {} reaches no pin", c.name))?;
-        let (site, ty) = pad
-            .strip_suffix(".PAD")
-            .and_then(|p| p.rsplit_once('.'))
-            .with_context(|| format!("pin bel {pad}"))?;
-        let variant = if ty == "IOB33" { "" } else { "~IOB33" };
-        let name = format!("{site}.IOB33.{bel}{variant}");
-        let xy = tile_xy(&name)?;
-        out.push((i as CellId, name, xy));
-    }
-    for (i, c) in d.cells.iter().enumerate() {
-        match c.kind {
-            Kind::Gnd => out.push((i as CellId, "X0Y0/PSEUDO_GND".into(), (0, 0))),
-            Kind::Vcc => out.push((i as CellId, "X0Y0/PSEUDO_VCC".into(), (0, 0))),
-            Kind::Bscan { chain } => {
-                let site = format!("BSCAN_X0Y{}", chain - 1);
-                let s = db
-                    .sites
-                    .get(&site)
-                    .with_context(|| format!("BSCAN {}: no site {site}", c.name))?;
-                let (x, y) = db.tile_xy(s.tile);
-                out.push((
-                    i as CellId,
-                    bel_name(db, &format!("{site}/BSCAN"))?,
-                    (x as i32, y as i32),
-                ));
-            }
-            Kind::Ps7 => {
-                let site = "PS7_X0Y0";
-                let s = db
-                    .sites
-                    .get(site)
-                    .with_context(|| format!("PS7 {}: no site {site}", c.name))?;
-                let (x, y) = db.tile_xy(s.tile);
-                out.push((
-                    i as CellId,
-                    bel_name(db, &format!("{site}/PS7"))?,
-                    (x as i32, y as i32),
-                ));
-            }
-            _ => {}
-        }
+        let xy = site_xy(&site).with_context(|| format!("placing {}", c.name))?;
+        out.push((i as CellId, site, xy));
     }
     // BUFGCTRLs last: their sources may be the pins and BSCANs above. One
     // driven from the fabric has no fixed source; the middle of the device
@@ -1485,22 +1307,27 @@ fn fixed_bels(db: &ChipDb, d: &Design, g: &Grid) -> Result<Vec<(CellId, String, 
             .context("more BUFGCTRLs than the device has")?;
         free[site] = false;
         let (name, xy) = &g.bufgs[site];
-        out.push((i as CellId, bel_name(db, &format!("{name}/BUFGCTRL"))?, *xy));
+        out.push((i as CellId, name.clone(), *xy));
     }
     Ok(out)
 }
 
-/// What `place_file` did.
-#[derive(Debug)]
-pub enum Outcome {
-    Placed(Stats),
-    /// Nothing written to the placement; nextpnr places the design.
-    Unsupported(Unsupported),
-}
+/// A cold anneal's range limit, in slices, starting temperature, in
+/// standard deviations of its moves' cost changes, and moves per
+/// temperature, times N^(4/3) (a hot one: the whole device, 20 and 2):
+/// the Cyclone II's `REFINE`, its polish after a cluster-level analytic
+/// placement. Its `REFINE_LE` (1, 0.05, 0.1) placed sha256 in 16 s but
+/// left it slower (estimated 54.7 against 59.6 MHz) and picorv32 slower
+/// still (165 against 186 MHz); (2, 0.2, 0.3) was worse on both (53.4,
+/// 158 MHz). The global placement is wirelength-only and its BLEs are
+/// legalised greedily, so the anneal has timing left to fix.
+const COLD_RANGE: f64 = 3.0;
+const COLD_TEMPERATURE: f64 = 0.5;
+const COLD_MOVES: f64 = 1.0;
 
 /// Anneals run in parallel from the same start with different seeds; the
 /// lowest-cost one wins, so the result doesn't depend on thread timing.
-fn best_of<'a>(start: &State<'a>, seeds: usize) -> (State<'a>, u64) {
+fn best_of<'a>(start: &State<'a>, seeds: usize, from: Start) -> (State<'a>, u64) {
     let results: Vec<(State, u64)> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..seeds)
             .map(|i| {
@@ -1509,7 +1336,7 @@ fn best_of<'a>(start: &State<'a>, seeds: usize) -> (State<'a>, u64) {
                     let mut rng =
                         Rng(0x9e37_79b9_7f4a_7c15
                             ^ (i as u64 + 1).wrapping_mul(0xbf58_476d_1ce4_e5b9));
-                    let moves = anneal(&mut s, &mut rng);
+                    let moves = anneal(&mut s, &mut rng, from);
                     (s, moves)
                 })
             })
@@ -1532,99 +1359,199 @@ fn best_of<'a>(start: &State<'a>, seeds: usize) -> (State<'a>, u64) {
 /// the machine's core count, so every machine places a design the same way.
 const SEEDS: usize = 8;
 
-/// Place nextpnr's packed netlist `packed`; write `-o preplaced` lines to
-/// `placement` (empty if chipsmith can't place the design, so nextpnr
-/// does).
-///
-/// With `delays` the placement is timing-driven; without, wirelength alone.
-pub fn place_file(
-    db: &ChipDb,
-    delays: Option<&Delays>,
-    packed: &Path,
-    placement: &Path,
-) -> Result<Outcome> {
-    let text =
-        std::fs::read_to_string(packed).with_context(|| format!("reading {}", packed.display()))?;
-    let json: Value = serde_json::from_str(&text)?;
-    let write = |text: &str| {
-        std::fs::write(placement, text).with_context(|| format!("writing {}", placement.display()))
-    };
-    let d = match read_design(&json)? {
-        Ok(d) => d,
-        Err(u) => {
-            write("")?;
-            return Ok(Outcome::Unsupported(u));
+/// From this many BLEs, chains and RAMs on, the anneal starts cold from an
+/// electrostatic global placement (chipsmith-place, ADR-0012) instead of
+/// hot from the greedy start; `CHIPSMITH_XC7_PLACER=anneal` or `electro`
+/// forces either.
+const ELECTRO_FROM: usize = 1000;
+
+/// The objects' global placement (chipsmith-place's electrostatic placer,
+/// wirelength only), each then put in the free place nearest its target:
+/// chains and RAMs first, then BLEs.
+fn global<'a>(
+    d: &'a Design,
+    g: &'a Grid,
+    timing: Option<&'a Timing>,
+    fixed: &[(CellId, String, Xy)],
+) -> Result<State<'a>> {
+    use chipsmith_place::electro;
+    use chipsmith_place::{Pin, PinOf};
+    // Bins of two grid columns by one row, in the cost's units (x halved);
+    // capacity in BLE slots, as a share of the fullest bin's.
+    let bin = |xy: Xy| ((xy.0 / 2) as usize, xy.1 as usize);
+    let width = g.slices.iter().map(|s| bin(s.xy).0).max().unwrap_or(0) + 1;
+    let height = g.y_max as usize + 1;
+    let mut slots = vec![0.0f32; width * height];
+    for s in &g.slices {
+        let (x, y) = bin(s.xy);
+        slots[y * width + x] += SLOTS as f32;
+    }
+    let full = slots.iter().copied().fold(1.0f32, f32::max);
+    let capacity = vec![slots.iter().map(|v| v / full).collect()];
+    let mut p = electro::Problem::new(width, height, capacity);
+    let mut obj_of: Vec<Option<u32>> = vec![None; d.cells.len()];
+    let mut objects: Vec<Obj> = Vec::new();
+    for (b, ble) in d.bles.iter().enumerate() {
+        let o = p.add_object(1, &[(0, 1.0 / full)]);
+        for c in ble.lut.into_iter().chain(ble.ff) {
+            obj_of[c as usize] = Some(o);
         }
+        objects.push(Obj::Ble(b as u32));
+    }
+    for (k, chain) in d.carries.iter().enumerate() {
+        let rows = chain.len().min(height) as u32;
+        let o = p.add_object(rows, &[(0, (SLOTS * chain.len()) as f32 / full)]);
+        for cs in chain {
+            let cells = std::iter::once(cs.carry)
+                .chain(cs.lut6.iter().chain(&cs.lut5).chain(&cs.ff).flatten().copied());
+            for c in cells {
+                obj_of[c as usize] = Some(o);
+            }
+        }
+        objects.push(Obj::Carry(k as u32));
+    }
+    for (r, ram) in d.drams.iter().enumerate() {
+        let o = p.add_object(1, &[(0, SLOTS as f32 / full)]);
+        for &c in ram.lut6.iter().chain(&ram.lut5) {
+            obj_of[c as usize] = Some(o);
+        }
+        objects.push(Obj::Dram(r as u32));
+    }
+    let mut fixed_of: HashMap<CellId, u32> = HashMap::default();
+    for (c, _, xy) in fixed {
+        fixed_of.insert(*c, p.add_fixed(((xy.0 / 2) as f32 + 0.5, xy.1 as f32 + 0.5)));
+    }
+    for cells in &d.net_cells {
+        let mut pins: Vec<Pin> = Vec::new();
+        for &c in cells {
+            let of = match (obj_of[c as usize], fixed_of.get(&c)) {
+                (Some(o), _) => PinOf::Object(o),
+                (None, Some(&f)) => PinOf::Fixed(f),
+                _ => continue,
+            };
+            if !pins.iter().any(|q| q.of == of) {
+                pins.push(Pin { of, dx: 0.0, dy: 0.0 });
+            }
+        }
+        if pins.len() >= 2 {
+            p.add_net(pins, 1.0);
+        }
+    }
+    let opts = electro::Options {
+        accel: electro::Accel::from_env().map_err(anyhow::Error::msg)?,
+        timing_every: 0,
+        trace: std::env::var_os("CHIPSMITH_XC7_TRACE").is_some(),
+        ..Default::default()
     };
+    let out =
+        electro::place(&p, &mut electro::NoTiming, None, &opts).map_err(anyhow::Error::msg)?;
+    let target = |o: usize| {
+        let (cx, cy) = out.centres[o];
+        ((cx * 2.0) as i32, cy as i32)
+    };
+
+    let mut s = initial_empty(d, g, timing);
+    let near = |xy: Xy| {
+        let mut order: Vec<u32> = (0..g.slices.len() as u32).collect();
+        order.sort_by_key(|&i| {
+            let (x, y) = g.slices[i as usize].xy;
+            ((x - xy.0).abs() / 2 + (y - xy.1).abs(), i)
+        });
+        order
+    };
+    // Macros, longest first.
+    let mut macros: Vec<usize> = (d.bles.len()..objects.len()).collect();
+    macros.sort_by_key(|&o| match objects[o] {
+        Obj::Carry(k) => std::cmp::Reverse(d.carries[k as usize].len()),
+        _ => std::cmp::Reverse(1),
+    });
+    for o in macros {
+        let ok = near(target(o)).into_iter().any(|sl| s.place(objects[o], sl));
+        ensure!(ok, "no room for {:?}", objects[o]);
+    }
+    // BLEs: a ring search outward from the target, slot by slot.
+    let col_of_x = |x: i32| {
+        g.slices
+            .iter()
+            .min_by_key(|sl| (sl.xy.0 - x).abs())
+            .map_or(0, |sl| sl.col as i32)
+    };
+    for o in 0..d.bles.len() {
+        let (tx, ty) = target(o);
+        let tcol = col_of_x(tx);
+        let mut placed = false;
+        'rings: for r in 0..(g.cols as i32).max(g.y_max + 1) {
+            for dc in -r..=r {
+                for dy in -r..=r {
+                    if dc.abs() != r && dy.abs() != r {
+                        continue;
+                    }
+                    let Ok(col) = u32::try_from(tcol + dc) else {
+                        continue;
+                    };
+                    for even in [true, false] {
+                        let Some(&sl) = g.at.get(&(col, ty + dy, even)) else {
+                            continue;
+                        };
+                        for k in 0..SLOTS as u32 {
+                            let slot = sl * SLOTS as u32 + k;
+                            if s.occ[slot as usize] == Occ::Free && s.place(objects[o], slot) {
+                                placed = true;
+                                break 'rings;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ensure!(placed, "the design doesn't fit the device");
+    }
+    Ok(s)
+}
+
+/// Places the packer's design. With `delays` the placement is
+/// timing-driven; without, wirelength alone.
+pub(crate) fn place(db: &ChipDb, delays: Option<&Delays>, d: &Design) -> Result<Placement> {
     let started = Instant::now();
     let g = Grid::new(db)?;
-    let timing = delays.map(|delays| Timing::new(&d, delays));
-    let mut start = initial(&d, &g, timing.as_ref())?;
-    // Fixed cells' positions, for the nets they're on.
-    for (c, _, xy) in fixed_bels(db, &d, &g)? {
-        start.cell_xy[c as usize] = xy;
+    let timing = delays.map(|delays| Timing::new(d, delays));
+    let fixed = fixed_sites(db, d, &g)?;
+    let objects = d.bles.len() + d.carries.len() + d.drams.len();
+    let electro = match std::env::var("CHIPSMITH_XC7_PLACER").as_deref() {
+        Ok("anneal") => false,
+        Ok("electro") => true,
+        _ => objects >= ELECTRO_FROM,
+    };
+    let (mut start, from) = if electro {
+        (global(d, &g, timing.as_ref(), &fixed)?, Start::Cold)
+    } else {
+        (initial(d, &g, timing.as_ref())?, Start::Hot)
+    };
+    for (c, _, xy) in &fixed {
+        start.cell_xy[*c as usize] = *xy;
     }
     for n in 0..d.nets.len() {
         start.net_cost[n] = start.cost(n);
     }
     let initial_wirelength = start.wirelength();
     let threads = SEEDS;
-    let (mut best, moves) = best_of(&start, threads);
+    let (mut best, moves) = best_of(&start, threads, from);
     let critical = best.analyse(false);
-    let lines = bels(db, &d, &g, &best)?;
-    let mut text = String::new();
-    for (cell, bel) in &lines {
-        text += &format!("{cell}\t{bel}\n");
-    }
-    write(&text)?;
-    Ok(Outcome::Placed(Stats {
-        cells: d.cells.len(),
-        bles: d.bles.len(),
-        carry_chains: d.carries.len(),
-        rams: d.drams.len(),
-        initial_wirelength,
-        wirelength: best.wirelength(),
-        critical,
-        moves,
-        seconds: started.elapsed().as_secs_f64(),
-        threads,
-    }))
-}
-
-/// The wirelength and estimated critical path (ps) of another placement of
-/// the same packed netlist (cell -> bel as nextpnr writes it in `--write`,
-/// `SLICE_X30Y39/A6LUT`), measured the way the placer measures its own.
-pub fn measure(db: &ChipDb, delays: &Delays, packed: &Path, placed: &Path) -> Result<(f64, Ps)> {
-    let read = |p: &Path| -> Result<Value> {
-        let text =
-            std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
-        Ok(serde_json::from_str(&text)?)
-    };
-    let d = match read_design(&read(packed)?)? {
-        Ok(d) => d,
-        Err(Unsupported(why)) => bail!("can't measure: {why}"),
-    };
-    let placed = read(placed)?;
-    let cells = top_module(&placed)?["cells"]
-        .as_object()
-        .context("no cells")?;
-    let g = Grid::new(db)?;
-    let timing = Timing::new(&d, delays);
-    let mut s = initial(&d, &g, Some(&timing))?;
-    for (i, c) in d.cells.iter().enumerate() {
-        let bel = cells
-            .get(&c.name)
-            .and_then(|c| c["attributes"]["NEXTPNR_BEL"].as_str())
-            .with_context(|| format!("{}: not placed", c.name))?;
-        let readable = bel_name(db, bel)?;
-        let tile = readable.split('/').next().unwrap_or_default();
-        let t = db
-            .tile_by_name(tile)
-            .with_context(|| format!("bel {bel}"))?;
-        let (x, y) = db.tile_xy(t);
-        s.cell_xy[i] = (x as i32, y as i32);
-    }
-    Ok((s.wirelength(), s.analyse(false)))
+    Ok(Placement {
+        sites: sites(d, &g, &best, &fixed),
+        stats: Stats {
+            cells: d.cells.len(),
+            bles: d.bles.len(),
+            carry_chains: d.carries.len(),
+            rams: d.drams.len(),
+            initial_wirelength,
+            wirelength: best.wirelength(),
+            critical,
+            moves,
+            seconds: started.elapsed().as_secs_f64(),
+            threads,
+        },
+    })
 }
 
 #[cfg(test)]
@@ -1637,8 +1564,6 @@ mod tests {
             ce: None,
             sr: None,
             clk_inv: false,
-            sr_inv: false,
-            latch: false,
             sync: true,
         }
     }

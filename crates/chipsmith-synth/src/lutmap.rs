@@ -1,5 +1,5 @@
-//! Technology mapping of simple gates to 4-input LUTs, in place of yosys'
-//! `abc -lut 4`.
+//! Technology mapping of simple gates to K-input LUTs, in place of yosys'
+//! `abc -lut K`: 4 for the Cyclone II's LE, 6 for the 7-series slice.
 //!
 //! The gates become an And-Inverter Graph first, with structural hashing
 //! (ABC's `strash`): duplicate logic merges, inversions live on edges, and
@@ -27,7 +27,30 @@ use serde_json::{json, Map, Value};
 
 use crate::rewrite::{Namer, Subst};
 
-const K: usize = 4;
+/// How many inputs a LUT has: 1 to 6, so a truth table fits a `u64`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LutSize(usize);
+
+impl LutSize {
+    /// The Cyclone II's LE.
+    pub const FOUR: LutSize = LutSize(4);
+    /// The 7-series slice's LUT6.
+    pub const SIX: LutSize = LutSize(6);
+
+    pub fn new(k: usize) -> Option<LutSize> {
+        (1..=6).contains(&k).then_some(LutSize(k))
+    }
+
+    pub fn inputs(self) -> usize {
+        self.0
+    }
+
+    /// The table's bits that count: `2^k` of them.
+    fn mask(self) -> u64 {
+        u64::MAX >> (64 - (1 << self.0))
+    }
+}
+
 /// Cuts kept per node.
 const CUTS: usize = 8;
 /// Area-flow passes after the depth pass.
@@ -375,21 +398,30 @@ impl GateList {
     }
 }
 
-/// Truth table of leaf `i` of a K-input function.
-const VAR: [u16; K] = [0xaaaa, 0xcccc, 0xf0f0, 0xff00];
+/// Truth table of leaf `i` of a 6-input function; a K-input one takes its
+/// low `2^K` bits (`LutSize::mask`).
+const VAR: [u64; 6] = [
+    0xaaaa_aaaa_aaaa_aaaa,
+    0xcccc_cccc_cccc_cccc,
+    0xf0f0_f0f0_f0f0_f0f0,
+    0xff00_ff00_ff00_ff00,
+    0xffff_0000_ffff_0000,
+    0xffff_ffff_0000_0000,
+];
 
-/// A cut: up to K leaves (sorted AIG nodes) and the node's function of them.
+/// A cut: up to K leaves (sorted AIG nodes) and the node's function of
+/// them, a K-input table (`2^K` bits; a function of fewer leaves repeats).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Cut {
     leaves: Vec<u32>,
-    tt: u16,
+    tt: u64,
 }
 
 /// Re-express `tt` over `from` leaves as a function over `to` (a superset).
-fn stretch(tt: u16, from: &[u32], to: &[u32]) -> u16 {
+fn stretch(k: LutSize, tt: u64, from: &[u32], to: &[u32]) -> u64 {
     let pos: Vec<usize> = from.iter().map(|l| to.binary_search(l).unwrap()).collect();
-    let mut out = 0u16;
-    for m in 0..16u16 {
+    let mut out = 0u64;
+    for m in 0..1u64 << k.0 {
         let mut idx = 0;
         for (i, &p) in pos.iter().enumerate() {
             idx |= ((m >> p) & 1) << i;
@@ -400,23 +432,24 @@ fn stretch(tt: u16, from: &[u32], to: &[u32]) -> u16 {
 }
 
 /// Drop leaves the function doesn't depend on.
-fn reduce(mut cut: Cut) -> Cut {
+fn reduce(k: LutSize, mut cut: Cut) -> Cut {
     let mut i = 0;
     while i < cut.leaves.len() {
         let shift = 1 << i;
-        let independent = (cut.tt & VAR[i]) >> shift == cut.tt & !VAR[i];
+        let var = VAR[i] & k.mask();
+        let independent = (cut.tt & var) >> shift == cut.tt & !var;
         if independent {
             let n = cut.leaves.len();
-            let mut tt = 0u16;
-            for m in 0..(1u16 << (n - 1)) {
+            let mut tt = 0u64;
+            for m in 0..(1u64 << (n - 1)) {
                 let low = m & ((1 << i) - 1);
                 let high = (m >> i) << (i + 1);
                 tt |= ((cut.tt >> (low | high)) & 1) << m;
             }
             // Replicate so the table stays a valid K-input function.
             let width = 1 << (n - 1);
-            let mut full = 0u16;
-            for r in 0..(16 / width) {
+            let mut full = 0u64;
+            for r in 0..((1 << k.0) / width) {
                 full |= tt << (r * width);
             }
             cut.tt = full;
@@ -440,6 +473,7 @@ struct NodeMap {
 }
 
 struct Mapper<'a> {
+    k: LutSize,
     aig: &'a Aig,
     /// AIG nodes outputs read (their LUTs must exist).
     roots: Vec<u32>,
@@ -449,7 +483,7 @@ struct Mapper<'a> {
 }
 
 impl<'a> Mapper<'a> {
-    fn new(net: &'a Network) -> Self {
+    fn new(net: &'a Network, k: LutSize) -> Self {
         let aig = &net.aig;
         let n = aig.nodes.len();
         let mut nodes = vec![NodeMap::default(); n];
@@ -459,7 +493,7 @@ impl<'a> Mapper<'a> {
                 Node::Leaf(_) => {
                     nodes[v].cuts = vec![Cut {
                         leaves: vec![v as u32],
-                        tt: VAR[0],
+                        tt: VAR[0] & k.mask(),
                     }];
                 }
                 Node::And(a, b) => {
@@ -484,6 +518,7 @@ impl<'a> Mapper<'a> {
             *r = r.max(1.0);
         }
         Mapper {
+            k,
             aig,
             roots,
             nodes,
@@ -519,10 +554,11 @@ impl<'a> Mapper<'a> {
     /// own cuts if it is an AND; each with the literal's polarity applied.
     fn fanin_cuts(&self, l: Lit) -> Vec<Cut> {
         let v = node(l);
-        let inv = if inverted(l) { 0xffff } else { 0 };
+        let mask = self.k.mask();
+        let inv = if inverted(l) { mask } else { 0 };
         let mut out = vec![Cut {
             leaves: vec![v],
-            tt: VAR[0] ^ inv,
+            tt: (VAR[0] & mask) ^ inv,
         }];
         if self.aig.is_and(v) {
             out.extend(self.nodes[v as usize].cuts.iter().map(|c| Cut {
@@ -545,11 +581,12 @@ impl<'a> Mapper<'a> {
                 let mut leaves: Vec<u32> = x.leaves.iter().chain(&y.leaves).copied().collect();
                 leaves.sort();
                 leaves.dedup();
-                if leaves.len() > K {
+                if leaves.len() > self.k.0 {
                     continue;
                 }
-                let tt = stretch(x.tt, &x.leaves, &leaves) & stretch(y.tt, &y.leaves, &leaves);
-                let cut = reduce(Cut { leaves, tt });
+                let k = self.k;
+                let tt = stretch(k, x.tt, &x.leaves, &leaves) & stretch(k, y.tt, &y.leaves, &leaves);
+                let cut = reduce(k, Cut { leaves, tt });
                 if !cuts.contains(&cut) {
                     cuts.push(cut);
                 }
@@ -763,7 +800,7 @@ pub struct Stats {
 }
 
 /// A `$lut` cell: `tt` over `inputs` (at most K), driving `y`.
-fn lut_cell(inputs: &[Value], tt: u16, y: u64) -> Value {
+fn lut_cell(inputs: &[Value], tt: u64, y: u64) -> Value {
     let width = inputs.len().max(1);
     let inputs: Vec<Value> = if inputs.is_empty() {
         vec![json!("0")]
@@ -824,7 +861,7 @@ enum Leaf {
 /// A mapped LUT: `tt` over `inputs` (at most K), driving bit `y`.
 struct LutOut {
     inputs: Vec<Leaf>,
-    tt: u16,
+    tt: u64,
     y: u64,
 }
 
@@ -836,8 +873,9 @@ struct Mapping {
     stats: Stats,
 }
 
-fn compute(net: &Network) -> Mapping {
-    let mut m = Mapper::new(net);
+fn compute(net: &Network, k: LutSize) -> Mapping {
+    let mut m = Mapper::new(net, k);
+    let mask = k.mask();
     m.pass(None);
     let mut cover = m.cover();
     for _ in 0..AREA_PASSES {
@@ -884,14 +922,15 @@ fn compute(net: &Network) -> Mapping {
         }
     };
     // A cut's table over the LUTs as emitted.
-    let table = |cut: &Cut| -> u16 {
+    let table = |cut: &Cut| -> u64 {
         cut.leaves
             .iter()
             .enumerate()
             .filter(|(_, l)| flipped.contains(l))
             .fold(cut.tt, |tt, (i, _)| {
                 let s = 1 << i;
-                ((tt & VAR[i]) >> s) | ((tt & !VAR[i]) << s)
+                let var = VAR[i] & mask;
+                ((tt & var) >> s) | ((tt & !var & mask) << s)
             })
     };
 
@@ -900,7 +939,7 @@ fn compute(net: &Network) -> Mapping {
         let n = &m.nodes[v as usize];
         let cut = &n.cuts[n.best];
         let inputs = cut.leaves.iter().map(|&l| leaf_value(l)).collect();
-        let inv = if flipped.contains(&v) { 0xffff } else { 0 };
+        let inv = if flipped.contains(&v) { mask } else { 0 };
         luts.push(LutOut {
             inputs,
             tt: table(cut) ^ inv,
@@ -927,7 +966,7 @@ fn compute(net: &Network) -> Mapping {
                     let n = &m.nodes[v as usize];
                     let cut = &n.cuts[n.best];
                     let inputs = cut.leaves.iter().map(|&l| leaf_value(l)).collect();
-                    let inv = if want_flipped { 0xffff } else { 0 };
+                    let inv = if want_flipped { mask } else { 0 };
                     luts.push(LutOut {
                         inputs,
                         tt: table(cut) ^ inv,
@@ -941,7 +980,7 @@ fn compute(net: &Network) -> Mapping {
             Node::Leaf(src) => {
                 luts.push(LutOut {
                     inputs: vec![Leaf::Bit(src)],
-                    tt: !VAR[0],
+                    tt: !VAR[0] & mask,
                     y: b,
                 });
                 continue;
@@ -977,7 +1016,7 @@ fn leaf_json(l: Leaf) -> Value {
 /// Map the gates of module `top` in `json` to `$lut` cells, in place.
 pub fn map(json: &mut Value) -> Result<Stats> {
     let net = Network::read(&json["modules"]["top"])?;
-    let mapping = compute(&net);
+    let mapping = compute(&net, LutSize::FOUR);
 
     let cells = json["modules"]["top"]["cells"]
         .as_object_mut()
@@ -1055,9 +1094,14 @@ fn ir_sig(b: SigBit) -> Sig {
     }
 }
 
-/// Map a module's gates to `$lut` cells, in place: the IR form of [`map`],
-/// with net indices for bit numbers.
+/// Map a module's gates to 4-input `$lut` cells, in place: the IR form of
+/// [`map`], with net indices for bit numbers.
 pub fn map_module(module: &mut Module) -> Result<Stats> {
+    map_module_k(module, LutSize::FOUR)
+}
+
+/// [`map_module`] to LUTs of `k` inputs.
+pub fn map_module_k(module: &mut Module, k: LutSize) -> Result<Stats> {
     let mut driver: HashMap<u64, (Op, Vec<Sig>)> = HashMap::new();
     let mut read = Vec::new();
     let mut gate_cells = Vec::new();
@@ -1123,7 +1167,7 @@ pub fn map_module(module: &mut Module) -> Result<Stats> {
     }
     let net_at = |i: u64| nets[i as usize].expect("the mapper only names the module's nets");
     let net = Network::build(GateList::new(driver, read, gate_cells, max_bit))?;
-    let mapping = compute(&net);
+    let mapping = compute(&net, k);
 
     let mut keep = is_gate.into_iter();
     module
@@ -1178,14 +1222,16 @@ mod tests {
     #[test]
     fn stretch_and_reduce_round_trip() {
         // a & b over leaves [1, 3], stretched to [1, 2, 3]: var0 & var2.
-        let tt = stretch(VAR[0] & VAR[1], &[1, 3], &[1, 2, 3]);
-        assert_eq!(tt, VAR[0] & VAR[2]);
-        let c = reduce(Cut {
+        let k = LutSize::FOUR;
+        let m = k.mask();
+        let tt = stretch(k, VAR[0] & VAR[1] & m, &[1, 3], &[1, 2, 3]);
+        assert_eq!(tt, VAR[0] & VAR[2] & m);
+        let c = reduce(k, Cut {
             leaves: vec![1, 2, 3],
             tt,
         });
         assert_eq!(c.leaves, vec![1, 3]);
-        assert_eq!(c.tt, VAR[0] & VAR[1]);
+        assert_eq!(c.tt, VAR[0] & VAR[1] & m);
     }
 
     #[test]
