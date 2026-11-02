@@ -342,9 +342,7 @@ pub fn registers(m: &mut Module, requests: &BTreeMap<String, IoRegisters>) -> Re
         // What the cell's registers share: the output and OE registers one
         // clock (and edge) and one enable line, all three one reset.
         let pin = &mut chosen[first..];
-        let out_side: Vec<usize> = (0..pin.len())
-            .filter(|&i| pin[i].1 != Role::Input)
-            .collect();
+        let out_side: Vec<usize> = (0..pin.len()).filter(|&i| pin[i].1 != Role::Input).collect();
         if let [o, e] = out_side[..] {
             ensure!(
                 pin[o].3.clk == pin[e].3.clk,
@@ -550,9 +548,7 @@ pub fn pads(m: &mut Module) -> Result<()> {
                 }),
                 output: out_reg.or(oe_reg).map(|r| OutRegs {
                     clk: r.clk,
-                    enable: out_reg
-                        .and_then(|r| r.enable)
-                        .or(oe_reg.and_then(|r| r.enable)),
+                    enable: out_reg.and_then(|r| r.enable).or(oe_reg.and_then(|r| r.enable)),
                     data: out_reg.map(mode),
                     oe: oe_reg.map(mode),
                 }),

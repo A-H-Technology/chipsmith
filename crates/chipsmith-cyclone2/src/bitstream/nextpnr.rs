@@ -17,8 +17,8 @@ use super::device::{Device, Node};
 use super::device::element_name;
 use super::hard::{self, Asmi, Hard, HardInput, Jtag};
 use super::io::{
-    Dir, InReg, Input, IoClock, IoControl, IoDb, IoReg, OutData, Output, OutputEnable, PinUse,
-    Standard, Vccio, BLOCK_CLK_N, BLOCK_CLK_P,
+    Dir, InReg, Input, IoClock, IoControl, IoDb, IoReg, OutData, Output, OutputEnable, PinUse, Standard, Vccio,
+    BLOCK_CLK_N, BLOCK_CLK_P,
 };
 use super::logic::{
     clock_slots, Aclr, Clear, ClkCtrl, Ctl, Domain, GlobalClock, LabConfig, LeConfig, LeSource,
@@ -1205,27 +1205,13 @@ impl Routed {
                             .get(&(x, y, z, clk))
                             .with_context(|| format!("{name}: {param} clock not routed"))?;
                         let (ena, clk_inv, ena_inv) = if clk == IoePin::InClk {
-                            (
-                                IoePin::InClkEna,
-                                control_param::INCLK_INVERT,
-                                control_param::INCLKENA_INVERT,
-                            )
+                            (IoePin::InClkEna, control_param::INCLK_INVERT, control_param::INCLKENA_INVERT)
                         } else {
-                            (
-                                IoePin::OutClkEna,
-                                control_param::OUTCLK_INVERT,
-                                control_param::OUTCLKENA_INVERT,
-                            )
+                            (IoePin::OutClkEna, control_param::OUTCLK_INVERT, control_param::OUTCLKENA_INVERT)
                         };
                         let enable = control(ena, ena_inv);
-                        ensure!(
-                            !mode.enable || enable.is_some(),
-                            "{name}: {param}'s clock enable not routed"
-                        );
-                        ensure!(
-                            !mode.areset || areset.is_some(),
-                            "{name}: {param}'s reset not routed"
-                        );
+                        ensure!(!mode.enable || enable.is_some(), "{name}: {param}'s clock enable not routed");
+                        ensure!(!mode.areset || areset.is_some(), "{name}: {param}'s reset not routed");
                         Ok(Some(IoReg {
                             clock: IoClock {
                                 buffer,

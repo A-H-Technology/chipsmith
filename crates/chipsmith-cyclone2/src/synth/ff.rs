@@ -107,10 +107,7 @@ fn name_inverted(m: &mut Module, inverted: &[(Net, Net)]) {
     for w in &m.wires {
         for (i, b) in w.bits.iter().enumerate() {
             if let Some(&r) = b.net().and_then(|q| inner.get(&q)) {
-                named.push(Wire::new(
-                    format!("{}[{i}]~inv", w.name),
-                    vec![SigBit::Net(r)],
-                ));
+                named.push(Wire::new(format!("{}[{i}]~inv", w.name), vec![SigBit::Net(r)]));
             }
         }
     }

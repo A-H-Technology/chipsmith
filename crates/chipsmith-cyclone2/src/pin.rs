@@ -341,12 +341,7 @@ impl IoRegMode {
     }
 
     /// `(name, value)` parameters saying so; `bit` writes a 1.
-    pub fn params<V>(
-        self,
-        name: &str,
-        value: impl Fn(&str) -> V,
-        bit: impl Fn() -> V,
-    ) -> Vec<(String, V)> {
+    pub fn params<V>(self, name: &str, value: impl Fn(&str) -> V, bit: impl Fn() -> V) -> Vec<(String, V)> {
         let mut v = vec![(name.to_string(), value(self.power_up.param()))];
         if self.enable {
             v.push((format!("{name}_ENA"), bit()));
@@ -390,17 +385,14 @@ pub fn register_of(params: &HashMap<String, String>, name: &str) -> Result<Optio
         return Ok(None);
     };
     let power_up = PowerUp::from_param(v).with_context(|| format!("{name} = {v:?}"))?;
-    let flag = |suffix: &str| {
-        params
-            .get(&format!("{name}_{suffix}"))
-            .is_some_and(|v| is_one(v))
-    };
+    let flag = |suffix: &str| params.get(&format!("{name}_{suffix}")).is_some_and(|v| is_one(v));
     Ok(Some(IoRegMode {
         power_up,
         enable: flag("ENA"),
         areset: flag("ARESET"),
     }))
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -468,16 +460,10 @@ mod tests {
                         .params(register_param::OUTPUT, str::to_string, || "1".to_string())
                         .into_iter()
                         .collect();
-                    assert_eq!(
-                        register_of(&params, register_param::OUTPUT).unwrap(),
-                        Some(m)
-                    );
+                    assert_eq!(register_of(&params, register_param::OUTPUT).unwrap(), Some(m));
                 }
             }
         }
-        assert_eq!(
-            register_of(&HashMap::new(), register_param::INPUT).unwrap(),
-            None
-        );
+        assert_eq!(register_of(&HashMap::new(), register_param::INPUT).unwrap(), None);
     }
 }
