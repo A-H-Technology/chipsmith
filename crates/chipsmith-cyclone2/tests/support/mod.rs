@@ -33,6 +33,9 @@ pub struct Lib {
     pub name: &'static str,
     pub library: &'static str,
     pub sim: String,
+    /// Models co-simulation gives iverilog as they are, of cells `sim`
+    /// leaves as blackboxes (behavioural, not for yosys).
+    pub models: &'static str,
 }
 
 static LIB: std::sync::OnceLock<Lib> = std::sync::OnceLock::new();
@@ -54,6 +57,7 @@ fn lib() -> &'static Lib {
         name: cells::LIBRARY_NAME,
         library: cells::LIBRARY,
         sim: SIM_MODELS.to_string(),
+        models: "",
     })
 }
 
@@ -2335,7 +2339,7 @@ pub fn cosim(
     let lib = dir.join("cells.v");
     std::fs::write(&lib, self::lib().library).unwrap();
     let m4k_v = dir.join("cosim_m4k.v");
-    std::fs::write(&m4k_v, COSIM_M4K).unwrap();
+    std::fs::write(&m4k_v, format!("{COSIM_M4K}\n{}", self::lib().models)).unwrap();
     let gold_v = dir.join("cosim_gold.v");
     let gate_v = dir.join("cosim_gate.v");
     yosys(

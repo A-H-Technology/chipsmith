@@ -12,7 +12,10 @@
 //! - each pip `<tile>.<dst>.<src>`, a pseudo pip its site's bits instead
 //!   (`crate::xray::pseudo_pip_features`), with nextpnr's renaming in
 //!   single-IOB (`_SING`) I/O tiles;
-//! - the clock tree's buffer enables, from the pips the clocks use.
+//! - the clock tree's buffer enables, from the pips the clocks use;
+//! - block RAM ([`bram_lines`]) as Vivado's bitstreams have it read back
+//!   by bit2fasm, which the widths' encoding nextpnr's `write_bram_width`
+//!   agrees with.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -58,9 +61,6 @@ pub(crate) fn pip_lines(db: &ChipDb, e: &Edge) -> Vec<String> {
                 format!("{tile}.{f}")
             })
             .collect();
-    }
-    if tile.starts_with("DSP_L") || tile.starts_with("DSP_R") {
-        return Vec::new();
     }
     let (mut src, mut dst) = (src.to_string(), dst.to_string());
     if sing {
@@ -111,7 +111,12 @@ pub(crate) fn write(db: &ChipDb, phys: &Physical, pips: &[Edge]) -> Result<Strin
             written.insert(s.half.as_str());
             for k in 0..4 {
                 let l = LETTERS[k];
-                if let Some(init) = s.lut_init[k] {
+                // A 5LUT's table below the 6LUT's (A6 high selects the top).
+                let init = match (s.lut_init[k], s.lut5_init[k]) {
+                    (t6, Some(t5)) => Some(t6.unwrap_or(0) & 0xffff_ffff_0000_0000 | t5),
+                    (t6, None) => t6,
+                };
+                if let Some(init) = init {
                     line(format!("{p}.{l}LUT.INIT[63:0] = 64'b{init:064b}"));
                 }
                 if s.lut_ram[k] {
@@ -122,7 +127,19 @@ pub(crate) fn write(db: &ChipDb, phys: &Physical, pips: &[Edge]) -> Result<Strin
                     line(format!("{p}.{l}LUT.RAM"));
                 }
                 if let Some(m) = s.outmux[k] {
+                    let m = if m == "5Q" { format!("{l}5Q") } else { m.to_string() };
                     line(format!("{p}.{l}OUTMUX.{m}"));
+                }
+                if let Some(ff) = s.ff5[k] {
+                    if ff.zini {
+                        line(format!("{p}.{l}5FF.ZINI"));
+                    }
+                    if ff.zrst {
+                        line(format!("{p}.{l}5FF.ZRST"));
+                    }
+                }
+                if let Some(m) = s.ff5mux[k] {
+                    line(format!("{p}.{l}5FFMUX.{m}"));
                 }
                 if let Some(ff) = s.ff[k] {
                     if ff.zini {
@@ -136,7 +153,7 @@ pub(crate) fn write(db: &ChipDb, phys: &Physical, pips: &[Edge]) -> Result<Strin
                     line(format!("{p}.{l}FFMUX.{m}"));
                 }
             }
-            let has_ff = s.ff.iter().any(Option::is_some);
+            let has_ff = s.ff.iter().chain(&s.ff5).any(Option::is_some);
             if has_ff && s.ffsync {
                 line(format!("{p}.FFSYNC"));
             }
@@ -198,6 +215,17 @@ pub(crate) fn write(db: &ChipDb, phys: &Physical, pips: &[Edge]) -> Result<Strin
             }
         }
         line(format!("{p}.PULLTYPE.NONE"));
+    }
+
+    for b in &phys.brams {
+        for l in bram_lines(db, b) {
+            line(l);
+        }
+    }
+    for d in &phys.dsps {
+        for l in dsp_lines(db, d) {
+            line(l);
+        }
     }
 
     for site in &phys.bufgs {
@@ -291,4 +319,190 @@ pub(crate) fn write(db: &ChipDb, phys: &Physical, pips: &[Edge]) -> Result<Strin
         }
     }
     Ok(dedup)
+}
+
+/// One block RAM's features: per RAMB18 half it uses (a RAMB36E1 both).
+pub(crate) fn bram_lines(db: &ChipDb, b: &crate::phys::BramConf) -> Vec<String> {
+    use crate::bram::{Size, WriteMode};
+    let c = &b.config;
+    let full = c.size == Size::Full;
+    let tile = tile_name(db, b.tile);
+    let mut out = Vec::new();
+    let halves: Vec<usize> = match b.half {
+        Some(h) => vec![h],
+        None => vec![0, 1],
+    };
+    // Vivado: PERFORMANCE where port B does nothing.
+    let b_unused = c.ports[1].read.is_none() && c.ports[1].write.is_none();
+    for h in halves {
+        let p = format!("{tile}.RAMB18_Y{h}");
+        let mut f = |s: String| out.push(format!("{p}.{s}"));
+        f("IN_USE".into());
+        // Each half's share of the widths (a RAMB36E1's halves each take
+        // half its word; x1 is a bit from each in turn) and SDP's.
+        for (name, w) in [
+            ("READ_WIDTH_A", c.ports[0].read),
+            ("READ_WIDTH_B", c.ports[1].read),
+            ("WRITE_WIDTH_A", c.ports[0].write),
+            ("WRITE_WIDTH_B", c.ports[1].write),
+        ] {
+            let Some(w) = w else { continue };
+            let bits = w.bits();
+            let half = if full && bits > 1 { bits / 2 } else { bits };
+            if name == "READ_WIDTH_A" && ((full && bits == 72) || (h == 1 && half == 36)) {
+                f("READ_WIDTH_A_18".into());
+            }
+            if half == 36 {
+                let side = &name[..name.len() - 2];
+                f(format!("SDP_{side}_36"));
+                if name.starts_with("WRITE") {
+                    f("WRITE_WIDTH_A_18".into());
+                    f("WRITE_WIDTH_B_18".into());
+                } else {
+                    f("READ_WIDTH_B_18".into());
+                }
+            } else if half > 1 {
+                f(format!("{name}_{half}"));
+            }
+        }
+        for (k, l) in ['A', 'B'].into_iter().enumerate() {
+            let port = &c.ports[k];
+            let out_reg = port.out_reg || (c.sdp && c.ports[0].out_reg);
+            if out_reg {
+                f(format!("DO{l}_REG"));
+            }
+            match port.mode {
+                WriteMode::WriteFirst => {}
+                WriteMode::ReadFirst => f(format!("WRITE_MODE_{l}_READ_FIRST")),
+                WriteMode::NoChange => f(format!("WRITE_MODE_{l}_NO_CHANGE")),
+            }
+            if !port.rstreg_first {
+                f(format!("RSTREG_PRIORITY_{l}_REGCE"));
+            }
+        }
+        if b_unused {
+            f("RDADDR_COLLISION_HWCONFIG_PERFORMANCE".into());
+        }
+        let inv = [
+            ("CLKARDCLK", c.inv.clk[0]),
+            ("CLKBWRCLK", c.inv.clk[1]),
+            ("ENARDEN", c.inv.en[0]),
+            ("ENBWREN", c.inv.en[1]),
+            ("RSTRAMARSTRAM", c.inv.rstram[0]),
+            ("RSTRAMB", c.inv.rstram[1]),
+            ("RSTREGARSTREG", c.inv.rstreg[0]),
+            ("RSTREGB", c.inv.rstreg[1]),
+            ("REGCLKARDRCLK", c.inv.clk[0]),
+            ("REGCLKB", if c.sdp { c.inv.clk[0] } else { c.inv.clk[1] }),
+        ];
+        for (pin, inverted) in inv {
+            if !inverted {
+                f(format!("ZINV_{pin}"));
+            }
+        }
+        // INIT and SRVAL, in the half's order (`bram::half_bits`), inverted.
+        for (k, l) in ['A', 'B'].into_iter().enumerate() {
+            let (init, srval, w) = half_values(c, k, h);
+            let z = |v: u64| !crate::bram::half_bits(v, w) & 0x3ffff;
+            f(format!("ZINIT_{l}[17:0] = 18'b{:018b}", z(init)));
+            f(format!("ZSRVAL_{l}[17:0] = 18'b{:018b}", z(srval)));
+        }
+        // Contents: a RAMB36E1's are its halves' bits in turn.
+        let data = c.size.data_bits();
+        for (prefix, base, words) in [("INIT", 0, data / 256 / c.size.halves()), ("INITP", data, data / 8 / 256 / c.size.halves())] {
+            for i in 0..words {
+                let bit = |k: usize| -> bool {
+                    if full {
+                        c.contents[base + 2 * (256 * i + k) + h]
+                    } else {
+                        c.contents[base + 256 * i + k]
+                    }
+                };
+                if (0..256).any(bit) {
+                    let v: String = (0..256).rev().map(|k| if bit(k) { '1' } else { '0' }).collect();
+                    f(format!("{prefix}_{i:02X}[255:0] = 256'b{v}"));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A port's INIT and SRVAL as half `h` of its block holds them, and the
+/// width of the word they are in: a RAMB18E1's own (SDP's wide read: each
+/// port's x18 half of it); a RAMB36E1's word of the port's read width split
+/// bit by bit between the halves as its pins are (bit 2i + h to half h's
+/// i; Vivado's bitstreams agree), each half's in the layout of half the
+/// width.
+pub(crate) fn half_values(c: &crate::bram::Config, k: usize, h: usize) -> (u64, u64, crate::bram::Width) {
+    use crate::bram::{Size, Width};
+    let p = &c.ports[k];
+    // SDP's wide read: each port's pins hold half its word, x18 (x36).
+    let w = match c.ports[0].read {
+        Some(r) if c.sdp && r == c.size.sdp() => c.size.tdp_max(),
+        _ => p.read.unwrap_or(c.size.tdp_max()),
+    };
+    if c.size == Size::Half {
+        return (p.init, p.srval, w);
+    }
+    let (dw, pw) = (w.data(), w.parity());
+    let pick = |v: u64| -> u64 {
+        let data = (0..dw / 2).fold(0u64, |a, i| a | (v >> (2 * i + h) & 1) << i);
+        let par = (0..pw / 2).fold(0u64, |a, j| a | (v >> (dw + 2 * j + h) & 1) << j);
+        data | par << (dw / 2)
+    };
+    let half = Width::from_bits(w.bits() / 2).unwrap_or(Width::X1);
+    (pick(p.init), pick(p.srval), half)
+}
+
+/// One DSP48E1's features, as Vivado's bitstreams read back by bit2fasm
+/// have them (prjxray's names; "Z" ones set where the value is 0).
+pub(crate) fn dsp_lines(db: &ChipDb, d: &crate::phys::DspConf) -> Vec<String> {
+    let c = &d.config;
+    let p = format!("{}.DSP48.DSP_{}", tile_name(db, d.tile), d.which);
+    let mut out = Vec::new();
+    let mut f = |s: String| out.push(format!("{p}.{s}"));
+    match c.areg {
+        0 => f("AREG_0".into()),
+        2 => f("AREG_2".into()),
+        _ => {}
+    }
+    match c.breg {
+        0 => f("BREG_0".into()),
+        2 => f("BREG_2".into()),
+        _ => {}
+    }
+    if !(c.areg == 2 && c.acascreg == 1) {
+        f("ZAREG_2_ACASCREG_1".into());
+    }
+    if !(c.breg == 2 && c.bcascreg == 1) {
+        f("ZBREG_2_BCASCREG_1".into());
+    }
+    for (&on, name) in c.stages.iter().zip(crate::dsp::STAGES) {
+        if !on {
+            f(format!("Z{name}[0]"));
+        }
+    }
+    if c.a_cascade {
+        f("A_INPUT[0]".into());
+    }
+    if c.b_cascade {
+        f("B_INPUT[0]".into());
+    }
+    if c.use_dport {
+        f("USE_DPORT[0]".into());
+    }
+    for (&v, (pin, w)) in c.inverted.iter().zip(crate::dsp::INVERTIBLE) {
+        let z = !v & ((1 << w) - 1);
+        if w == 1 {
+            if z == 1 {
+                f(format!("ZIS_{pin}_INVERTED"));
+            }
+        } else {
+            f(format!("ZIS_{pin}_INVERTED[{}:0] = {w}'b{:0w$b}", w - 1, z, w = w));
+        }
+    }
+    f(format!("MASK[47:0] = 48'b{:048b}", c.mask));
+    f(format!("PATTERN[47:0] = 48'b{:048b}", c.pattern));
+    out
 }

@@ -34,7 +34,8 @@ fn setup() {
     support::use_lib(support::Lib {
         name: cells::LIBRARY_NAME,
         library: cells::LIBRARY,
-        sim,
+        sim: cells::yosys_sim_without_models(&sim),
+        models: cells::MODELS,
     });
 }
 
@@ -138,7 +139,11 @@ fn cut_all(d: &mut Design, ty: &str) {
 /// with T inverted they never are structurally.
 fn tristates(d: &mut Design) {
     use chipsmith_netlist::{Gate, GateOp, Tribuf};
-    let m = d.modules.iter_mut().find(|m| !m.is_blackbox()).expect("top");
+    let m = d
+        .modules
+        .iter_mut()
+        .find(|m| !m.is_blackbox())
+        .expect("top");
     let mut subst = chipsmith_synth::rewrite::Subst::new(m);
     let mut out = Vec::new();
     let cells = std::mem::take(&mut m.cells);
@@ -183,7 +188,8 @@ fn tristates(d: &mut Design) {
 
 /// The proof, hard blocks `cut` out on all three sides.
 fn prove(name: &str, s: &Synthesized, cut: &[&str]) -> support::Proof {
-    let (mut rtl, mut refined, mut gate) = (support::read(&s.rtl), s.refined.clone(), s.cells.clone());
+    let (mut rtl, mut refined, mut gate) =
+        (support::read(&s.rtl), s.refined.clone(), s.cells.clone());
     tristates(&mut gate);
     let rtl_path = if cut.is_empty() {
         s.rtl.clone()
@@ -255,7 +261,13 @@ fn compare(name: &str, ours: &BTreeMap<String, usize>, theirs: &BTreeMap<String,
 fn example(dir: &str, files: &[&str]) -> Vec<PathBuf> {
     files
         .iter()
-        .map(|f| Path::new(ROOT).join("examples").join(dir).join("src").join(f))
+        .map(|f| {
+            Path::new(ROOT)
+                .join("examples")
+                .join(dir)
+                .join("src")
+                .join(f)
+        })
         .collect()
 }
 
@@ -269,7 +281,11 @@ fn design(file: &str) -> Vec<PathBuf> {
 fn zybo_blinky() {
     let files = example("zybo-blinky", &["blinky.v"]);
     let s = synthesize("zybo_blinky", "blinky", &files, Options::default());
-    compare("zybo-blinky", &counts(&s.cells), &synth_xilinx(&s.dir, "blinky", &files));
+    compare(
+        "zybo-blinky",
+        &counts(&s.cells),
+        &synth_xilinx(&s.dir, "blinky", &files),
+    );
     let p = prove("zybo_blinky", &s, &[]);
     assert!(p.equivalences > 0);
 }
@@ -277,7 +293,12 @@ fn zybo_blinky() {
 #[test]
 fn zybo_jtag_counter() {
     let files = example("zybo-jtag-counter", &["jtag_counter.v"]);
-    let s = synthesize("zybo_jtag_counter", "jtag_counter", &files, Options::default());
+    let s = synthesize(
+        "zybo_jtag_counter",
+        "jtag_counter",
+        &files,
+        Options::default(),
+    );
     compare(
         "zybo-jtag-counter",
         &counts(&s.cells),
@@ -294,7 +315,11 @@ fn registers_and_arithmetic() {
     let files = design("regs_arith.v");
     let s = synthesize("regs_arith", "regs_arith", &files, Options::default());
     let c = counts(&s.cells);
-    compare("regs_arith", &c, &synth_xilinx(&s.dir, "regs_arith", &files));
+    compare(
+        "regs_arith",
+        &c,
+        &synth_xilinx(&s.dir, "regs_arith", &files),
+    );
     for ty in ["FDRE", "FDSE", "FDCE", "FDPE", "CARRY4"] {
         assert!(c.contains_key(ty), "no {ty}: {c:?}");
     }
@@ -333,9 +358,99 @@ fn distributed_ram() {
         &files,
         Options {
             distributed_ram: false,
+            block_ram: false,
         },
     );
     prove("lutram_logic", &logic, &[]);
+}
+
+/// Every block RAM shape (`tests/designs/bram`, one memory each, its ports
+/// on the design's): synthesized into RAMB18E1/RAMB36E1 (but `tiny`,
+/// which stays in logic as Vivado keeps it) and co-simulated against the
+/// RTL, the blocks as `chipsmith_xc7::synth::cells::MODELS`, three seeds.
+#[test]
+fn block_ram_shapes() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/designs/bram");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "v"))
+        .map(|p| p.file_stem().unwrap().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    if let Ok(only) = std::env::var("CHIPSMITH_BRAM_SHAPE") {
+        names.retain(|n| *n == only);
+    }
+    let mut failures = Vec::new();
+    for name in &names {
+        let files = vec![dir.join(format!("{name}.v"))];
+        let s = synthesize(&format!("bram_{name}"), name, &files, Options::default());
+        let c = counts(&s.cells);
+        let blocks =
+            c.get("RAMB18E1").copied().unwrap_or(0) + c.get("RAMB36E1").copied().unwrap_or(0);
+        let mut compared = 0;
+        let mut failed = None;
+        for seed in 1..=3 {
+            match support::cosim(&s.dir, &s.rtl, &s.refined, &s.cells, 3000, seed) {
+                Ok(r) => compared += r.compared,
+                Err(e) => {
+                    failed = Some(format!("{name}, seed {seed}: {e}"));
+                    break;
+                }
+            }
+        }
+        eprintln!("{name}: {c:?}, {compared} output bits compared");
+        if let Some(f) = failed {
+            failures.push(f);
+        } else if (blocks == 0) != (name == "tiny") {
+            failures.push(format!("{name}: {blocks} blocks"));
+        } else if compared == 0 {
+            failures.push(format!("{name}: nothing compared"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Every multiplier shape (`tests/designs/dsp`): synthesized onto
+/// DSP48E1s and co-simulated against the RTL (yosys' DSP48E1 model), three
+/// seeds; the extremes of every operand come first.
+#[test]
+fn dsp_shapes() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/designs/dsp");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "v"))
+        .map(|p| p.file_stem().unwrap().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    if let Ok(only) = std::env::var("CHIPSMITH_DSP_SHAPE") {
+        names.retain(|n| *n == only);
+    }
+    let mut failures = Vec::new();
+    for name in &names {
+        let files = vec![dir.join(format!("{name}.v"))];
+        let s = synthesize(&format!("dsp_{name}"), name, &files, Options::default());
+        let c = counts(&s.cells);
+        let mut compared = 0;
+        let mut failed = None;
+        for seed in 1..=3 {
+            match support::cosim(&s.dir, &s.rtl, &s.refined, &s.cells, 3000, seed) {
+                Ok(r) => compared += r.compared,
+                Err(e) => {
+                    failed = Some(format!("{name}, seed {seed}: {e}"));
+                    break;
+                }
+            }
+        }
+        eprintln!("{name}: {c:?}, {compared} output bits compared");
+        if let Some(f) = failed {
+            failures.push(f);
+        } else if !c.contains_key("DSP48E1") {
+            failures.push(format!("{name}: no DSP48E1"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 fn picorv32() -> Vec<PathBuf> {
@@ -346,12 +461,20 @@ fn picorv32() -> Vec<PathBuf> {
 fn zybo_picorv32() {
     let files = picorv32();
     let s = synthesize("zybo_picorv32", "top", &files, Options::default());
-    compare("zybo-picorv32", &counts(&s.cells), &synth_xilinx(&s.dir, "top", &files));
+    compare(
+        "zybo-picorv32",
+        &counts(&s.cells),
+        &synth_xilinx(&s.dir, "top", &files),
+    );
     // The harness names the top `top`, which picorv32's own already is.
     let dir = support::scratch(Path::new(env!("CARGO_TARGET_TMPDIR")), "picorv32_top");
     let renamed = dir.join("picorv32_top.v");
     let top_v = std::fs::read_to_string(&files[1]).unwrap();
-    std::fs::write(&renamed, top_v.replacen("module top(", "module picorv32_top(", 1)).unwrap();
+    std::fs::write(
+        &renamed,
+        top_v.replacen("module top(", "module picorv32_top(", 1),
+    )
+    .unwrap();
     let mut running = vec![files[0].clone(), renamed];
     running.extend(design("picorv32_run.v"));
     let s = synthesize("zybo_picorv32_run", "run", &running, Options::default());
@@ -364,6 +487,7 @@ fn zybo_picorv32() {
         &files,
         Options {
             distributed_ram: false,
+            block_ram: false,
         },
     );
     prove("zybo_picorv32_logic", &logic, &[]);
@@ -373,9 +497,19 @@ fn zybo_picorv32() {
 fn zybo_sha256() {
     let files = example(
         "sha256",
-        &["sha256.v", "sha256_core.v", "sha256_k_constants.v", "sha256_w_mem.v", "top.v"],
+        &[
+            "sha256.v",
+            "sha256_core.v",
+            "sha256_k_constants.v",
+            "sha256_w_mem.v",
+            "top.v",
+        ],
     );
     let s = synthesize("zybo_sha256", "top", &files, Options::default());
-    compare("zybo-sha256", &counts(&s.cells), &synth_xilinx(&s.dir, "top", &files));
+    compare(
+        "zybo-sha256",
+        &counts(&s.cells),
+        &synth_xilinx(&s.dir, "top", &files),
+    );
     prove("zybo_sha256", &s, &[]);
 }

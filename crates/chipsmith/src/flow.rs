@@ -727,7 +727,7 @@ fn xc7_synth(verilog: &[PathBuf], top: &str, netlist: &Path) -> Result<Vec<PathB
     let out = xsynth::synthesize(design)?;
     let s = out.stats;
     say!(
-        "{} gates ({} AIG ANDs) to {} LUTs, depth {}; {} registers, {} CARRY4s, {} RAM32Ms, {} BUFGs in {:.1} s",
+        "{} gates ({} AIG ANDs) to {} LUTs, depth {}; {} registers, {} CARRY4s, {} RAM32Ms, {} block RAM (RAMB18 halves), {} DSP48E1s, {} BUFGs in {:.1} s",
         s.lutmap.gates,
         s.lutmap.and_nodes,
         s.lutmap.luts,
@@ -735,6 +735,8 @@ fn xc7_synth(verilog: &[PathBuf], top: &str, netlist: &Path) -> Result<Vec<PathB
         s.registers,
         s.carry4s,
         s.ram32ms,
+        s.bram_halves,
+        s.dsps,
         s.bufgs,
         started.elapsed().as_secs_f64()
     );
@@ -762,12 +764,16 @@ fn xc7_pnr(
     let delays = chipsmith_xc7::delay::Delays::load(&data.db)?;
     let r = chipsmith_xc7::pnr::run(&graph, &delays, &data.db, netlist, pins, fasm)?;
     say!(
-        "packed {} LUTs, {} registers, {} CARRY4s, {} RAM32Ms into {} slices",
+        "packed {} LUTs ({} LUT6 sites), {} registers, {} CARRY4s, {} RAM32Ms into {} slices; {} RAMB18E1s, {} RAMB36E1s, {} DSP48E1s",
         r.luts,
+        r.lut_sites,
         r.registers,
         r.carry4s,
         r.ram32ms,
-        r.slices
+        r.slices,
+        r.ramb18s,
+        r.ramb36s,
+        r.dsps
     );
     say!(
         "placed {} cells, wirelength {:.0} (from {:.0}), estimated critical path {:.2} ns, {} moves on {} threads in {:.1} s",

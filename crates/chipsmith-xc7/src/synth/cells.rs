@@ -5,10 +5,16 @@
 
 use std::collections::BTreeMap;
 
+use anyhow::{ensure, Result};
 use chipsmith_netlist::{CellKind, Const, Dir, Generic, GenericPort, ParamValue, SigBit, State};
+
+use crate::bram::{self, Size};
 
 pub const CARRY4: &str = "CARRY4";
 pub const RAM32M: &str = "RAM32M";
+pub const RAMB18E1: &str = "RAMB18E1";
+pub const RAMB36E1: &str = "RAMB36E1";
+pub const DSP48E1: &str = "DSP48E1";
 pub const IBUF: &str = "IBUF";
 pub const OBUF: &str = "OBUF";
 pub const OBUFT: &str = "OBUFT";
@@ -23,10 +29,33 @@ pub const LIBRARY: &str = include_str!("cells.v");
 /// The name [`LIBRARY`] is read under, for error positions.
 pub const LIBRARY_NAME: &str = "chipsmith-xc7/cells.v";
 
+/// Behavioural models of the hard blocks (block RAM), for co-simulating a
+/// netlist with iverilog; checked against Vivado's unisim models
+/// (`tests/models.rs`).
+pub const MODELS: &str = include_str!("../sim.v");
+/// The cells [`MODELS`] models.
+pub const MODELLED: [&str; 2] = [RAMB18E1, RAMB36E1];
+
+/// yosys' `xilinx/cells_sim.v` without its models of [`MODELLED`]
+/// (timing only, no behaviour), so they stay blackboxes for [`MODELS`].
+pub fn yosys_sim_without_models(sim: &str) -> String {
+    let mut out = sim.to_string();
+    for ty in MODELLED {
+        let start = format!("module {ty} (");
+        while let Some(i) = out.find(&start) {
+            let end = out[i..]
+                .find("endmodule")
+                .map_or(out.len(), |j| i + j + "endmodule".len());
+            out.replace_range(i..end, "");
+        }
+    }
+    out
+}
+
 /// Cells that are pure functions of their inputs: unused ones go.
 pub const REMOVABLE: &[&str] = &[
     "LUT1", "LUT2", "LUT3", "LUT4", "LUT5", "LUT6", "FDRE", "FDSE", "FDCE", "FDPE", CARRY4, RAM32M,
-    BUFG,
+    RAMB18E1, RAMB36E1, DSP48E1, BUFG,
 ];
 
 /// Whether `ty` is one of [`LIBRARY`]'s cells.
@@ -43,7 +72,9 @@ fn port(name: &str, dir: Dir, sig: Vec<SigBit>) -> GenericPort {
 }
 
 fn bits(v: u64, width: usize) -> ParamValue {
-    ParamValue::Bits(Const((0..width).map(|i| State::from(v >> i & 1 == 1)).collect()))
+    ParamValue::Bits(Const(
+        (0..width).map(|i| State::from(v >> i & 1 == 1)).collect(),
+    ))
 }
 
 fn generic(ty: &str, params: BTreeMap<String, ParamValue>, ports: Vec<GenericPort>) -> CellKind {
@@ -188,6 +219,139 @@ impl Ram32m {
     }
 }
 
+/// A block RAM at its pins (UG953's names), per port A and B: clock,
+/// enable (of the port's reads and writes), byte write enables (WEA,
+/// WEBWE), address, write data, read data, output register enable and the
+/// latch's and register's resets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ramb {
+    pub config: bram::Config,
+    pub clk: [SigBit; 2],
+    pub en: [SigBit; 2],
+    pub regce: [SigBit; 2],
+    pub rstram: [SigBit; 2],
+    pub rstreg: [SigBit; 2],
+    /// [`Size::addr_pins`] bits each.
+    pub addr: [Vec<SigBit>; 2],
+    /// WEA: 2 (4) bits, WEBWE: 4 (8).
+    pub we: [Vec<SigBit>; 2],
+    /// [`Size::data_pins`] bits each, and an eighth of that in parity.
+    pub di: [Vec<SigBit>; 2],
+    pub dip: [Vec<SigBit>; 2],
+    pub dout: [Vec<SigBit>; 2],
+    pub doutp: [Vec<SigBit>; 2],
+}
+
+/// Port names per side: (A, B).
+const RAMB_PORTS: [(&str, &str); 11] = [
+    ("CLKARDCLK", "CLKBWRCLK"),
+    ("ENARDEN", "ENBWREN"),
+    ("REGCEAREGCE", "REGCEB"),
+    ("RSTRAMARSTRAM", "RSTRAMB"),
+    ("RSTREGARSTREG", "RSTREGB"),
+    ("ADDRARDADDR", "ADDRBWRADDR"),
+    ("WEA", "WEBWE"),
+    ("DIADI", "DIBDI"),
+    ("DIPADIP", "DIPBDIP"),
+    ("DOADO", "DOBDO"),
+    ("DOPADOP", "DOPBDOP"),
+];
+
+impl Ramb {
+    /// Every pin tied off (enables 0, write enables 0, addresses 0), read
+    /// data on fresh nets the caller fills in.
+    pub fn new(config: bram::Config, dout: [Vec<SigBit>; 2], doutp: [Vec<SigBit>; 2]) -> Ramb {
+        let s = config.size;
+        let zeros = |n: usize| vec![SigBit::ZERO; n];
+        Ramb {
+            config,
+            clk: [SigBit::ZERO; 2],
+            en: [SigBit::ZERO; 2],
+            regce: [SigBit::ZERO; 2],
+            rstram: [SigBit::ZERO; 2],
+            rstreg: [SigBit::ZERO; 2],
+            addr: [zeros(s.addr_pins()), zeros(s.addr_pins())],
+            we: [zeros(s.data_pins() / 8), zeros(s.data_pins() / 4)],
+            di: [zeros(s.data_pins()), zeros(s.data_pins())],
+            dip: [zeros(s.data_pins() / 8), zeros(s.data_pins() / 8)],
+            dout,
+            doutp,
+        }
+    }
+
+    pub fn cell(self) -> CellKind {
+        let s = self.config.size;
+        let mut ports = Vec::new();
+        for (side, (a, b)) in RAMB_PORTS.into_iter().enumerate() {
+            for (k, name) in [a, b].into_iter().enumerate() {
+                let (dir, sig) = match side {
+                    0 => (Dir::In, vec![self.clk[k]]),
+                    1 => (Dir::In, vec![self.en[k]]),
+                    2 => (Dir::In, vec![self.regce[k]]),
+                    3 => (Dir::In, vec![self.rstram[k]]),
+                    4 => (Dir::In, vec![self.rstreg[k]]),
+                    5 => (Dir::In, self.addr[k].clone()),
+                    6 => (Dir::In, self.we[k].clone()),
+                    7 => (Dir::In, self.di[k].clone()),
+                    8 => (Dir::In, self.dip[k].clone()),
+                    9 => (Dir::Out, self.dout[k].clone()),
+                    _ => (Dir::Out, self.doutp[k].clone()),
+                };
+                ports.push(port(name, dir, sig));
+            }
+        }
+        if s == Size::Full {
+            for p in ["CASCADEINA", "CASCADEINB", "INJECTDBITERR", "INJECTSBITERR"] {
+                ports.push(port(p, Dir::In, vec![SigBit::ZERO]));
+            }
+        }
+        generic(s.primitive(), self.config.params(), ports)
+    }
+
+    /// A RAMB18E1 or RAMB36E1 cell's pins and configuration. Pins left
+    /// out read as UG953's defaults: 0, but REGCE 1 (`unconnected`).
+    pub fn from_generic(g: &Generic) -> Result<Ramb> {
+        let config = bram::Config::from_params(&g.ty, &g.params)?;
+        let s = config.size;
+        let sig = |name: &str, width: usize, default: SigBit| -> Result<Vec<SigBit>> {
+            let mut v = g.port(name).map(|p| p.sig.clone()).unwrap_or_default();
+            ensure!(v.len() <= width, "{}: {name} has {} bits", g.ty, v.len());
+            v.resize(width, default);
+            Ok(v)
+        };
+        let one = |name: &str, default: SigBit| -> Result<SigBit> { Ok(sig(name, 1, default)?[0]) };
+        let pair = |i: usize, default: SigBit| -> Result<[SigBit; 2]> {
+            let (a, b) = RAMB_PORTS[i];
+            Ok([one(a, default)?, one(b, default)?])
+        };
+        let vec2 = |i: usize, wa: usize, wb: usize| -> Result<[Vec<SigBit>; 2]> {
+            let (a, b) = RAMB_PORTS[i];
+            Ok([sig(a, wa, SigBit::ZERO)?, sig(b, wb, SigBit::ZERO)?])
+        };
+        let (d, p) = (s.data_pins(), s.data_pins() / 8);
+        let out = |name: &str, width: usize| -> Result<Vec<SigBit>> {
+            let v = g.port(name).map(|p| p.sig.clone()).unwrap_or_default();
+            ensure!(v.len() <= width, "{}: {name} has {} bits", g.ty, v.len());
+            Ok(v)
+        };
+        let ramb = Ramb {
+            clk: pair(0, SigBit::ZERO)?,
+            en: pair(1, SigBit::ZERO)?,
+            regce: pair(2, SigBit::ONE)?,
+            rstram: pair(3, SigBit::ZERO)?,
+            rstreg: pair(4, SigBit::ZERO)?,
+            addr: vec2(5, s.addr_pins(), s.addr_pins())?,
+            we: vec2(6, d / 8, d / 4)?,
+            di: vec2(7, d, d)?,
+            dip: vec2(8, p, p)?,
+            dout: [out("DOADO", d)?, out("DOBDO", d)?],
+            doutp: [out("DOPADOP", p)?, out("DOPBDOP", p)?],
+            config,
+        };
+        Ok(ramb)
+    }
+}
+
 pub fn ibuf(pad: SigBit, o: SigBit) -> CellKind {
     generic(
         IBUF,
@@ -245,8 +409,9 @@ mod tests {
 
     #[test]
     fn the_library_declares_every_cell_synthesis_makes() {
-        for ty in LUTS.iter().chain(&FFS).chain(&[CARRY4, RAM32M, IBUF, OBUF, OBUFT, IOBUF, BUFG])
-        {
+        for ty in LUTS.iter().chain(&FFS).chain(&[
+            CARRY4, RAM32M, RAMB18E1, RAMB36E1, IBUF, OBUF, OBUFT, IOBUF, BUFG,
+        ]) {
             assert!(is_device_cell(ty), "{ty}");
         }
         assert!(!is_device_cell("LUT"));
