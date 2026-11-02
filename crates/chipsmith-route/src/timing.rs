@@ -110,10 +110,10 @@ fn register_setup(port: &str) -> Option<Ps> {
         // input C, whose node carries part of that (`lut_pin_extra`).
         "DATAIN" => 84.0 + TSU,
         "SDATA" => 366.0 - lut_pin_extra(2) + TSU,
-        // LAB-wide enable and sync clear reach the register through the LAB
-        // control lines; their own DMF arcs aren't identified yet, so they
-        // count like SDATA. Unknown, not measured.
-        "ENA" | "SCLR" => 366.0 + TSU,
+        // LAB-wide enable, sync clear and sync load reach the register
+        // through the LAB control lines; their own DMF arcs aren't
+        // identified yet, so they count like SDATA. Unknown, not measured.
+        "ENA" | "SCLR" | "SLOAD" => 366.0 + TSU,
         _ => return None,
     })
 }

@@ -21,13 +21,99 @@
 
 use anyhow::{bail, Result};
 use chipsmith_netlist::{
-    Bit, CellKind, Ctrl, DffControl, Ff, FfKind, LatchReset, Module, Net, Polarity, SigBit, State,
-    SyncEnable, Wire,
+    Bit, CellKind, Ctrl, DffControl, Ff, FfKind, GateOp, LatchReset, Module, Net, Polarity, SigBit,
+    State, SyncEnable, Wire,
 };
 use chipsmith_synth::rewrite::{define_inits, inits, set_inits, Gates, Subst};
 use rustc_hash::FxHashMap;
 
-use super::cells::{Comb, Reg};
+use super::cells::{Comb, Reg, LCELL_COMB};
+
+/// Multiplexers in front of registers that the LAB's synchronous load can
+/// take over: `$_MUX_`s read only by one register's data input, with an
+/// adder's sum (an arithmetic LE's output) on one leg. The adder's LE
+/// can't take the multiplexer into its LUT (arithmetic mode uses A, B and
+/// the carry), so without it the multiplexer costs a LUT of its own after
+/// the sum, and a LUT and a hop on the path. With it, the register sits in
+/// the adder's LE, the sum on DATAIN and the other leg on SDATA (the LE's
+/// input C, which arithmetic mode leaves free), as Quartus builds
+/// picorv32's `reg_next_pc` (66 LUTs to chipsmith's 123 without it).
+struct SyncLoads {
+    /// Each such multiplexer's output: (A, B, S).
+    mux: FxHashMap<Net, [SigBit; 3]>,
+    /// Sums of arithmetic LEs read only by one multiplexer.
+    sums: rustc_hash::FxHashSet<Net>,
+}
+
+impl SyncLoads {
+    fn new(m: &Module) -> Self {
+        let mut readers: FxHashMap<Net, u32> = FxHashMap::default();
+        for c in &m.cells {
+            c.kind.for_each_port(|p| {
+                if p.dir != Some(chipsmith_netlist::Dir::Out) {
+                    for n in p.bits.iter().filter_map(|b| b.net()) {
+                        *readers.entry(n).or_default() += 1;
+                    }
+                }
+            });
+        }
+        for w in &m.wires {
+            if w.port.is_some_and(|d| d.drives()) {
+                for n in w.bits.iter().filter_map(|b| b.net()) {
+                    *readers.entry(n).or_default() += 2;
+                }
+            }
+        }
+        let one = |n: Net| readers.get(&n) == Some(&1);
+        let mut mux = FxHashMap::default();
+        let mut sums = rustc_hash::FxHashSet::default();
+        for c in &m.cells {
+            match &c.kind {
+                CellKind::Gate(g) if g.op() == GateOp::Mux => {
+                    if let SigBit::Net(y) = g.y {
+                        if one(y) {
+                            let i = g.inputs();
+                            mux.insert(y, [i[0], i[1], i[2]]);
+                        }
+                    }
+                }
+                CellKind::Other(gc) if gc.ty == LCELL_COMB => {
+                    let arithmetic = gc.port("COUT").is_some()
+                        || gc.port("CIN").is_some_and(|p| p.sig.iter().any(|b| b.net().is_some()));
+                    let out = gc.port("COMBOUT").and_then(|p| p.sig.first()?.net());
+                    if let (true, Some(y)) = (arithmetic, out) {
+                        if one(y) {
+                            sums.insert(y);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        SyncLoads { mux, sums }
+    }
+
+    /// For a register's data input: (sload, sdata, datain) with sload
+    /// active high, if the LAB's synchronous load can take its
+    /// multiplexer.
+    fn take(&self, g: &mut Gates, d: SigBit) -> Option<(SigBit, SigBit, SigBit)> {
+        let [a, b, s] = *self.mux.get(&d.net()?)?;
+        // SDATA and the load come from the LAB's lines: signals, not
+        // constants (a constant leg is a clear or a LUT's job).
+        if a.net().is_none() || b.net().is_none() || s.net().is_none() {
+            return None;
+        }
+        let sum = |x: SigBit| x.net().is_some_and(|n| self.sums.contains(&n));
+        if sum(a) {
+            Some((s, b, a))
+        } else if sum(b) {
+            let load = g.not(s);
+            Some((load, a, b))
+        } else {
+            None
+        }
+    }
+}
 
 /// A control as an active-high signal.
 fn active_high(g: &mut Gates, c: Ctrl) -> SigBit {
@@ -60,6 +146,9 @@ enum Mapped {
 pub fn map(m: &mut Module) -> Result<Counts> {
     define_inits(m);
     let mut init = inits(m);
+    // Before the registers leave the module: their data inputs are the
+    // multiplexers' readers.
+    let loads = SyncLoads::new(m);
     let mut g = Gates::new(m, "ff");
     let cells = std::mem::take(&mut g.m.cells);
     let mut subst = Subst::new(g.m);
@@ -75,7 +164,7 @@ pub fn map(m: &mut Module) -> Result<Counts> {
     let mut counts = Counts::default();
     let mut inverted = Vec::new();
     for (name, ff) in regs {
-        match legalize(&mut g, &mut subst, &mut init, &mut inverted, &name, ff)? {
+        match legalize(&mut g, &mut subst, &mut init, &mut inverted, &loads, &name, ff)? {
             Mapped::Register => counts.registers += 1,
             Mapped::Latch => counts.latches += 1,
             Mapped::Emulated => {
@@ -207,6 +296,7 @@ fn emulate(
             ena,
             aclr: active,
             sclr: SigBit::ZERO,
+            sload: None,
             q: reg,
         }
         .cell(),
@@ -222,6 +312,7 @@ fn legalize(
     subst: &mut Subst,
     init: &mut FxHashMap<Net, State>,
     inverted: &mut Vec<(Net, Net)>,
+    loads: &SyncLoads,
     name: &str,
     ff: Ff<Bit>,
 ) -> Result<Mapped> {
@@ -392,6 +483,16 @@ fn legalize(
             return Ok(Mapped::Emulated);
         }
     };
+    // A register stored inverted takes an inverter on its data, so its
+    // multiplexer stays a LUT.
+    let sload = if invert {
+        None
+    } else {
+        loads.take(g, d).map(|(load, sdata, datain)| {
+            d = datain;
+            (load, sdata)
+        })
+    };
     let reg_q = if invert {
         d = g.not(d);
         let r = g.m.new_net();
@@ -411,6 +512,7 @@ fn legalize(
             ena,
             aclr,
             sclr,
+            sload,
             q: reg_q,
         }
         .cell(),

@@ -77,13 +77,15 @@ enum Port {
     Inclkena,
     Outclkena,
     Areset,
+    /// A register's synchronous load: it takes SDATA while the net is high.
+    Sload,
     M4k(m4k::Pin),
     Mult(mult::Pin),
     Hard(hard::Pin),
 }
 
 impl Port {
-    const FIXED: [Port; 21] = [
+    const FIXED: [Port; 22] = [
         Port::DataA,
         Port::DataB,
         Port::DataC,
@@ -105,13 +107,14 @@ impl Port {
         Port::Inclkena,
         Port::Outclkena,
         Port::Areset,
+        Port::Sload,
     ];
 
     /// The netlist's name of each port, in `FIXED` order.
-    const NAMES: [&'static str; 21] = [
+    const NAMES: [&'static str; 22] = [
         "DATAA", "DATAB", "DATAC", "DATAD", "CIN", "COUT", "COMBOUT", "DATAIN", "SDATA", "CLK",
         "ENA", "ACLR", "SCLR", "REGOUT", "INCLK", "OUTCLK", "DATAOUT", "OE", "INCLKENA",
-        "OUTCLKENA", "ARESET",
+        "OUTCLKENA", "ARESET", "SLOAD",
     ];
 
     fn parse(name: &str) -> Option<Port> {
@@ -148,6 +151,7 @@ impl Port {
             Port::Inclkena => 18,
             Port::Outclkena => 19,
             Port::Areset => 20,
+            Port::Sload => 21,
             Port::M4k(_) | Port::Mult(_) | Port::Hard(_) => return None,
         })
     }
@@ -234,6 +238,7 @@ struct Cell {
     ena_inv: bool,
     sclr_inv: bool,
     aclr_inv: bool,
+    sload_inv: bool,
     /// A multiplier's A_REG, B_REG, P_REG.
     mult_regs: [bool; 3],
     /// Pin buffers: the top-level port they serve (`LEDR[0]`).
@@ -273,8 +278,9 @@ type Ctl = (Option<NetId>, bool);
 #[derive(Debug, Clone, Copy)]
 struct Sig {
     /// Nets the LE takes from its LAB's lines: the LUT's inputs, then the
-    /// register's SDATA, ENA, SCLR and ACLR, those that are connected.
-    inputs: [NetId; 8],
+    /// register's SDATA, ENA, SCLR, ACLR and SLOAD, those that are
+    /// connected.
+    inputs: [NetId; 9],
     n_inputs: u8,
     ff: Option<FfCtl>,
     /// A LUT and an unrelated register on SDATA.
@@ -286,7 +292,7 @@ struct Sig {
 enum Refusal {
     /// More than `MAX_LAB_INPUTS` distinct signals from outside.
     Inputs,
-    /// Registers with SDATA and others with SCLR.
+    /// Registers that take different synchronous controls.
     SyncKind,
     /// Two clocks.
     Clock,
@@ -303,9 +309,13 @@ struct FfCtl {
     clk: Ctl,
     ena: Ctl,
     sclr: Ctl,
+    sload: Ctl,
     /// The clear net and whether it is active low.
     aclr: Option<(NetId, bool)>,
-    /// Bit 0: uses SDATA, bit 1: SCLR; a LAB's registers agree on it.
+    /// Bit 0: SDATA with the LAB's sload tied high, bit 1: SCLR, bit 2:
+    /// SDATA under an sload net. A register takes the LAB's sclr and
+    /// sload together (one bit), so a LAB's registers that take either
+    /// agree on it.
     sync_kind: u8,
 }
 
@@ -610,6 +620,7 @@ fn read_design(json: &Value) -> Result<Design> {
             ena_inv: flag("ENA_INV"),
             sclr_inv: flag("SCLR_INV"),
             aclr_inv: flag("ACLR_INV"),
+            sload_inv: flag("SLOAD_INV"),
             mult_regs: mult::Regs::PARAMS.map(flag),
             port: c["attributes"]["PORT"].as_str().map(str::to_string),
             io_regs: [
@@ -842,10 +853,13 @@ fn read_design(json: &Value) -> Result<Design> {
         .iter()
         .map(|&Le { lut, ff }| {
             let mut sig = Sig {
-                inputs: [0; 8],
+                inputs: [0; 9],
                 n_inputs: 0,
                 ff: None,
-                packed: lut.is_some() && ff.is_some_and(|f| cells[f].net(Port::Sdata).is_some()),
+                packed: lut.is_some()
+                    && ff.is_some_and(|f| {
+                        cells[f].net(Port::Sdata).is_some() && cells[f].net(Port::Sload).is_none()
+                    }),
             };
             let mut add = |net: Option<NetId>| {
                 if let Some(n) = net {
@@ -860,16 +874,19 @@ fn read_design(json: &Value) -> Result<Design> {
             }
             if let Some(f) = ff {
                 let c = &cells[f];
-                for p in [Port::Sdata, Port::Ena, Port::Sclr, Port::Aclr] {
+                for p in [Port::Sdata, Port::Ena, Port::Sclr, Port::Aclr, Port::Sload] {
                     add(c.net(p));
                 }
+                let sload = c.net(Port::Sload);
                 sig.ff = Some(FfCtl {
                     clk: (c.net(Port::Clk), c.clk_inv),
                     ena: (c.net(Port::Ena), c.ena_inv),
                     sclr: (c.net(Port::Sclr), c.sclr_inv),
+                    sload: (sload, c.sload_inv),
                     aclr: c.net(Port::Aclr).map(|n| (n, c.aclr_inv)),
-                    sync_kind: c.net(Port::Sdata).is_some() as u8
-                        | (c.net(Port::Sclr).is_some() as u8) << 1,
+                    sync_kind: (c.net(Port::Sdata).is_some() && sload.is_none()) as u8
+                        | (c.net(Port::Sclr).is_some() as u8) << 1
+                        | (sload.is_some() as u8) << 2,
                 });
             }
             sig
@@ -1558,6 +1575,7 @@ impl<'a> State<'a> {
         let mut n_domains = 0;
         let (mut ena, mut aclr, mut sclr): (Option<Ctl>, Option<(NetId, bool)>, Option<Ctl>) =
             (None, None, None);
+        let mut sload: Option<Ctl> = None;
         let mut sync_kind = 0;
         let mut inputs = [0 as NetId; MAX_LAB_INPUTS];
         let mut n_inputs = 0;
@@ -1631,7 +1649,7 @@ impl<'a> State<'a> {
                 domains[n_domains] = domain;
                 n_domains += 1;
             }
-            if !one(&mut ena, ff.ena) || !one(&mut sclr, ff.sclr) {
+            if !one(&mut ena, ff.ena) || !one(&mut sclr, ff.sclr) || !one(&mut sload, ff.sload) {
                 return Err(Refusal::Control);
             }
             if let Some(a) = ff.aclr {

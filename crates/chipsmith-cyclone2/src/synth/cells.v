@@ -17,7 +17,8 @@ endmodule
 // ENA gates SCLR (only an enabled clock edge clears); ACLR is asynchronous.
 // Unconnected (synthesis ties them so): ENA 1, ACLR and SCLR 0.
 (* blackbox *)
-module LCELL_FF (input DATAIN, input CLK, input ENA, input ACLR, input SCLR, output REGOUT);
+module LCELL_FF (input DATAIN, input CLK, input ENA, input ACLR, input SCLR, input SLOAD,
+                 input SDATA, output REGOUT);
   // 1: clocked on CLK's falling edge (the LAB inverts the clock).
   parameter CLK_INV = 0;
 endmodule

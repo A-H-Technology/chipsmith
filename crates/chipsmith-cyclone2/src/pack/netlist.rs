@@ -42,6 +42,8 @@ pub enum Port {
     Ena,
     Aclr,
     Sclr,
+    /// A register's synchronous load: SDATA while it is high.
+    Sload,
     Regout,
     Dataout,
     /// A tri-state pin's output enable.
@@ -77,7 +79,7 @@ pub enum Port {
 pub const LUT_INPUTS: [Port; 4] = [Port::DataA, Port::DataB, Port::DataC, Port::DataD];
 
 impl Port {
-    const FIXED: [(Port, &'static str); 25] = [
+    const FIXED: [(Port, &'static str); 26] = [
         (Port::DataA, "DATAA"),
         (Port::DataB, "DATAB"),
         (Port::DataC, "DATAC"),
@@ -91,6 +93,7 @@ impl Port {
         (Port::Ena, "ENA"),
         (Port::Aclr, "ACLR"),
         (Port::Sclr, "SCLR"),
+        (Port::Sload, "SLOAD"),
         (Port::Regout, "REGOUT"),
         (Port::Dataout, "DATAOUT"),
         (Port::Oe, "OE"),
@@ -152,6 +155,8 @@ pub struct FfConfig {
     pub sclr_inv: bool,
     /// Clears while ACLR is low: the LAB's clear-line inversion.
     pub aclr_inv: bool,
+    /// Loads SDATA while SLOAD is low.
+    pub sload_inv: bool,
 }
 
 /// What one of an IOE's inputs from the core (output data, output enable)
