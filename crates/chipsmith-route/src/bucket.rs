@@ -169,23 +169,35 @@ impl Router<'_> {
             let (dx, dy) = self.node[n as usize].bbox.gap(target);
             g + fx.estimate(dx as u64, dy as u64, crit_q)
         };
-        let mut frontier: Vec<(NodeId, u64)> = Vec::with_capacity(seeds.len());
+        // The frontier by estimate, each entry (f, node, g); an entry whose
+        // g is no longer its node's label is stale and skipped. A round
+        // takes every live entry within the bucket, then relaxes them all
+        // from those costs: the rounds `gpu.rs` runs, without passing over
+        // the whole frontier each round.
+        let mut heap: BinaryHeap<std::cmp::Reverse<(u64, NodeId, u64)>> = BinaryHeap::new();
+        let live = |l: &Labels, n: NodeId, g: u64| unpack(l.get(n as usize)).0 == g;
         for &(n, dq) in seeds {
             let g = Fixed::seed_cost(dq, crit_q).min(G_MAX);
             if l.offer(n as usize, pack(g, SEED)) {
-                frontier.push((n, g));
+                heap.push(std::cmp::Reverse((f_of(n, g), n, g)));
             }
             work[0] += 1;
         }
-        let mut improved: Vec<NodeId> = Vec::new();
+        let mut round: Vec<(NodeId, u64)> = Vec::new();
         loop {
+            while let Some(&std::cmp::Reverse((_, n, g))) = heap.peek() {
+                if live(l, n, g) {
+                    break;
+                }
+                heap.pop();
+            }
             let sink_g = match l.get(sink as usize) {
                 u64::MAX => None,
                 lab => Some(unpack(lab).0),
             };
             // Done when nothing left could beat the sink's cost; failed
             // when nothing is left and the sink wasn't reached.
-            let Some(fmin) = frontier.iter().map(|&(n, g)| f_of(n, g)).min() else {
+            let Some(&std::cmp::Reverse((fmin, _, _))) = heap.peek() else {
                 if sink_g.is_some() {
                     break;
                 }
@@ -195,13 +207,19 @@ impl Router<'_> {
                 break;
             }
             let bound = fmin + fx.bucket_q;
-            improved.clear();
-            let mut deferred: Vec<(NodeId, u64)> = Vec::new();
-            for &(v, gv) in &frontier {
-                if f_of(v, gv) > bound {
-                    deferred.push((v, gv));
-                    continue;
+            round.clear();
+            while let Some(&std::cmp::Reverse((f, n, g))) = heap.peek() {
+                if f > bound {
+                    break;
                 }
+                heap.pop();
+                if live(l, n, g) {
+                    round.push((n, g));
+                }
+            }
+            round.sort_unstable();
+            round.dedup();
+            for &(v, gv) in &round {
                 work[2] += 1;
                 for e in self.db.downhill_range(v) {
                     if !fx.edge_ok[e] {
@@ -211,9 +229,7 @@ impl Router<'_> {
                     let m = dst as usize;
                     if self.reserved_for_other(dst, net)
                         || !self.node[m].bbox.overlaps(region)
-                        || allowed.is_some_and(|a| {
-                            dst != sink && !a[self.db.node_type[m] as usize]
-                        })
+                        || allowed.is_some_and(|a| dst != sink && !a[self.db.node_type[m] as usize])
                     {
                         continue;
                     }
@@ -224,23 +240,11 @@ impl Router<'_> {
                         continue;
                     }
                     if l.offer(m, pack(g2, e as u32)) {
-                        improved.push(dst);
+                        heap.push(std::cmp::Reverse((f_of(dst, g2), dst, g2)));
                         work[1] += 1;
                     }
                 }
             }
-            // The next frontier: the deferred and the improved, each at
-            // its label now, once; in node order.
-            frontier.clear();
-            for n in deferred
-                .iter()
-                .map(|&(n, _)| n)
-                .chain(improved.iter().copied())
-            {
-                frontier.push((n, unpack(l.get(n as usize)).0));
-            }
-            frontier.sort_unstable();
-            frontier.dedup_by_key(|e| e.0);
         }
         let mut branch = Vec::new();
         let mut n = sink;
@@ -341,14 +345,30 @@ impl Router<'_> {
             .or_else(|| {
                 (region != chipdb::Box::EVERYWHERE)
                     .then(|| {
-                        self.search_bucketed(fx, l, net, seeds, sink, crit_q, chipdb::Box::EVERYWHERE, work)
+                        self.search_bucketed(
+                            fx,
+                            l,
+                            net,
+                            seeds,
+                            sink,
+                            crit_q,
+                            chipdb::Box::EVERYWHERE,
+                            work,
+                        )
                     })
                     .flatten()
             })
     }
 
     /// Add a branch to a `Start`'s tree, keeping its `Fixed` delays.
-    fn graft_q(&self, fx: &Fixed, s: &mut Scratch, st: &mut Start, branch: &[(NodeId, Edge)], seed: NodeId) {
+    fn graft_q(
+        &self,
+        fx: &Fixed,
+        s: &mut Scratch,
+        st: &mut Start,
+        branch: &[(NodeId, Edge)],
+        seed: NodeId,
+    ) {
         let before = st.tree.nodes.len();
         self.graft(s, &mut st.tree, &mut st.delays, branch, seed, st.gen);
         for j in before..st.tree.nodes.len() {
@@ -376,10 +396,23 @@ impl Router<'_> {
                 continue;
             }
             let crit_q = Fixed::crit_q(crit[i]);
-            let seeds: Vec<(NodeId, u64)> =
-                st.tree.nodes.iter().copied().zip(st.dq.iter().copied()).collect();
-            let found =
-                self.search_bucketed_anywhere(fx, l, index, &seeds, sink, crit_q, region, &mut s.work);
+            let seeds: Vec<(NodeId, u64)> = st
+                .tree
+                .nodes
+                .iter()
+                .copied()
+                .zip(st.dq.iter().copied())
+                .collect();
+            let found = self.search_bucketed_anywhere(
+                fx,
+                l,
+                index,
+                &seeds,
+                sink,
+                crit_q,
+                region,
+                &mut s.work,
+            );
             let (branch, seed) =
                 found.with_context(|| format!("net {}: no route to a sink", net.name))?;
             self.graft_q(fx, s, &mut st, &branch, seed);
@@ -422,8 +455,13 @@ impl Router<'_> {
                 .copied()
                 .filter(|&i| s.in_tree[net.sinks[i] as usize] != st.gen)
                 .collect();
-            let seeds: Vec<(NodeId, u64)> =
-                st.tree.nodes.iter().copied().zip(st.dq.iter().copied()).collect();
+            let seeds: Vec<(NodeId, u64)> = st
+                .tree
+                .nodes
+                .iter()
+                .copied()
+                .zip(st.dq.iter().copied())
+                .collect();
             let search = |l: &mut Labels, work: &mut [u64; 3], i: usize| {
                 self.search_bucketed_anywhere(
                     fx,
@@ -458,7 +496,10 @@ impl Router<'_> {
                         search(&mut ps.labels, &mut ps.work, i)
                     })
                     .collect(),
-                None => todo.iter().map(|&i| search(&mut l, &mut s.work, i)).collect(),
+                None => todo
+                    .iter()
+                    .map(|&i| search(&mut l, &mut s.work, i))
+                    .collect(),
             };
             for b in branches {
                 let (branch, seed) =

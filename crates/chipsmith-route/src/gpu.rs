@@ -550,6 +550,8 @@ pub struct Searcher {
     /// Seconds in the batches, and batches run.
     pub busy_s: f64,
     pub batches: u64,
+    /// Slots the GPU gave up on (the CPU routed them).
+    pub gave_up: u64,
     /// Of `busy_s`: uploading the batch, the kernel (to its first read),
     /// packing and reading the trees.
     pub phase_s: [f64; 3],
@@ -630,6 +632,7 @@ impl Searcher {
             bucket_q: fx.bucket_q,
             busy_s: 0.0,
             batches: 0,
+            gave_up: 0,
             phase_s: [0.0; 3],
             n,
             client,
@@ -670,7 +673,10 @@ impl Searcher {
             self.state_set = true;
             return;
         }
-        for (list, add) in [(std::mem::take(&mut self.placed), true), (std::mem::take(&mut self.lifted), false)] {
+        for (list, add) in [
+            (std::mem::take(&mut self.placed), true),
+            (std::mem::take(&mut self.lifted), false),
+        ] {
             if list.is_empty() {
                 continue;
             }
@@ -746,7 +752,10 @@ impl Searcher {
             self.b.pool_cap = cap;
         }
         let init_node: Vec<u32> = nets.iter().flat_map(|x| x.init.iter().copied()).collect();
-        let init_dq: Vec<u64> = nets.iter().flat_map(|x| x.init_dq.iter().copied()).collect();
+        let init_dq: Vec<u64> = nets
+            .iter()
+            .flat_map(|x| x.init_dq.iter().copied())
+            .collect();
         // One upload: per slot source, net, region, first sink, then where
         // its trees go, then the (sink, criticality) pairs.
         let mut inp: Vec<u32> = Vec::new();
@@ -846,6 +855,7 @@ impl Searcher {
         self.busy_s += t_all;
         self.batches += 1;
         let stride = 2 + 3 * OUT_CAP;
+        self.gave_up += (0..k).filter(|&s| out[s * stride] != DONE).count() as u64;
         (0..k)
             .map(|s| {
                 let o = s * stride;
@@ -985,8 +995,12 @@ impl crate::Router<'_> {
                 delay[tree.parent[i] as usize] + own
             });
         }
-        let index: std::collections::HashMap<NodeId, usize> =
-            tree.nodes.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+        let index: std::collections::HashMap<NodeId, usize> = tree
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, &n)| (n, i))
+            .collect();
         tree.sink_delay = net.sinks.iter().map(|sk| delay[index[sk]]).collect();
         tree
     }

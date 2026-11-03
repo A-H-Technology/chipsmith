@@ -344,7 +344,9 @@ impl<'a> Router<'a> {
         // The batched integer router throughout (docs/gpu-pnr.md,
         // "Routing"): on CPU threads, or a GPU; the same trees either way.
         let accel = std::env::var("CHIPSMITH_ROUTE_ACCEL").ok();
-        let accel = accel.as_deref().filter(|a| ["cpu", "cuda", "hip"].contains(a));
+        let accel = accel
+            .as_deref()
+            .filter(|a| ["cpu", "cuda", "hip"].contains(a));
         let var = |name: &str| std::env::var(name).ok();
         Router {
             db,
@@ -498,7 +500,13 @@ impl<'a> Router<'a> {
 
     /// `todo` in batches of at most `k` by `self.schedule`; a net routed
     /// alone is a batch of its own where it comes in the order.
-    fn schedule(&self, nets: &[NetReq], todo: &[usize], trees: &[Tree], k: usize) -> Vec<Vec<usize>> {
+    fn schedule(
+        &self,
+        nets: &[NetReq],
+        todo: &[usize],
+        trees: &[Tree],
+        k: usize,
+    ) -> Vec<Vec<usize>> {
         let k = k.max(1);
         match self.schedule {
             Schedule::Order => {
@@ -537,7 +545,10 @@ impl<'a> Router<'a> {
                         .copied()
                         .filter(|&n| self.node[n as usize].occ > 1)
                         .collect();
-                    let blocked = |b: usize| mine.iter().any(|n| claims.get(n).is_some_and(|c| c.contains(&b)));
+                    let blocked = |b: usize| {
+                        mine.iter()
+                            .any(|n| claims.get(n).is_some_and(|c| c.contains(&b)))
+                    };
                     let b = (first_open..out.len())
                         .find(|&b| out[b].len() < k && !self.alone(nets, out[b][0]) && !blocked(b));
                     let b = b.unwrap_or_else(|| {
@@ -757,134 +768,165 @@ impl<'a> Router<'a> {
                             g.note_lifted(&trees[i].nodes);
                         }
                     }
-                    let olds: Vec<Tree> = batch
+                    let mut olds: Vec<Tree> = batch
                         .iter()
                         .map(|&i| std::mem::take(&mut trees[i]))
                         .collect();
-                    let this = &*self;
-                    let route = |s: &mut Scratch,
-                                 i: usize,
-                                 old: &Tree,
-                                 pool: Option<&[Mutex<Option<Scratch>>]>|
-                     -> (Result<Tree>, f64) {
-                        let t_net = std::time::Instant::now();
-                        let tree = this.route_net(s, i as u32, &nets[i], &crit[i], keep.then_some(old), pool);
-                        let wide = if nets[i].sinks.len() >= WIDE_NET {
-                            t_net.elapsed().as_secs_f64()
-                        } else {
-                            0.0
-                        };
-                        (tree, wide)
-                    };
-                    #[cfg(feature = "gpu")]
-                    let on_gpu = searcher.is_some() && batch.len() > 1;
-                    #[cfg(not(feature = "gpu"))]
-                    let on_gpu = false;
-                    let routed: Vec<(Result<Tree>, f64)> = match &this.fixed {
-                        // Alone (wide, or confined): its sinks go side by
-                        // side, on the GPU unless confined.
-                        Some(fx) if batch.len() == 1 => {
-                            let i = batch[0];
-                            let wide = nets[i].sinks.len() >= WIDE_NET;
+                    rerouted += batch.len();
+                    let mut batch = batch;
+                    // With the integer search, the nets that collided go
+                    // again side by side, against what the others
+                    // committed, until none collides.
+                    loop {
+                        let this = &*self;
+                        let route = |s: &mut Scratch,
+                                     i: usize,
+                                     old: &Tree,
+                                     pool: Option<&[Mutex<Option<Scratch>>]>|
+                         -> (Result<Tree>, f64) {
                             let t_net = std::time::Instant::now();
-                            let tree = this.route_net_grouped(
-                                fx,
-                                &mut scratch,
+                            let tree = this.route_net(
+                                s,
                                 i as u32,
                                 &nets[i],
                                 &crit[i],
-                                keep.then_some(&olds[0]),
-                                if wide { this.sink_group } else { 1 },
-                                &pool,
-                                #[cfg(feature = "gpu")]
-                                searcher
-                                    .as_mut()
-                                    .filter(|_| !this.confined.contains_key(&(i as u32))),
+                                keep.then_some(old),
+                                pool,
                             );
-                            vec![(tree, if wide { t_net.elapsed().as_secs_f64() } else { 0.0 })]
-                        }
-                        // Alone: its sinks may go side by side instead.
-                        None if batch.len() == 1 => {
-                            vec![route(&mut scratch, batch[0], &olds[0], Some(&pool))]
-                        }
-                        Some(_) if on_gpu => {
-                            #[cfg(feature = "gpu")]
-                            {
-                                let g = searcher.as_mut().expect("on_gpu");
-                                this.route_batch_gpu(g, &mut scratch, &batch, nets, &crit, &olds, keep)
-                            }
-                            #[cfg(not(feature = "gpu"))]
-                            unreachable!()
-                        }
-                        fixed => batch
-                            .par_iter()
-                            .zip(&olds)
-                            .map(|(&i, old)| {
-                                let slot = rayon::current_thread_index().unwrap_or(0) % pool.len();
-                                let mut s = pool[slot].lock().expect("a router thread panicked");
-                                let s = s.get_or_insert_with(|| Scratch::new(this.db.nodes()));
-                                match fixed {
-                                    // The GPU's search on CPU threads: the
-                                    // same trees as `route_batch_gpu`.
-                                    Some(fx) => {
-                                        let tree = this.route_net_bucketed(
-                                            fx,
-                                            s,
-                                            i as u32,
-                                            &nets[i],
-                                            &crit[i],
-                                            keep.then_some(old),
-                                        );
-                                        (tree, 0.0)
-                                    }
-                                    None => route(s, i, old, None),
-                                }
-                            })
-                            .collect(),
-                    };
-                    // Committed in net order. A net whose tree takes a
-                    // node an earlier net of this batch just took (a long
-                    // wire reaching into both regions, or a search that
-                    // left its region) is routed again now, against what
-                    // is committed: two nets that can't see each other
-                    // would otherwise trade the same wire back and forth
-                    // every iteration and never converge.
-                    batch_stamp += 1;
-                    for ((&i, (tree, wide)), old) in batch.iter().zip(routed).zip(&olds) {
-                        let mut tree = tree?;
-                        t_wide += wide;
-                        if tree.nodes.iter().any(|&n| taken[n as usize] == batch_stamp) {
-                            tree = match &self.fixed {
-                                Some(fx) => self.route_net_bucketed(
+                            let wide = if nets[i].sinks.len() >= WIDE_NET {
+                                t_net.elapsed().as_secs_f64()
+                            } else {
+                                0.0
+                            };
+                            (tree, wide)
+                        };
+                        #[cfg(feature = "gpu")]
+                        let on_gpu = searcher.is_some() && batch.len() > 1;
+                        #[cfg(not(feature = "gpu"))]
+                        let on_gpu = false;
+                        let routed: Vec<(Result<Tree>, f64)> = match &this.fixed {
+                            // Alone (wide, or confined): its sinks go side by
+                            // side, on the GPU unless confined.
+                            Some(fx) if batch.len() == 1 => {
+                                let i = batch[0];
+                                let wide = nets[i].sinks.len() >= WIDE_NET;
+                                let t_net = std::time::Instant::now();
+                                let tree = this.route_net_grouped(
                                     fx,
                                     &mut scratch,
                                     i as u32,
                                     &nets[i],
                                     &crit[i],
-                                    keep.then_some(old),
-                                )?,
-                                None => self.route_net(
+                                    keep.then_some(&olds[0]),
+                                    if wide { this.sink_group } else { 1 },
+                                    &pool,
+                                    #[cfg(feature = "gpu")]
+                                    searcher
+                                        .as_mut()
+                                        .filter(|_| !this.confined.contains_key(&(i as u32))),
+                                );
+                                vec![(
+                                    tree,
+                                    if wide {
+                                        t_net.elapsed().as_secs_f64()
+                                    } else {
+                                        0.0
+                                    },
+                                )]
+                            }
+                            // Alone: its sinks may go side by side instead.
+                            None if batch.len() == 1 => {
+                                vec![route(&mut scratch, batch[0], &olds[0], Some(&pool))]
+                            }
+                            Some(_) if on_gpu => {
+                                #[cfg(feature = "gpu")]
+                                {
+                                    let g = searcher.as_mut().expect("on_gpu");
+                                    this.route_batch_gpu(
+                                        g,
+                                        &mut scratch,
+                                        &batch,
+                                        nets,
+                                        &crit,
+                                        &olds,
+                                        keep,
+                                    )
+                                }
+                                #[cfg(not(feature = "gpu"))]
+                                unreachable!()
+                            }
+                            fixed => batch
+                                .par_iter()
+                                .zip(&olds)
+                                .map(|(&i, old)| {
+                                    let slot =
+                                        rayon::current_thread_index().unwrap_or(0) % pool.len();
+                                    let mut s =
+                                        pool[slot].lock().expect("a router thread panicked");
+                                    let s = s.get_or_insert_with(|| Scratch::new(this.db.nodes()));
+                                    match fixed {
+                                        // The GPU's search on CPU threads: the
+                                        // same trees as `route_batch_gpu`.
+                                        Some(fx) => {
+                                            let tree = this.route_net_bucketed(
+                                                fx,
+                                                s,
+                                                i as u32,
+                                                &nets[i],
+                                                &crit[i],
+                                                keep.then_some(old),
+                                            );
+                                            (tree, 0.0)
+                                        }
+                                        None => route(s, i, old, None),
+                                    }
+                                })
+                                .collect(),
+                        };
+                        // Committed in net order. A net whose tree takes a
+                        // node an earlier net of this batch just took (a long
+                        // wire reaching into both regions, or a search that
+                        // left its region) is routed again now, against what
+                        // is committed: two nets that can't see each other
+                        // would otherwise trade the same wire back and forth
+                        // every iteration and never converge.
+                        batch_stamp += 1;
+                        let (mut again, mut again_olds) = (Vec::new(), Vec::new());
+                        for ((&i, (tree, wide)), old) in batch.iter().zip(routed).zip(olds) {
+                            let mut tree = tree?;
+                            t_wide += wide;
+                            if tree.nodes.iter().any(|&n| taken[n as usize] == batch_stamp) {
+                                repaired += 1;
+                                if self.fixed.is_some() {
+                                    again.push(i);
+                                    again_olds.push(old);
+                                    continue;
+                                }
+                                tree = self.route_net(
                                     &mut scratch,
                                     i as u32,
                                     &nets[i],
                                     &crit[i],
-                                    keep.then_some(old),
+                                    keep.then_some(&old),
                                     Some(&pool),
-                                )?,
-                            };
-                            repaired += 1;
+                                )?;
+                            }
+                            for &n in &tree.nodes {
+                                self.node[n as usize].occ += 1;
+                                taken[n as usize] = batch_stamp;
+                            }
+                            #[cfg(feature = "gpu")]
+                            if let Some(g) = searcher.as_mut() {
+                                g.note_placed(&tree.nodes);
+                            }
+                            trees[i] = tree;
                         }
-                        for &n in &tree.nodes {
-                            self.node[n as usize].occ += 1;
-                            taken[n as usize] = batch_stamp;
+                        if again.is_empty() {
+                            break;
                         }
-                        #[cfg(feature = "gpu")]
-                        if let Some(g) = searcher.as_mut() {
-                            g.note_placed(&tree.nodes);
-                        }
-                        trees[i] = tree;
+                        batch = again;
+                        olds = again_olds;
                     }
-                    rerouted += batch.len();
                 }
                 for s in pool.iter_mut() {
                     if let Some(s) = s.get_mut().expect("a router thread panicked") {
@@ -971,7 +1013,7 @@ impl<'a> Router<'a> {
             }
             #[cfg(feature = "gpu")]
             if let (true, Some(g)) = (trace, &searcher) {
-                eprintln!("route: GPU batches so far {:.2} s, {} launches ({:.2} s uploading, {:.2} s in kernels, {:.2} s reading trees)", g.busy_s, g.batches, g.phase_s[0], g.phase_s[1], g.phase_s[2]);
+                eprintln!("route: GPU batches so far {:.2} s, {} launches ({:.2} s uploading, {:.2} s in kernels, {:.2} s reading trees), {} slots given up", g.busy_s, g.batches, g.phase_s[0], g.phase_s[1], g.phase_s[2], g.gave_up);
             }
             if overused.is_empty() {
                 let analysis = if self.repair {
@@ -1024,18 +1066,27 @@ impl<'a> Router<'a> {
             let mut k = 0;
             let mut todo: Vec<(f32, usize, Vec<bool>)> = Vec::new();
             for (i, net) in nets.iter().enumerate() {
-                let c: Vec<f32> = arcs[k..k + net.sinks.len()].iter().map(|a| analysis.criticality(a)).collect();
+                let c: Vec<f32> = arcs[k..k + net.sinks.len()]
+                    .iter()
+                    .map(|a| analysis.criticality(a))
+                    .collect();
                 k += net.sinks.len();
                 let worst = c.iter().copied().fold(0.0, f32::max);
                 if worst >= REPAIR_CRITICALITY && net.sinks.len() <= WIDE_NET {
-                    todo.push((worst, i, c.iter().map(|&c| c >= REPAIR_CRITICALITY).collect()));
+                    todo.push((
+                        worst,
+                        i,
+                        c.iter().map(|&c| c >= REPAIR_CRITICALITY).collect(),
+                    ));
                 }
             }
             todo.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
             let mut improved = false;
             for (_, i, critical) in todo.into_iter().take(REPAIR_NETS) {
                 tried += 1;
-                if let Some(a) = self.repair_net(s, nets, trees, crit, i, &critical, analysis.critical)? {
+                if let Some(a) =
+                    self.repair_net(s, nets, trees, crit, i, &critical, analysis.critical)?
+                {
                     analysis = a;
                     improved = true;
                     kept += 1;
@@ -1098,7 +1149,13 @@ impl<'a> Router<'a> {
         let mut legal = false;
         for _ in 0..REPAIR_DISPLACED_ROUNDS {
             let displaced: Vec<usize> = (0..nets.len())
-                .filter(|&j| j != i && trees[j].nodes.iter().any(|&n| self.node[n as usize].occ > 1))
+                .filter(|&j| {
+                    j != i
+                        && trees[j]
+                            .nodes
+                            .iter()
+                            .any(|&n| self.node[n as usize].occ > 1)
+                })
                 .collect();
             if displaced.is_empty() {
                 legal = true;
@@ -1416,8 +1473,13 @@ impl<'a> Router<'a> {
                 }
                 let m = e.dst as usize;
                 let g2 = g + match self.steal {
-                    None => (1.0 - crit) * self.node_cost(e.dst) + crit * self.node[m].delay / DELAY_UNIT,
-                    Some(p) => self.node[m].delay / DELAY_UNIT + if self.node[m].occ > 0 { p } else { 0.0 },
+                    None => {
+                        (1.0 - crit) * self.node_cost(e.dst)
+                            + crit * self.node[m].delay / DELAY_UNIT
+                    }
+                    Some(p) => {
+                        self.node[m].delay / DELAY_UNIT + if self.node[m].occ > 0 { p } else { 0.0 }
+                    }
                 };
                 let v = &mut s.visit[m];
                 if v.stamp == gen && v.cost <= g2 {
@@ -1682,7 +1744,11 @@ mod tests {
         let (w, h) = (12u32, 12u32);
         let db = grid(w, h);
         let design = mixed_nets(&db, w, h);
-        let route = |batching: Batching, bucketed: bool, schedule: Schedule, threads: usize| -> Vec<Vec<NodeId>> {
+        let route = |batching: Batching,
+                     bucketed: bool,
+                     schedule: Schedule,
+                     threads: usize|
+         -> Vec<Vec<NodeId>> {
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
                 .build()
@@ -1787,27 +1853,28 @@ mod tests {
         let (w, h) = (12u32, 12u32);
         let db = grid(w, h);
         let design = mixed_nets(&db, w, h);
-        let route = |gpu: bool, schedule: Schedule, group: usize| -> Option<(Vec<Vec<NodeId>>, usize)> {
-            let mut router = Router::new(&db, &design);
-            router.batching = Batching::Fixed(8);
-            router.batch_iterations = usize::MAX;
-            router.bucketed = true;
-            router.schedule = schedule;
-            router.sink_group = group;
-            if gpu {
-                router.gpu_runtime = Some(gpu::Runtime::Cuda);
-            }
-            match router.route(&design.nets) {
-                Ok((trees, iterations, _)) => {
-                    Some((trees.into_iter().map(|t| t.nodes).collect(), iterations))
+        let route =
+            |gpu: bool, schedule: Schedule, group: usize| -> Option<(Vec<Vec<NodeId>>, usize)> {
+                let mut router = Router::new(&db, &design);
+                router.batching = Batching::Fixed(8);
+                router.batch_iterations = usize::MAX;
+                router.bucketed = true;
+                router.schedule = schedule;
+                router.sink_group = group;
+                if gpu {
+                    router.gpu_runtime = Some(gpu::Runtime::Cuda);
                 }
-                Err(e) if gpu => {
-                    eprintln!("no GPU to test on: {e}");
-                    None
+                match router.route(&design.nets) {
+                    Ok((trees, iterations, _)) => {
+                        Some((trees.into_iter().map(|t| t.nodes).collect(), iterations))
+                    }
+                    Err(e) if gpu => {
+                        eprintln!("no GPU to test on: {e}");
+                        None
+                    }
+                    Err(e) => panic!("{e}"),
                 }
-                Err(e) => panic!("{e}"),
-            }
-        };
+            };
         for (schedule, group) in [(Schedule::Order, 8), (Schedule::Overuse, 40)] {
             let cpu = route(false, schedule, group).unwrap();
             eprintln!("{schedule:?}, sink group {group}: {} iterations", cpu.1);
@@ -1817,4 +1884,3 @@ mod tests {
         }
     }
 }
-

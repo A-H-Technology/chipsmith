@@ -623,7 +623,10 @@ mod tests {
         };
         let t = g.analyse(&[arc(aq, xa), arc(xo, xc), arc(xo, bd)]);
         // The LUT arc is input D's; the routing carries the rest of A's.
-        assert_eq!(t.critical, TCO + 100.0 + 150.0 + LUT_INPUT_IC + 100.0 + 84.0 + TSU);
+        assert_eq!(
+            t.critical,
+            TCO + 100.0 + 150.0 + LUT_INPUT_IC + 100.0 + 84.0 + TSU
+        );
     }
 
     /// reg a -> LUT x (DATAA) -> reg b, and reg a -> reg c directly.
@@ -684,6 +687,9 @@ mod tests {
         assert_eq!(a, 414.0 + LUT_INPUT_IC);
         let b = lut_arc("DATAB", "COUT", 3).unwrap() + lut_pin_extra(1);
         assert_eq!(b, 393.0 + LUT_INPUT_IC);
-        assert_eq!(register_setup("SDATA").unwrap() + lut_pin_extra(2), 366.0 + TSU);
+        assert_eq!(
+            register_setup("SDATA").unwrap() + lut_pin_extra(2),
+            366.0 + TSU
+        );
     }
 }
