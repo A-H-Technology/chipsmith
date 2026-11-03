@@ -164,15 +164,6 @@ pub fn export(db: &ChipDb, routed: &Routed, pins: &BTreeMap<String, String>, per
                 lut = Some(l);
             }
         }
-        if g.ty == "RAM32M" {
-            // Vivado writes a RAM32M's bit 0 (RAMA, the 5LUT) from the
-            // slice's <L>I pin and bit 1 from <L>X; the decoder reads them
-            // the other way round. Swapped here so each net stays on the
-            // site pin it is routed to.
-            for p in g.ports.iter_mut().filter(|p| p.name.starts_with("DI") && p.sig.len() == 2) {
-                p.sig.swap(0, 1);
-            }
-        }
         cells.push(C {
             name: c.name.clone(),
             g,

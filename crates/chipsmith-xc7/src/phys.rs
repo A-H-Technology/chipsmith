@@ -291,8 +291,13 @@ impl Builder<'_> {
             (Kind::Lut { dram: true }, Bel::Lut6(k) | Bel::Lut5(k)) => {
                 let six = matches!(bel, Bel::Lut6(_));
                 match port {
-                    "DI" if six && k == 3 => pin("DI".into()),
-                    "DI" if six => pin(format!("{}I", LETTERS[k])),
+                    // The 5LUT's half (a RAM32M's bit 0) is written from
+                    // <L>I (D's from DI), the 6LUT's from <L>X: Vivado's
+                    // RAM32M, checked by importing chipsmith's routing into
+                    // it (`crate::vivado`), whose bitstream then sets the
+                    // same bits.
+                    "DI" if !six && k == 3 => pin("DI".into()),
+                    "DI" if !six => pin(format!("{}I", LETTERS[k])),
                     "DI" => pin(format!("{}X", LETTERS[k])),
                     "WE" => pin("WE".into()),
                     "CLK" => pin("CLK".into()),

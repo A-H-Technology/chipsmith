@@ -610,7 +610,7 @@ pub fn decode_routed(
                     a.push(pin(&d, format!("{}{i}", LETTERS[k]))?);
                 }
             }
-            // Each 6LUT's data: its own pin, or the next LUT's data.
+            // Each LUT's DI1: its own <L>I pin, or the next LUT's DI1.
             let mut di1 = [SigBit::ZERO; 4];
             di1[3] = pin(&d, "DI".into())?;
             for k in (0..3).rev() {
@@ -621,7 +621,9 @@ pub fn decode_routed(
                 };
             }
             let di = |d: &Decoder, k: usize| -> Result<[SigBit; 2]> {
-                Ok([pin(d, format!("{}X", LETTERS[k]))?, di1[k]])
+                // Bit 0 (the 5LUT's half) from DI1, bit 1 from <L>X, as
+                // Vivado's RAM32M has them.
+                Ok([di1[k], pin(d, format!("{}X", LETTERS[k]))?])
             };
             let we = pin(&d, if h.we_ce { "CE" } else { "WE" }.into())?;
             let ram = Ram32m {
