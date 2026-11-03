@@ -173,19 +173,28 @@ fn design_with(
     );
     // Through the blocks: co-simulated.
     if blocks_in(&s.netlist) > 0 {
-        let sim = support::cosim(
+        // The CPUs' KEY[0] resets them (examples/*/src/top.v).
+        let cpu = matches!(name, "femtorv32" | "picorv32");
+        let buttons: &[(&str, usize)] = if cpu { &[("KEY", 0)] } else { &[] };
+        let sim = support::cosim_with(
             &s.dir,
             &s.rtl,
             s.stages.refined.as_ref().unwrap(),
             s.stages.cells.as_ref().unwrap(),
             COSIM_CYCLES,
             1,
+            buttons,
         )
         .unwrap_or_else(|e| panic!("{name}: co-simulation: {e}"));
         eprintln!(
             "{name}: co-simulated {} cycles, {} output bits compared",
             sim.cycles, sim.compared
         );
+        // A CPU's LEDs (27 bits) are compared once its program runs: most
+        // cycles, not the few around a reset.
+        if cpu {
+            assert!(sim.compared > 20 * COSIM_CYCLES as u64, "{name}: {sim:?}");
+        }
     }
     let ours = pack(&s.dir, "chipsmith", &s.netlist);
     if compare {
@@ -444,11 +453,9 @@ fn memory_selftests_io_registers() {
             .cells
             .iter()
             .map(|c| match &c.kind {
-                CellKind::Other(g) if g.ty.starts_with("CY2_") => g
-                    .params
-                    .keys()
-                    .filter(|k| k.ends_with("_REGISTER"))
-                    .count(),
+                CellKind::Other(g) if g.ty.starts_with("CY2_") => {
+                    g.params.keys().filter(|k| k.ends_with("_REGISTER")).count()
+                }
                 _ => 0,
             })
             .sum();
@@ -737,6 +744,53 @@ fn sha256() {
 #[test]
 fn femtorv32() {
     design("femtorv32", "top", &example("femtorv32"), true);
+}
+
+/// The CPUs' co-simulation has teeth once they run: two pins of a register
+/// file block's read address swapped (another register read), and their
+/// LEDs differ.
+#[test]
+fn cpu_cosim_catches_a_wrong_register() {
+    use chipsmith_netlist::SigBit;
+    for name in ["femtorv32", "picorv32"] {
+        let s = synthesize(&format!("{name}-mutated"), "top", &example(name));
+        let mut d = s.stages.cells.clone().unwrap();
+        let g = d.modules[0]
+            .cells
+            .iter_mut()
+            .find_map(|c| match &mut c.kind {
+                CellKind::Other(g) if g.ty == "CY2_M4K" => Some(g),
+                _ => None,
+            })
+            .expect("a register file block");
+        let a = &mut g.ports.iter_mut().find(|p| p.name == "B_ADDR").unwrap().sig;
+        // The two lowest address pins on distinct nets.
+        let nets: Vec<usize> = (0..a.len())
+            .filter(|&i| matches!(a[i], SigBit::Net(_)))
+            .collect();
+        let j = nets[1..]
+            .iter()
+            .copied()
+            .find(|&j| a[j] != a[nets[0]])
+            .expect("two address nets");
+        a.swap(nets[0], j);
+        let dir = scratch(&format!("{name}-mutated-sim"));
+        match support::cosim_with(
+            &dir,
+            &s.rtl,
+            s.stages.refined.as_ref().unwrap(),
+            &d,
+            COSIM_CYCLES,
+            1,
+            &[("KEY", 0)],
+        ) {
+            Ok(r) => panic!("{name}: a wrong register read not caught ({r:?})"),
+            Err(e) => {
+                assert!(e.starts_with("MISMATCH"), "{name}: {e}");
+                eprintln!("{name}, read address pins swapped: caught ({e})");
+            }
+        }
+    }
 }
 
 #[test]

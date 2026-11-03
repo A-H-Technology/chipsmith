@@ -1191,7 +1191,15 @@ fn equiv(
         width > 18 && !constant
     });
     if front_ends && wide {
-        match equiv_matched(dir, &format!("{name}_icells"), gold, gate, reference, words, true) {
+        match equiv_matched(
+            dir,
+            &format!("{name}_icells"),
+            gold,
+            gate,
+            reference,
+            words,
+            true,
+        ) {
             Ok(n) => return Ok(n),
             Err(e) => eprintln!(
                 "{}: {name}: with -icells: {}; again without",
@@ -1727,9 +1735,10 @@ fn name_inverted(refined: &mut Module, gate: &Module) {
         );
         // Kept: nothing reads it, and the proof's `opt_clean` would sweep it.
         let mut named = Wire::new(w.name.clone(), vec![y]);
-        named
-            .attributes
-            .insert(chipsmith_netlist::attr::KEEP.into(), chipsmith_netlist::ParamValue::bool(true));
+        named.attributes.insert(
+            chipsmith_netlist::attr::KEEP.into(),
+            chipsmith_netlist::ParamValue::bool(true),
+        );
         refined.wires.push(named);
     }
 }
@@ -2261,7 +2270,9 @@ module CY2_M4K (input CLK, input CLK1, input ENA0, input ENA1, input CLR0, input
   wire [11:0] ab = B_ADDR >> (12 - abits(PB));
   reg mem [0:4607];
   integer i;
-  initial for (i = 0; i < 4608; i = i + 1) mem[i] = INIT[i];
+  // An undefined INIT bit (a memory with no initial contents) is 0 in the
+  // device, as the RTL's memories are in the co-simulation.
+  initial for (i = 0; i < 4608; i = i + 1) mem[i] = INIT[i] === 1'bx ? 1'b0 : INIT[i];
   // Port A: writes (but a read-only simple dual port), reads but in
   // simple dual port; each read sees its own port's write (new data, a
   // byte left out undefined) and the other's old data.
@@ -2322,6 +2333,12 @@ pub struct Cosim {
 /// compared just after it, `cycles` times. An output bit the RTL leaves
 /// x isn't compared. Fails with the seed and the cycle of the first
 /// difference.
+///
+/// The RTL's registers and memories without an initial value start at 0,
+/// as the device powers them up: left x, a CPU's register file (x0 is never
+/// written) or a register loaded through an x enable at the first edge
+/// keeps the outputs x for good, and nothing is compared. The RTL's own x
+/// (don't-care) constants stay.
 pub fn cosim(
     dir: &Path,
     rtl: &Path,
@@ -2329,6 +2346,22 @@ pub fn cosim(
     gate: &Design,
     cycles: usize,
     seed: u32,
+) -> Result<Cosim, String> {
+    cosim_with(dir, rtl, refined, gate, cycles, seed, &[])
+}
+
+/// [`cosim`], with `buttons` (input port, bit) as active-low push buttons
+/// after the first 16 cycles: released (1), pressed one cycle in 256. A
+/// CPU held in reset by a button drawn at random every cycle never runs:
+/// femtorv32's and picorv32's reset counts 15 released cycles in a row.
+pub fn cosim_with(
+    dir: &Path,
+    rtl: &Path,
+    refined: &Design,
+    gate: &Design,
+    cycles: usize,
+    seed: u32,
+    buttons: &[(&str, usize)],
 ) -> Result<Cosim, String> {
     use chipsmith_netlist::Dir;
     let _ = refined;
@@ -2346,7 +2379,9 @@ pub fn cosim(
         dir,
         "cosim_netlists",
         &format!(
-            "read_json {rtl}\nhierarchy -top top\nproc\nmemory_collect\nopt_clean\nrename top gold\n\
+            "read_json {rtl}\nhierarchy -top top\nproc\nmemory_collect\n\
+             setundef -zero -init -params t:$dff t:$adff t:$aldff t:$dffsr t:$dlatch t:$mem_v2\n\
+             opt_clean\nrename top gold\n\
              write_verilog -noattr {gold_v}\ndesign -reset\n\
              read_verilog -lib {lib}\nread_json {gate}\nread_verilog -overwrite {sim}\nhierarchy -top top\nproc\nflatten\n\
              opt_clean\nrename top gate\nwrite_verilog -noattr {gate_v}\n",
@@ -2411,14 +2446,24 @@ pub fn cosim(
             let words = w.div_ceil(32);
             let parts: Vec<String> = (0..words).map(|_| "$random(seed)".to_string()).collect();
             let top = w - 1;
+            let held: String = buttons
+                .iter()
+                .filter(|(p, _)| p == n)
+                .map(|(_, b)| format!("    if (cyc >= 16) {n}[{b}] = ($random(seed) & 255) != 0;\n"))
+                .collect();
             format!(
                 "    if (cyc < 16) case ((cyc + {k}) % 4)\n      0: {n} = {{{w}{{1'b1}}}};\n      1: {n} = 0;\n      \
                  2: begin {n} = 0; {n}[{top}] = 1'b1; end\n      3: begin {n} = {{{w}{{1'b1}}}}; {n}[{top}] = 1'b0; end\n    endcase\n    \
-                 else {n} = {{{}}};\n",
+                 else {n} = {{{}}};\n{held}",
                 parts.join(", ")
             )
         })
         .collect();
+    for (p, b) in buttons {
+        if !inputs.iter().any(|(n, w)| n == p && b < w) {
+            return Err(format!("co-simulation: no input bit {p}[{b}] to hold"));
+        }
+    }
     tb += &format!("  initial begin\n{draw}  end\n");
     let mut check = String::new();
     for (n, w) in &outputs {

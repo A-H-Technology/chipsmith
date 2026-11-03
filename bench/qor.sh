@@ -29,6 +29,11 @@ if [[ -z "${CHIPSMITH_CYCLONE2_DB:-}" ]]; then
     exec nix develop "$root" --command "$self" "$@"
 fi
 re=$(realpath "${CYCLONE2_RE:-/pool/dev/cyclone2-re}")
+# A cram older than cyclone2-re's staleness check (b5eb9e7) doesn't know
+# source-digest; a newer one refuses to run when its checkout's sources
+# changed since it was built. Either way: not the export of this checkout.
+"$re/tools/cram/target/release/cram" source-digest > /dev/null \
+    || { echo "$re/tools/cram/target/release/cram: not built from that checkout's tools/cram; rebuild it" >&2; exit 1; }
 CS=$(realpath "${CS:-$root/target/release/chipsmith}")
 out=$(realpath -m "$1")
 shift
