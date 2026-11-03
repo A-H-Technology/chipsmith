@@ -225,16 +225,7 @@ impl Timing for LeTiming<'_> {
                 } else {
                     let ((x0, y0), (x1, y1)) =
                         (self.pos(centres, c.from_cell), self.pos(centres, c.to_cell));
-                    let (dx, dy) = ((x0 - x1).abs(), (y0 - y1).abs());
-                    c.pin
-                        + if dx < 0.5 && dy < 0.5 {
-                            timing::wire_delay("LOCAL_LINE")
-                        } else {
-                            timing::wire_delay("LE_BUFFER")
-                                + timing::wire_delay("LOCAL_INTERCONNECT")
-                                + dx as Ps * timing::wire_delay("R4") / 4.0
-                                + dy as Ps * timing::wire_delay("C4") / 4.0
-                        }
+                    c.pin + hop_delay((x0 - x1).abs(), (y0 - y1).abs())
                 };
                 Arc {
                     from: c.from,
@@ -260,11 +251,60 @@ impl Timing for LeTiming<'_> {
 /// control set rather than open one.
 const OPEN_PENALTY: f32 = 1.5;
 
+/// How far, in bins, a carry chain goes from its target to sit beside a
+/// chain it is joined to.
+const ALIGN_REACH: f32 = 4.0;
+
+/// Pairs of carry chains joined by connections (an adder into an adder,
+/// bit k into bit k), each pair once: how many connections join them and
+/// how many LABs further down the chain the loads' LEs sit than their
+/// drivers' (the commonest), so that rows match when the second chain's
+/// head is that many LABs above the first's.
+fn chain_links(d: &Design) -> HashMap<(usize, usize), (u32, i32)> {
+    let mut offsets: HashMap<(usize, usize), HashMap<i32, u32>> = HashMap::default();
+    for c in d.conns.iter().filter(|c| !c.internal) {
+        let (Some(a), Some(b)) = (d.le_of[c.from_cell], d.le_of[c.to_cell]) else {
+            continue;
+        };
+        let (Some(ca), Some(cb)) = (d.chain_of[a], d.chain_of[b]) else {
+            continue;
+        };
+        if ca == cb {
+            continue;
+        }
+        let at = |chain: usize, le: usize| {
+            (d.chains[chain].iter().position(|&x| x == le).expect("in its chain") / LES_PER_LAB) as i32
+        };
+        let (key, off) = if ca < cb {
+            ((ca, cb), at(cb, b) - at(ca, a))
+        } else {
+            ((cb, ca), at(ca, a) - at(cb, b))
+        };
+        *offsets.entry(key).or_default().entry(off).or_default() += 1;
+    }
+    offsets
+        .into_iter()
+        .map(|(k, m)| {
+            let n = m.values().sum();
+            let (&off, _) = m
+                .iter()
+                .max_by_key(|&(&o, &c)| (c, std::cmp::Reverse(o.abs()), o))
+                .expect("a connection");
+            (k, (n, off))
+        })
+        .collect()
+}
+
 /// Put every object of `lp` into `state` near its centre in `centres`:
 /// blocks, chains longest first, then registers, then the other LEs, each
 /// into the LAB nearest its target (plus `OPEN_PENALTY` for a register
 /// opening a LAB) that has a free slot and that `lab_check` accepts.
 /// Errs naming what found no place.
+// TODO(qor3): measurement knob, removed once the default is picked.
+fn chain_align() -> bool {
+    std::env::var("CHIPSMITH_PLACE_CHAIN_ALIGN").as_deref() != Ok("0")
+}
+
 fn legalize(state: &mut State, lp: &LeProblem, centres: &[Pos]) -> std::result::Result<(), String> {
     let d = state.design;
     let grid = state.grid;
@@ -285,6 +325,17 @@ fn legalize(state: &mut State, lp: &LeProblem, centres: &[Pos]) -> std::result::
         (x, y + chain_dy(d.chains[c].len(), 0))
     };
 
+    let links = if chain_align() { chain_links(d) } else { HashMap::default() };
+    // Each chain's partners, most connections first: (partner, connections,
+    // how many LABs the partner's head sits above this one's).
+    let mut partners: Vec<Vec<(usize, u32, i32)>> = vec![Vec::new(); d.chains.len()];
+    for (&(a, b), &(n, off)) in &links {
+        partners[a].push((b, n, off));
+        partners[b].push((a, n, -off));
+    }
+    for p in &mut partners {
+        p.sort_by_key(|&(c, n, _)| (std::cmp::Reverse(n), c));
+    }
     let mut order: Vec<usize> = (0..lp.things.len()).collect();
     let key = |o: usize| -> (u8, i64, i64, i64) {
         let (x, y) = centres[o];
@@ -320,8 +371,29 @@ fn legalize(state: &mut State, lp: &LeProblem, centres: &[Pos]) -> std::result::
                 let (tx, ty) = head(o, c);
                 let (bx, by) = (tx.floor() as i32, ty.floor() as i32);
                 let mut placed = false;
-                'search: for &(dx, dy) in &spiral {
-                    for top in labs_in(bx + dx, by + dy) {
+                // Beside a chain already placed that this one feeds or
+                // reads, rows matched, so each bit's connection is a direct
+                // link; else the free LABs nearest the target.
+                let mut beside: Vec<usize> = Vec::new();
+                for &(p, _, off) in &partners[c] {
+                    let (pl, _) = state.pos[d.chains[p][0]];
+                    if pl == usize::MAX {
+                        continue;
+                    }
+                    let (px, py) = grid.xy[pl];
+                    for x in [px - 2, px + 2] {
+                        let Some(lab) = grid.lab_at((x, py - off)) else {
+                            continue;
+                        };
+                        let (lx, ly) = unit(grid.xy[lab]);
+                        if (lx - tx).abs() + (ly - ty).abs() <= ALIGN_REACH {
+                            beside.push(lab);
+                        }
+                    }
+                }
+                let spiral_labs = spiral.iter().flat_map(|&(dx, dy)| labs_in(bx + dx, by + dy));
+                'search: for top in beside.into_iter().chain(spiral_labs) {
+                    {
                         let Some(labs) = grid.chain_labs(top, chain.len()) else {
                             continue;
                         };

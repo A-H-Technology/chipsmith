@@ -350,6 +350,10 @@ struct Design {
     driver_le: Vec<Option<u32>>,
     /// Every driver-to-load connection, for timing.
     conns: Vec<Conn>,
+    /// The routed connections (not `internal`) each LE's and each block's
+    /// cells are on, for the anneal's timing cost.
+    conns_of_le: Vec<Vec<u32>>,
+    conns_of_block: Vec<Vec<u32>>,
     timing: timing::Graph,
 }
 
@@ -879,6 +883,20 @@ fn read_design(json: &Value) -> Result<Design> {
         .iter()
         .map(|d| d.and_then(|c| le_of[c]).map(|le| le as u32))
         .collect();
+    let mut conns_of_le: Vec<Vec<u32>> = vec![Vec::new(); les.len()];
+    let mut conns_of_block: Vec<Vec<u32>> = vec![Vec::new(); blocks.len()];
+    for (i, c) in conns.iter().enumerate().filter(|(_, c)| !c.internal) {
+        for cell in [c.from_cell, c.to_cell] {
+            let list = match (le_of[cell], block_of[cell]) {
+                (Some(le), _) => &mut conns_of_le[le],
+                (_, Some(r)) => &mut conns_of_block[r],
+                _ => continue,
+            };
+            if list.last() != Some(&(i as u32)) {
+                list.push(i as u32);
+            }
+        }
+    }
 
     Ok(Design {
         cells,
@@ -895,6 +913,8 @@ fn read_design(json: &Value) -> Result<Design> {
         driver,
         driver_le,
         conns,
+        conns_of_le,
+        conns_of_block,
         timing,
     })
 }
@@ -1379,6 +1399,14 @@ struct State<'a> {
     /// Each net's bounding box and weighted wirelength.
     bbox: Vec<Bbox>,
     net_cost: Vec<f32>,
+    /// Each connection's weight for its delay (`TIMING_COST` times its
+    /// criticality to `CRIT_EXP`) and weighted delay; the move being
+    /// evaluated's new weighted delays, and the generation that marks a
+    /// connection already among them.
+    conn_weight: Vec<f32>,
+    conn_cost: Vec<f32>,
+    conn_new: Vec<(u32, f32)>,
+    conn_gen: Vec<u32>,
     /// The move being evaluated: the boxes it changed, as they were, so a
     /// rejected move is undone without recomputing them; and nets that
     /// need a full recompute (`touched_gen` marks a net already saved).
@@ -1402,7 +1430,8 @@ impl<'a> State<'a> {
     }
 
     fn total(&self) -> f64 {
-        self.net_cost.iter().map(|&c| c as f64).sum()
+        self.net_cost.iter().map(|&c| c as f64).sum::<f64>()
+            + self.conn_cost.iter().map(|&c| c as f64).sum::<f64>()
     }
 
     /// Unweighted wirelength, for reporting.
@@ -1419,6 +1448,7 @@ impl<'a> State<'a> {
         self.generation += 1;
         self.saved.clear();
         self.dirty.clear();
+        self.conn_new.clear();
         let g = self.generation;
         match undo {
             Undo::Les(moved) => {
@@ -1458,7 +1488,29 @@ impl<'a> State<'a> {
             .iter()
             .map(|&(n, _)| self.net_cost[n] as f64)
             .sum();
-        after - before
+        after - before + self.conn_delta(undo, g)
+    }
+
+    /// The change in weighted delay of the connections a move touched,
+    /// their new values kept in `conn_new` for `commit_cost`.
+    fn conn_delta(&mut self, undo: &Undo, g: u32) -> f64 {
+        let d = self.design;
+        let lists: Vec<&[u32]> = match undo {
+            Undo::Les(moved) => moved.iter().map(|&(le, _, _)| &d.conns_of_le[le][..]).collect(),
+            Undo::Blocks(moved) => moved.iter().map(|&(r, _)| &d.conns_of_block[r][..]).collect(),
+        };
+        let mut delta = 0.0f64;
+        for &i in lists.into_iter().flatten() {
+            let i = i as usize;
+            if self.conn_weight[i] == 0.0 || self.conn_gen[i] == g {
+                continue;
+            }
+            self.conn_gen[i] = g;
+            let new = self.conn_weight[i] * self.conn_delay(&d.conns[i]);
+            delta += (new - self.conn_cost[i]) as f64;
+            self.conn_new.push((i as u32, new));
+        }
+        delta
     }
 
     fn net_moved(&mut self, n: usize, old: Xy, new: Xy, g: u32) {
@@ -1484,6 +1536,9 @@ impl<'a> State<'a> {
             let n = self.saved[i].0;
             self.net_cost[n] = self.cost(n);
         }
+        for &(i, c) in &self.conn_new {
+            self.conn_cost[i as usize] = c;
+        }
     }
 
     /// A connection's delay as the placement stands: nothing inside an LE
@@ -1496,14 +1551,7 @@ impl<'a> State<'a> {
         }
         let ((x0, y0), (x1, y1)) = (self.cell_xy(c.from_cell), self.cell_xy(c.to_cell));
         let (dx, dy) = ((x0 - x1).abs() / 2, (y0 - y1).abs());
-        if dx == 0 && dy == 0 {
-            return c.pin + timing::wire_delay("LOCAL_LINE");
-        }
-        c.pin
-            + timing::wire_delay("LE_BUFFER")
-            + timing::wire_delay("LOCAL_INTERCONNECT")
-            + dx as Ps * timing::wire_delay("R4") / 4.0
-            + dy as Ps * timing::wire_delay("C4") / 4.0
+        c.pin + hop_delay(dx as f32, dy as f32)
     }
 
     /// Re-run timing on the current placement and reweight every net by
@@ -1521,15 +1569,19 @@ impl<'a> State<'a> {
             .collect();
         let analysis = d.timing.analyse(&arcs);
         self.weight.iter_mut().for_each(|w| *w = 1.0);
-        for (c, a) in d.conns.iter().zip(&arcs) {
+        let timing_cost = timing_cost();
+        for (i, (c, a)) in d.conns.iter().zip(&arcs).enumerate() {
+            let crit = analysis.criticality(a).powf(CRIT_EXP);
             if let Some(n) = c.net {
-                let w = 1.0 + TIMING_WEIGHT * analysis.criticality(a).powf(CRIT_EXP);
+                let w = 1.0 + TIMING_WEIGHT * crit;
                 self.weight[n] = self.weight[n].max(w);
             }
+            self.conn_weight[i] = if c.internal { 0.0 } else { timing_cost * crit };
         }
         for n in 0..d.nets.len() {
             self.net_cost[n] = self.cost(n);
         }
+        self.recompute_conn_costs();
         analysis.critical
     }
 
@@ -1704,6 +1756,10 @@ impl<'a> State<'a> {
             weight: vec![1.0; design.nets.len()],
             bbox: vec![Bbox::default(); design.nets.len()],
             net_cost: vec![0.0; design.nets.len()],
+            conn_weight: vec![0.0; design.conns.len()],
+            conn_cost: vec![0.0; design.conns.len()],
+            conn_new: Vec::new(),
+            conn_gen: vec![0; design.conns.len()],
             saved: Vec::new(),
             dirty: Vec::new(),
             touched_gen: vec![0; design.nets.len()],
@@ -1726,6 +1782,17 @@ impl<'a> State<'a> {
             self.bbox[n] = self.compute_bbox(n);
             self.net_cost[n] = self.cost(n);
         }
+        self.recompute_conn_costs();
+    }
+
+    fn recompute_conn_costs(&mut self) {
+        for (i, c) in self.design.conns.iter().enumerate() {
+            self.conn_cost[i] = if self.conn_weight[i] > 0.0 {
+                self.conn_weight[i] * self.conn_delay(c)
+            } else {
+                0.0
+            };
+        }
     }
 
     /// Try moving `le` (with its chain, if any) to `lab`/`k`. Returns the
@@ -1736,23 +1803,40 @@ impl<'a> State<'a> {
             let chain = &d.chains[c];
             let labs = self.grid.chain_labs(lab, chain.len())?;
             let target = |i: usize| (labs[i / LES_PER_LAB], i % LES_PER_LAB);
-            // Only into slots that are free or the chain's own.
+            // Into slots that are free, the chain's own, or held by LEs of
+            // no chain, which take the slots the chain leaves: in a full
+            // region a chain otherwise never moves, and stays wherever
+            // legalisation put it rather than beside the chains it feeds.
+            let mut evicted: Vec<usize> = Vec::new();
             for i in 0..chain.len() {
                 let (l, kk) = target(i);
-                if self.slots[l][kk].is_some_and(|o| d.chain_of[o] != Some(c)) {
-                    return None;
+                match self.slots[l][kk] {
+                    Some(o) if d.chain_of[o] == Some(c) => {}
+                    Some(o) if d.chain_of[o].is_none() && chain_swaps() => evicted.push(o),
+                    Some(_) => return None,
+                    None => {}
                 }
             }
             let moved: Vec<(usize, usize, usize)> = chain
                 .iter()
+                .chain(&evicted)
                 .map(|&x| (x, self.pos[x].0, self.pos[x].1))
                 .collect();
-            for &x in chain {
-                let (l, kk) = self.pos[x];
+            let targets: Vec<(usize, usize)> = (0..chain.len()).map(target).collect();
+            let vacated: Vec<(usize, usize)> = chain
+                .iter()
+                .map(|&x| self.pos[x])
+                .filter(|p| !targets.contains(p))
+                .collect();
+            for &(_, l, kk) in &moved {
                 self.slots[l][kk] = None;
             }
             for (i, &x) in chain.iter().enumerate() {
                 let (l, kk) = target(i);
+                self.put(x, l, kk);
+            }
+            // As many slots free up as the chain takes from others.
+            for (&x, &(l, kk)) in evicted.iter().zip(&vacated) {
                 self.put(x, l, kk);
             }
             let mut touched: Vec<usize> = moved.iter().map(|&(_, l, _)| l).chain(labs).collect();
@@ -2415,6 +2499,55 @@ impl Legalizer for LabLegalizer<'_, '_> {
         self.state.reweight();
         weights.copy_from_slice(&self.state.weight);
     }
+}
+
+/// The routing between two LEs `dx` LAB columns and `dy` rows apart (less
+/// the input pin): the LAB's own feedback line within a LAB; the LE buffer
+/// and the destination's LAB line, plus the wires between. Into the LAB
+/// beside it on the same row an LE drives that LAB's lines directly (the
+/// direct link); anything further takes a whole R4 per 4 columns and a C4
+/// per 4 rows begun, the way the router has to. Charging a quarter wire a
+/// LAB instead made a carry chain one row off its neighbour cost 71 ps
+/// where the router pays a C4 (285 ps), so adders feeding adders weren't
+/// kept side by side.
+fn hop_delay(dx: f32, dy: f32) -> Ps {
+    if dx < 0.5 && dy < 0.5 {
+        return timing::wire_delay("LOCAL_LINE");
+    }
+    let base = timing::wire_delay("LE_BUFFER") + timing::wire_delay("LOCAL_INTERCONNECT");
+    if !hop_steps() {
+        return base + dx * timing::wire_delay("R4") / 4.0 + dy * timing::wire_delay("C4") / 4.0;
+    }
+    let (dx, dy) = (dx.round(), dy.round());
+    if dx <= 1.0 && dy == 0.0 {
+        return base;
+    }
+    base + (dx / 4.0).ceil() * timing::wire_delay("R4") + (dy / 4.0).ceil() * timing::wire_delay("C4")
+}
+
+// TODO(qor3): measurement knobs, removed once the defaults are picked.
+fn hop_steps() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CHIPSMITH_PLACE_HOPS").as_deref() != Ok("0"))
+}
+
+/// How much a fully critical connection's modelled delay counts in the
+/// anneal's cost, per ps, next to the timing-weighted wirelength: what lets
+/// it see that a carry chain beside the one it feeds (direct links) is
+/// faster than one below it, which is less wirelength.
+fn timing_cost() -> f32 {
+    static V: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("CHIPSMITH_PLACE_TIMING_COST")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.03)
+    })
+}
+
+fn chain_swaps() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CHIPSMITH_PLACE_CHAIN_SWAP").as_deref() != Ok("0"))
 }
 
 /// How much more a fully critical net's wirelength counts than an uncritical
