@@ -35,7 +35,7 @@
 //! Constants: each sink of the constant nets is reached from the nearest
 //! GND_WIRE or VCC_WIRE (by graph hops), one routed net per source.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use anyhow::{bail, ensure, Context, Result};
 use chipsmith_route::chipdb::{ChipDb, NodeId};
@@ -184,16 +184,78 @@ enum End {
     Pin(String, String),
 }
 
-/// The 64-bit table of a k-input LUT on pins A1..Ak.
-fn expand(init: u64, k: usize) -> u64 {
-    let mask = if k == 0 { 0 } else { (1u64 << k) - 1 };
-    (0..64).fold(0, |t, j| t | ((init >> (j & mask)) & 1) << j)
+/// The 64-bit table of a LUT whose input `i` is on pin `pins[i]` (1 to 6).
+fn expand(init: u64, pins: &[usize]) -> u64 {
+    (0..64u64).fold(0, |t, j| {
+        let idx = pins.iter().enumerate().fold(0, |a, (i, &p)| a | (j >> (p - 1) & 1) << i);
+        t | ((init >> idx) & 1) << j
+    })
+}
+
+/// The pin of a logic LUT's `r`th input (from 0), fastest first: a site
+/// pin's delay falls from A1 (0.52 ns, prjxray-db's slow corner) to A6
+/// (0.005 ns). With the 5LUT in use (a pair, or a LUT5 there) A6 is tied
+/// high, so both LUTs take theirs from A5 down.
+fn lut_pin(five_used: bool, r: usize) -> usize {
+    if five_used { 5 - r } else { 6 - r }
 }
 
 struct Builder<'a> {
     db: &'a ChipDb,
     p: &'a Packed,
     sites: &'a [Option<(String, Bel)>],
+    /// The (site, letter)s whose 5LUT holds a cell.
+    five_used: HashSet<(String, usize)>,
+    /// Each (site, letter)'s logic LUT inputs (A1 = 0, ...) by rank, the
+    /// most critical first: input `i` takes the `rank[i]`th fastest pin.
+    rank: HashMap<(String, usize), Vec<usize>>,
+}
+
+impl Builder<'_> {
+    /// The pin of LUT input `i` (from 0) of the logic LUT(s) at `site`,
+    /// letter `k`.
+    fn lut_pin(&self, site: &str, k: usize, i: usize) -> usize {
+        let five = self.five_used.contains(&(site.to_string(), k));
+        let r = self.rank.get(&(site.to_string(), k)).and_then(|r| r.get(i)).copied().unwrap_or(i);
+        lut_pin(five, r)
+    }
+}
+
+/// Each slice letter's LUT inputs by rank: a pair shares its pins, so an
+/// input ranks by the more critical of its two LUTs' connections to it;
+/// ties keep the input order.
+fn ranks(d: &crate::place::Design, placement: &Placement) -> HashMap<(String, usize), Vec<usize>> {
+    let mut crit: HashMap<(String, usize), Vec<f32>> = HashMap::new();
+    for (c, cell) in d.cells.iter().enumerate() {
+        if cell.kind != (Kind::Lut { dram: false }) {
+            continue;
+        }
+        let Some((site, Bel::Lut6(k) | Bel::Lut5(k))) = &placement.sites[c] else {
+            continue;
+        };
+        let v = crit.entry((site.clone(), *k)).or_default();
+        for (port, _) in &cell.pins {
+            let Some(i) = port.strip_prefix('A').and_then(|i| i.parse::<usize>().ok()) else {
+                continue;
+            };
+            if v.len() < i {
+                v.resize(i, 0.0);
+            }
+            let x = placement.lut_criticality.get(&(c as CellId, port.clone())).copied().unwrap_or(0.0);
+            v[i - 1] = v[i - 1].max(x);
+        }
+    }
+    crit.into_iter()
+        .map(|(key, v)| {
+            let mut order: Vec<usize> = (0..v.len()).collect();
+            order.sort_by(|&a, &b| v[b].total_cmp(&v[a]).then(a.cmp(&b)));
+            let mut rank = vec![0; v.len()];
+            for (r, &i) in order.iter().enumerate() {
+                rank[i] = r;
+            }
+            (key, rank)
+        })
+        .collect()
 }
 
 impl Builder<'_> {
@@ -223,8 +285,8 @@ impl Builder<'_> {
         let pin = |name: String| Ok(End::Pin(site.to_string(), name));
         match (&cell.kind, bel) {
             (Kind::Lut { dram: false }, Bel::Lut6(k) | Bel::Lut5(k)) => {
-                let i = port.strip_prefix('A').context("a LUT input")?;
-                pin(format!("{}{i}", LETTERS[k]))
+                let i: usize = port.strip_prefix('A').and_then(|i| i.parse().ok()).context("a LUT input")?;
+                pin(format!("{}{}", LETTERS[k], self.lut_pin(site, k, i - 1)))
             }
             (Kind::Lut { dram: true }, Bel::Lut6(k) | Bel::Lut5(k)) => {
                 let six = matches!(bel, Bel::Lut6(_));
@@ -382,6 +444,16 @@ pub(crate) fn build(db: &ChipDb, p: &Packed, placement: &Placement, family: &std
         db,
         p,
         sites: &placement.sites,
+        five_used: placement
+            .sites
+            .iter()
+            .flatten()
+            .filter_map(|(site, bel)| match bel {
+                Bel::Lut5(k) => Some((site.clone(), *k)),
+                _ => None,
+            })
+            .collect(),
+        rank: ranks(d, placement),
     };
     let mut slices: BTreeMap<String, SliceConf> = BTreeMap::new();
     let slice = |slices: &mut BTreeMap<String, SliceConf>, site: &str| -> Result<()> {
@@ -471,12 +543,16 @@ pub(crate) fn build(db: &ChipDb, p: &Packed, placement: &Placement, family: &std
             (Kind::Lut { dram: false }, Conf::Lut { init }) => {
                 let (site, bel) = b.at(c)?;
                 let inputs = cell.pins.iter().filter(|(p, _)| p.starts_with('A')).count();
+                let (Bel::Lut6(k) | Bel::Lut5(k)) = bel else {
+                    bail!("{}: a logic LUT in {bel:?}", cell.name);
+                };
+                let pins: Vec<usize> = (0..inputs).map(|i| b.lut_pin(site, k, i)).collect();
                 slice(&mut slices, site)?;
                 let s = slices.get_mut(site).unwrap();
                 match bel {
-                    Bel::Lut6(k) => s.lut_init[k] = Some(expand(*init, inputs)),
+                    Bel::Lut6(k) => s.lut_init[k] = Some(expand(*init, &pins)),
                     Bel::Lut5(k) => {
-                        s.lut5_init[k] = Some(expand(*init, inputs) & 0xffff_ffff);
+                        s.lut5_init[k] = Some(expand(*init, &pins) & 0xffff_ffff);
                         const_sinks.push((pin_node(db, site, &format!("{}6", LETTERS[k]))?, p.vcc, Vec::new()));
                     }
                     _ => bail!("{}: a logic LUT in {bel:?}", cell.name),
@@ -655,10 +731,14 @@ mod tests {
     #[test]
     fn small_luts_repeat_over_the_unused_inputs() {
         // A1 & A2 on a LUT6: every 4 bits 0b1000.
-        assert_eq!(expand(0b1000, 2), 0x8888_8888_8888_8888);
+        assert_eq!(expand(0b1000, &[1, 2]), 0x8888_8888_8888_8888);
         // A constant 1.
-        assert_eq!(expand(1, 0), u64::MAX);
+        assert_eq!(expand(1, &[]), u64::MAX);
         // A feed-through of A1.
-        assert_eq!(expand(0b10, 1), 0xaaaa_aaaa_aaaa_aaaa);
+        assert_eq!(expand(0b10, &[1]), 0xaaaa_aaaa_aaaa_aaaa);
+        // ... of A6: the upper half.
+        assert_eq!(expand(0b10, &[6]), 0xffff_ffff_0000_0000);
+        // I0 & !I1 with I0 on A6, I1 on A5.
+        assert_eq!(expand(0b0010, &[6, 5]), 0x0000_ffff_0000_0000);
     }
 }
