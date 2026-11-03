@@ -428,6 +428,27 @@ pub(crate) struct Conn {
     /// register, a carry chain's own LUTs and registers, CO3 into the next
     /// CIN.
     pub internal: bool,
+    /// What the connection goes into, for its estimate: 0 a LUT input, 1 a
+    /// register's D or a bypass, 2 a CE, 3 an SR.
+    pub sink: u8,
+}
+
+/// The routed delay of a connection by what it goes into and its
+/// distance (ps): fixed, per grid column, per row; least squares over
+/// zybo-picorv32's routed connections (CHIPSMITH_XC7_CONNS).
+const LINEAR: [[Ps; 3]; 4] = [[712.0, 22.1, 106.1], [480.0, 25.4, 40.5], [663.0, 8.4, 66.8], [1301.0, 0.0, 44.5]];
+
+impl Timing {
+    /// The estimated delay of `c` between cells at `a` and `b`.
+    fn estimate(&self, c: &Conn, a: Xy, b: Xy) -> Ps {
+        static LIN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *LIN.get_or_init(|| std::env::var("CHIPSMITH_XC7_EXP_LIN").is_ok_and(|v| v == "1")) {
+            let k = LINEAR[c.sink as usize];
+            k[0] + k[1] * (a.0 - b.0).abs() as Ps + k[2] * (a.1 - b.1).abs() as Ps
+        } else {
+            self.delays.route(a.0 - b.0, a.1 - b.1)
+        }
+    }
 }
 
 /// The design's timing graph (cell arcs, path starts and ends) and every
@@ -623,7 +644,14 @@ impl Timing {
                     }
                     _ => false,
                 };
+                let sink = match uport.as_str() {
+                    p if p.len() == 2 && p.starts_with('A') => 0,
+                    "CE" => 2,
+                    "SR" => 3,
+                    _ => 1,
+                };
                 conns.push(Conn {
+                    sink,
                     from_cell: *drv,
                     to_cell: *user,
                     from: g.node(&d.cells[*drv as usize].name, dport),
@@ -925,7 +953,7 @@ impl<'a> State<'a> {
         if c.internal && a == b {
             return 0.0;
         }
-        t.delays.route(a.0 - b.0, a.1 - b.1)
+        t.estimate(c, a, b)
     }
 
     /// Static timing of the current placement; with `reweight`, every net
@@ -1804,7 +1832,7 @@ impl chipsmith_place::electro::Timing for GlobalTiming<'_> {
                     && self.obj_of[c.from_cell as usize] == self.obj_of[c.to_cell as usize];
                 let delay = match (xy(c.from_cell), xy(c.to_cell)) {
                     _ if c.internal && same => 0.0,
-                    (Some(a), Some(b)) => t.delays.route(a.0 - b.0, a.1 - b.1),
+                    (Some(a), Some(b)) => t.estimate(c, a, b),
                     _ => 0.0,
                 };
                 Arc { from: c.from, to: c.to, delay }

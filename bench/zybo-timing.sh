@@ -54,9 +54,14 @@ for name in "$@"; do
     done
     CHIPSMITH_XC7_SEED=$seed CHIPSMITH_XC7_ENDPOINTS=$s/chipsmith.tsv systemd-run --user --scope -q -p MemoryMax=12G -p MemorySwapMax=0 \
         "$bin/chipsmith" -C "$s/examples/$name" build > "$s/build.log" 2>&1 \
+        || grep -q 'clocks missing their frequency' "$s/build.log" \
         || { tail -5 "$s/build.log"; exit 1; }
-    # The slowest clock from a pin (a BSCAN's TCK isn't exported).
+    # A clock short of its [clocks] frequency fails the build after the
+    # FASM is written: Vivado can still time it.
+    # The slowest clock from a pin (a BSCAN's TCK isn't exported), then
+    # every clock's.
     est=$(grep -E '^ *clock [^ .]+: ' "$s/build.log" | grep -o 'Fmax [0-9.]* MHz' | sort -k2 -n | head -1)
+    est="$est ($(grep -E '^ *clock ' "$s/build.log" | sed -E 's/^ *clock ([^:]+):.*Fmax ([0-9.]+) MHz.*/\1 \2/' | paste -sd, -))"
     if [[ -n "${ZYBO_NO_VIVADO:-}" ]]; then
         # Screening by the estimate alone.
         echo "$name seed $seed: chipsmith ${est:-no estimate} (no Vivado)"
@@ -68,7 +73,8 @@ for name in "$@"; do
         || { tail -5 "$s/import.log"; exit 1; }
     wns=$(grep -A8 '^| Design Timing Summary' "$s/timing_summary.rpt" | tail -3 | head -1 | awk '{print $1}')
     viv=$(python3 -c "print(f'{1000 / (8 - $wns):.1f}')")
-    echo "$name seed $seed: chipsmith ${est:-no estimate}, Vivado on chipsmith's routing Fmax $viv MHz (WNS $wns ns); $(head -1 "$s/import.txt")"
+    clocks=$(python3 bench/zybo-clocks.py "$s/timing_summary.rpt")
+    echo "$name seed $seed: chipsmith ${est:-no estimate}, Vivado on chipsmith's routing Fmax $viv MHz (WNS $wns ns; per clock: $clocks); $(head -1 "$s/import.txt")"
     dirs+=("$s")
   done
 done

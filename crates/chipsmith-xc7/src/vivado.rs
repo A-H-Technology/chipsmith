@@ -314,11 +314,35 @@ pub fn export(db: &ChipDb, routed: &Routed, pins: &BTreeMap<String, String>, per
             Some((o, name_of(&i)))
         })
         .collect();
+    let port_of = |c: &C, name: &str| c.g.ports.iter().find(|p| p.name == name).map(|p| p.sig[0]);
+    let mut generated = Vec::new();
     for c in cells.iter().filter(|c| c.g.ty == "BUFG") {
-        let i = c.g.ports.iter().find(|p| p.name == "I").context("a BUFG without I")?.sig[0];
+        let i = port_of(c, "I").context("a BUFG without I")?;
         if let Some(port) = driver_port.get(&i) {
             writeln!(xdc, "create_clock -period {period_ns:.3} -name {port} [get_ports {{{port}}}]")?;
+            continue;
         }
+        // A register toggling (D its own Q through a LUT1 inverter) makes a
+        // clock of half its clock's frequency (zybo-mult-selftest's).
+        let Some(ff) = cells.iter().find(|f| f.g.ty.starts_with("FD") && port_of(f, "Q") == Some(i)) else {
+            continue;
+        };
+        let toggles = cells.iter().any(|l| {
+            l.g.ty == "LUT1"
+                && port_of(l, "O") == port_of(ff, "D")
+                && port_of(l, "I0") == Some(i)
+                && param_u64(&l.g, "INIT") == 0b01
+        });
+        if toggles {
+            generated.push((cell_name(&ff.name), cell_name(&c.name)));
+        }
+    }
+    for (ff, bufg) in generated {
+        // The master: the first port clock (its BUFG's), as the register's.
+        writeln!(
+            xdc,
+            "create_generated_clock -name {bufg} -source [get_pins {{{ff}/C}}] -divide_by 2 [get_pins {{{ff}/Q}}]"
+        )?;
     }
 
     // Routing: each site input the netlist reads, back to the site output

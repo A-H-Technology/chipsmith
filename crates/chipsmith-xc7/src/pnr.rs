@@ -187,6 +187,9 @@ pub fn run(
     let text = fasm::write(db, &ph, &pips)?;
     std::fs::write(fasm_out, text).with_context(|| format!("writing {}", fasm_out.display()))?;
 
+    if let Some(path) = std::env::var_os("CHIPSMITH_XC7_CONNS") {
+        conns_dump(db, d, &timing, delays, &ph.nets, &trees, &placement.sites, &path)?;
+    }
     let clocks = clock_timing(d, &packed.conf, &timing, &ph.nets, &trees, &placement.sites)?;
     let count = |f: &dyn Fn(&Kind, &Conf) -> bool| {
         d.cells
@@ -304,6 +307,46 @@ fn check(db: &ChipDb, nets: &[NetReq], trees: &[Tree]) -> Result<()> {
 
 /// Each clock's own critical path over the routed design: the placer's
 /// connections with their routed delays (0 inside a slice).
+/// CHIPSMITH_XC7_CONNS=<file>: every routed connection's tile distance
+/// (dx, dy), the placer's estimate, the routed delay (ps) and the sink
+/// port, to fit the placer's estimate to the router's.
+#[allow(clippy::too_many_arguments)]
+fn conns_dump(
+    db: &ChipDb,
+    d: &place::Design,
+    timing: &place::Timing,
+    delays: &Delays,
+    nets: &[phys::RouteNet],
+    trees: &[Tree],
+    sites: &[Option<(String, place::Bel)>],
+    path: &std::ffi::OsStr,
+) -> Result<()> {
+    let mut delay: std::collections::HashMap<(NetId, CellId, &str), Ps> = std::collections::HashMap::new();
+    for (r, t) in nets.iter().zip(trees) {
+        for (ports, &dl) in r.sink_ports.iter().zip(&t.sink_delay) {
+            for (c, p) in ports {
+                delay.insert((r.net, *c, p.as_str()), dl);
+            }
+        }
+    }
+    let xy = |c: CellId| -> Option<(i32, i32)> {
+        let (site, _) = sites[c as usize].as_ref()?;
+        let (x, y) = db.tile_xy(db.sites.get(site)?.tile);
+        Some((x as i32, y as i32))
+    };
+    let mut text = String::new();
+    for c in &timing.conns {
+        let port = timing.graph.name(c.to);
+        let port = port.rsplit_once('.').map_or(port, |p| p.1);
+        let (Some(dl), Some(a), Some(b)) = (delay.get(&(c.net, c.to_cell, port)), xy(c.from_cell), xy(c.to_cell)) else {
+            continue;
+        };
+        let (dx, dy) = (a.0 - b.0, a.1 - b.1);
+        text += &format!("{dx}\t{dy}\t{:.0}\t{dl:.0}\t{port}\n", delays.route(dx, dy));
+    }
+    std::fs::write(path, text).with_context(|| format!("writing {}", path.to_string_lossy()))
+}
+
 fn clock_timing(
     d: &place::Design,
     conf: &[Conf],
