@@ -91,6 +91,8 @@ struct Decoder<'a> {
     names: HashMap<u32, HashMap<String, u32>>,
     /// Each driver's pip, by name, for `CHIPSMITH_DECODE_TRACE`.
     why: HashMap<NodeId, String>,
+    /// Every site input the netlist reads (`resolve`'s starting nodes).
+    read: std::cell::RefCell<HashSet<NodeId>>,
 }
 
 impl Decoder<'_> {
@@ -125,6 +127,7 @@ impl Decoder<'_> {
     /// What drives a site input: a site output's net, a constant, or (no
     /// driver at all) 1.
     fn resolve(&self, mut n: NodeId) -> SigBit {
+        self.read.borrow_mut().insert(n);
         for _ in 0..10_000 {
             if let Some(&s) = self.source.get(&n) {
                 return s;
@@ -189,6 +192,31 @@ pub fn decode(
     fasm: &str,
     pins: &BTreeMap<String, String>,
 ) -> Result<Design> {
+    Ok(decode_routed(db, family, fasm, pins)?.design)
+}
+
+/// A decoded bitstream with what it was traced through, for writing it
+/// out placed and routed (`crate::vivado`).
+pub struct Routed {
+    pub design: Design,
+    /// Each node's driver, through the enabled and the always-on pips.
+    pub driver: HashMap<NodeId, NodeId>,
+    /// The net on each site output pin.
+    pub source: HashMap<NodeId, SigBit>,
+    /// The site inputs the netlist reads.
+    pub read: HashSet<NodeId>,
+    /// Each slice half's site, by the key its cells are named after
+    /// (`<tile>.<half>`).
+    pub slice_sites: BTreeMap<String, String>,
+}
+
+/// [`decode`], keeping the routing.
+pub fn decode_routed(
+    db: &ChipDb,
+    family: &std::path::Path,
+    fasm: &str,
+    pins: &BTreeMap<String, String>,
+) -> Result<Routed> {
     let tiles = parse(fasm)?;
     let tile_of: HashMap<&str, u32> = db
         .tile_names
@@ -204,6 +232,7 @@ pub fn decode(
         constant: HashMap::new(),
         names: HashMap::new(),
         why: HashMap::new(),
+        read: Default::default(),
     };
     for tile in 0..db.width * db.height {
         for (w, v) in [
@@ -785,7 +814,13 @@ pub fn decode(
         chipsmith_netlist::attr::TOP.into(),
         chipsmith_netlist::ParamValue::int(1),
     );
-    Ok(Design { modules: vec![m] })
+    Ok(Routed {
+        design: Design { modules: vec![m] },
+        driver: d.driver,
+        source: d.source,
+        read: d.read.into_inner(),
+        slice_sites: slice_nets.into_iter().map(|(k, (site, _))| (k, site)).collect(),
+    })
 }
 
 /// One RAMB18 half's features.

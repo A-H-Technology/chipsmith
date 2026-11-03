@@ -498,7 +498,7 @@ impl Timing {
                             // A RAM write: its data, address and enable are
                             // sampled on the clock like a register's D.
                             let n = node(&mut g, i);
-                            g.set_setup(n, delays.setup_ce);
+                            g.set_setup(n, delays.setup_ce + delays.clock_margin);
                         }
                     }
                 }
@@ -516,7 +516,7 @@ impl Timing {
                             _ => continue,
                         };
                         let n = node(&mut g, p);
-                        g.set_setup(n, setup);
+                        g.set_setup(n, setup + delays.clock_margin);
                     }
                 }
                 Kind::Carry => {
@@ -544,7 +544,7 @@ impl Timing {
                                 },
                             );
                         } else if let Some(setup) = delays.bram.setup(p) {
-                            g.set_setup(n, setup);
+                            g.set_setup(n, setup + delays.clock_margin);
                         }
                     }
                 }
@@ -575,11 +575,11 @@ impl Timing {
                             }
                         } else if let Some(k) = operand(p) {
                             if inreg[k] {
-                                g.set_setup(n, dl.setup_areg);
+                                g.set_setup(n, dl.setup_areg + delays.clock_margin);
                             } else if *mreg {
-                                g.set_setup(n, dl.setup_mreg);
+                                g.set_setup(n, dl.setup_mreg + delays.clock_margin);
                             } else if *preg {
-                                g.set_setup(n, dl.setup_preg);
+                                g.set_setup(n, dl.setup_preg + delays.clock_margin);
                             } else {
                                 for &o in &outs {
                                     let to = node(&mut g, o);
@@ -587,7 +587,7 @@ impl Timing {
                                 }
                             }
                         } else if p.starts_with("CE") || p.starts_with("RST") {
-                            g.set_setup(n, dl.setup_control);
+                            g.set_setup(n, dl.setup_control + delays.clock_margin);
                         }
                     }
                 }
@@ -952,6 +952,36 @@ impl<'a> State<'a> {
 
     fn wirelength(&self) -> f64 {
         (0..self.d.nets.len()).map(|n| self.hpwl(n) as f64).sum()
+    }
+
+    /// Each LUT input's criticality (`Placement::lut_criticality`).
+    fn lut_criticality(&self) -> HashMap<(CellId, String), f32> {
+        let mut out = HashMap::default();
+        let Some(t) = self.timing else {
+            return out;
+        };
+        let arcs: Vec<Arc> = t
+            .conns
+            .iter()
+            .map(|c| Arc {
+                from: c.from,
+                to: c.to,
+                delay: self.conn_delay(t, c),
+            })
+            .collect();
+        let analysis = t.graph.analyse(&arcs);
+        for (c, a) in t.conns.iter().zip(&arcs) {
+            if !matches!(self.d.cells[c.to_cell as usize].kind, Kind::Lut { dram: false }) {
+                continue;
+            }
+            let Some((_, port)) = t.graph.name(c.to).rsplit_once('.') else {
+                continue;
+            };
+            let crit = analysis.criticality(a);
+            let e = out.entry((c.to_cell, port.to_string())).or_insert(0.0f32);
+            *e = e.max(crit);
+        }
+        out
     }
 
     fn pos(&self, o: Obj) -> u32 {
@@ -1514,10 +1544,30 @@ pub(crate) enum Bel {
     Site,
 }
 
+impl Bel {
+    /// Vivado's name of the bel; a site's one bel goes by the site's type,
+    /// so by `SITE` here.
+    pub(crate) fn vivado_name(self) -> String {
+        let letter = |k: usize| ['A', 'B', 'C', 'D'][k];
+        match self {
+            Bel::Lut6(k) => format!("{}6LUT", letter(k)),
+            Bel::Lut5(k) => format!("{}5LUT", letter(k)),
+            Bel::Ff(k) => format!("{}FF", letter(k)),
+            Bel::Ff5(k) => format!("{}5FF", letter(k)),
+            Bel::Carry4 => "CARRY4".into(),
+            Bel::Site => "SITE".into(),
+        }
+    }
+}
+
 /// The placement: each cell's site (`SLICE_X30Y39`) and bel; constants have
 /// none.
 pub(crate) struct Placement {
     pub sites: Vec<Option<(String, Bel)>>,
+    /// Each LUT input's criticality on the final placement's timing, by
+    /// (cell, port), for choosing its site pin; inputs on no timed path
+    /// aren't in it.
+    pub lut_criticality: HashMap<(CellId, String), f32>,
     pub stats: Stats,
 }
 
@@ -1672,14 +1722,17 @@ const COLD_MOVES: f64 = 1.0;
 /// Anneals run in parallel from the same start with different seeds; the
 /// lowest-cost one wins, so the result doesn't depend on thread timing.
 fn best_of<'a>(start: &State<'a>, seeds: usize, from: Start) -> (State<'a>, u64) {
+    // CHIPSMITH_XC7_SEED=<n>: another set of seeds, to tell a change from
+    // the anneal's luck (bench/zybo-timing.sh's ZYBO_SEEDS); 0 is the default.
+    let base: u64 = std::env::var("CHIPSMITH_XC7_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
     let results: Vec<(State, u64)> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..seeds)
             .map(|i| {
                 let mut s = start.clone();
                 scope.spawn(move || {
-                    let mut rng =
-                        Rng(0x9e37_79b9_7f4a_7c15
-                            ^ (i as u64 + 1).wrapping_mul(0xbf58_476d_1ce4_e5b9));
+                    let mut rng = Rng(0x9e37_79b9_7f4a_7c15
+                        ^ (i as u64 + 1).wrapping_mul(0xbf58_476d_1ce4_e5b9)
+                        ^ base.wrapping_mul(0x94d0_49bb_1331_11eb));
                     let moves = anneal(&mut s, &mut rng, from);
                     (s, moves)
                 })
@@ -1895,6 +1948,7 @@ pub(crate) fn place(db: &ChipDb, delays: Option<&Delays>, d: &Design) -> Result<
     let critical = best.analyse(false);
     Ok(Placement {
         sites: sites(d, &g, &best, &fixed),
+        lut_criticality: best.lut_criticality(),
         stats: Stats {
             cells: d.cells.len(),
             bles: d.bles.len(),

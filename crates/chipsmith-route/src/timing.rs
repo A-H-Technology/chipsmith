@@ -389,6 +389,11 @@ impl Graph {
         &self.names[n as usize]
     }
 
+    /// A path end's setup time; `None` for a node no path ends at.
+    pub fn setup(&self, n: u32) -> Option<Ps> {
+        self.setup[n as usize]
+    }
+
     /// Arrival and required times over the cell arcs plus `net_arcs`, with
     /// the clock period set to the critical path itself (so the worst slack
     /// is 0 and criticality is relative, as VPR does without a constraint).
@@ -512,6 +517,11 @@ pub struct Analysis {
 }
 
 impl Analysis {
+    /// The latest arrival at `node`, if a timed path reaches it.
+    pub fn arrival(&self, node: u32) -> Option<Ps> {
+        self.arrival[node as usize]
+    }
+
     /// How close `arc` is to the critical path: 1 on it, 0 for an arc with
     /// a whole critical path of slack or on no timed path at all.
     pub fn criticality(&self, arc: &Arc) -> f32 {
