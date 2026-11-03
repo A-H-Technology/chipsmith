@@ -430,6 +430,13 @@ pub(crate) struct Conn {
     pub internal: bool,
 }
 
+impl Timing {
+    /// The estimated delay of a connection between cells at `a` and `b`.
+    fn estimate(&self, a: Xy, b: Xy) -> Ps {
+        self.delays.route(a.0 - b.0, a.1 - b.1)
+    }
+}
+
 /// The design's timing graph (cell arcs, path starts and ends) and every
 /// connection the placement decides the delay of.
 pub(crate) struct Timing {
@@ -443,12 +450,16 @@ pub(crate) struct Timing {
 /// The Cyclone II's 8 is too weak here: swept on picorv32 and
 /// zybo-jtag-counter, nextpnr's Fmax on chipsmith's routing (README), 20
 /// came out best; 40 and 80 no better, a lower exponent worse.
+/// Rechecked on chipsmith's calibrated timing (bench/zybo-timing.sh, five
+/// seeds): 10 with an exponent of 2 placed riscv-bram 3% and sha256 2%
+/// worse, picorv32 no better.
 const TIMING_WEIGHT: f32 = 20.0;
 const CRIT_EXP: f32 = 4.0;
 
 impl Timing {
     pub(crate) fn new(d: &Design, delays: &Delays) -> Self {
         let mut g = timing::Graph::default();
+        g.cut_loops();
         // Which object (and which slice of it) each cell is in: 0 BLE, 1
         // carry chain, 2 RAM.
         let mut obj: Vec<Option<(u8, u32, u32)>> = vec![None; d.cells.len()];
@@ -498,7 +509,7 @@ impl Timing {
                             // A RAM write: its data, address and enable are
                             // sampled on the clock like a register's D.
                             let n = node(&mut g, i);
-                            g.set_setup(n, delays.setup_ce);
+                            g.set_setup(n, delays.setup_ce + delays.clock_margin);
                         }
                     }
                 }
@@ -516,7 +527,7 @@ impl Timing {
                             _ => continue,
                         };
                         let n = node(&mut g, p);
-                        g.set_setup(n, setup);
+                        g.set_setup(n, setup + delays.clock_margin);
                     }
                 }
                 Kind::Carry => {
@@ -544,7 +555,7 @@ impl Timing {
                                 },
                             );
                         } else if let Some(setup) = delays.bram.setup(p) {
-                            g.set_setup(n, setup);
+                            g.set_setup(n, setup + delays.clock_margin);
                         }
                     }
                 }
@@ -575,11 +586,11 @@ impl Timing {
                             }
                         } else if let Some(k) = operand(p) {
                             if inreg[k] {
-                                g.set_setup(n, dl.setup_areg);
+                                g.set_setup(n, dl.setup_areg + delays.clock_margin);
                             } else if *mreg {
-                                g.set_setup(n, dl.setup_mreg);
+                                g.set_setup(n, dl.setup_mreg + delays.clock_margin);
                             } else if *preg {
-                                g.set_setup(n, dl.setup_preg);
+                                g.set_setup(n, dl.setup_preg + delays.clock_margin);
                             } else {
                                 for &o in &outs {
                                     let to = node(&mut g, o);
@@ -587,7 +598,7 @@ impl Timing {
                                 }
                             }
                         } else if p.starts_with("CE") || p.starts_with("RST") {
-                            g.set_setup(n, dl.setup_control);
+                            g.set_setup(n, dl.setup_control + delays.clock_margin);
                         }
                     }
                 }
@@ -916,7 +927,7 @@ impl<'a> State<'a> {
         if c.internal && a == b {
             return 0.0;
         }
-        t.delays.route(a.0 - b.0, a.1 - b.1)
+        t.estimate(a, b)
     }
 
     /// Static timing of the current placement; with `reweight`, every net
@@ -952,6 +963,36 @@ impl<'a> State<'a> {
 
     fn wirelength(&self) -> f64 {
         (0..self.d.nets.len()).map(|n| self.hpwl(n) as f64).sum()
+    }
+
+    /// Each LUT input's criticality (`Placement::lut_criticality`).
+    fn lut_criticality(&self) -> HashMap<(CellId, String), f32> {
+        let mut out = HashMap::default();
+        let Some(t) = self.timing else {
+            return out;
+        };
+        let arcs: Vec<Arc> = t
+            .conns
+            .iter()
+            .map(|c| Arc {
+                from: c.from,
+                to: c.to,
+                delay: self.conn_delay(t, c),
+            })
+            .collect();
+        let analysis = t.graph.analyse(&arcs);
+        for (c, a) in t.conns.iter().zip(&arcs) {
+            if !matches!(self.d.cells[c.to_cell as usize].kind, Kind::Lut { dram: false }) {
+                continue;
+            }
+            let Some((_, port)) = t.graph.name(c.to).rsplit_once('.') else {
+                continue;
+            };
+            let crit = analysis.criticality(a);
+            let e = out.entry((c.to_cell, port.to_string())).or_insert(0.0f32);
+            *e = e.max(crit);
+        }
+        out
     }
 
     fn pos(&self, o: Obj) -> u32 {
@@ -1363,6 +1404,8 @@ pub struct Stats {
     pub moves: u64,
     pub seconds: f64,
     pub threads: usize,
+    /// Started from the electrostatic global placement.
+    pub electro: bool,
 }
 
 /// Where an anneal starts: hot from the greedy start, or cold from a
@@ -1514,10 +1557,30 @@ pub(crate) enum Bel {
     Site,
 }
 
+impl Bel {
+    /// Vivado's name of the bel; a site's one bel goes by the site's type,
+    /// so by `SITE` here.
+    pub(crate) fn vivado_name(self) -> String {
+        let letter = |k: usize| ['A', 'B', 'C', 'D'][k];
+        match self {
+            Bel::Lut6(k) => format!("{}6LUT", letter(k)),
+            Bel::Lut5(k) => format!("{}5LUT", letter(k)),
+            Bel::Ff(k) => format!("{}FF", letter(k)),
+            Bel::Ff5(k) => format!("{}5FF", letter(k)),
+            Bel::Carry4 => "CARRY4".into(),
+            Bel::Site => "SITE".into(),
+        }
+    }
+}
+
 /// The placement: each cell's site (`SLICE_X30Y39`) and bel; constants have
 /// none.
 pub(crate) struct Placement {
     pub sites: Vec<Option<(String, Bel)>>,
+    /// Each LUT input's criticality on the final placement's timing, by
+    /// (cell, port), for choosing its site pin; inputs on no timed path
+    /// aren't in it.
+    pub lut_criticality: HashMap<(CellId, String), f32>,
     pub stats: Stats,
 }
 
@@ -1672,14 +1735,17 @@ const COLD_MOVES: f64 = 1.0;
 /// Anneals run in parallel from the same start with different seeds; the
 /// lowest-cost one wins, so the result doesn't depend on thread timing.
 fn best_of<'a>(start: &State<'a>, seeds: usize, from: Start) -> (State<'a>, u64) {
+    // CHIPSMITH_XC7_SEED=<n>: another set of seeds, to tell a change from
+    // the anneal's luck (bench/zybo-timing.sh's ZYBO_SEEDS); 0 is the default.
+    let base: u64 = std::env::var("CHIPSMITH_XC7_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
     let results: Vec<(State, u64)> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..seeds)
             .map(|i| {
                 let mut s = start.clone();
                 scope.spawn(move || {
-                    let mut rng =
-                        Rng(0x9e37_79b9_7f4a_7c15
-                            ^ (i as u64 + 1).wrapping_mul(0xbf58_476d_1ce4_e5b9));
+                    let mut rng = Rng(0x9e37_79b9_7f4a_7c15
+                        ^ (i as u64 + 1).wrapping_mul(0xbf58_476d_1ce4_e5b9)
+                        ^ base.wrapping_mul(0x94d0_49bb_1331_11eb));
                     let moves = anneal(&mut s, &mut rng, from);
                     (s, moves)
                 })
@@ -1707,10 +1773,70 @@ const SEEDS: usize = 8;
 /// electrostatic global placement (chipsmith-place, ADR-0012) instead of
 /// hot from the greedy start; `CHIPSMITH_XC7_PLACER=anneal` or `electro`
 /// forces either.
-const ELECTRO_FROM: usize = 1000;
+///
+/// Five seeds each on chipsmith's calibrated timing, the electrostatic
+/// start (timing-driven, below) against the greedy one: sha256 +5%,
+/// picorv32 +4%, riscv-bram +2%, bram-selftest +4%, mult-selftest's
+/// 62.5 MHz logic -6%; placement 4-5 times faster on the middle three.
+/// By Vivado's timer on picorv32's five seeds, even (145.4 against 145.1
+/// MHz): the estimate's bias moves with the placement's style.
+const ELECTRO_FROM: usize = 200;
+
+/// The global placement reweights its nets by their criticality (as the
+/// anneal does) every this many iterations once it has spread: sha256 at
+/// 52.7 MHz against 50.1 without (five seeds).
+const GLOBAL_TIMING_EVERY: usize = 25;
+
+/// The global placement's nets weighted by their most critical connection,
+/// as the anneal weights them, on the objects' current centres.
+struct GlobalTiming<'a> {
+    timing: Option<&'a Timing>,
+    obj_of: &'a [Option<u32>],
+    fixed_xy: &'a HashMap<CellId, Xy>,
+    problem_net: &'a [Option<usize>],
+}
+
+impl chipsmith_place::electro::Timing for GlobalTiming<'_> {
+    fn reweight(&mut self, centres: &[chipsmith_place::Pos], weights: &mut [f32]) {
+        let Some(t) = self.timing else {
+            return;
+        };
+        let xy = |c: CellId| -> Option<Xy> {
+            match self.obj_of[c as usize] {
+                Some(o) => {
+                    let (cx, cy) = centres[o as usize];
+                    Some(((cx * 2.0) as i32, cy as i32))
+                }
+                None => self.fixed_xy.get(&c).copied(),
+            }
+        };
+        let arcs: Vec<Arc> = t
+            .conns
+            .iter()
+            .map(|c| {
+                let same = self.obj_of[c.from_cell as usize].is_some()
+                    && self.obj_of[c.from_cell as usize] == self.obj_of[c.to_cell as usize];
+                let delay = match (xy(c.from_cell), xy(c.to_cell)) {
+                    _ if c.internal && same => 0.0,
+                    (Some(a), Some(b)) => t.estimate(a, b),
+                    _ => 0.0,
+                };
+                Arc { from: c.from, to: c.to, delay }
+            })
+            .collect();
+        let analysis = t.graph.analyse(&arcs);
+        weights.iter_mut().for_each(|w| *w = 1.0);
+        for (c, a) in t.conns.iter().zip(&arcs) {
+            if let Some(n) = self.problem_net[c.net as usize] {
+                let w = 1.0 + TIMING_WEIGHT * analysis.criticality(a).powf(CRIT_EXP);
+                weights[n] = weights[n].max(w);
+            }
+        }
+    }
+}
 
 /// The objects' global placement (chipsmith-place's electrostatic placer,
-/// wirelength only), each then put in the free place nearest its target:
+/// timing-driven by [`GlobalTiming`]), each then put in the free place nearest its target:
 /// chains and RAMs first, then BLEs.
 fn global<'a>(
     d: &'a Design,
@@ -1776,7 +1902,10 @@ fn global<'a>(
     for (c, _, xy) in fixed {
         fixed_of.insert(*c, p.add_fixed(((xy.0 / 2) as f32 + 0.5, xy.1 as f32 + 0.5)));
     }
-    for cells in &d.net_cells {
+    // Each design net's net in the problem, for reweighting.
+    let mut problem_net: Vec<Option<usize>> = vec![None; d.net_cells.len()];
+    let mut problem_nets = 0;
+    for (n, cells) in d.net_cells.iter().enumerate() {
         let mut pins: Vec<Pin> = Vec::new();
         for &c in cells {
             let of = match (obj_of[c as usize], fixed_of.get(&c)) {
@@ -1790,16 +1919,24 @@ fn global<'a>(
         }
         if pins.len() >= 2 {
             p.add_net(pins, 1.0);
+            problem_net[n] = Some(problem_nets);
+            problem_nets += 1;
         }
     }
     let opts = electro::Options {
         accel: electro::Accel::from_env().map_err(anyhow::Error::msg)?,
-        timing_every: 0,
+        timing_every: if timing.is_some() { GLOBAL_TIMING_EVERY } else { 0 },
         trace: std::env::var_os("CHIPSMITH_XC7_TRACE").is_some(),
         ..Default::default()
     };
-    let out =
-        electro::place(&p, &mut electro::NoTiming, None, &opts).map_err(anyhow::Error::msg)?;
+    let fixed_xy: HashMap<CellId, Xy> = fixed.iter().map(|(c, _, xy)| (*c, *xy)).collect();
+    let mut hook = GlobalTiming {
+        timing,
+        obj_of: &obj_of,
+        fixed_xy: &fixed_xy,
+        problem_net: &problem_net,
+    };
+    let out = electro::place(&p, &mut hook, None, &opts).map_err(anyhow::Error::msg)?;
     let target = |o: usize| {
         let (cx, cy) = out.centres[o];
         ((cx * 2.0) as i32, cy as i32)
@@ -1895,6 +2032,7 @@ pub(crate) fn place(db: &ChipDb, delays: Option<&Delays>, d: &Design) -> Result<
     let critical = best.analyse(false);
     Ok(Placement {
         sites: sites(d, &g, &best, &fixed),
+        lut_criticality: best.lut_criticality(),
         stats: Stats {
             cells: d.cells.len(),
             bles: d.bles.len(),
@@ -1906,6 +2044,7 @@ pub(crate) fn place(db: &ChipDb, delays: Option<&Delays>, d: &Design) -> Result<
             moves,
             seconds: started.elapsed().as_secs_f64(),
             threads,
+            electro,
         },
     })
 }

@@ -271,10 +271,11 @@ fn zybo_mult_selftest() {
     built("zybo-mult-selftest", 3600);
 }
 
-/// Two passes of the program out of block RAM (about 10,000 cycles each).
+/// Two passes of the program out of block RAM (about 20,000 cycles each:
+/// the CPU runs on half the clock).
 #[test]
 fn zybo_riscv_bram() {
-    built("zybo-riscv-bram", 25000);
+    built("zybo-riscv-bram", 50000);
 }
 
 /// sha256 on Zybo pins: takes a while to place (the annealer).

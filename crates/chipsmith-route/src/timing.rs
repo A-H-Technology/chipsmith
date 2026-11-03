@@ -175,6 +175,8 @@ pub struct Graph {
     /// latch loops.
     lut: Vec<Option<u32>>,
     luts: u32,
+    /// Cut any other combinational loop too (`cut_loops`).
+    cut_loops: bool,
 }
 
 impl Graph {
@@ -331,6 +333,14 @@ impl Graph {
         self.setup[node as usize] = Some(setup);
     }
 
+    /// Cut every combinational loop, as Vivado's timer does, rather than
+    /// leave what is in or after one untimed: synthesis can leave a loop no
+    /// value ever takes (two muxes selecting each other), and everything
+    /// downstream of it would go unseen.
+    pub fn cut_loops(&mut self) {
+        self.cut_loops = true;
+    }
+
     /// Put a path start or end on clock `clock`.
     pub fn set_clock(&mut self, node: u32, clock: u32) {
         self.clocks.insert(node, clock);
@@ -389,6 +399,11 @@ impl Graph {
         &self.names[n as usize]
     }
 
+    /// A path end's setup time; `None` for a node no path ends at.
+    pub fn setup(&self, n: u32) -> Option<Ps> {
+        self.setup[n as usize]
+    }
+
     /// Arrival and required times over the cell arcs plus `net_arcs`, with
     /// the clock period set to the critical path itself (so the worst slack
     /// is 0 and criticality is relative, as VPR does without a constraint).
@@ -421,15 +436,56 @@ impl Graph {
             .filter(|&v| indegree[v as usize] == 0)
             .collect();
         let mut i = 0;
-        while i < order.len() {
-            for &a in &fanout[order[i] as usize] {
-                let to = arcs[a].to as usize;
-                indegree[to] -= 1;
-                if indegree[to] == 0 {
-                    order.push(to as u32);
+        let mut cut = vec![false; arcs.len()];
+        loop {
+            while i < order.len() {
+                for &a in &fanout[order[i] as usize] {
+                    let to = arcs[a].to as usize;
+                    indegree[to] -= 1;
+                    if indegree[to] == 0 {
+                        order.push(to as u32);
+                    }
+                }
+                i += 1;
+            }
+            if !self.cut_loops || order.len() == n {
+                break;
+            }
+            // Walk back from a node still waiting through others still
+            // waiting until one repeats: that closes a loop; cut the arc
+            // that closed it and go on.
+            let mut fanin: Vec<Vec<usize>> = vec![Vec::new(); n];
+            for (k, a) in arcs.iter().enumerate() {
+                if !cut[k] && indegree[a.to as usize] > 0 && indegree[a.from as usize] > 0 {
+                    fanin[a.to as usize].push(k);
                 }
             }
-            i += 1;
+            let Some(start) = (0..n).find(|&v| indegree[v] > 0 && !fanin[v].is_empty()) else {
+                break;
+            };
+            let mut seen = vec![false; n];
+            let mut v = start;
+            let closing = loop {
+                seen[v] = true;
+                let k = fanin[v][0];
+                let from = arcs[k].from as usize;
+                if seen[from] {
+                    break k;
+                }
+                v = from;
+            };
+            cut[closing] = true;
+            let to = arcs[closing].to as usize;
+            indegree[to] -= 1;
+            if indegree[to] == 0 {
+                order.push(to as u32);
+            }
+        }
+        for (k, c) in cut.iter().enumerate() {
+            if *c {
+                let from = arcs[k].from as usize;
+                fanout[from].retain(|&a| a != k);
+            }
         }
 
         let mut arrival: Vec<Option<Ps>> = self.launch.clone();
@@ -512,6 +568,11 @@ pub struct Analysis {
 }
 
 impl Analysis {
+    /// The latest arrival at `node`, if a timed path reaches it.
+    pub fn arrival(&self, node: u32) -> Option<Ps> {
+        self.arrival[node as usize]
+    }
+
     /// How close `arc` is to the critical path: 1 on it, 0 for an arc with
     /// a whole critical path of slack or on no timed path at all.
     pub fn criticality(&self, arc: &Arc) -> f32 {
@@ -624,6 +685,34 @@ mod tests {
         let t = g.analyse(&[arc(aq, xa), arc(xo, xc), arc(xo, bd)]);
         // The LUT arc is input D's; the routing carries the rest of A's.
         assert_eq!(t.critical, TCO + 100.0 + 150.0 + LUT_INPUT_IC + 100.0 + 84.0 + TSU);
+    }
+
+    /// reg a -> x -> y -> x (a loop of two cells) -> reg b: untimed unless
+    /// the loop is cut, then timed from a once round.
+    #[test]
+    fn a_loop_of_two_is_cut_on_request() {
+        let mut g = Graph::default();
+        let (aq, xi, xl, xo, yi, yo, bd) = (
+            g.node("a", "Q"),
+            g.node("x", "I0"),
+            g.node("x", "I1"),
+            g.node("x", "O"),
+            g.node("y", "I0"),
+            g.node("y", "O"),
+            g.node("b", "D"),
+        );
+        g.set_launch(aq, 0.0);
+        g.set_setup(bd, 0.0);
+        g.add_arc(xi, xo, 10.0);
+        g.add_arc(xl, xo, 10.0);
+        g.add_arc(yi, yo, 10.0);
+        let arc = |from, to| Arc { from, to, delay: 100.0 };
+        let nets = [arc(aq, xi), arc(xo, yi), arc(yo, xl), arc(xo, bd)];
+        assert_eq!(g.analyse(&nets).critical, 0.0);
+        g.cut_loops();
+        let t = g.analyse(&nets);
+        assert!(t.arrival(bd).is_some());
+        assert!(t.critical >= 210.0, "{}", t.critical);
     }
 
     /// reg a -> LUT x (DATAA) -> reg b, and reg a -> reg c directly.

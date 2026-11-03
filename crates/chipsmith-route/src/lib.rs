@@ -388,6 +388,14 @@ impl<'a> Router<'a> {
         }
     }
 
+    /// Each node's routing delay, for a device whose delays go by node
+    /// (`delays[node]`) rather than by wire type.
+    pub fn set_node_delays(&mut self, delays: &[Ps]) {
+        for (info, &d) in self.node.iter_mut().zip(delays) {
+            info.delay = d;
+        }
+    }
+
     /// Route net `net` (an index into the nets `route` takes) on the given
     /// wire types alone, apart from its own sinks, anywhere on the chip: a
     /// clock on the clock tree, which its bounding box may not reach.

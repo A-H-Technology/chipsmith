@@ -13,5 +13,6 @@ mod phys;
 mod place;
 pub mod pnr;
 pub mod synth;
+pub mod vivado;
 pub mod xray;
 pub mod zynq;

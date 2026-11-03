@@ -1,20 +1,25 @@
-//! 7-series delays for the placer, from prjxray-db (slow corner, max):
+//! 7-series delays, Vivado's slow corner (speed grade -1), for the placer,
+//! the router and the timing report:
 //!
-//! - cell delays from `timings/slicel.sdf` (Vivado's SDF for a SLICEL):
-//!   LUT input to O6, every CARRY4 input to every output it reaches, the
-//!   register's clock-to-Q and its setup (D, CE) and recovery (SR) times;
+//! - cell delays from prjxray-db's `timings/slicel.sdf` (Vivado's SDF for a
+//!   SLICEL): LUT input to O6, every CARRY4 input to every output it
+//!   reaches; the register's clock to Q and setup times as Vivado's timer
+//!   has them ([`VIVADO_REGISTER`]), which the SDF's leave the site's own
+//!   routing out of;
 //! - block RAM's clock to read data (with and without the output
 //!   register) and its inputs' setup times, from `timings/BRAM_L.sdf`;
-//! - routing estimated from distance, hop by hop: per interconnect hop the
-//!   mean intrinsic delay of the pips driving that wire class in
-//!   `tile_type_INT_L.json` (singles, doubles, quads, hexes), plus the pip
-//!   into the site pin (IMUX).
-//!
-//! prjxray's pip delays leave out the wires' RC (most INT wires carry
-//! none), so routed delays come out low against nextpnr's or Vivado's.
-//! The placer only needs them in proportion: criticality is relative to the
-//! estimated critical path. Doubling the wire hops to stand in for the RC
-//! placed picorv32 worse by nextpnr's STA (README), so they stay as read.
+//! - routing per node of the routing graph ([`node_delays`]): the delay of
+//!   its class (the pip into it: a single, a double, an IMUX, ...) fitted
+//!   to Vivado's net delays on chipsmith's own routing ([`ROUTING`]), plus
+//!   a site input's own delay (a slice's A1 0.56 ns, its A6 0.03 ns).
+//!   prjxray-db's intrinsic pip delays leave out the loading of the wires
+//!   and read 17-21% short of Vivado, connection by connection;
+//! - for the placer, routing estimated from distance, hop by hop: per
+//!   interconnect hop the mean intrinsic delay of the pips driving that
+//!   wire class in `tile_type_INT_L.json` (singles, doubles, quads,
+//!   hexes), plus the pip into the site pin (IMUX);
+//! - a margin for the clock tree's skew and uncertainty
+//!   ([`CLOCK_MARGIN`]) on every path end.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -22,6 +27,7 @@ use std::path::Path;
 use anyhow::{ensure, Context, Result};
 use serde_json::Value;
 
+use chipsmith_route::chipdb::ChipDb;
 use chipsmith_route::timing::Ps;
 
 #[derive(Debug, Clone)]
@@ -34,6 +40,8 @@ pub struct Delays {
     pub clock_to_q: Ps,
     pub setup_d: Ps,
     pub setup_ce: Ps,
+    /// Added to every path end's setup ([`CLOCK_MARGIN`]).
+    pub clock_margin: Ps,
     pub recovery_sr: Ps,
     /// Interconnect hops by length: 1, 2, 4 (horizontal quads) and 6
     /// (vertical hexes), and the pip into a site pin.
@@ -45,6 +53,26 @@ pub struct Delays {
     pub bram: BramDelays,
     pub dsp: DspDelays,
 }
+
+/// A slice register's clock to Q, and its setup times on D, CE and SR (ps),
+/// as Vivado 2026.1's timer has them: medians over chipsmith's builds
+/// imported into Vivado (`bench/zybo-cell-delays.py`; its report's
+/// `Setup_*` lines are what setup takes off the required time, so the
+/// setup time is their negative). prjxray-db's SDF leaves out what the
+/// site adds between the register and its pins (its FF_INIT: clock to Q
+/// 303, setup D -46, CE 109): Vivado's clock to Q is 456 in a SLICEL, 518
+/// in a SLICEM; its setup on D -31 (-118 to 256 by where D comes in), on
+/// CE 205, on a synchronous reset 660. The reset's here is 600: with
+/// [`CLOCK_MARGIN`] what Vivado takes off a path into SR in all (739 at
+/// the median; 116 into D, 340 into CE, which the others come to).
+const VIVADO_REGISTER: [Ps; 4] = [456.0, -31.0, 205.0, 600.0];
+
+/// What Vivado's timer takes off every register-to-register path for the
+/// clock (ps): its uncertainty (35) and the skew its clock tree leaves
+/// after pessimism removal, 140 in all at the median over chipsmith's
+/// builds (bench/zybo-timing.py: requirement - slack - data path - setup,
+/// per endpoint), where chipsmith's clocks arrive everywhere at once.
+const CLOCK_MARGIN: Ps = 140.0;
 
 /// A DSP48E1 multiplying A by B (no D port, no pattern detect), from
 /// DSP_L.sdf: A to P through the multiplier and the ALU, A's setup into
@@ -282,17 +310,20 @@ impl Delays {
                 .copied()
                 .with_context(|| format!("INT_L has no {class} pips"))
         };
+        // The register's own arcs are Vivado's (VIVADO_REGISTER), the SDF's
+        // being checked to be there.
+        get("FF_INIT", "IOPATH", "CLK", "Q")?;
+        get("FF_INIT", "SETUP", "DIN", "")?;
+        get("FF_INIT", "SETUP", "CE", "")?;
+        let [clock_to_q, setup_d, setup_ce, recovery_sr] = VIVADO_REGISTER;
         Ok(Delays {
             lut: get("LUT6", "IOPATH", "A1", "O6")?,
             carry,
-            clock_to_q: get("FF_INIT", "IOPATH", "CLK", "Q")?,
-            setup_d: get("FF_INIT", "SETUP", "DIN", "")?,
-            setup_ce: get("FF_INIT", "SETUP", "CE", "")?,
-            recovery_sr: sdf
-                .iter()
-                .filter(|((_, kind, from, _), _)| kind == "RECOVERY" && from == "SR")
-                .map(|(_, &d)| d)
-                .fold(0.0, Ps::max),
+            clock_to_q,
+            setup_d,
+            setup_ce,
+            clock_margin: CLOCK_MARGIN,
+            recovery_sr,
             single: hop("single")?,
             double: hop("double")?,
             quad: hop("quad")?,
@@ -321,9 +352,140 @@ impl Delays {
     }
 }
 
+/// The slow-max delay of a prjxray-db `delay` quadruple, in ps.
+fn slow_max(v: &Value) -> Option<Ps> {
+    v.as_array()?.get(3)?.as_str()?.parse::<Ps>().ok().map(|d| d * 1000.0)
+}
+
+/// Vivado's routing delay per node class (`node_class`), fitted to its
+/// net delays on chipsmith's own placement and routing
+/// (`bench/zybo-timing-fit.py`): prjxray-db's intrinsic pip delays leave
+/// out the wires' loading, and read 17-21% short connection by connection.
+const ROUTING: &str = include_str!("../data/xc7z010-1-routing.tsv");
+
+/// What a node not in [`ROUTING`] costs over prjxray-db's intrinsic delay
+/// of the pip into it: about what the fitted classes cost over theirs.
+const UNFITTED: Ps = 1.2;
+
+/// A node's class by one of its wires, as the fit names it: a slice's pin
+/// as `M:A1` (SLICEM) or `L:A1` (SLICEL); any other wire by its name less
+/// the trailing index and the tile side (`EE4BEG`, `IMUX`, `CLB_OUTS`).
+pub fn node_class(wire: &str) -> String {
+    if let Some(rest) = wire.strip_prefix("CLBLM_").or_else(|| wire.strip_prefix("CLBLL_")) {
+        let pin = ["M_", "LL_", "L_"].iter().find_map(|p| Some((*p, rest.strip_prefix(p)?)));
+        if let Some((side, pin)) = pin {
+            let b = pin.as_bytes();
+            let letter = !b.is_empty() && (b'A'..=b'D').contains(&b[0]);
+            let site_pin = match pin {
+                "CE" | "SR" | "CLK" | "CIN" | "COUT" | "WE" => true,
+                _ if letter => matches!(&pin[1..], "" | "1" | "2" | "3" | "4" | "5" | "6" | "X" | "I" | "MUX" | "Q" | "5Q"),
+                _ => false,
+            };
+            if site_pin {
+                return format!("{}:{pin}", if side == "M_" { "M" } else { "L" });
+            }
+        }
+    }
+    let w = wire.trim_end_matches(|c: char| c.is_ascii_digit());
+    let w = w.strip_suffix("_L").unwrap_or(w);
+    let w = w.replace("_L_", "_").replace("LOGIC_OUTS_L", "LOGIC_OUTS");
+    if w.starts_with("CLBLM_") || w.starts_with("CLBLL_") {
+        let mut parts = w.splitn(3, '_');
+        if let (Some(_), Some(_), Some(rest)) = (parts.next(), parts.next(), parts.next()) {
+            return format!("CLB_{rest}");
+        }
+    }
+    w
+}
+
+/// [`ROUTING`]: each class's delay and how many connections it was fitted on.
+fn fitted() -> HashMap<&'static str, (Ps, Ps)> {
+    ROUTING
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| {
+            let mut f = l.split('\t');
+            Some((f.next()?, (f.next()?.parse().ok()?, f.next()?.parse().ok()?)))
+        })
+        .collect()
+}
+
+/// Each routing-graph node's delay: the class of the pip into it (the
+/// slowest, if several drive it) from [`ROUTING`], plus a site input's
+/// own delay into its site (a slice's A1 0.58 ns, its A6 under 0.05 ns).
+/// prjxray-db's tile types (`family`, `.../zynq7`) name the pips and site
+/// pins and give the intrinsic delays a class missing from the table
+/// falls back on.
+pub fn node_delays(db: &ChipDb, family: &Path) -> Result<Vec<Ps>> {
+    let fitted: HashMap<&str, Ps> = fitted().into_iter().map(|(c, (d, _))| (c, d)).collect();
+    // Per tile type: each wire's (pip delay, site pin delay).
+    let mut by_type: Vec<HashMap<u32, (Ps, Ps)>> = Vec::with_capacity(db.tile_types.len());
+    for tt in &db.tile_types {
+        let mut wires: HashMap<u32, (Ps, Ps)> = HashMap::new();
+        let path = family.join(format!("tile_type_{}.json", tt.name));
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            by_type.push(wires);
+            continue;
+        };
+        let json: Value = serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let names: HashMap<&str, u32> = (0..tt.wires.len() as u32).map(|w| (tt.wires.get(w), w)).collect();
+        let mut pins: HashMap<u32, Ps> = HashMap::new();
+        for site in json["sites"].as_array().into_iter().flatten() {
+            for pin in site["site_pins"].as_object().into_iter().flat_map(|p| p.values()) {
+                let Some((&w, name)) = pin["wire"].as_str().and_then(|n| Some((names.get(n)?, n))) else {
+                    continue;
+                };
+                let d = fitted
+                    .get(node_class(name).as_str())
+                    .copied()
+                    .unwrap_or_else(|| slow_max(&pin["delay"]).unwrap_or(0.0));
+                pins.insert(w, d);
+                wires.entry(w).or_default().1 = d;
+            }
+        }
+        for pip in json["pips"].as_object().into_iter().flat_map(|p| p.values()) {
+            let Some((&w, name)) = pip["dst_wire"].as_str().and_then(|n| Some((names.get(n)?, n))) else {
+                continue;
+            };
+            if pins.contains_key(&w) {
+                continue;
+            }
+            let d = fitted
+                .get(node_class(name).as_str())
+                .copied()
+                .unwrap_or_else(|| UNFITTED * slow_max(&pip["src_to_dst"]["delay"]).unwrap_or(0.0));
+            let e = wires.entry(w).or_default();
+            e.0 = e.0.max(d);
+        }
+        by_type.push(wires);
+    }
+    let mut pip = vec![0.0 as Ps; db.nodes()];
+    let mut pin = vec![0.0 as Ps; db.nodes()];
+    for tile in 0..db.width * db.height {
+        for (&w, &(p, s)) in &by_type[db.tile_type_index(tile) as usize] {
+            let n = db.node(tile, w) as usize;
+            pip[n] = pip[n].max(p);
+            pin[n] = pin[n].max(s);
+        }
+    }
+    Ok(pip.iter().zip(&pin).map(|(p, s)| p + s).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_classes_as_the_fit_names_them() {
+        assert_eq!(node_class("CLBLM_M_A1"), "M:A1");
+        assert_eq!(node_class("CLBLL_LL_CE"), "L:CE");
+        assert_eq!(node_class("CLBLM_L_AX"), "L:AX");
+        assert_eq!(node_class("CLBLM_LOGIC_OUTS4"), "CLB_OUTS");
+        assert_eq!(node_class("IMUX_L34"), "IMUX");
+        assert_eq!(node_class("EE4BEG0"), "EE4BEG");
+        assert_eq!(node_class("SR1BEG_S0"), "SR1BEG_S");
+        assert_eq!(node_class("LOGIC_OUTS_L4"), "LOGIC_OUTS");
+    }
 
     const SDF: &str = r#"
     (CELL
@@ -400,9 +562,10 @@ mod tests {
     fn sdf_and_pip_delays_are_read_slow_max_in_ps() {
         let d = Delays::parse(SDF, &int()).unwrap();
         assert_eq!(d.lut, 124.0);
-        assert_eq!(d.clock_to_q, 303.0);
-        assert_eq!(d.setup_d, -46.0);
-        assert_eq!(d.setup_ce, 109.0);
+        // The register's arcs are Vivado's, not the SDF's 303, -46, 109.
+        assert_eq!(d.clock_to_q, 456.0);
+        assert_eq!(d.setup_d, -31.0);
+        assert_eq!(d.setup_ce, 205.0);
         assert_eq!(d.carry[&("CIN".to_string(), "CO3".to_string())], 114.0);
         assert!((d.hex - 190.0).abs() < 1e-3);
         // Same tile: out and back in through one single.
