@@ -158,7 +158,8 @@ impl SyncLoads {
         }
         // Candidates: a multiplexer into a register, a sum read only by it
         // on one leg. Keyed by the sum.
-        let mut taken: FxHashMap<Net, (Net, SigBit)> = FxHashMap::default();
+        // Sum -> (the register's Q, the other leg, the register's D).
+        let mut taken: FxHashMap<Net, (Net, SigBit, Net)> = FxHashMap::default();
         mux.retain(|&y, &mut [a, b, s]| {
             if !q_of.contains_key(&y) || s.net().is_none() {
                 return false;
@@ -166,11 +167,11 @@ impl SyncLoads {
             let sum = |x: SigBit| x.net().filter(|&n| one(n) && arith.contains_key(&n));
             match (sum(a), sum(b)) {
                 (Some(n), _) => {
-                    taken.insert(n, (q_of[&y], b));
+                    taken.insert(n, (q_of[&y], b, y));
                     true
                 }
                 (None, Some(n)) => {
-                    taken.insert(n, (q_of[&y], a));
+                    taken.insert(n, (q_of[&y], a, y));
                     true
                 }
                 (None, None) => false,
@@ -229,7 +230,29 @@ impl SyncLoads {
                             || resets.iter().any(|r| SigBit::Const(State::from(r.2)) == k)
                     })
                     .count();
-                if outside.len() + constants <= LAB_DATA_INPUTS {
+                // An LE takes the LAB's clear and load together (one bit),
+                // so the registers of these 16 LEs that take either must
+                // take the same: clear (2), load (4) or both (6). Before
+                // any load is taken they agree, as the placer had them.
+                let kind = |y: &Net| -> u8 {
+                    let reset = |d: &Net| reset_of.get(d).is_some_and(|r| !r.1);
+                    if let Some(t) = taken.get(y) {
+                        4 | if reset(&t.2) { 2 } else { 0 }
+                    } else if resets.iter().any(|r| r.0 == *y) {
+                        4
+                    } else if reset(y) {
+                        // Read elsewhere too or not, the register sits in
+                        // the sum's LE.
+                        2
+                    } else {
+                        0
+                    }
+                };
+                let mut kinds: Vec<u8> = lab.iter().map(kind).filter(|&k| k != 0).collect();
+                kinds.dedup();
+                kinds.sort_unstable();
+                kinds.dedup();
+                if outside.len() + constants <= LAB_DATA_INPUTS && kinds.len() <= 1 {
                     sums.extend(lab.iter().filter(|y| taken.contains_key(y)));
                     resets_taken.extend(resets.iter().map(|r| r.0));
                 }
