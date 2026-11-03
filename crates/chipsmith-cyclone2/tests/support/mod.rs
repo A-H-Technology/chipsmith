@@ -409,8 +409,10 @@ pub fn packed_gate(packed: &Path) -> Design {
     let resolve = |n: u64| *subst.get(&n).unwrap_or(&n);
     let idle = |ty: &str, p: &str| match (ty, p) {
         ("LCELL_COMB", "DATAA" | "DATAB" | "DATAC" | "DATAD" | "CIN") => Some("1"),
-        ("LCELL_FF", "ENA") => Some("1"),
-        ("LCELL_FF", "ACLR" | "SCLR" | "SDATA" | "SLOAD") => Some("0"),
+        // SDATA is the LE's input C, which reads 1 unrouted: a load of a
+        // constant 1 leaves it so (`pack_constants`).
+        ("LCELL_FF", "ENA" | "SDATA") => Some("1"),
+        ("LCELL_FF", "ACLR" | "SCLR" | "SLOAD") => Some("0"),
         _ => None,
     };
     for c in cells.values_mut() {

@@ -733,8 +733,8 @@ fn pack_constants(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
                     nl.disconnect(c, p);
                     const_one_ff.push(c);
                 }
-                // A constant on the synchronous load (`synth::ff`): driven
-                // by the constant's LE once the folding is done.
+                // A constant on the synchronous load (`synth::ff`): a 0
+                // driven by the constant's LE once the folding is done.
                 Kind::Ff(_) if p == Port::Sdata && nl.cell(c).net(Port::Sload).is_some() => {
                     nl.disconnect(c, p);
                     const_sdata.push((c, value));
@@ -784,11 +784,15 @@ fn pack_constants(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
         nl.connect(lut, Port::Combout, n);
         nl.connect(ff, Port::Datain, n);
     }
+    // A 0 comes from `~GND`. A 1 is the LE's input C left unrouted, which
+    // reads 1, as Quartus builds `.sdata(1'b1)`: with a constant-1 LE
+    // instead, Quartus' assembly of the same routing left the input
+    // unrouted where the LE sat in the loads' LAB (i2c-master).
     for (ff, v) in const_sdata {
-        if dead_cells.contains(ff) {
+        if dead_cells.contains(ff) || v {
             continue;
         }
-        let n = constant_le(nl, v);
+        let n = constant_le(nl, false);
         nl.connect(ff, Port::Sdata, n);
     }
     Ok(())
@@ -1243,7 +1247,7 @@ fn to_json(nl: &Netlist) -> Result<Value> {
                     params.insert("SLOAD_INV".into(), bit(true));
                 }
                 // SDATA without an SLOAD net: the LAB's sload tied high.
-                if cell.has_port(Port::Sdata) && !cell.has_port(Port::Sload) {
+                if cell.net(Port::Sdata).is_some() && cell.net(Port::Sload).is_none() {
                     params.insert("SLOAD".into(), bit(true));
                 }
                 "LCELL_FF"

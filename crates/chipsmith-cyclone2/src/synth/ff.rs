@@ -39,9 +39,10 @@ use super::cells::{Comb, Reg, LCELL_COMB};
 /// the adder's LE, the sum on DATAIN and the other leg on SDATA (the LE's
 /// input C, which arithmetic mode leaves free), as Quartus builds
 /// picorv32's `reg_next_pc` (66 LUTs to chipsmith's 123 without it). A
-/// constant leg comes from the design's constant LE (the packer's
-/// `constant_le`): sha256's `digest_update ? H + a : H0`, where H0 is a
-/// constant or `mode` bit by bit.
+/// constant leg is a 0 from the design's `~GND` LE (the packer's
+/// `constant_le`) or a 1 from input C left unrouted: sha256's
+/// `digest_update ? H + a : H0`, where H0 is a constant or `mode` bit by
+/// bit.
 ///
 /// A LAB takes 34 signals from outside (the placer's `MAX_LAB_INPUTS`),
 /// and a carry chain fills its LABs 16 LEs at a time: each 16 LEs of a
@@ -222,7 +223,8 @@ impl SyncLoads {
                     .collect();
                 outside.sort_unstable();
                 outside.dedup();
-                // A constant leg comes from the design's constant LE.
+                // A constant 0 comes from `~GND` on a LAB line (a 1 takes
+                // none; counted anyway).
                 let constants = [SigBit::ZERO, SigBit::ONE]
                     .into_iter()
                     .filter(|&k| {
