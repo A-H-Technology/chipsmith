@@ -6,11 +6,11 @@
         "nixpkgs": "nixpkgs"
       },
       "locked": {
-        "lastModified": 1793535563,
-        "narHash": "sha256-1zW/ZydaDSGqjRnpgar8f3UQumaFEn5UXQO4u6E+JQo=",
+        "lastModified": 1793667771,
+        "narHash": "sha256-pIL56/QF+R4SnpxhDqcpEnV9ItvZh24bK3WETfLhP9s=",
         "owner": "cramt",
         "repo": "cyclone2-re",
-        "rev": "3c324d8ced7885934270a4981f76ef838b51ff0a",
+        "rev": "e43034ad4be1550e88564ed9e59ce7fde0b6dc63",
         "type": "github"
       },
       "original": {
