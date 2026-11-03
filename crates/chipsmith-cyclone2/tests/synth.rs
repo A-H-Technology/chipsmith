@@ -845,6 +845,40 @@ fn async_load() {
     feature("async_load");
 }
 
+/// Multiplexers in front of registers with an adder on one leg take the
+/// LAB's synchronous load (`designs/sync_load.v`): the other leg on SDATA,
+/// the select on SLOAD, no LUT of their own, as Quartus builds them. Proven
+/// and co-simulated; fails if the registers stop taking the load (8 + 8 +
+/// 6 of them, 8 more loading a constant; the 4 that power up 1 keep their
+/// LUTs) or the packed LUT count grows back by the multiplexers' 30.
+#[test]
+fn sync_load() {
+    let f = Path::new(ROOT).join("crates/chipsmith-cyclone2/tests/designs/sync_load.v");
+    let s = synthesize("sync_load", "top", std::slice::from_ref(&f));
+    let proof = prove("sync_load", &s);
+    eprintln!("sync_load: {} $equiv proven", proof.equivalences);
+    let refined = s.stages.refined.as_ref().unwrap();
+    let gate = s.stages.cells.as_ref().unwrap();
+    let sim = support::cosim(&s.dir, &s.rtl, refined, gate, COSIM_CYCLES, 1)
+        .unwrap_or_else(|e| panic!("sync_load: co-simulation: {e}"));
+    eprintln!(
+        "sync_load: co-simulated {} cycles, {} output bits compared",
+        sim.cycles, sim.compared
+    );
+    let loads = gate.modules[0]
+        .cells
+        .iter()
+        .filter(|c| matches!(&c.kind, CellKind::Other(g) if g.ty == "LCELL_FF"
+            && g.port("SLOAD").is_some_and(|p| p.sig[0].net().is_some())))
+        .count();
+    assert_eq!(loads, 30, "registers on the sync load");
+    let packed = pack(&s.dir, "sync_load", &s.netlist);
+    eprintln!("sync_load: {packed:?}");
+    // 30 adder bits, the 4-bit adder of `high` and its multiplexer, the
+    // constant LEs, and the inverters of SLOAD and the enables folded away.
+    assert!(packed.luts <= 44, "sync_load: {} LUTs", packed.luts);
+}
+
 /// Falling-edge registers: the LAB clock's inversion (CLK_INV), not an
 /// inverter in front of the clock. The proof steps every register on one
 /// edge, so it can't tell the edges apart; the co-simulation does, and

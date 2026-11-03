@@ -24,40 +24,41 @@ nextpnr, no prjxray tool, only prjxray-db's data.
 | xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes, with no external tool but GHDL for VHDL (2026-11-01: chipsmith's own Verilog front end, synthesis, packing, placement, routing and FASM; 2026-11-02: frames and `.bit`; "The Zybo flow", below): LUT1-LUT6, CARRY4, FDRE/FDSE/FDCE/FDPE, RAM32M, block RAM (RAMB18E1, since 2026-11-02; "7-series block RAM", below), multipliers (DSP48E1, since 2026-11-02; "7-series multipliers", below), LUT6_2 pairs, LVCMOS33 pins, BUFGs, BSCANs and the PS7 | yes, with the earlier flow (2026-10-24, yosys and nextpnr around chipsmith's placement and routing: zybo-jtag-counter read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga). chipsmith's own flow is checked at the bitstream instead (decoded and co-simulated against the RTL, below), not yet on the board |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
-LEDs, 971 LEs and two M4Ks (its register file); a build takes 16 to 23 s
-on the benchmark machine (docs/vs-quartus.md; Compile speed, below).
+LEDs, 875 LEs and two M4Ks (its register file); a build takes 43 to 58 s
+on the benchmark machine at load 13 to 26 (docs/vs-quartus.md; Compile
+speed, below).
 
 Against Quartus II 13.0sp1 Web Edition on the same Verilog, pins and
 clock, to a bitstream (`bench/vs-quartus.sh`, docs/vs-quartus.md;
-2026-11-02/03, branch `qor2` at 16c6b23, a shared i7-4770K at load 4 to
-19, median 9). Wall-time medians over 3 interleaved reps; Fmax is
+2026-11-03, branch `qor3` at f6d26ff, a shared i7-4770K at load 9 to
+38, median 14). Wall-time medians over 3 interleaved reps; Fmax is
 quartus_sta's for both tools' placements (picorv32x24: chipsmith's own
 estimate):
 
 | design | LEs Quartus / chipsmith | Quartus s | chipsmith s | Fmax MHz Quartus / chipsmith |
 |---|---|---|---|---|
-| blinky-verilog | 26 / 26 | 65 | 6.9 | 285 / 298 |
-| picorv32 | 839 / 971 | 107 | 20 | 120 / 130 |
-| femtorv32 | 473 / 513 | 72 | 17 | 81 / 71 |
-| sdram-selftest | 567 / 645 | 79 | 13 | 166 / 180 |
-| sha256 | 3,303 / 3,674 | 166 | 108 | 65 / 51 |
-| picorv32x24 | 20,240 / 23,527 | 1,105 | 556 | 105 / 113 |
+| blinky-verilog | 26 / 26 | 128 | 14 | 285 / 298 |
+| picorv32 | 839 / 875 | 151 | 50 | 120 / 142 |
+| femtorv32 | 473 / 513 | 152 | 29 | 81 / 75 |
+| sdram-selftest | 567 / 626 | 128 | 33 | 166 / 181 |
+| sha256 | 3,303 / 3,422 | 328 | 200 | 65 / 70 |
+| picorv32x24 | 20,240 / 21,241 | 1,318 | 691 | 105 / 110 |
 
-chipsmith is 1.5x to 19x faster in wall time at every size and uses 1.3x
-to 8x less CPU time: Quartus 13.0 Web Edition is single-threaded, and
-most of its time on small designs is a fixed minute or so. Quartus still
-uses 8% to 17% fewer LEs (chipsmith 13% fewer on crc32). chipsmith's
-placements are faster on picorv32, sdram-selftest, crc32, blinky and (by
-its estimate) picorv32x24; Quartus' by 11% on mult-selftest, 14% on
-femtorv32 and 26% on sha256. Branch `qor2`'s router (present congestion
-growing 1.2x an iteration, critical connections rerouted for delay once
-legal) gave sha256 43.7 -> 51.4 MHz and picorv32x24 83 -> 113, at the
-cost of more routing iterations (picorv32x24's route 250 -> 413 s).
-chipsmith's estimate is within -1.4% to +5.2% of quartus_sta on its own
+chipsmith is 1.6x to 10x faster in wall time at every size and uses 1.5x
+to 8.5x less CPU time: Quartus 13.0 Web Edition is single-threaded, and
+most of its time on small designs is a fixed minute or two. Quartus still
+uses 4% to 16% fewer LEs (chipsmith 13% fewer on crc32). chipsmith's
+placements are faster on picorv32, sha256, sdram-selftest, crc32, blinky
+and (by its estimate) picorv32x24; Quartus' by 4% on mult-selftest and 7%
+on femtorv32. Branch `qor3` built sums of three or more terms by arrival
+(sha256 51.4 -> 69.6 MHz), shared two sums under a multiplexer and put
+multiplexers behind sums on the LAB's synchronous load (picorv32 971 ->
+875 LEs, sha256 3,674 -> 3,422, picorv32x24 23,527 -> 21,241).
+chipsmith's estimate is within -1.4% to +6.1% of quartus_sta on its own
 placements. The earlier runs (2026-11-01, `open` a288925: 12% to 83% more
-LEs than Quartus; 2026-11-02, `qor`) and what closed the gap since are in
-docs/vs-quartus.md. Neither tool rebuilds incrementally after a logic
-edit.
+LEs than Quartus; 2026-11-02, `qor`; 2026-11-02/03, `qor2`) and what
+closed the gap since are in docs/vs-quartus.md. Neither tool rebuilds
+incrementally after a logic edit.
 
 `examples/de2-jtag-counter` answers over the JTAG cable, so a load can be
 checked without watching the board: the Cyclone II's JTAG block makes it a

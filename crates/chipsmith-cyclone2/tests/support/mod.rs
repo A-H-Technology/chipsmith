@@ -81,23 +81,27 @@ module LCELL_COMB (input DATAA, input DATAB, input DATAC, input DATAD, input CIN
   assign COUT = DATAA ? k2[1] : k2[0];
 endmodule
 module LCELL_FF (input DATAIN, input CLK, input ENA, input ACLR, input SCLR, input SDATA,
-                 output reg REGOUT);
+                 input SLOAD, output reg REGOUT);
   parameter CLK_INV = 0;
   // The packer's (`pack::to_json`; synthesis leaves them 0): the LAB's
-  // control inversions, and SDATA loaded through the LAB's sync load, tied
-  // high, in place of DATAIN.
+  // control inversions, and SDATA loaded through the LAB's sync load tied
+  // high (the packer's `SLOAD`, renamed by `packed_gate`: a port has the
+  // name) in place of DATAIN. Otherwise SDATA is loaded while SLOAD is
+  // active.
   parameter ENA_INV = 0;
   parameter SCLR_INV = 0;
   parameter ACLR_INV = 0;
-  parameter SLOAD = 0;
+  parameter SLOAD_INV = 0;
+  parameter SLOAD_HIGH = 0;
   initial REGOUT = 1'b0;
   wire clk = CLK_INV ? ~CLK : CLK;
   wire ena = ENA_INV ? ~ENA : ENA;
   wire sclr = SCLR_INV ? ~SCLR : SCLR;
   wire aclr = ACLR_INV ? ~ACLR : ACLR;
+  wire load = SLOAD_HIGH ? 1'b1 : SLOAD_INV ? ~SLOAD : SLOAD;
   always @(posedge clk, posedge aclr)
     if (aclr) REGOUT <= 1'b0;
-    else if (ena) REGOUT <= sclr ? 1'b0 : SLOAD ? SDATA : DATAIN;
+    else if (ena) REGOUT <= sclr ? 1'b0 : load ? SDATA : DATAIN;
 endmodule
 // An I/O cell register (`cells.v`): on its side's clock edge
 // (`*CLK_INVERT`: falling), while its enable is active if it takes one; the
@@ -405,12 +409,23 @@ pub fn packed_gate(packed: &Path) -> Design {
     let resolve = |n: u64| *subst.get(&n).unwrap_or(&n);
     let idle = |ty: &str, p: &str| match (ty, p) {
         ("LCELL_COMB", "DATAA" | "DATAB" | "DATAC" | "DATAD" | "CIN") => Some("1"),
-        ("LCELL_FF", "ENA") => Some("1"),
-        ("LCELL_FF", "ACLR" | "SCLR" | "SDATA") => Some("0"),
+        // SDATA is the LE's input C, which reads 1 unrouted: a load of a
+        // constant 1 leaves it so (`pack_constants`).
+        ("LCELL_FF", "ENA" | "SDATA") => Some("1"),
+        ("LCELL_FF", "ACLR" | "SCLR" | "SLOAD") => Some("0"),
         _ => None,
     };
     for c in cells.values_mut() {
         let ty = c["type"].as_str().unwrap().to_string();
+        if ty == "LCELL_FF" {
+            // The model's SLOAD is the port; the packer's tied-high
+            // parameter of that name is its SLOAD_HIGH.
+            let params = c["parameters"].as_object_mut().unwrap();
+            if let Some(v) = params.remove("SLOAD") {
+                params.insert("SLOAD_HIGH".into(), v);
+            }
+            c["port_directions"]["SLOAD"] = serde_json::json!("input");
+        }
         let dirs = c["port_directions"].clone();
         let conns = c["connections"].as_object_mut().unwrap();
         for (p, _) in dirs.as_object().unwrap() {
