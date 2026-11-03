@@ -1,11 +1,12 @@
-//! The router's critical paths don't slide back: a fresh build of an
-//! example, through the `chipsmith` binary, routes to at most a bound on
-//! its estimated critical path. The bounds sit a little above what branch
-//! `qor2` routes (docs/vs-quartus.md, "Routing round 2") and below what
-//! `open` 3ba072c did, so losing the slower present-cost growth or the
-//! critical-path repair fails here. The build is deterministic, so a
-//! bound only moves when the flow does. Needs `CHIPSMITH_CYCLONE2_DB`: run
-//! in the devshell. sha256 takes a few minutes.
+//! Quality of results doesn't slide back: a fresh build of an example,
+//! through the `chipsmith` binary, routes to at most a bound on its
+//! estimated critical path, or takes at most so many LEs. The bounds sit a
+//! little above what branch `qor3` builds (docs/vs-quartus.md, round 3) and
+//! below what came before, so losing the sums ordered by arrival (sha256,
+//! femtorv32) or the shared sums (picorv32's LEs) fails here, as does
+//! losing `qor2`'s routing. The build is deterministic, so a bound only
+//! moves when the flow does. Needs `CHIPSMITH_CYCLONE2_DB`: run in the
+//! devshell. sha256 takes a few minutes.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -27,8 +28,8 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
-/// The routed critical path of a fresh build of `examples/<example>`, ns.
-fn routed_critical(example: &str) -> f64 {
+/// A fresh build of `examples/<example>`'s report.
+fn build(example: &str) -> String {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("route-quality")
         .join(example);
@@ -45,32 +46,55 @@ fn routed_critical(example: &str) -> f64 {
         .unwrap();
     let report = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{example}: build failed:\n{report}");
-    // "routed <n> nets, <n> pips, <n> iterations in <s> s; critical path <ns> ns (estimate)"
     report
-        .lines()
-        .find(|l| l.trim_start().starts_with("routed "))
-        .and_then(|l| l.split("critical path ").nth(1))
-        .and_then(|s| s.split(' ').next())
-        .and_then(|ns| ns.parse().ok())
-        .unwrap_or_else(|| panic!("{example}: no routed critical path in\n{report}"))
 }
 
-fn at_most(example: &str, bound: f64, before: f64) {
+/// The number after `before` on the first line that starts with `line`.
+fn number(example: &str, report: &str, line: &str, before: &str) -> f64 {
+    report
+        .lines()
+        .find(|l| l.trim_start().starts_with(line))
+        .and_then(|l| l.split(before).nth(1))
+        .and_then(|s| s.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("{example}: no \"{line}...{before}\" in\n{report}"))
+}
+
+/// The routed critical path of a fresh build of `examples/<example>`, ns.
+fn routed_critical(example: &str) -> f64 {
+    let report = build(example);
+    // "routed <n> nets, <n> pips, <n> iterations in <s> s; critical path <ns> ns (estimate)"
+    number(example, &report, "routed ", "critical path ")
+}
+
+fn at_most(example: &str, (bound, before): (f64, f64)) {
     let ns = routed_critical(example);
-    eprintln!("{example}: routed critical path {ns:.2} ns (bound {bound}, open 3ba072c {before})");
-    assert!(ns <= bound, "{example}: routed critical path {ns:.2} ns, over {bound} (open 3ba072c: {before})");
+    eprintln!("{example}: routed critical path {ns:.2} ns (bound {bound}, before {before})");
+    assert!(ns <= bound, "{example}: routed critical path {ns:.2} ns, over {bound} (before: {before})");
 }
 
 #[test]
 fn femtorv32() {
-    at_most("femtorv32", FEMTORV32.0, FEMTORV32.1);
+    at_most("femtorv32", FEMTORV32);
 }
 
 #[test]
 fn sha256() {
-    at_most("sha256", SHA256.0, SHA256.1);
+    at_most("sha256", SHA256);
 }
 
-/// (bound, `open` 3ba072c's), ns.
-const FEMTORV32: (f64, f64) = (14.0, 14.31);
-const SHA256: (f64, f64) = (19.6, 22.58);
+#[test]
+fn picorv32_les() {
+    // "placed <n> LEs (<n> carry chains), ..."
+    let les = number("picorv32", &build("picorv32"), "placed ", "placed ");
+    let (bound, before) = PICORV32_LES;
+    eprintln!("picorv32: {les} LEs (bound {bound}, before {before})");
+    assert!(les <= bound, "picorv32: {les} LEs, over {bound} (before: {before})");
+}
+
+/// (bound, before), ns: `open` 80351e1's (sums as written; femtorv32
+/// 13.76, sha256 19.27) above, `qor3`'s (13.05, 13.98) below.
+const FEMTORV32: (f64, f64) = (13.6, 13.76);
+const SHA256: (f64, f64) = (15.0, 19.27);
+/// (bound, before): `qor3` 916 without shared sums 971.
+const PICORV32_LES: (f64, f64) = (930.0, 971.0);
