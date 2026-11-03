@@ -78,7 +78,6 @@ pub fn run(
     let placement = place::place(db, Some(delays), d)?;
     let place_seconds = started.elapsed().as_secs_f64();
 
-    let ph = phys::build(db, &packed, &placement, family)?;
     // Each cell's site and bel, beside the FASM.
     let mut text = String::new();
     for (c, at) in d.cells.iter().zip(&placement.sites) {
@@ -122,6 +121,7 @@ pub fn run(
             }
         }
     }
+    let ph = phys::build(db, &packed, &placement, family)?;
     let reqs: Vec<NetReq> = ph
         .nets
         .iter()
@@ -188,7 +188,7 @@ pub fn run(
     std::fs::write(fasm_out, text).with_context(|| format!("writing {}", fasm_out.display()))?;
 
     if let Some(path) = std::env::var_os("CHIPSMITH_XC7_CONNS") {
-        conns_dump(db, d, &timing, delays, &ph.nets, &trees, &placement.sites, &path)?;
+        conns_dump(db, &timing, delays, &ph.nets, &trees, &placement.sites, &path)?;
     }
     let clocks = clock_timing(d, &packed.conf, &timing, &ph.nets, &trees, &placement.sites)?;
     let count = |f: &dyn Fn(&Kind, &Conf) -> bool| {
@@ -313,7 +313,6 @@ fn check(db: &ChipDb, nets: &[NetReq], trees: &[Tree]) -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 fn conns_dump(
     db: &ChipDb,
-    d: &place::Design,
     timing: &place::Timing,
     delays: &Delays,
     nets: &[phys::RouteNet],

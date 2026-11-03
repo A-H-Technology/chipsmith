@@ -776,8 +776,12 @@ fn xc7_pnr(
         r.dsps
     );
     say!(
-        "placed {} cells, wirelength {:.0} (from {:.0}), estimated critical path {:.2} ns, {} moves on {} threads in {:.1} s",
+        "placed {} cells ({} BLEs, {} carry chains, {} RAMs; {} start), wirelength {:.0} (from {:.0}), estimated critical path {:.2} ns, {} moves on {} threads in {:.1} s",
         r.place.cells,
+        r.place.bles,
+        r.place.carry_chains,
+        r.place.rams,
+        if r.place.electro { "electrostatic" } else { "greedy" },
         r.place.wirelength,
         r.place.initial_wirelength,
         r.place.critical / 1000.0,

@@ -428,26 +428,12 @@ pub(crate) struct Conn {
     /// register, a carry chain's own LUTs and registers, CO3 into the next
     /// CIN.
     pub internal: bool,
-    /// What the connection goes into, for its estimate: 0 a LUT input, 1 a
-    /// register's D or a bypass, 2 a CE, 3 an SR.
-    pub sink: u8,
 }
 
-/// The routed delay of a connection by what it goes into and its
-/// distance (ps): fixed, per grid column, per row; least squares over
-/// zybo-picorv32's routed connections (CHIPSMITH_XC7_CONNS).
-const LINEAR: [[Ps; 3]; 4] = [[712.0, 22.1, 106.1], [480.0, 25.4, 40.5], [663.0, 8.4, 66.8], [1301.0, 0.0, 44.5]];
-
 impl Timing {
-    /// The estimated delay of `c` between cells at `a` and `b`.
-    fn estimate(&self, c: &Conn, a: Xy, b: Xy) -> Ps {
-        static LIN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *LIN.get_or_init(|| std::env::var("CHIPSMITH_XC7_EXP_LIN").is_ok_and(|v| v == "1")) {
-            let k = LINEAR[c.sink as usize];
-            k[0] + k[1] * (a.0 - b.0).abs() as Ps + k[2] * (a.1 - b.1).abs() as Ps
-        } else {
-            self.delays.route(a.0 - b.0, a.1 - b.1)
-        }
+    /// The estimated delay of a connection between cells at `a` and `b`.
+    fn estimate(&self, a: Xy, b: Xy) -> Ps {
+        self.delays.route(a.0 - b.0, a.1 - b.1)
     }
 }
 
@@ -464,16 +450,11 @@ pub(crate) struct Timing {
 /// The Cyclone II's 8 is too weak here: swept on picorv32 and
 /// zybo-jtag-counter, nextpnr's Fmax on chipsmith's routing (README), 20
 /// came out best; 40 and 80 no better, a lower exponent worse.
-const TIMING_WEIGHT_DEFAULT: f32 = 20.0;
-const CRIT_EXP_DEFAULT: f32 = 4.0;
-
-/// Experiment knobs over the defaults (CHIPSMITH_XC7_EXP_WEIGHT, _CRITEXP),
-/// read once.
-fn knob(name: &str, default: f32, cell: &'static std::sync::OnceLock<f32>) -> f32 {
-    *cell.get_or_init(|| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default))
-}
-static WEIGHT_KNOB: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-static CRITEXP_KNOB: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+/// Rechecked on chipsmith's calibrated timing (bench/zybo-timing.sh, five
+/// seeds): 10 with an exponent of 2 placed riscv-bram 3% and sha256 2%
+/// worse, picorv32 no better.
+const TIMING_WEIGHT: f32 = 20.0;
+const CRIT_EXP: f32 = 4.0;
 
 impl Timing {
     pub(crate) fn new(d: &Design, delays: &Delays) -> Self {
@@ -644,14 +625,7 @@ impl Timing {
                     }
                     _ => false,
                 };
-                let sink = match uport.as_str() {
-                    p if p.len() == 2 && p.starts_with('A') => 0,
-                    "CE" => 2,
-                    "SR" => 3,
-                    _ => 1,
-                };
                 conns.push(Conn {
-                    sink,
                     from_cell: *drv,
                     to_cell: *user,
                     from: g.node(&d.cells[*drv as usize].name, dport),
@@ -953,7 +927,7 @@ impl<'a> State<'a> {
         if c.internal && a == b {
             return 0.0;
         }
-        t.estimate(c, a, b)
+        t.estimate(a, b)
     }
 
     /// Static timing of the current placement; with `reweight`, every net
@@ -976,9 +950,7 @@ impl<'a> State<'a> {
         if reweight {
             self.weight.iter_mut().for_each(|w| *w = 1.0);
             for (c, a) in t.conns.iter().zip(&arcs) {
-                let tw = knob("CHIPSMITH_XC7_EXP_WEIGHT", TIMING_WEIGHT_DEFAULT, &WEIGHT_KNOB);
-                let ce = knob("CHIPSMITH_XC7_EXP_CRITEXP", CRIT_EXP_DEFAULT, &CRITEXP_KNOB);
-                let w = 1.0 + tw * analysis.criticality(a).powf(ce);
+                let w = 1.0 + TIMING_WEIGHT * analysis.criticality(a).powf(CRIT_EXP);
                 let n = c.net as usize;
                 self.weight[n] = self.weight[n].max(w);
             }
@@ -1432,6 +1404,8 @@ pub struct Stats {
     pub moves: u64,
     pub seconds: f64,
     pub threads: usize,
+    /// Started from the electrostatic global placement.
+    pub electro: bool,
 }
 
 /// Where an anneal starts: hot from the greedy start, or cold from a
@@ -1799,7 +1773,17 @@ const SEEDS: usize = 8;
 /// electrostatic global placement (chipsmith-place, ADR-0012) instead of
 /// hot from the greedy start; `CHIPSMITH_XC7_PLACER=anneal` or `electro`
 /// forces either.
-const ELECTRO_FROM: usize = 1000;
+///
+/// Five seeds each on chipsmith's calibrated timing, the electrostatic
+/// start (timing-driven, below) against the greedy one: sha256 +5%,
+/// picorv32 +4%, riscv-bram +2%, bram-selftest +4%, mult-selftest's
+/// 62.5 MHz logic -6%; placement 4-5 times faster on the middle three.
+const ELECTRO_FROM: usize = 200;
+
+/// The global placement reweights its nets by their criticality (as the
+/// anneal does) every this many iterations once it has spread: sha256 at
+/// 52.7 MHz against 50.1 without (five seeds).
+const GLOBAL_TIMING_EVERY: usize = 25;
 
 /// The global placement's nets weighted by their most critical connection,
 /// as the anneal weights them, on the objects' current centres.
@@ -1832,7 +1816,7 @@ impl chipsmith_place::electro::Timing for GlobalTiming<'_> {
                     && self.obj_of[c.from_cell as usize] == self.obj_of[c.to_cell as usize];
                 let delay = match (xy(c.from_cell), xy(c.to_cell)) {
                     _ if c.internal && same => 0.0,
-                    (Some(a), Some(b)) => t.estimate(c, a, b),
+                    (Some(a), Some(b)) => t.estimate(a, b),
                     _ => 0.0,
                 };
                 Arc { from: c.from, to: c.to, delay }
@@ -1840,11 +1824,9 @@ impl chipsmith_place::electro::Timing for GlobalTiming<'_> {
             .collect();
         let analysis = t.graph.analyse(&arcs);
         weights.iter_mut().for_each(|w| *w = 1.0);
-        let tw = knob("CHIPSMITH_XC7_EXP_WEIGHT", TIMING_WEIGHT_DEFAULT, &WEIGHT_KNOB);
-        let ce = knob("CHIPSMITH_XC7_EXP_CRITEXP", CRIT_EXP_DEFAULT, &CRITEXP_KNOB);
         for (c, a) in t.conns.iter().zip(&arcs) {
             if let Some(n) = self.problem_net[c.net as usize] {
-                let w = 1.0 + tw * analysis.criticality(a).powf(ce);
+                let w = 1.0 + TIMING_WEIGHT * analysis.criticality(a).powf(CRIT_EXP);
                 weights[n] = weights[n].max(w);
             }
         }
@@ -1852,7 +1834,7 @@ impl chipsmith_place::electro::Timing for GlobalTiming<'_> {
 }
 
 /// The objects' global placement (chipsmith-place's electrostatic placer,
-/// wirelength only), each then put in the free place nearest its target:
+/// timing-driven by [`GlobalTiming`]), each then put in the free place nearest its target:
 /// chains and RAMs first, then BLEs.
 fn global<'a>(
     d: &'a Design,
@@ -1939,11 +1921,9 @@ fn global<'a>(
             problem_nets += 1;
         }
     }
-    // Experiment: timing-driven global placement (CHIPSMITH_XC7_EXP_GLOBAL=<every>).
-    let every: usize = std::env::var("CHIPSMITH_XC7_EXP_GLOBAL").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     let opts = electro::Options {
         accel: electro::Accel::from_env().map_err(anyhow::Error::msg)?,
-        timing_every: if timing.is_some() { every } else { 0 },
+        timing_every: if timing.is_some() { GLOBAL_TIMING_EVERY } else { 0 },
         trace: std::env::var_os("CHIPSMITH_XC7_TRACE").is_some(),
         ..Default::default()
     };
@@ -2062,6 +2042,7 @@ pub(crate) fn place(db: &ChipDb, delays: Option<&Delays>, d: &Design) -> Result<
             moves,
             seconds: started.elapsed().as_secs_f64(),
             threads,
+            electro,
         },
     })
 }

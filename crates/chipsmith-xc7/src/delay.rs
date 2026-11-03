@@ -62,8 +62,10 @@ pub struct Delays {
 /// site adds between the register and its pins (its FF_INIT: clock to Q
 /// 303, setup D -46, CE 109): Vivado's clock to Q is 456 in a SLICEL, 518
 /// in a SLICEM; its setup on D -31 (-118 to 256 by where D comes in), on
-/// CE 205, on a synchronous reset 660.
-const VIVADO_REGISTER: [Ps; 4] = [456.0, -31.0, 205.0, 660.0];
+/// CE 205, on a synchronous reset 660. The reset's here is 600: with
+/// [`CLOCK_MARGIN`] what Vivado takes off a path into SR in all (739 at
+/// the median; 116 into D, 340 into CE, which the others come to).
+const VIVADO_REGISTER: [Ps; 4] = [456.0, -31.0, 205.0, 600.0];
 
 /// What Vivado's timer takes off every register-to-register path for the
 /// clock (ps): its uncertainty (35) and the skew its clock tree leaves
@@ -279,22 +281,6 @@ impl Delays {
         let dsp = std::fs::read_to_string(&dsp_path)
             .with_context(|| format!("reading {}", dsp_path.display()))?;
         let mut d = Self::parse(&sdf, &int)?;
-        // Experiment: the placer's hops as fitted (CHIPSMITH_XC7_EXP_HOPS=1).
-        if std::env::var("CHIPSMITH_XC7_EXP_HOPS").is_ok_and(|v| v == "1") {
-            let f = fitted();
-            let mean = |names: &[&str]| -> Ps {
-                let (s, n) = names.iter().filter_map(|c| f.get(*c)).fold((0.0, 0.0), |(s, n), (d, k)| (s + d * k, n + k));
-                if n > 0.0 { s / n } else { 0.0 }
-            };
-            d.single = mean(&["NR1BEG", "NL1BEG", "SR1BEG", "SL1BEG", "ER1BEG", "EL1BEG", "WR1BEG", "WL1BEG"]);
-            d.double = mean(&["NN2BEG", "NE2BEG", "NW2BEG", "SS2BEG", "SE2BEG", "SW2BEG", "EE2BEG", "WW2BEG"]);
-            d.quad = mean(&["EE4BEG", "WW4BEG"]);
-            d.hex = mean(&["NN6BEG", "NE6BEG", "NW6BEG", "SS6BEG", "SE6BEG", "SW6BEG"]);
-            // Out through the slice's output stage, in through IMUX and a
-            // fast pin.
-            d.imux = mean(&["CLB_OUTS"]) + mean(&["IMUX"]) + 100.0;
-            eprintln!("    placer hops {:.0} {:.0} {:.0} {:.0} + {:.0}", d.single, d.double, d.quad, d.hex, d.imux);
-        }
         d.bram = BramDelays::parse(&bram)?;
         d.dsp = DspDelays::parse(&dsp)?;
         Ok(d)

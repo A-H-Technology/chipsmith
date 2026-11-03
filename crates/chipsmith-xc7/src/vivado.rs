@@ -164,6 +164,19 @@ pub fn export(db: &ChipDb, routed: &Routed, pins: &BTreeMap<String, String>, per
                 lut = Some(l);
             }
         }
+        if g.ty == "DSP48E1" {
+            // A DSP column's cascade wires are always connected, so the
+            // decoder reads each block's PCIN, ACIN, ... as the PCOUT, ACOUT,
+            // ... below it, and Vivado's timer times those arcs whatever
+            // OPMODE selects. chipsmith builds no cascades: they go to 0.
+            // Remove once it does (only cut what OPMODE and A_/B_INPUT
+            // leave unread).
+            for p in g.ports.iter_mut() {
+                if matches!(p.name.as_str(), "PCIN" | "ACIN" | "BCIN" | "CARRYCASCIN" | "MULTSIGNIN") {
+                    p.sig.iter_mut().for_each(|b| *b = SigBit::ZERO);
+                }
+            }
+        }
         cells.push(C {
             name: c.name.clone(),
             g,
