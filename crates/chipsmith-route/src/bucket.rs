@@ -163,6 +163,7 @@ impl Router<'_> {
         }
         l.gen += 1;
         let pf_q = q(self.present_factor);
+        let allowed = self.confined.get(&net);
         let target = self.node[sink as usize].bbox;
         let f_of = |n: NodeId, g: u64| {
             let (dx, dy) = self.node[n as usize].bbox.gap(target);
@@ -208,7 +209,12 @@ impl Router<'_> {
                     }
                     let dst = self.db.edge(e).dst;
                     let m = dst as usize;
-                    if self.reserved_for_other(dst, net) || !self.node[m].bbox.overlaps(region) {
+                    if self.reserved_for_other(dst, net)
+                        || !self.node[m].bbox.overlaps(region)
+                        || allowed.is_some_and(|a| {
+                            dst != sink && !a[self.db.node_type[m] as usize]
+                        })
+                    {
                         continue;
                     }
                     let ni = &self.node[m];
@@ -265,17 +271,16 @@ impl Router<'_> {
         tree
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn route_net_bucketed_with(
+    /// A net's starting tree for the integer search: the source and what
+    /// survives of `keep`, marked in `s` under a new tree generation.
+    pub(crate) fn start_tree(
         &self,
         fx: &Fixed,
         s: &mut Scratch,
-        l: &mut Labels,
-        index: u32,
         net: &NetReq,
         crit: &[f32],
         keep: Option<&Tree>,
-    ) -> Result<Tree> {
+    ) -> Start {
         s.tree_generation += 1;
         let gen = s.tree_generation;
         let mut tree = Tree {
@@ -290,7 +295,7 @@ impl Router<'_> {
         if let Some(old) = keep.filter(|t| !t.nodes.is_empty()) {
             self.keep_branches(s, net, crit, old, &mut tree);
         }
-        let mut delays: Vec<Ps> = tree.nodes.iter().map(|&n| s.delay_to[n as usize]).collect();
+        let delays: Vec<Ps> = tree.nodes.iter().map(|&n| s.delay_to[n as usize]).collect();
         // Each tree node's delay in `Fixed` units, along its parents.
         let mut dq: Vec<u64> = Vec::with_capacity(tree.nodes.len());
         for i in 0..tree.nodes.len() {
@@ -302,45 +307,84 @@ impl Router<'_> {
             };
             dq.push(up + own);
         }
-        let region = self.region(net).unwrap_or(chipdb::Box::EVERYWHERE);
-        let mut order: Vec<usize> = (0..net.sinks.len()).collect();
-        order.sort_by(|&a, &b| {
-            crit[b].total_cmp(&crit[a]).then(
-                self.distance(net.source, net.sinks[a])
-                    .total_cmp(&self.distance(net.source, net.sinks[b])),
-            )
-        });
-        for i in order {
+        Start {
+            tree,
+            delays,
+            dq,
+            gen,
+        }
+    }
+
+    /// The region a net's integer searches stay in first; a confined net
+    /// searches the whole chip, as `Router::search` does.
+    pub(crate) fn search_region(&self, index: u32, net: &NetReq) -> chipdb::Box {
+        match self.region(net) {
+            Some(r) if !self.confined.contains_key(&index) => r,
+            _ => chipdb::Box::EVERYWHERE,
+        }
+    }
+
+    /// The integer search in `region`, then over the whole chip.
+    #[allow(clippy::too_many_arguments)]
+    fn search_bucketed_anywhere(
+        &self,
+        fx: &Fixed,
+        l: &mut Labels,
+        net: u32,
+        seeds: &[(NodeId, u64)],
+        sink: NodeId,
+        crit_q: u64,
+        region: chipdb::Box,
+        work: &mut [u64; 3],
+    ) -> Option<Branch> {
+        self.search_bucketed(fx, l, net, seeds, sink, crit_q, region, work)
+            .or_else(|| {
+                (region != chipdb::Box::EVERYWHERE)
+                    .then(|| {
+                        self.search_bucketed(fx, l, net, seeds, sink, crit_q, chipdb::Box::EVERYWHERE, work)
+                    })
+                    .flatten()
+            })
+    }
+
+    /// Add a branch to a `Start`'s tree, keeping its `Fixed` delays.
+    fn graft_q(&self, fx: &Fixed, s: &mut Scratch, st: &mut Start, branch: &[(NodeId, Edge)], seed: NodeId) {
+        let before = st.tree.nodes.len();
+        self.graft(s, &mut st.tree, &mut st.delays, branch, seed, st.gen);
+        for j in before..st.tree.nodes.len() {
+            let own = fx.delay_q[st.tree.nodes[j] as usize] as u64;
+            st.dq.push(st.dq[st.tree.parent[j] as usize] + own);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn route_net_bucketed_with(
+        &self,
+        fx: &Fixed,
+        s: &mut Scratch,
+        l: &mut Labels,
+        index: u32,
+        net: &NetReq,
+        crit: &[f32],
+        keep: Option<&Tree>,
+    ) -> Result<Tree> {
+        let mut st = self.start_tree(fx, s, net, crit, keep);
+        let region = self.search_region(index, net);
+        for i in self.sink_order(net, crit) {
             let sink = net.sinks[i];
-            if s.in_tree[sink as usize] == gen {
+            if s.in_tree[sink as usize] == st.gen {
                 continue;
             }
             let crit_q = Fixed::crit_q(crit[i]);
             let seeds: Vec<(NodeId, u64)> =
-                tree.nodes.iter().copied().zip(dq.iter().copied()).collect();
-            let found = self
-                .search_bucketed(fx, l, index, &seeds, sink, crit_q, region, &mut s.work)
-                .or_else(|| {
-                    self.search_bucketed(
-                        fx,
-                        l,
-                        index,
-                        &seeds,
-                        sink,
-                        crit_q,
-                        chipdb::Box::EVERYWHERE,
-                        &mut s.work,
-                    )
-                });
+                st.tree.nodes.iter().copied().zip(st.dq.iter().copied()).collect();
+            let found =
+                self.search_bucketed_anywhere(fx, l, index, &seeds, sink, crit_q, region, &mut s.work);
             let (branch, seed) =
                 found.with_context(|| format!("net {}: no route to a sink", net.name))?;
-            let before = tree.nodes.len();
-            self.graft(s, &mut tree, &mut delays, &branch, seed, gen);
-            for j in before..tree.nodes.len() {
-                let own = fx.delay_q[tree.nodes[j] as usize] as u64;
-                dq.push(dq[tree.parent[j] as usize] + own);
-            }
+            self.graft_q(fx, s, &mut st, &branch, seed);
         }
+        let mut tree = st.tree;
         tree.sink_delay = net
             .sinks
             .iter()
@@ -348,4 +392,97 @@ impl Router<'_> {
             .collect();
         Ok(tree)
     }
+
+    /// A net alone in its batch (a wide one, or one confined to some wire
+    /// types), with the integer search: its sinks `group` at a time side
+    /// by side, each from the tree as it was when the group began, the
+    /// branches grafted in order. On the GPU (`gpu`) a group is one launch,
+    /// a slot per sink; a search the GPU gives up on is the CPU's against
+    /// the same tree, so the tree is the same either way.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn route_net_grouped(
+        &self,
+        fx: &Fixed,
+        s: &mut Scratch,
+        index: u32,
+        net: &NetReq,
+        crit: &[f32],
+        keep: Option<&Tree>,
+        group: usize,
+        pool: &[Mutex<Option<Scratch>>],
+        #[cfg(feature = "gpu")] mut gpu: Option<&mut crate::gpu::Searcher>,
+    ) -> Result<Tree> {
+        let mut st = self.start_tree(fx, s, net, crit, keep);
+        let region = self.search_region(index, net);
+        let order = self.sink_order(net, crit);
+        let mut l = std::mem::take(&mut s.labels);
+        for chunk in order.chunks(group.max(1)) {
+            let todo: Vec<usize> = chunk
+                .iter()
+                .copied()
+                .filter(|&i| s.in_tree[net.sinks[i] as usize] != st.gen)
+                .collect();
+            let seeds: Vec<(NodeId, u64)> =
+                st.tree.nodes.iter().copied().zip(st.dq.iter().copied()).collect();
+            let search = |l: &mut Labels, work: &mut [u64; 3], i: usize| {
+                self.search_bucketed_anywhere(
+                    fx,
+                    l,
+                    index,
+                    &seeds,
+                    net.sinks[i],
+                    Fixed::crit_q(crit[i]),
+                    region,
+                    work,
+                )
+            };
+            #[allow(unused_mut)]
+            let mut on_device: Option<Vec<Option<Branch>>> = None;
+            #[cfg(feature = "gpu")]
+            if let Some(g) = gpu.as_deref_mut().filter(|_| todo.len() > 1) {
+                on_device = Some(self.search_group_gpu(g, index, &st, &todo, net, crit, region));
+            }
+            let branches: Vec<Option<Branch>> = match on_device {
+                // The GPU's, and the CPU's search where it gave up.
+                Some(found) => found
+                    .into_iter()
+                    .zip(&todo)
+                    .map(|(b, &i)| b.or_else(|| search(&mut l, &mut s.work, i)))
+                    .collect(),
+                None if todo.len() > 1 => todo
+                    .par_iter()
+                    .map(|&i| {
+                        let slot = rayon::current_thread_index().unwrap_or(0) % pool.len();
+                        let mut ps = pool[slot].lock().expect("a router thread panicked");
+                        let ps = ps.get_or_insert_with(|| Scratch::new(self.db.nodes()));
+                        search(&mut ps.labels, &mut ps.work, i)
+                    })
+                    .collect(),
+                None => todo.iter().map(|&i| search(&mut l, &mut s.work, i)).collect(),
+            };
+            for b in branches {
+                let (branch, seed) =
+                    b.with_context(|| format!("net {}: no route to a sink", net.name))?;
+                self.graft_q(fx, s, &mut st, &branch, seed);
+            }
+        }
+        s.labels = l;
+        let mut tree = st.tree;
+        tree.sink_delay = net
+            .sinks
+            .iter()
+            .map(|&sink| s.delay_to[sink as usize])
+            .collect();
+        Ok(tree)
+    }
+}
+
+/// A net's tree as the integer search builds it: the tree, each node's
+/// delay from the source in picoseconds and in `Fixed` units, and the tree
+/// generation its nodes are marked with in the search scratch.
+pub(crate) struct Start {
+    pub tree: Tree,
+    pub delays: Vec<Ps>,
+    pub dq: Vec<u64>,
+    pub gen: u32,
 }

@@ -36,9 +36,9 @@ mod chipsmith_place_runtime {
 const UNITS: u32 = 256;
 /// Nets a batch runs at once (each has a label per node on the device).
 pub const SLOTS: usize = 64;
-/// A slot's tree holds at most this many nodes; a bigger net is routed on
-/// the CPU.
-pub const TREE_CAP: usize = 1024;
+/// A slot adds at most this many nodes to the tree it starts from; a net
+/// that needs more is routed on the CPU.
+pub const OUT_CAP: usize = 1024;
 /// Frontier entries a slot's round may hold; more fails the slot (the
 /// CPU routes its net).
 const FCAP: usize = 1 << 16;
@@ -110,6 +110,8 @@ fn slot_kernel(
     hist: &[u32],
     owner: &[u32],
     inp: &[u32],
+    init_node: &[u32],
+    init_dq: &[u64],
     out: &mut [u32],
     gen: &mut [u32],
     slot_round: &mut [u32],
@@ -141,25 +143,37 @@ fn slot_kernel(
     slots: u32,
     o_sinks: u32,
     #[comptime] n: usize,
-    #[comptime] tree_cap: usize,
+    #[comptime] out_cap: usize,
     #[comptime] fcap: usize,
 ) {
     // inp: per slot source, net, region, first sink; then one more first
-    // sink; then (sink, criticality) pairs.
+    // sink; then per slot where its starting tree is in `init_*`, its
+    // length, and where its tree goes in the tree pool; then (sink,
+    // criticality) pairs.
     let s = CUBE_POS as usize;
     let k = slots as usize;
     let t = UNIT_POS as usize;
     let nt = CUBE_DIM as usize;
     let base = s * n;
     let fb = s * fcap;
-    let tb = s * tree_cap;
+    let o_tree = 4 * k + 1;
+    let io = inp[o_tree + s] as usize;
+    let il = inp[o_tree + k + s] as usize;
+    let tb = inp[o_tree + 2 * k + s] as usize;
+    let bb = s * out_cap * 2;
+    // The starting tree: the source, and what the net keeps of its last
+    // routing (or, for one sink of a wide net, its tree so far).
+    let mut i0 = t;
+    while i0 < il {
+        let node = init_node[io + i0];
+        tree_node[tb + i0] = node;
+        tree_dq[tb + i0] = init_dq[io + i0];
+        in_tree[base + node as usize] = batch;
+        i0 += nt;
+    }
     // scal: bound, sink_g, crit; misc: cur_sink, sink_box, next_sink, frontier size.
     if t == 0 {
-        let src = inp[s];
-        tree_node[tb] = src;
-        tree_dq[tb] = delay_q[src as usize] as u64;
-        tree_len[s] = 1u32;
-        in_tree[base + src as usize] = batch;
+        tree_len[s] = il as u32;
         phase[s] = 4u32;
         misc[s * 4 + 2] = inp[3 * k + s];
         misc[s * 4 + 3] = 0u32;
@@ -219,11 +233,11 @@ fn slot_kernel(
                     if via == 16777215u32 {
                         walking = false;
                     } else {
-                        branch[tb * 2 + len as usize * 2] = v;
-                        branch[tb * 2 + len as usize * 2 + 1] = via;
+                        branch[bb + len as usize * 2] = v;
+                        branch[bb + len as usize * 2 + 1] = via;
                         len += 1u32;
                         v = edge_src[via as usize];
-                        if len as usize >= tree_cap {
+                        if len as usize >= out_cap {
                             walking = false;
                             whole = false;
                         }
@@ -232,14 +246,14 @@ fn slot_kernel(
                 let mut cut = len;
                 let mut found = false;
                 for i in 0..len {
-                    if !found && in_tree[base + branch[tb * 2 + i as usize * 2] as usize] == batch {
+                    if !found && in_tree[base + branch[bb + i as usize * 2] as usize] == batch {
                         cut = i;
                         found = true;
                     }
                 }
                 let mut attach = v;
                 if cut < len {
-                    attach = branch[tb * 2 + cut as usize * 2];
+                    attach = branch[bb + cut as usize * 2];
                 }
                 let tl = tree_len[s];
                 let mut parent = 0u32;
@@ -248,15 +262,15 @@ fn slot_kernel(
                         parent = i;
                     }
                 }
-                let fits = whole && (tl + cut) as usize <= tree_cap;
+                let fits = whole && (tl + cut) as usize <= il + out_cap;
                 let mut j = cut;
                 while j > 0u32 && fits {
                     j -= 1u32;
-                    let node = branch[tb * 2 + j as usize * 2];
+                    let node = branch[bb + j as usize * 2];
                     let idx = tree_len[s];
                     tree_node[tb + idx as usize] = node;
                     tree_parent[tb + idx as usize] = parent;
-                    tree_via[tb + idx as usize] = branch[tb * 2 + j as usize * 2 + 1];
+                    tree_via[tb + idx as usize] = branch[bb + j as usize * 2 + 1];
                     tree_dq[tb + idx as usize] =
                         tree_dq[tb + parent as usize] + delay_q[node as usize] as u64;
                     in_tree[base + node as usize] = batch;
@@ -313,7 +327,9 @@ fn slot_kernel(
                     }
                     labels[base + node as usize].fetch_min(tag | (g << 24) | 16777215u64);
                     mark[base + node as usize].store(round);
-                    n_node[fb + i] = node;
+                    if i < fcap {
+                        n_node[fb + i] = node;
+                    }
                     i += nt;
                 }
             } else {
@@ -398,19 +414,19 @@ fn slot_kernel(
             sync_cube();
         }
     }
-    // The result: phase and tree length, then (node, parent, edge) per
-    // tree node.
-    let ob = s * (2 + 3 * tree_cap);
+    // The result: phase and how many nodes the slot added to its starting
+    // tree, then (node, parent, edge) per added node.
+    let ob = s * (2 + 3 * out_cap);
     let tl = tree_len[s] as usize;
     if t == 0 {
         out[ob] = phase[s];
-        out[ob + 1] = tl as u32;
+        out[ob + 1] = (tl - il) as u32;
     }
-    let mut i = t;
+    let mut i = il + t;
     while i < tl {
-        out[ob + 2 + 3 * i] = tree_node[tb + i];
-        out[ob + 3 + 3 * i] = tree_parent[tb + i];
-        out[ob + 4 + 3 * i] = tree_via[tb + i];
+        out[ob + 2 + 3 * (i - il)] = tree_node[tb + i];
+        out[ob + 3 + 3 * (i - il)] = tree_parent[tb + i];
+        out[ob + 4 + 3 * (i - il)] = tree_via[tb + i];
         i += nt;
     }
 }
@@ -437,6 +453,14 @@ fn add_occ(nodes: &[u32], occ: &[Atomic<u32>]) {
     }
 }
 
+/// Occupancy deltas: -1 for each listed node.
+#[cube(launch_unchecked)]
+fn sub_occ(nodes: &[u32], occ: &[Atomic<u32>]) {
+    if ABSOLUTE_POS < nodes.len() {
+        occ[nodes[ABSOLUTE_POS] as usize].fetch_sub(1u32);
+    }
+}
+
 fn count(n: usize) -> CubeCount {
     CubeCount::Static((n as u32).div_ceil(UNITS).max(1), 1, 1)
 }
@@ -446,16 +470,20 @@ fn arg(h: &Handle, len: usize) -> BufferArg {
 }
 
 /// One net of a batch as the GPU gets it.
-pub struct SlotNet {
+pub struct SlotNet<'a> {
     pub net: u32,
-    pub source: NodeId,
+    /// The tree the slot starts from, source first, parents before
+    /// children: each node with its delay from the source in `Fixed`
+    /// units.
+    pub init: &'a [NodeId],
+    pub init_dq: &'a [u64],
     /// Sinks in search order, with their criticalities in fixed point.
     pub sinks: Vec<(NodeId, u64)>,
     pub region: chipdb::Box,
 }
 
-/// A slot's tree: nodes in order (the source first), each one's parent
-/// index and the edge into it.
+/// What a slot added to its starting tree: nodes in order, each one's
+/// parent (an index into the whole tree) and the edge into it.
 pub struct SlotTree {
     pub nodes: Vec<NodeId>,
     pub parent: Vec<u32>,
@@ -469,6 +497,8 @@ struct Buffers {
     slot_round: Handle,
     phase: Handle,
     tree_len: Handle,
+    /// The tree pool's capacity in nodes.
+    pool_cap: usize,
     scal: Handle,
     fmin: Handle,
     misc: Handle,
@@ -499,6 +529,12 @@ pub struct Searcher {
     has_owner: bool,
     occ: Handle,
     hist: Handle,
+    /// Whether `occ` and `hist` hold this iteration's state; then the
+    /// nodes trees took and gave up since they were last brought up to
+    /// date.
+    state_set: bool,
+    placed: Vec<u32>,
+    lifted: Vec<u32>,
     labels: Handle,
     mark: Handle,
     in_tree: Handle,
@@ -559,6 +595,9 @@ impl Searcher {
             owner: up32(if owner.is_empty() { &[u32::MAX] } else { owner }),
             occ: up32(&vec![0u32; n]),
             hist: up32(&vec![0u32; n]),
+            state_set: false,
+            placed: Vec::new(),
+            lifted: Vec::new(),
             labels: client.create_from_slice(u64::as_bytes(&vec![u64::MAX; SLOTS * n])),
             mark: up32(&vec![0u32; SLOTS * n]),
             in_tree: up32(&vec![0u32; SLOTS * n]),
@@ -573,15 +612,16 @@ impl Searcher {
                 fmin: client.empty(SLOTS * 8),
                 misc: client.empty(SLOTS * 4 * 4),
                 next_count: client.empty(SLOTS * 4),
-                tree_node: client.empty(SLOTS * TREE_CAP * 4),
-                tree_parent: client.create_from_slice(u32::as_bytes(&vec![0u32; SLOTS * TREE_CAP])),
-                tree_via: client.create_from_slice(u32::as_bytes(&vec![SEED; SLOTS * TREE_CAP])),
-                tree_dq: client.empty(SLOTS * TREE_CAP * 8),
-                branch: client.empty(SLOTS * TREE_CAP * 2 * 4),
+                pool_cap: 0,
+                tree_node: client.empty(4),
+                tree_parent: client.empty(4),
+                tree_via: client.empty(4),
+                tree_dq: client.empty(8),
+                branch: client.empty(SLOTS * OUT_CAP * 2 * 4),
                 f_node: client.empty(SLOTS * FCAP * 4),
                 f_g: client.empty(SLOTS * FCAP * 8),
                 n_node: client.empty(SLOTS * FCAP * 4),
-                out: client.empty(SLOTS * (2 + 3 * TREE_CAP) * 4),
+                out: client.empty(SLOTS * (2 + 3 * OUT_CAP) * 4),
             },
             kx_q: fx.kx_q,
             ky_q: fx.ky_q,
@@ -597,32 +637,70 @@ impl Searcher {
         Ok(s)
     }
 
-    /// The routing state at an iteration's start.
-    pub fn set_state(&mut self, occ: &[u32], hist: &[u32]) {
-        self.occ = self.client.create_from_slice(u32::as_bytes(occ));
-        self.hist = self.client.create_from_slice(u32::as_bytes(hist));
+    /// History changed (an iteration ended): the next batch uploads the
+    /// whole state.
+    pub fn invalidate(&mut self) {
+        self.state_set = false;
+        self.placed.clear();
+        self.lifted.clear();
     }
 
-    /// Committed nodes (one entry per tree node).
-    pub fn commit(&mut self, nodes: &[u32]) {
-        if nodes.is_empty() {
+    /// A tree's nodes went onto the occupancy.
+    pub fn note_placed(&mut self, nodes: &[u32]) {
+        if self.state_set {
+            self.placed.extend_from_slice(nodes);
+        }
+    }
+
+    /// A tree's nodes came off the occupancy.
+    pub fn note_lifted(&mut self, nodes: &[u32]) {
+        if self.state_set {
+            self.lifted.extend_from_slice(nodes);
+        }
+    }
+
+    /// Bring the device's occupancy and history up to date: all of it
+    /// after `invalidate`, else the deltas noted since.
+    fn sync(&mut self, node: &[crate::NodeInfo]) {
+        if !self.state_set {
+            let occ: Vec<u32> = node.iter().map(|n| n.occ as u32).collect();
+            let hist: Vec<u32> = node.iter().map(|n| n.hist as u32).collect();
+            self.occ = self.client.create_from_slice(u32::as_bytes(&occ));
+            self.hist = self.client.create_from_slice(u32::as_bytes(&hist));
+            self.state_set = true;
             return;
         }
-        let h = self.client.create_from_slice(u32::as_bytes(nodes));
-        unsafe {
-            add_occ::launch_unchecked(
-                &self.client,
-                count(nodes.len()),
-                CubeDim::new_1d(UNITS),
-                arg(&h, nodes.len()),
-                arg(&self.occ, self.n),
-            );
+        for (list, add) in [(std::mem::take(&mut self.placed), true), (std::mem::take(&mut self.lifted), false)] {
+            if list.is_empty() {
+                continue;
+            }
+            let h = self.client.create_from_slice(u32::as_bytes(&list));
+            unsafe {
+                if add {
+                    add_occ::launch_unchecked(
+                        &self.client,
+                        count(list.len()),
+                        CubeDim::new_1d(UNITS),
+                        arg(&h, list.len()),
+                        arg(&self.occ, self.n),
+                    );
+                } else {
+                    sub_occ::launch_unchecked(
+                        &self.client,
+                        count(list.len()),
+                        CubeDim::new_1d(UNITS),
+                        arg(&h, list.len()),
+                        arg(&self.occ, self.n),
+                    );
+                }
+            }
         }
     }
 
-    /// Route `nets` (at most `SLOTS`), each from its source through its
-    /// sinks in order; None for a net the GPU couldn't finish (a sink out
-    /// of its region, or a tree past `TREE_CAP`).
+    /// Route `nets` (at most `SLOTS`), each from its starting tree through
+    /// its sinks in order; None for a net the GPU couldn't finish (a sink
+    /// out of its region, a frontier past `FCAP`, more than `OUT_CAP` new
+    /// nodes).
     pub fn route_batch(&mut self, nets: &[SlotNet], pf_q: u64) -> Vec<Option<SlotTree>> {
         assert!(nets.len() <= SLOTS);
         let t0 = std::time::Instant::now();
@@ -651,10 +729,28 @@ impl Searcher {
             }
             self.gen_max = 0;
         }
-        // One upload: per slot source, net, region, first sink, then the
-        // (sink, criticality) pairs.
+        // The tree pool: each slot's starting tree and room for what it
+        // adds.
+        let mut tree_off = Vec::with_capacity(k);
+        let mut pool = 0usize;
+        for x in nets {
+            tree_off.push(pool as u32);
+            pool += x.init.len() + OUT_CAP;
+        }
+        if pool > self.b.pool_cap {
+            let cap = pool.next_power_of_two();
+            self.b.tree_node = c.empty(cap * 4);
+            self.b.tree_parent = c.empty(cap * 4);
+            self.b.tree_via = c.empty(cap * 4);
+            self.b.tree_dq = c.empty(cap * 8);
+            self.b.pool_cap = cap;
+        }
+        let init_node: Vec<u32> = nets.iter().flat_map(|x| x.init.iter().copied()).collect();
+        let init_dq: Vec<u64> = nets.iter().flat_map(|x| x.init_dq.iter().copied()).collect();
+        // One upload: per slot source, net, region, first sink, then where
+        // its trees go, then the (sink, criticality) pairs.
         let mut inp: Vec<u32> = Vec::new();
-        inp.extend(nets.iter().map(|x| x.source));
+        inp.extend(nets.iter().map(|x| x.init[0]));
         inp.extend(nets.iter().map(|x| x.net));
         inp.extend(
             nets.iter()
@@ -666,6 +762,13 @@ impl Searcher {
             first += x.sinks.len() as u32;
         }
         inp.push(first);
+        let mut at = 0u32;
+        for x in nets {
+            inp.push(at);
+            at += x.init.len() as u32;
+        }
+        inp.extend(nets.iter().map(|x| x.init.len() as u32));
+        inp.extend(&tree_off);
         let o_sinks = inp.len() as u32;
         for x in nets {
             for &(sk, cq) in &x.sinks {
@@ -674,6 +777,8 @@ impl Searcher {
             }
         }
         let inp_h = c.create_from_slice(u32::as_bytes(&inp));
+        let init_node_h = c.create_from_slice(u32::as_bytes(&init_node));
+        let init_dq_h = c.create_from_slice(u64::as_bytes(&init_dq));
         self.batch += 1;
         let t_up = t0.elapsed().as_secs_f64();
         let b = &self.b;
@@ -692,7 +797,9 @@ impl Searcher {
                 arg(&self.hist, n),
                 arg(&self.owner, n),
                 arg(&inp_h, inp.len()),
-                arg(&b.out, SLOTS * (2 + 3 * TREE_CAP)),
+                arg(&init_node_h, init_node.len()),
+                arg(&init_dq_h, init_dq.len()),
+                arg(&b.out, SLOTS * (2 + 3 * OUT_CAP)),
                 arg(&b.gen, SLOTS),
                 arg(&b.slot_round, SLOTS),
                 arg(&b.phase, SLOTS),
@@ -704,11 +811,11 @@ impl Searcher {
                 arg(&self.labels, SLOTS * n),
                 arg(&self.mark, SLOTS * n),
                 arg(&self.in_tree, SLOTS * n),
-                arg(&b.tree_node, SLOTS * TREE_CAP),
-                arg(&b.tree_parent, SLOTS * TREE_CAP),
-                arg(&b.tree_via, SLOTS * TREE_CAP),
-                arg(&b.tree_dq, SLOTS * TREE_CAP),
-                arg(&b.branch, SLOTS * TREE_CAP * 2),
+                arg(&b.tree_node, b.pool_cap),
+                arg(&b.tree_parent, b.pool_cap),
+                arg(&b.tree_via, b.pool_cap),
+                arg(&b.tree_dq, b.pool_cap),
+                arg(&b.branch, SLOTS * OUT_CAP * 2),
                 arg(&b.f_node, SLOTS * FCAP),
                 arg(&b.f_g, SLOTS * FCAP),
                 arg(&b.n_node, SLOTS * FCAP),
@@ -723,7 +830,7 @@ impl Searcher {
                 k as u32,
                 o_sinks,
                 n,
-                TREE_CAP,
+                OUT_CAP,
                 FCAP,
             );
         }
@@ -738,7 +845,7 @@ impl Searcher {
         self.phase_s[2] += t_all - t_kernel;
         self.busy_s += t_all;
         self.batches += 1;
-        let stride = 2 + 3 * TREE_CAP;
+        let stride = 2 + 3 * OUT_CAP;
         (0..k)
             .map(|s| {
                 let o = s * stride;
@@ -756,10 +863,12 @@ impl Searcher {
 }
 
 impl crate::Router<'_> {
-    /// A batch's nets on the GPU, each in the order and with the
-    /// criticalities `route_net_bucketed` uses; a net the GPU gives up on
-    /// is routed by the CPU's search against the same state, so the trees
-    /// are the CPU's either way.
+    /// A batch's nets on the GPU, each from the tree `route_net_bucketed`
+    /// starts from (what survives of `olds`, with `keep`) and with its
+    /// sink order and criticalities; a net the GPU gives up on is routed by
+    /// the CPU's search against the same state, so the trees are the CPU's
+    /// either way.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn route_batch_gpu(
         &self,
         g: &mut Searcher,
@@ -767,40 +876,47 @@ impl crate::Router<'_> {
         batch: &[usize],
         nets: &[crate::NetReq],
         crit: &[Vec<f32>],
+        olds: &[crate::Tree],
+        keep: bool,
     ) -> Vec<(anyhow::Result<crate::Tree>, f64)> {
         let fx = self.fixed.as_ref().expect("the GPU searches in integers");
+        g.sync(&self.node);
         let pf_q = crate::bucket::q(self.present_factor);
-        let slot_of = |i: usize| -> SlotNet {
-            let net = &nets[i];
-            let mut order: Vec<usize> = (0..net.sinks.len()).collect();
-            order.sort_by(|&a, &b| {
-                crit[i][b].total_cmp(&crit[i][a]).then(
-                    self.distance(net.source, net.sinks[a])
-                        .total_cmp(&self.distance(net.source, net.sinks[b])),
-                )
-            });
-            SlotNet {
-                net: i as u32,
-                source: net.source,
-                sinks: order
-                    .iter()
-                    .map(|&k| (net.sinks[k], Fixed::crit_q(crit[i][k])))
-                    .collect(),
-                region: self.region(net).unwrap_or(chipdb::Box::EVERYWHERE),
-            }
-        };
         let mut out = Vec::with_capacity(batch.len());
-        for chunk in batch.chunks(SLOTS) {
-            let slots: Vec<SlotNet> = chunk.iter().map(|&i| slot_of(i)).collect();
+        for (chunk, olds) in batch.chunks(SLOTS).zip(olds.chunks(SLOTS)) {
+            let starts: Vec<crate::bucket::Start> = chunk
+                .iter()
+                .zip(olds)
+                .map(|(&i, old)| self.start_tree(fx, s, &nets[i], &crit[i], keep.then_some(old)))
+                .collect();
+            let slots: Vec<SlotNet> = chunk
+                .iter()
+                .zip(&starts)
+                .map(|(&i, st)| SlotNet {
+                    net: i as u32,
+                    init: &st.tree.nodes,
+                    init_dq: &st.dq,
+                    sinks: self
+                        .sink_order(&nets[i], &crit[i])
+                        .iter()
+                        .map(|&k| (nets[i].sinks[k], Fixed::crit_q(crit[i][k])))
+                        .collect(),
+                    region: self.search_region(i as u32, &nets[i]),
+                })
+                .collect();
             let trees = g.route_batch(&slots, pf_q);
-            for (&i, t) in chunk.iter().zip(trees) {
+            drop(slots);
+            for (((&i, t), st), old) in chunk.iter().zip(trees).zip(starts).zip(olds) {
                 let tree = match t {
-                    Some(t) => Ok(self.tree_of_slot(&nets[i], t)),
-                    None => {
-                        let tree =
-                            self.route_net_bucketed(fx, s, i as u32, &nets[i], &crit[i], None);
-                        tree
-                    }
+                    Some(t) => Ok(self.tree_of_slot(&nets[i], st.tree, t)),
+                    None => self.route_net_bucketed(
+                        fx,
+                        s,
+                        i as u32,
+                        &nets[i],
+                        &crit[i],
+                        keep.then_some(old),
+                    ),
                 };
                 out.push((tree, 0.0));
             }
@@ -808,26 +924,70 @@ impl crate::Router<'_> {
         out
     }
 
-    fn tree_of_slot(&self, net: &crate::NetReq, t: SlotTree) -> crate::Tree {
-        let mut delay = Vec::with_capacity(t.nodes.len());
-        for (i, &n) in t.nodes.iter().enumerate() {
+    /// One integer search per sink in `todo`, side by side on the GPU, each
+    /// from the tree in `st`: the branch back from the sink (None where
+    /// the GPU gave up).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn search_group_gpu(
+        &self,
+        g: &mut Searcher,
+        index: u32,
+        st: &crate::bucket::Start,
+        todo: &[usize],
+        net: &crate::NetReq,
+        crit: &[f32],
+        region: chipdb::Box,
+    ) -> Vec<Option<crate::Branch>> {
+        g.sync(&self.node);
+        let pf_q = crate::bucket::q(self.present_factor);
+        let mut out = Vec::with_capacity(todo.len());
+        for chunk in todo.chunks(SLOTS) {
+            let slots: Vec<SlotNet> = chunk
+                .iter()
+                .map(|&i| SlotNet {
+                    net: index,
+                    init: &st.tree.nodes,
+                    init_dq: &st.dq,
+                    sinks: vec![(net.sinks[i], Fixed::crit_q(crit[i]))],
+                    region,
+                })
+                .collect();
+            for t in g.route_batch(&slots, pf_q) {
+                // What the slot added is the branch, from where it meets
+                // the tree out to the sink.
+                out.push(t.filter(|t| !t.nodes.is_empty()).map(|t| {
+                    let seed = st.tree.nodes[t.parent[0] as usize];
+                    let branch = t
+                        .nodes
+                        .iter()
+                        .zip(&t.via)
+                        .rev()
+                        .map(|(&n, &e)| (n, *self.db.edge(e as usize)))
+                        .collect();
+                    (branch, seed)
+                }));
+            }
+        }
+        out
+    }
+
+    /// A net's tree: its starting tree and what the GPU added.
+    fn tree_of_slot(&self, net: &crate::NetReq, mut tree: crate::Tree, t: SlotTree) -> crate::Tree {
+        for ((&n, &p), &e) in t.nodes.iter().zip(&t.parent).zip(&t.via) {
+            crate::add_node(&mut tree, n, *self.db.edge(e as usize), p);
+        }
+        let mut delay = Vec::with_capacity(tree.nodes.len());
+        for (i, &n) in tree.nodes.iter().enumerate() {
             let own = self.node[n as usize].delay;
             delay.push(if i == 0 {
                 own
             } else {
-                delay[t.parent[i] as usize] + own
+                delay[tree.parent[i] as usize] + own
             });
         }
         let index: std::collections::HashMap<NodeId, usize> =
-            t.nodes.iter().enumerate().map(|(i, &n)| (n, i)).collect();
-        crate::Tree {
-            sink_delay: net.sinks.iter().map(|sk| delay[index[sk]]).collect(),
-            pips: t.via[1..]
-                .iter()
-                .map(|&e| *self.db.edge(e as usize))
-                .collect(),
-            nodes: t.nodes,
-            parent: t.parent,
-        }
+            tree.nodes.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+        tree.sink_delay = net.sinks.iter().map(|sk| delay[index[sk]]).collect();
+        tree
     }
 }
