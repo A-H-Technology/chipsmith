@@ -44,7 +44,7 @@ fn main() {
             "wreduce" => {
                 wreduce::wreduce(m);
             }
-            "alumacc" => alumacc::alumacc(m),
+            "alumacc" => alumacc::alumacc_with(m, alumacc::SumOrder::Arrival),
             "fsm" => {
                 for r in chipsmith_synth::fsm::state_registers(m) {
                     eprintln!("state register {:?}: {} values", &r.q[..2], r.values.len());

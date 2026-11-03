@@ -90,8 +90,92 @@ struct Term {
     negative: bool,
 }
 
+/// How a sum of three or more terms becomes a tree of two-operand adders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SumOrder {
+    /// Balanced, pairing the terms as written.
+    AsWritten,
+    /// Balanced by arrival, Huffman-style: the two terms ready first are
+    /// added first, so a deep term (another sum's result) goes in last.
+    /// sha256's `t1 + sum0 + maj` as written added `t1`, three adders
+    /// deep, first, and `w_data` went through five adders to `a_reg`;
+    /// Quartus' path through it has four.
+    Arrival,
+}
+
+/// Logic levels a sum counts for in [`arrivals`]: its carry chain and the
+/// hop into it are about as slow as a LUT level and a half, and a LUT
+/// takes two or three levels of two-input gates.
+const SUM_LEVELS: u32 = 4;
+
+/// Each net's depth from a register, memory or input in logic levels
+/// (a gate, multiplexer or comparison 1, a LUT 2, a sum `SUM_LEVELS`).
+fn arrivals(m: &Module) -> HashMap<Net, u32> {
+    let combinational = |k: &CellKind| {
+        !matches!(
+            k,
+            CellKind::Ff(_) | CellKind::FfGate(_) | CellKind::Mem(_) | CellKind::Other(_)
+        )
+    };
+    let cost = |k: &CellKind| match k {
+        CellKind::Binary(b) if matches!(b.op, BinaryOp::Add | BinaryOp::Sub) => SUM_LEVELS,
+        CellKind::Alu(_) => SUM_LEVELS,
+        CellKind::Unary(u) if u.op == UnaryOp::Neg => SUM_LEVELS,
+        CellKind::Lut(_) => 2,
+        _ => 1,
+    };
+    let mut driver: HashMap<Net, usize> = HashMap::new();
+    for (i, c) in m.cells.iter().enumerate().filter(|(_, c)| combinational(&c.kind)) {
+        c.kind.for_each_port(|p| {
+            if p.dir == Some(chipsmith_netlist::Dir::Out) {
+                for n in p.bits.iter().filter_map(|b| b.net()) {
+                    driver.insert(n, i);
+                }
+            }
+        });
+    }
+    let inputs = |i: usize| {
+        let mut v = Vec::new();
+        m.cells[i].kind.for_each_port(|p| {
+            if p.dir != Some(chipsmith_netlist::Dir::Out) {
+                v.extend(p.bits.iter().filter_map(|b| b.net()).filter_map(|n| driver.get(&n).copied()));
+            }
+        });
+        v
+    };
+    // Depth-first with an explicit stack; a cell met again while open (a
+    // combinational loop) counts as ready.
+    let mut level: Vec<Option<u32>> = vec![None; m.cells.len()];
+    let mut open = vec![false; m.cells.len()];
+    for root in 0..m.cells.len() {
+        if level[root].is_some() || !combinational(&m.cells[root].kind) {
+            continue;
+        }
+        let mut stack = vec![root];
+        while let Some(&i) = stack.last() {
+            if level[i].is_some() {
+                stack.pop();
+                continue;
+            }
+            let ins = inputs(i);
+            if !open[i] {
+                open[i] = true;
+                stack.extend(ins.iter().filter(|&&j| level[j].is_none() && !open[j]));
+                continue;
+            }
+            let ready = ins.iter().map(|&j| level[j].unwrap_or(0)).max().unwrap_or(0);
+            level[i] = Some(ready + cost(&m.cells[i].kind));
+            stack.pop();
+        }
+    }
+    driver
+        .into_iter()
+        .map(|(n, i)| (n, level[i].unwrap_or(0)))
+        .collect()
+}
+
 /// Rewrites every sum of three or more terms as a balanced adder tree.
-fn balance_sums(m: &mut Module) {
+fn balance_sums(m: &mut Module, order: SumOrder) {
     let is_sum = |k: &CellKind| matches!(k, CellKind::Binary(b) if matches!(b.op, BinaryOp::Add | BinaryOp::Sub));
     let mut uses: HashMap<Net, usize> = HashMap::new();
     let mut driver: HashMap<Net, usize> = HashMap::new();
@@ -180,6 +264,18 @@ fn balance_sums(m: &mut Module) {
     if trees.is_empty() {
         return;
     }
+    let arrival = match order {
+        SumOrder::AsWritten => HashMap::new(),
+        SumOrder::Arrival => arrivals(m),
+    };
+    let ready = |t: &Term| {
+        t.sig
+            .iter()
+            .filter_map(|b| b.net())
+            .map(|n| arrival.get(&n).copied().unwrap_or(0))
+            .max()
+            .unwrap_or(0)
+    };
     let mut namer = crate::rewrite::Namer::new(m, "alumacc");
     let mut dead = vec![false; m.cells.len()];
     let mut new = Vec::new();
@@ -189,6 +285,38 @@ fn balance_sums(m: &mut Module) {
             dead[c] = true;
         }
         let mut level = terms;
+        if order == SumOrder::Arrival {
+            // Earliest first; a sum joins after the terms as ready as it.
+            let mut pending: Vec<(u32, Term)> = level.into_iter().map(|t| (ready(&t), t)).collect();
+            while pending.len() > 1 {
+                let first = (0..pending.len()).min_by_key(|&i| (pending[i].0, i)).expect("terms");
+                let (ra, a) = pending.remove(first);
+                let second = (0..pending.len()).min_by_key(|&i| (pending[i].0, i)).expect("terms");
+                let (rb, b) = pending.remove(second);
+                let out = if pending.is_empty() && !(a.negative && b.negative) {
+                    y.clone()
+                } else {
+                    m.new_sig(w)
+                };
+                let (op, x, z, negative) = match (a.negative, b.negative) {
+                    (false, true) => (BinaryOp::Sub, &a, &b, false),
+                    (true, false) => (BinaryOp::Sub, &b, &a, false),
+                    (n, _) => (BinaryOp::Add, &a, &b, n),
+                };
+                let operand = |t: &Term| Operand {
+                    sig: t.sig.clone(),
+                    signed: false,
+                };
+                new.push(CellKind::Binary(Binary {
+                    op,
+                    a: operand(x),
+                    b: operand(z),
+                    y: out.clone(),
+                }));
+                pending.push((ra.max(rb) + SUM_LEVELS, Term { sig: out, negative }));
+            }
+            level = pending.into_iter().map(|(_, t)| t).collect();
+        }
         while level.len() > 1 {
             let mut next = Vec::new();
             for pair in level.chunks(2) {
@@ -244,7 +372,11 @@ fn balance_sums(m: &mut Module) {
 }
 
 pub fn alumacc(m: &mut Module) {
-    balance_sums(m);
+    alumacc_with(m, SumOrder::AsWritten)
+}
+
+pub fn alumacc_with(m: &mut Module, order: SumOrder) {
+    balance_sums(m, order);
     let mut g = Gates::new(m, "alumacc");
     let cells = std::mem::take(&mut g.m.cells);
     let mut subst = Subst::new(g.m);
@@ -411,6 +543,53 @@ mod tests {
             .iter()
             .filter(|c| matches!(c.kind, CellKind::Alu(_)))
             .count()
+    }
+
+    fn binary(m: &mut Module, op: BinaryOp, a: &SigSpec, b: &SigSpec) -> SigSpec {
+        let y = m.new_sig(a.len());
+        let operand = |sig: &SigSpec| Operand {
+            sig: sig.clone(),
+            signed: false,
+        };
+        let name = format!("c{}", m.cells.len());
+        m.add_cell(
+            name,
+            CellKind::Binary(Binary {
+                op,
+                a: operand(a),
+                b: operand(b),
+                y: y.clone(),
+            }),
+        );
+        y
+    }
+
+    /// sha256's `a_new = t1 + sum0 + maj`, `t1` itself a sum (read twice,
+    /// so a term here): by arrival, `sum0 + maj` comes first and `t1` goes
+    /// into the last adder; as written, `t1 + sum0` came first.
+    #[test]
+    fn a_late_term_goes_into_the_last_adder() {
+        let build = |order: SumOrder| {
+            let mut m = Module::new("top");
+            let (h, w, sum0, maj, d) = (m.new_sig(8), m.new_sig(8), m.new_sig(8), m.new_sig(8), m.new_sig(8));
+            let t1 = binary(&mut m, BinaryOp::Add, &h, &w);
+            let e = binary(&mut m, BinaryOp::Add, &d, &t1);
+            let t2 = binary(&mut m, BinaryOp::Add, &sum0, &maj);
+            let a = binary(&mut m, BinaryOp::Add, &t1, &t2);
+            for (name, y) in [("e", e), ("a", a.clone())] {
+                let mut wire = chipsmith_netlist::Wire::new(name, y);
+                wire.port = Some(chipsmith_netlist::Dir::Out);
+                m.wires.push(wire);
+            }
+            alumacc_with(&mut m, order);
+            // The adder whose result is `a`: does it read `t1` itself?
+            m.cells.iter().any(|c| match &c.kind {
+                CellKind::Alu(alu) => alu.y == a && (alu.a.sig == t1 || alu.b.sig == t1),
+                _ => false,
+            })
+        };
+        assert!(build(SumOrder::Arrival), "t1 into the last adder");
+        assert!(!build(SumOrder::AsWritten), "as written, t1 first");
     }
 
     /// A comparison with a constant on a few bits stays logic for the LUT

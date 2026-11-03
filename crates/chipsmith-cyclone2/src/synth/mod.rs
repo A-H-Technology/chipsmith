@@ -158,7 +158,7 @@ fn run(
         opt::opt(m, removable);
     }
     obs.stage("mult", m);
-    alumacc::alumacc(m);
+    alumacc::alumacc_with(m, alumacc::SumOrder::Arrival);
     opt::opt(m, removable);
     obs.stage("alumacc", m);
     let m4ks = m4k::map(m);
