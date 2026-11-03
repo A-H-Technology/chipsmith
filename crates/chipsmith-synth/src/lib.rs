@@ -14,6 +14,7 @@ pub mod opt;
 pub mod restructure;
 pub mod rewrite;
 pub mod rom;
+pub mod share;
 pub mod techmap;
 pub mod tribuf;
 pub mod undef;

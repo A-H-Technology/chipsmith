@@ -20,7 +20,7 @@ use anyhow::{bail, Context, Result};
 use chipsmith_netlist::{attr, is_set, CellKind, Design, Module};
 use chipsmith_synth::rewrite::define_inits;
 use chipsmith_synth::{
-    alumacc, clean, divmod, fsm, lutmap, memory, opt, restructure, rom, techmap, tribuf, undef,
+    alumacc, clean, divmod, fsm, lutmap, memory, opt, restructure, rom, share, techmap, tribuf, undef,
     wreduce,
 };
 
@@ -142,6 +142,10 @@ fn run(
     // Before wreduce and alumacc: its stages are subtractions and
     // comparisons, which they narrow and put on carry chains.
     if divmod::lower(m) {
+        opt::opt(m, removable);
+    }
+    // Before wreduce narrows the sums differently (`share`).
+    if share::share_sums(m) > 0 {
         opt::opt(m, removable);
     }
     while wreduce::wreduce(m) {
