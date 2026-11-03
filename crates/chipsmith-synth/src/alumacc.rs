@@ -418,7 +418,9 @@ mod tests {
     #[test]
     fn small_constant_compares_stay_logic() {
         let constant = |v: usize, w: usize| -> SigSpec {
-            (0..w).map(|i| SigBit::Const(State::from(v >> i & 1 == 1))).collect()
+            (0..w)
+                .map(|i| SigBit::Const(State::from(v >> i & 1 == 1)))
+                .collect()
         };
         let mut m = Module::new("top");
         let step = m.new_sig(4);

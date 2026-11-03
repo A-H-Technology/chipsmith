@@ -70,23 +70,28 @@ pub fn restructure(m: &mut Module) -> usize {
         let first = word.first()?.net()?;
         let &j = mux_of.get(&first)?;
         let y = out(j);
-        (y == word && y.len() == width && y.iter().all(|b| b.net().is_some_and(|n| readers.get(&n) == Some(&1))))
-            .then_some(j)
+        (y == word
+            && y.len() == width
+            && y.iter()
+                .all(|b| b.net().is_some_and(|n| readers.get(&n) == Some(&1))))
+        .then_some(j)
     };
     // A node's data words, each with the literals that choose it: a
     // `$mux`'s A on !S and B on S; a `$pmux`'s B words on their select
     // and A on none of them.
     let choices = |j: usize| -> Vec<(SigSpec, Vec<(SigBit, bool)>)> {
         match &m.cells[j].kind {
-            CellKind::Mux(mx) => vec![(mx.a.clone(), vec![(mx.s, false)]), (mx.b.clone(), vec![(mx.s, true)])],
+            CellKind::Mux(mx) => vec![
+                (mx.a.clone(), vec![(mx.s, false)]),
+                (mx.b.clone(), vec![(mx.s, true)]),
+            ],
             CellKind::Pmux(p) => {
                 let w = p.a.len();
-                let mut v: Vec<_> = p
-                    .s
-                    .iter()
-                    .enumerate()
-                    .map(|(k, &s)| (p.b[k * w..(k + 1) * w].to_vec(), vec![(s, true)]))
-                    .collect();
+                let mut v: Vec<_> =
+                    p.s.iter()
+                        .enumerate()
+                        .map(|(k, &s)| (p.b[k * w..(k + 1) * w].to_vec(), vec![(s, true)]))
+                        .collect();
                 v.push((p.a.clone(), p.s.iter().map(|&s| (s, false)).collect()));
                 v
             }
@@ -135,7 +140,10 @@ pub fn restructure(m: &mut Module) -> usize {
         // operand muxes: 6 words of 7 leaves, 32 LUTs more), one that
         // picks one word or the default far less (sdram-selftest's:
         // 112 LUTs fewer).
-        let default = leaves.iter().find(|(_, p)| p.iter().all(|&(_, v)| !v)).map(|(d, _)| d);
+        let default = leaves
+            .iter()
+            .find(|(_, p)| p.iter().all(|&(_, v)| !v))
+            .map(|(d, _)| d);
         let mut distinct: Vec<&SigSpec> = Vec::new();
         for (d, _) in &leaves {
             if Some(d) != default && !distinct.contains(&d) {
@@ -225,7 +233,8 @@ mod tests {
                     }
                     CellKind::Pmux(p) => {
                         let w = p.a.len();
-                        let s: Option<Vec<bool>> = p.s.iter().map(|b| val.get(b).copied()).collect();
+                        let s: Option<Vec<bool>> =
+                            p.s.iter().map(|b| val.get(b).copied()).collect();
                         let Some(s) = s else { continue };
                         for k in 0..w {
                             let v = if s.iter().any(|&x| x) {
@@ -274,7 +283,12 @@ mod tests {
         let c: Vec<SigBit> = (0..3).map(|_| m.new_sig(1)[0]).collect();
         let (t1, t2) = (m.new_sig(4), m.new_sig(4));
         let mux = |a: &SigSpec, b: &SigSpec, s: SigBit, y: &SigSpec| {
-            CellKind::Mux(Mux { a: a.clone(), b: b.clone(), s, y: y.clone() })
+            CellKind::Mux(Mux {
+                a: a.clone(),
+                b: b.clone(),
+                s,
+                y: y.clone(),
+            })
         };
         m.add_cell("m1", mux(&d, &x, c[0], &t1));
         m.add_cell("m2", mux(&t1, &d, c[1], &t2));
@@ -284,10 +298,14 @@ mod tests {
         m.wires.push(w);
         let before = m.clone();
         assert_eq!(restructure(&mut m), 1);
-        let pmux: Vec<&Pmux> = m.cells.iter().filter_map(|c| match &c.kind {
-            CellKind::Pmux(p) => Some(p),
-            _ => None,
-        }).collect();
+        let pmux: Vec<&Pmux> = m
+            .cells
+            .iter()
+            .filter_map(|c| match &c.kind {
+                CellKind::Pmux(p) => Some(p),
+                _ => None,
+            })
+            .collect();
         assert_eq!(pmux.len(), 1);
         assert_eq!(pmux[0].s.len(), 1, "one select for the one word");
         for sel in 0..8usize {
@@ -299,7 +317,11 @@ mod tests {
                 inputs.insert(d[k], k % 2 == 0);
                 inputs.insert(x[k], k < 2);
             }
-            assert_eq!(eval(&m, &inputs, &y), eval(&before, &inputs, &y), "selects {sel:03b}");
+            assert_eq!(
+                eval(&m, &inputs, &y),
+                eval(&before, &inputs, &y),
+                "selects {sel:03b}"
+            );
         }
     }
 }
