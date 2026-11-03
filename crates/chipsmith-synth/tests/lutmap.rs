@@ -60,3 +60,55 @@ fn ir_and_json_map_alike() {
     assert_eq!(ir_stats.luts, json_stats.luts);
     assert_eq!(ir_stats.depth, json_stats.depth);
 }
+
+/// LUTs of `top` by input count.
+fn by_inputs(top: &chipsmith_netlist::Module) -> [usize; 7] {
+    let mut n = [0; 7];
+    for c in &top.cells {
+        if let CellKind::Lut(l) = &c.kind {
+            n[l.a.len()] += 1;
+        }
+    }
+    n
+}
+
+/// At K = 6 a cost that charges a 6-input LUT two smaller ones trades
+/// 6-input LUTs for smaller ones and lowers that cost; keeping the best cut
+/// never deepens the mapping.
+#[test]
+fn cost_and_kept_cut_at_six() {
+    use chipsmith_synth::lutmap::{map_module_k, map_module_with, LutCost, LutSize, MapOptions};
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("lutmap-cost");
+    std::fs::create_dir_all(&dir).unwrap();
+    let gates = std::fs::read(gates(&dir)).unwrap();
+    let map = |opts: Option<MapOptions>| {
+        let mut design = read_json(&gates).unwrap();
+        let top = design.modules.iter_mut().find(|m| m.name == "top").unwrap();
+        let stats = match opts {
+            Some(o) => map_module_with(top, LutSize::SIX, o).unwrap(),
+            None => map_module_k(top, LutSize::SIX).unwrap(),
+        };
+        (stats, by_inputs(top))
+    };
+    let (plain, n0) = map(None);
+    let (default, n1) = map(Some(MapOptions::DEFAULT));
+    assert_eq!((plain, n0), (default, n1));
+    let alm = MapOptions {
+        cost: LutCost::by_inputs([3, 3, 3, 3, 3, 4, 6]).unwrap(),
+        keep_best_cut: true,
+    };
+    let (costed, n2) = map(Some(alm));
+    let area = |n: [usize; 7]| 3 * n[..5].iter().sum::<usize>() + 4 * n[5] + 6 * n[6];
+    eprintln!(
+        "uniform {n0:?} depth {}\ncosted  {n2:?} depth {}",
+        plain.depth, costed.depth
+    );
+    assert!(n2[6] < n0[6]);
+    assert!(area(n2) < area(n0));
+    let (kept, _) = map(Some(MapOptions {
+        keep_best_cut: true,
+        ..MapOptions::DEFAULT
+    }));
+    assert!(kept.depth <= plain.depth);
+    assert!(LutCost::by_inputs([1, 1, 1, 0, 1, 1, 1]).is_none());
+}
