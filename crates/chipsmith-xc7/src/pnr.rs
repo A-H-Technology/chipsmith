@@ -336,7 +336,8 @@ fn clock_timing(
         .collect();
     let _ = conf;
     // CHIPSMITH_XC7_ENDPOINTS=<file>: every path end's site, bel, port,
-    // arrival and setup (ps), to hold against another timer's
+    // arrival (`-` if no timed path reaches it) and setup (ps), to hold
+    // against another timer's
     // (`bench/zybo-timing.sh`).
     if let Some(path) = std::env::var_os("CHIPSMITH_XC7_ENDPOINTS") {
         let a = timing.graph.analyse(&arcs);
@@ -348,9 +349,11 @@ fn clock_timing(
             .collect();
         let mut text = String::new();
         for n in 0..timing.graph.len() as u32 {
-            let (Some(setup), Some(arrival)) = (timing.graph.setup(n), a.arrival(n)) else {
+            let Some(setup) = timing.graph.setup(n) else {
                 continue;
             };
+            // `-`: no timed path reaches it.
+            let arrival = a.arrival(n).map_or("-".to_string(), |t| format!("{t:.0}"));
             let name = timing.graph.name(n);
             let Some((cell, port)) = name.rsplit_once('.') else {
                 continue;
@@ -358,7 +361,7 @@ fn clock_timing(
             let Some((site, bel)) = at.get(cell) else {
                 continue;
             };
-            text += &format!("{site}\t{}\t{port}\t{arrival:.0}\t{setup:.0}\n", bel.vivado_name());
+            text += &format!("{site}\t{}\t{port}\t{arrival}\t{setup:.0}\n", bel.vivado_name());
         }
         std::fs::write(&path, text).with_context(|| format!("writing {}", path.to_string_lossy()))?;
     }

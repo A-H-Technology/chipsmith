@@ -279,6 +279,22 @@ impl Delays {
         let dsp = std::fs::read_to_string(&dsp_path)
             .with_context(|| format!("reading {}", dsp_path.display()))?;
         let mut d = Self::parse(&sdf, &int)?;
+        // Experiment: the placer's hops as fitted (CHIPSMITH_XC7_EXP_HOPS=1).
+        if std::env::var("CHIPSMITH_XC7_EXP_HOPS").is_ok_and(|v| v == "1") {
+            let f = fitted();
+            let mean = |names: &[&str]| -> Ps {
+                let (s, n) = names.iter().filter_map(|c| f.get(*c)).fold((0.0, 0.0), |(s, n), (d, k)| (s + d * k, n + k));
+                if n > 0.0 { s / n } else { 0.0 }
+            };
+            d.single = mean(&["NR1BEG", "NL1BEG", "SR1BEG", "SL1BEG", "ER1BEG", "EL1BEG", "WR1BEG", "WL1BEG"]);
+            d.double = mean(&["NN2BEG", "NE2BEG", "NW2BEG", "SS2BEG", "SE2BEG", "SW2BEG", "EE2BEG", "WW2BEG"]);
+            d.quad = mean(&["EE4BEG", "WW4BEG"]);
+            d.hex = mean(&["NN6BEG", "NE6BEG", "NW6BEG", "SS6BEG", "SE6BEG", "SW6BEG"]);
+            // Out through the slice's output stage, in through IMUX and a
+            // fast pin.
+            d.imux = mean(&["CLB_OUTS"]) + mean(&["IMUX"]) + 100.0;
+            eprintln!("    placer hops {:.0} {:.0} {:.0} {:.0} + {:.0}", d.single, d.double, d.quad, d.hex, d.imux);
+        }
         d.bram = BramDelays::parse(&bram)?;
         d.dsp = DspDelays::parse(&dsp)?;
         Ok(d)
@@ -396,6 +412,18 @@ pub fn node_class(wire: &str) -> String {
     w
 }
 
+/// [`ROUTING`]: each class's delay and how many connections it was fitted on.
+fn fitted() -> HashMap<&'static str, (Ps, Ps)> {
+    ROUTING
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| {
+            let mut f = l.split('\t');
+            Some((f.next()?, (f.next()?.parse().ok()?, f.next()?.parse().ok()?)))
+        })
+        .collect()
+}
+
 /// Each routing-graph node's delay: the class of the pip into it (the
 /// slowest, if several drive it) from [`ROUTING`], plus a site input's
 /// own delay into its site (a slice's A1 0.58 ns, its A6 under 0.05 ns).
@@ -403,14 +431,7 @@ pub fn node_class(wire: &str) -> String {
 /// pins and give the intrinsic delays a class missing from the table
 /// falls back on.
 pub fn node_delays(db: &ChipDb, family: &Path) -> Result<Vec<Ps>> {
-    let fitted: HashMap<&str, Ps> = ROUTING
-        .lines()
-        .filter(|l| !l.starts_with('#'))
-        .filter_map(|l| {
-            let mut f = l.split('\t');
-            Some((f.next()?, f.next()?.parse().ok()?))
-        })
-        .collect();
+    let fitted: HashMap<&str, Ps> = fitted().into_iter().map(|(c, (d, _))| (c, d)).collect();
     // Per tile type: each wire's (pip delay, site pin delay).
     let mut by_type: Vec<HashMap<u32, (Ps, Ps)>> = Vec::with_capacity(db.tile_types.len());
     for tt in &db.tile_types {

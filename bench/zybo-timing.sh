@@ -15,7 +15,8 @@
 # Scratch goes to $ZYBO_TIMING_DIR (default /tmp/zybo-timing/<example>, or
 # <example>-s<seed> per seed). $ZYBO_SEEDS (e.g. "0 1 2 3 4") builds each
 # example once per placer seed (CHIPSMITH_XC7_SEED).
-# Needs Vivado through xc7-re ($XC7_RE, default ../xc7-re). Runs itself in
+# Needs Vivado through xc7-re ($XC7_RE, default ../xc7-re); with
+# ZYBO_NO_VIVADO=1 only builds and prints chipsmith's estimates. Runs itself in
 # the devshell when not already in it.
 set -euo pipefail
 root=$(dirname "$(dirname "$(realpath "$0")")")
@@ -56,6 +57,11 @@ for name in "$@"; do
         || { tail -5 "$s/build.log"; exit 1; }
     # The slowest clock from a pin (a BSCAN's TCK isn't exported).
     est=$(grep -E '^ *clock [^ .]+: ' "$s/build.log" | grep -o 'Fmax [0-9.]* MHz' | sort -k2 -n | head -1)
+    if [[ -n "${ZYBO_NO_VIVADO:-}" ]]; then
+        # Screening by the estimate alone.
+        echo "$name seed $seed: chipsmith ${est:-no estimate} (no Vivado)"
+        continue
+    fi
     "$bin/xc7_vivado" "$s/examples/$name" "$(ls "$s/examples/$name"/build/*.fasm)" "$s" 2> "$s/export.log" \
         || { tail -5 "$s/export.log"; exit 1; }
     systemd-run --user --scope -q -p MemoryMax=20G -p MemorySwapMax=0 "$xc7_re/tools/import.sh" "$s" > "$s/import.log" 2>&1 \
@@ -66,4 +72,4 @@ for name in "$@"; do
     dirs+=("$s")
   done
 done
-python3 bench/zybo-timing.py "${dirs[@]}"
+[[ -n "${ZYBO_NO_VIVADO:-}" ]] || python3 bench/zybo-timing.py "${dirs[@]}"

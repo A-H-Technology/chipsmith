@@ -443,12 +443,21 @@ pub(crate) struct Timing {
 /// The Cyclone II's 8 is too weak here: swept on picorv32 and
 /// zybo-jtag-counter, nextpnr's Fmax on chipsmith's routing (README), 20
 /// came out best; 40 and 80 no better, a lower exponent worse.
-const TIMING_WEIGHT: f32 = 20.0;
-const CRIT_EXP: f32 = 4.0;
+const TIMING_WEIGHT_DEFAULT: f32 = 20.0;
+const CRIT_EXP_DEFAULT: f32 = 4.0;
+
+/// Experiment knobs over the defaults (CHIPSMITH_XC7_EXP_WEIGHT, _CRITEXP),
+/// read once.
+fn knob(name: &str, default: f32, cell: &'static std::sync::OnceLock<f32>) -> f32 {
+    *cell.get_or_init(|| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default))
+}
+static WEIGHT_KNOB: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+static CRITEXP_KNOB: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
 
 impl Timing {
     pub(crate) fn new(d: &Design, delays: &Delays) -> Self {
         let mut g = timing::Graph::default();
+        g.cut_loops();
         // Which object (and which slice of it) each cell is in: 0 BLE, 1
         // carry chain, 2 RAM.
         let mut obj: Vec<Option<(u8, u32, u32)>> = vec![None; d.cells.len()];
@@ -939,7 +948,9 @@ impl<'a> State<'a> {
         if reweight {
             self.weight.iter_mut().for_each(|w| *w = 1.0);
             for (c, a) in t.conns.iter().zip(&arcs) {
-                let w = 1.0 + TIMING_WEIGHT * analysis.criticality(a).powf(CRIT_EXP);
+                let tw = knob("CHIPSMITH_XC7_EXP_WEIGHT", TIMING_WEIGHT_DEFAULT, &WEIGHT_KNOB);
+                let ce = knob("CHIPSMITH_XC7_EXP_CRITEXP", CRIT_EXP_DEFAULT, &CRITEXP_KNOB);
+                let w = 1.0 + tw * analysis.criticality(a).powf(ce);
                 let n = c.net as usize;
                 self.weight[n] = self.weight[n].max(w);
             }
@@ -1762,6 +1773,56 @@ const SEEDS: usize = 8;
 /// forces either.
 const ELECTRO_FROM: usize = 1000;
 
+/// The global placement's nets weighted by their most critical connection,
+/// as the anneal weights them, on the objects' current centres.
+struct GlobalTiming<'a> {
+    timing: Option<&'a Timing>,
+    obj_of: &'a [Option<u32>],
+    fixed_xy: &'a HashMap<CellId, Xy>,
+    problem_net: &'a [Option<usize>],
+}
+
+impl chipsmith_place::electro::Timing for GlobalTiming<'_> {
+    fn reweight(&mut self, centres: &[chipsmith_place::Pos], weights: &mut [f32]) {
+        let Some(t) = self.timing else {
+            return;
+        };
+        let xy = |c: CellId| -> Option<Xy> {
+            match self.obj_of[c as usize] {
+                Some(o) => {
+                    let (cx, cy) = centres[o as usize];
+                    Some(((cx * 2.0) as i32, cy as i32))
+                }
+                None => self.fixed_xy.get(&c).copied(),
+            }
+        };
+        let arcs: Vec<Arc> = t
+            .conns
+            .iter()
+            .map(|c| {
+                let same = self.obj_of[c.from_cell as usize].is_some()
+                    && self.obj_of[c.from_cell as usize] == self.obj_of[c.to_cell as usize];
+                let delay = match (xy(c.from_cell), xy(c.to_cell)) {
+                    _ if c.internal && same => 0.0,
+                    (Some(a), Some(b)) => t.delays.route(a.0 - b.0, a.1 - b.1),
+                    _ => 0.0,
+                };
+                Arc { from: c.from, to: c.to, delay }
+            })
+            .collect();
+        let analysis = t.graph.analyse(&arcs);
+        weights.iter_mut().for_each(|w| *w = 1.0);
+        let tw = knob("CHIPSMITH_XC7_EXP_WEIGHT", TIMING_WEIGHT_DEFAULT, &WEIGHT_KNOB);
+        let ce = knob("CHIPSMITH_XC7_EXP_CRITEXP", CRIT_EXP_DEFAULT, &CRITEXP_KNOB);
+        for (c, a) in t.conns.iter().zip(&arcs) {
+            if let Some(n) = self.problem_net[c.net as usize] {
+                let w = 1.0 + tw * analysis.criticality(a).powf(ce);
+                weights[n] = weights[n].max(w);
+            }
+        }
+    }
+}
+
 /// The objects' global placement (chipsmith-place's electrostatic placer,
 /// wirelength only), each then put in the free place nearest its target:
 /// chains and RAMs first, then BLEs.
@@ -1829,7 +1890,10 @@ fn global<'a>(
     for (c, _, xy) in fixed {
         fixed_of.insert(*c, p.add_fixed(((xy.0 / 2) as f32 + 0.5, xy.1 as f32 + 0.5)));
     }
-    for cells in &d.net_cells {
+    // Each design net's net in the problem, for reweighting.
+    let mut problem_net: Vec<Option<usize>> = vec![None; d.net_cells.len()];
+    let mut problem_nets = 0;
+    for (n, cells) in d.net_cells.iter().enumerate() {
         let mut pins: Vec<Pin> = Vec::new();
         for &c in cells {
             let of = match (obj_of[c as usize], fixed_of.get(&c)) {
@@ -1843,16 +1907,26 @@ fn global<'a>(
         }
         if pins.len() >= 2 {
             p.add_net(pins, 1.0);
+            problem_net[n] = Some(problem_nets);
+            problem_nets += 1;
         }
     }
+    // Experiment: timing-driven global placement (CHIPSMITH_XC7_EXP_GLOBAL=<every>).
+    let every: usize = std::env::var("CHIPSMITH_XC7_EXP_GLOBAL").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     let opts = electro::Options {
         accel: electro::Accel::from_env().map_err(anyhow::Error::msg)?,
-        timing_every: 0,
+        timing_every: if timing.is_some() { every } else { 0 },
         trace: std::env::var_os("CHIPSMITH_XC7_TRACE").is_some(),
         ..Default::default()
     };
-    let out =
-        electro::place(&p, &mut electro::NoTiming, None, &opts).map_err(anyhow::Error::msg)?;
+    let fixed_xy: HashMap<CellId, Xy> = fixed.iter().map(|(c, _, xy)| (*c, *xy)).collect();
+    let mut hook = GlobalTiming {
+        timing,
+        obj_of: &obj_of,
+        fixed_xy: &fixed_xy,
+        problem_net: &problem_net,
+    };
+    let out = electro::place(&p, &mut hook, None, &opts).map_err(anyhow::Error::msg)?;
     let target = |o: usize| {
         let (cx, cy) = out.centres[o];
         ((cx * 2.0) as i32, cy as i32)

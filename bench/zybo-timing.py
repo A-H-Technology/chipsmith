@@ -23,7 +23,8 @@ def load(d):
     chip = {}
     for line in open(f"{d}/chipsmith.tsv"):
         site, bel, port, arr, setup = line.rstrip("\n").split("\t")
-        chip[(site, bel, port)] = float(arr) / 1000
+        if arr != "-":
+            chip[(site, bel, port)] = float(arr) / 1000
     cell = {}
     for line in open(f"{d}/cells.tsv"):
         name, site, bel = line.rstrip("\n").split("\t")
