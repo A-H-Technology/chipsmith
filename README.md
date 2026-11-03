@@ -928,7 +928,9 @@ to the FASM, and since 2026-11-02 to the `.bit` (ADR-0013):
   weights them. Five seeds each by the calibrated estimate, against the
   greedy start or an untimed global placement: sha256 +5%, picorv32 +4%,
   riscv-bram +2%, bram-selftest +4%, mult-selftest's 62.5 MHz logic -6%;
-  placement 4 to 5 times faster on picorv32 and riscv-bram.
+  by Vivado on picorv32's five seeds, even (145.4 against 145.1 MHz,
+  137.7-155.7 against 131.0-158.0); placement 4 to 5 times faster on
+  picorv32 and riscv-bram.
 - **Site routing** (`phys.rs`): each cell port is one site pin, by rule:
   a logic LUT's inputs on the fastest pins, the most critical by the
   placement's timing first (a site pin costs 0.56 ns into the slice at
