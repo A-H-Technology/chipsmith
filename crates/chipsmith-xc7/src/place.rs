@@ -1778,6 +1778,8 @@ const SEEDS: usize = 8;
 /// start (timing-driven, below) against the greedy one: sha256 +5%,
 /// picorv32 +4%, riscv-bram +2%, bram-selftest +4%, mult-selftest's
 /// 62.5 MHz logic -6%; placement 4-5 times faster on the middle three.
+/// By Vivado's timer on picorv32's five seeds, even (145.4 against 145.1
+/// MHz): the estimate's bias moves with the placement's style.
 const ELECTRO_FROM: usize = 200;
 
 /// The global placement reweights its nets by their criticality (as the
