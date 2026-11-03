@@ -91,6 +91,11 @@ pub struct Reg {
     pub ena: SigBit,
     pub aclr: SigBit,
     pub sclr: SigBit,
+    /// The LAB's synchronous load and its data (the LE's input C): Q takes
+    /// `sdata` instead of `d` while `sload` is high. Without it SLOAD is
+    /// tied 0 rather than left open, so the simulation models never read
+    /// an open input as z (the packer drops the constant).
+    pub sload: Option<(SigBit, SigBit)>,
     pub q: SigBit,
 }
 
@@ -110,7 +115,13 @@ impl Reg {
                 port("ACLR", Dir::In, vec![self.aclr]),
                 port("SCLR", Dir::In, vec![self.sclr]),
                 port("REGOUT", Dir::Out, vec![self.q]),
-            ],
+            ]
+            .into_iter()
+            .chain(match self.sload {
+                Some((sload, sdata)) => vec![port("SLOAD", Dir::In, vec![sload]), port("SDATA", Dir::In, vec![sdata])],
+                None => vec![port("SLOAD", Dir::In, vec![SigBit::ZERO])],
+            })
+            .collect(),
         )
     }
 }

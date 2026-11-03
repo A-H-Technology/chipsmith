@@ -184,7 +184,8 @@ fn an_inverter_folds_into_lut_masks_and_the_pin() {
             clk_inv: false,
             ena_inv: true,
             sclr_inv: false,
-            aclr_inv: false
+            aclr_inv: false,
+            sload_inv: false
         })
     );
     // The pin was fed by a buffer of the inverter: one inversion, in the IOE.

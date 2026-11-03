@@ -121,6 +121,8 @@ pub enum LePin {
     Ena,
     Aclr,
     Sclr,
+    /// The LAB's synchronous load, as the register takes it.
+    Sload,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -304,6 +306,7 @@ fn wire(dev: &Device, tx: u32, ty: u32, name: &str) -> Result<Wire> {
                 "ENA" => LePin::Ena,
                 "ACLR" => LePin::Aclr,
                 "SCLR" => LePin::Sclr,
+                "SLOAD" => LePin::Sload,
                 _ => bail!("wire {name}"),
             };
             return Ok(Wire::Le { x, y, k, pin });
@@ -632,6 +635,7 @@ impl Routed {
         let mut ena: HashMap<(u32, u32, u32), u8> = HashMap::new();
         let mut aclr: HashMap<(u32, u32, u32), Aclr> = HashMap::new();
         let mut sclr: HashMap<(u32, u32, u32), u8> = HashMap::new();
+        let mut sload: HashMap<(u32, u32, u32), u8> = HashMap::new();
         let mut pia: HashMap<(u32, u32, u32), LeSource> = HashMap::new();
         let mut clk_in: HashMap<u32, (Node, u8)> = HashMap::new();
         // A clock control fed from the core: LAB line -> BLOCK_INPUT_MUX
@@ -850,6 +854,7 @@ impl Routed {
                         match pin {
                             LePin::Ena => ena.insert((x, y, k), line),
                             LePin::Sclr => sclr.insert((x, y, k), line),
+                            LePin::Sload => sload.insert((x, y, k), line),
                             LePin::Aclr => aclr.insert((x, y, k), Aclr::Pia(line)).map(|_| 0),
                             p => bail!("{}: control line into LE pin {p:?}", n.name),
                         };
@@ -1028,6 +1033,14 @@ impl Routed {
             .values()
             .filter_map(|c| match c.bel {
                 Bel::Ff { x, y, k } if flag(c, "SCLR_INV") => Some((x, y, k)),
+                _ => None,
+            })
+            .collect();
+        let sload_inv: std::collections::HashSet<(u32, u32, u32)> = self
+            .cells
+            .values()
+            .filter_map(|c| match c.bel {
+                Bel::Ff { x, y, k } if flag(c, "SLOAD_INV") => Some((x, y, k)),
                 _ => None,
             })
             .collect();
@@ -1347,16 +1360,27 @@ impl Routed {
                     );
                     lab.sync.sclr = Some(c);
                 }
-                // Registers on the sync load path load SDATA (input C) every
-                // cycle through the LAB's sload, tied high.
-                let sload = sdata.contains(&(x, y, k));
-                if sload {
-                    lab.sync.sload = Some(Sload::Const);
+                // Registers on the sync load path load SDATA (input C): every
+                // cycle through the LAB's sload tied high, or while the
+                // LAB's sload, from a control line, is high.
+                let load = match sload.get(&(x, y, k)) {
+                    Some(&line) => Some(Sload::Pia(Ctl {
+                        line,
+                        inverted: sload_inv.contains(&(x, y, k)),
+                    })),
+                    None => sdata.contains(&(x, y, k)).then_some(Sload::Const),
+                };
+                if let Some(l) = load {
+                    ensure!(
+                        lab.sync.sload.is_none_or(|o| o == l),
+                        "LAB {xy:?}: two sync loads"
+                    );
+                    lab.sync.sload = Some(l);
                 }
                 le_at(&mut les, x, y, k).reg = Some(Reg {
                     clock,
                     aclr: a.map(|_| 0),
-                    sync: sc.is_some() || sload,
+                    sync: sc.is_some() || load.is_some(),
                 });
             }
         }

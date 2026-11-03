@@ -664,6 +664,7 @@ fn pack_constants(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
         .collect();
     let (mut dead_cells, mut dead_nets) = (Pool::default(), Pool::default());
     let mut const_one_ff = Vec::new();
+    let mut const_sdata = Vec::new();
     while let Some((n, value)) = work.pop() {
         if dead_nets.contains(n) {
             continue;
@@ -724,13 +725,19 @@ fn pack_constants(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
                 }
                 Kind::Ff(_)
                     if (p == Port::Ena && value)
-                        || (matches!(p, Port::Aclr | Port::Sclr) && !value) =>
+                        || (matches!(p, Port::Aclr | Port::Sclr | Port::Sload) && !value) =>
                 {
                     nl.disconnect(c, p); // the idle level
                 }
                 Kind::Ff(_) if p == Port::Datain && value => {
                     nl.disconnect(c, p);
                     const_one_ff.push(c);
+                }
+                // A constant on the synchronous load (`synth::ff`): driven
+                // by the constant's LE once the folding is done.
+                Kind::Ff(_) if p == Port::Sdata && nl.cell(c).net(Port::Sload).is_some() => {
+                    nl.disconnect(c, p);
+                    const_sdata.push((c, value));
                 }
                 Kind::Ff(_) => {
                     // Data 0, never enabled, never clocked or always
@@ -777,6 +784,13 @@ fn pack_constants(nl: &mut Netlist, stats: &mut Stats) -> Result<()> {
         nl.connect(lut, Port::Combout, n);
         nl.connect(ff, Port::Datain, n);
     }
+    for (ff, v) in const_sdata {
+        if dead_cells.contains(ff) {
+            continue;
+        }
+        let n = constant_le(nl, v);
+        nl.connect(ff, Port::Sdata, n);
+    }
     Ok(())
 }
 
@@ -817,7 +831,7 @@ fn push_inversion_back(nl: &mut Netlist, inverter: CellId, input: NetId) -> bool
     let takes_inversion = |&(u, p): &(CellId, Port)| match nl.cell(u).kind {
         Kind::Lut { .. } => p.lut_index().is_some(),
         Kind::Obuf { .. } | Kind::Iobuf { .. } => nl.cell(u).kind.is_ioe_in(p),
-        Kind::Ff(_) => matches!(p, Port::Ena | Port::Sclr | Port::Aclr),
+        Kind::Ff(_) => matches!(p, Port::Ena | Port::Sclr | Port::Aclr | Port::Sload),
         _ => false,
     };
     if !loads.iter().all(takes_inversion) {
@@ -835,6 +849,7 @@ fn push_inversion_back(nl: &mut Netlist, inverter: CellId, input: NetId) -> bool
             },
             Kind::Ff(cfg) if p == Port::Ena => cfg.ena_inv = !cfg.ena_inv,
             Kind::Ff(cfg) if p == Port::Aclr => cfg.aclr_inv = !cfg.aclr_inv,
+            Kind::Ff(cfg) if p == Port::Sload => cfg.sload_inv = !cfg.sload_inv,
             Kind::Ff(cfg) => cfg.sclr_inv = !cfg.sclr_inv,
             _ => unreachable!("checked above"),
         }
@@ -975,12 +990,13 @@ fn pack_lut1(nl: &mut Netlist, stats: &mut Stats) {
                         );
                     }
                 }
-                (Kind::Ff(_), _) if matches!(p, Port::Ena | Port::Sclr | Port::Aclr) => {
+                (Kind::Ff(_), _) if matches!(p, Port::Ena | Port::Sclr | Port::Aclr | Port::Sload) => {
                     nl.reconnect(u, p, input);
                     if let Kind::Ff(cfg) = &mut nl.cell_mut(u).kind {
                         match p {
                             Port::Ena => cfg.ena_inv = inv,
                             Port::Sclr => cfg.sclr_inv = inv,
+                            Port::Sload => cfg.sload_inv = inv,
                             _ => cfg.aclr_inv = inv,
                         }
                     }
@@ -1223,7 +1239,11 @@ fn to_json(nl: &Netlist) -> Result<Value> {
                 if cfg.aclr_inv {
                     params.insert("ACLR_INV".into(), bit(true));
                 }
-                if cell.has_port(Port::Sdata) {
+                if cfg.sload_inv {
+                    params.insert("SLOAD_INV".into(), bit(true));
+                }
+                // SDATA without an SLOAD net: the LAB's sload tied high.
+                if cell.has_port(Port::Sdata) && !cell.has_port(Port::Sload) {
                     params.insert("SLOAD".into(), bit(true));
                 }
                 "LCELL_FF"

@@ -3,8 +3,8 @@
 //! estimated critical path, or takes at most so many LEs. The bounds sit a
 //! little above what branch `qor3` builds (docs/vs-quartus.md, round 3) and
 //! below what came before, so losing the sums ordered by arrival (sha256,
-//! femtorv32) or the shared sums (picorv32's LEs) fails here, as does
-//! losing `qor2`'s routing. The build is deterministic, so a bound only
+//! femtorv32), the shared sums or the synchronous load (picorv32's and
+//! sha256's LEs) fails here, as does losing `qor2`'s routing. The build is deterministic, so a bound only
 //! moves when the flow does. Needs `CHIPSMITH_CYCLONE2_DB`: run in the
 //! devshell. sha256 takes a few minutes.
 
@@ -60,41 +60,47 @@ fn number(example: &str, report: &str, line: &str, before: &str) -> f64 {
         .unwrap_or_else(|| panic!("{example}: no \"{line}...{before}\" in\n{report}"))
 }
 
-/// The routed critical path of a fresh build of `examples/<example>`, ns.
-fn routed_critical(example: &str) -> f64 {
-    let report = build(example);
+/// The routed critical path of a build's report, ns.
+fn routed_critical(example: &str, report: &str) -> f64 {
     // "routed <n> nets, <n> pips, <n> iterations in <s> s; critical path <ns> ns (estimate)"
-    number(example, &report, "routed ", "critical path ")
+    number(example, report, "routed ", "critical path ")
 }
 
-fn at_most(example: &str, (bound, before): (f64, f64)) {
-    let ns = routed_critical(example);
-    eprintln!("{example}: routed critical path {ns:.2} ns (bound {bound}, before {before})");
-    assert!(ns <= bound, "{example}: routed critical path {ns:.2} ns, over {bound} (before: {before})");
+/// A build's LEs, from "placed <n> LEs (<n> carry chains), ...".
+fn les(example: &str, report: &str) -> f64 {
+    number(example, report, "placed ", "placed ")
+}
+
+fn at_most(example: &str, what: &str, value: f64, (bound, before): (f64, f64)) {
+    eprintln!("{example}: {what} {value:.2} (bound {bound}, before {before})");
+    assert!(value <= bound, "{example}: {what} {value:.2}, over {bound} (before: {before})");
 }
 
 #[test]
 fn femtorv32() {
-    at_most("femtorv32", FEMTORV32);
+    let report = build("femtorv32");
+    at_most("femtorv32", "routed critical path, ns", routed_critical("femtorv32", &report), FEMTORV32);
 }
 
 #[test]
 fn sha256() {
-    at_most("sha256", SHA256);
+    let report = build("sha256");
+    at_most("sha256", "routed critical path, ns", routed_critical("sha256", &report), SHA256);
+    at_most("sha256", "LEs", les("sha256", &report), SHA256_LES);
 }
 
 #[test]
 fn picorv32_les() {
-    // "placed <n> LEs (<n> carry chains), ..."
-    let les = number("picorv32", &build("picorv32"), "placed ", "placed ");
-    let (bound, before) = PICORV32_LES;
-    eprintln!("picorv32: {les} LEs (bound {bound}, before {before})");
-    assert!(les <= bound, "picorv32: {les} LEs, over {bound} (before: {before})");
+    let report = build("picorv32");
+    at_most("picorv32", "LEs", les("picorv32", &report), PICORV32_LES);
 }
 
 /// (bound, before), ns: `open` 80351e1's (sums as written; femtorv32
-/// 13.76, sha256 19.27) above, `qor3`'s (13.05, 13.98) below.
+/// 13.76, sha256 19.27) above, `qor3`'s (12.99, 13.76) below.
 const FEMTORV32: (f64, f64) = (13.6, 13.76);
 const SHA256: (f64, f64) = (15.0, 19.27);
-/// (bound, before): `qor3` 916 without shared sums 971.
-const PICORV32_LES: (f64, f64) = (930.0, 971.0);
+/// (bound, before), LEs: `qor3`'s picorv32 875 (971 without shared sums,
+/// 916 without the synchronous load), sha256 3,422 (3,672 without the
+/// load, 3,538 without its constant legs).
+const PICORV32_LES: (f64, f64) = (890.0, 971.0);
+const SHA256_LES: (f64, f64) = (3440.0, 3672.0);
