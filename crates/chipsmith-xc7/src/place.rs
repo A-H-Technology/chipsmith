@@ -77,6 +77,10 @@ pub(crate) enum Kind {
         port: String,
     },
     Bufg,
+    /// A PLL or MMCM, in the clock management tile nearest its input.
+    Cmt {
+        prim: crate::cmt::Prim,
+    },
     Bscan {
         chain: u32,
     },
@@ -426,7 +430,7 @@ impl Design {
             };
             if matches!(
                 self.cells[*drv as usize].kind,
-                Kind::Bufg | Kind::Gnd | Kind::Vcc
+                Kind::Bufg | Kind::Cmt { .. } | Kind::Gnd | Kind::Vcc
             ) {
                 continue;
             }
@@ -758,6 +762,8 @@ struct Grid {
     y_max: i32,
     /// BUFGCTRL sites: (site, position).
     bufgs: Vec<(String, Xy)>,
+    /// PLLE2_ADV and MMCME2_ADV sites: (site, kind, position).
+    cmts: Vec<(String, crate::cmt::Prim, Xy)>,
     /// BRAM tiles, DSP tiles.
     hard: [Vec<HardTile>; 2],
 }
@@ -766,6 +772,7 @@ impl Grid {
     fn new(db: &ChipDb) -> Result<Self> {
         let mut slices: Vec<Slice> = Vec::new();
         let mut bufgs = Vec::new();
+        let mut cmts = Vec::new();
         let mut bram_sites: HashMap<u32, (Option<String>, Option<String>, Option<String>)> =
             HashMap::default();
         let mut dsp_sites: HashMap<u32, [Option<String>; 2]> = HashMap::default();
@@ -786,6 +793,9 @@ impl Grid {
                     col: 0,
                 }),
                 "BUFGCTRL" => bufgs.push((name.clone(), xy_of(s.tile))),
+                ty if crate::cmt::Prim::from_cell(ty).is_some() => {
+                    cmts.push((name.clone(), crate::cmt::Prim::from_cell(ty).expect("matched"), xy_of(s.tile)))
+                }
                 // Block RAM sites by relative name: RAMB18_X0Y0 (the FIFO18E1
                 // site, lower), RAMB18_X0Y1, RAMB36_X0Y0.
                 "FIFO18E1" | "RAMB18E1" | "RAMBFIFO36E1" => {
@@ -870,6 +880,7 @@ impl Grid {
             slices,
             at,
             bufgs,
+            cmts,
             hard: [brams, dsps],
         })
     }
@@ -1743,9 +1754,32 @@ fn fixed_sites(db: &ChipDb, d: &Design, g: &Grid) -> Result<Vec<(CellId, String,
         let xy = site_xy(&site).with_context(|| format!("placing {}", c.name))?;
         out.push((i as CellId, site, xy));
     }
-    // BUFGCTRLs last: their sources may be the pins and BSCANs above. One
-    // driven from the fabric has no fixed source; the middle of the device
-    // stands in.
+    // PLLs and MMCMs next: each in the free site of its kind nearest the
+    // cell that drives CLKIN1 (a clock pin reaches the tile of its own
+    // clock region without a BUFG).
+    let pinned: HashMap<CellId, Xy> = out.iter().map(|(c, _, xy)| (*c, *xy)).collect();
+    let mut cmt_free = vec![true; g.cmts.len()];
+    for (i, c) in d.cells.iter().enumerate() {
+        let Kind::Cmt { prim } = c.kind else { continue };
+        let source = c
+            .net("CLKIN1")
+            .and_then(|n| d.nets[n as usize].driver.as_ref())
+            .and_then(|(drv, _)| pinned.get(drv).copied())
+            .unwrap_or((0, g.y_max / 2));
+        let site = (0..g.cmts.len())
+            .filter(|&s| cmt_free[s] && g.cmts[s].1 == prim)
+            .min_by_key(|&s| {
+                let (x, y) = g.cmts[s].2;
+                ((y - source.1).abs() + (x - source.0).abs() / 2, s)
+            })
+            .with_context(|| format!("{}: no {} site left", c.name, prim.cell()))?;
+        cmt_free[site] = false;
+        let (name, _, xy) = &g.cmts[site];
+        out.push((i as CellId, name.clone(), *xy));
+    }
+    // BUFGCTRLs last: their sources may be the pins, BSCANs and clock
+    // blocks above. One driven from the fabric has no fixed source; the
+    // middle of the device stands in.
     let fixed: HashMap<CellId, Xy> = out.iter().map(|(c, _, xy)| (*c, *xy)).collect();
     let middle = (
         g.slices.iter().map(|s| s.xy.0).max().unwrap_or(0) / 2,
@@ -2153,6 +2187,7 @@ mod tests {
             cols: 1,
             y_max: n as i32 - 1,
             bufgs: Vec::new(),
+            cmts: Vec::new(),
             hard: [Vec::new(), Vec::new()],
         }
     }

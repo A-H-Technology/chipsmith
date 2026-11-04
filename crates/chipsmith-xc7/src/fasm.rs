@@ -228,6 +228,13 @@ pub(crate) fn write(db: &ChipDb, phys: &Physical, pips: &[Edge]) -> Result<Strin
         }
     }
 
+    for c in &phys.cmts {
+        let p = format!("{}.{}", tile_name(db, c.tile), c.config.prim().site_prefix());
+        for f in c.config.features(c.reset)? {
+            line(format!("{p}.{f}"));
+        }
+    }
+
     for site in &phys.bufgs {
         let s = &db.sites[site];
         let p = format!("{}.BUFGCTRL.{}", tile_name(db, s.tile), s.relative);

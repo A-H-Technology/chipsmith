@@ -1,0 +1,58 @@
+# Vivado 2026.1's PLLE2_ADV and MMCME2_ADV settings that don't come from
+# the counters (bench/cmt/extract.py, BANDWIDTH OPTIMIZED). `const`: set on
+# every block of the kind; `table <kind> <mult> <feature> <width> <hex>`: by
+# whole CLKFBOUT_MULT, the lock and loop-filter tables.
+const MMCM FILTREG1_RESERVED[3]
+const MMCM LOCKREG3_RESERVED[0]
+const MMCM POWER_REG_POWER_REG_POWER_REG[8]
+const MMCM POWER_REG_POWER_REG_POWER_REG[11]
+const MMCM POWER_REG_POWER_REG_POWER_REG[12]
+const MMCM POWER_REG_POWER_REG_POWER_REG[15]
+table MMCM 2 LKTABLE 40 31be8fa401
+table MMCM 2 TABLE 10 13c
+table MMCM 3 LKTABLE 40 423e8fa401
+table MMCM 3 TABLE 10 16c
+table MMCM 4 LKTABLE 40 5afe8fa401
+table MMCM 4 TABLE 10 1dc
+table MMCM 5 LKTABLE 40 73be8fa401
+table MMCM 5 TABLE 10 35c
+table MMCM 6 LKTABLE 40 8c7e8fa401
+table MMCM 6 TABLE 10 3ac
+table MMCM 7 LKTABLE 40 9cfe8fa401
+table MMCM 7 TABLE 10 3b4
+table MMCM 9 LKTABLE 40 ce7e8fa401
+table MMCM 9 TABLE 10 394
+table MMCM 58 LKTABLE 40 ffcfafa401
+table MMCM 58 TABLE 10 90
+table MMCM 59 LKTABLE 40 ffcfafa401
+table MMCM 59 TABLE 10 90
+table MMCM 61 LKTABLE 40 ffcfafa401
+table MMCM 61 TABLE 10 90
+table MMCM 63 LKTABLE 40 ffcfafa401
+table MMCM 63 TABLE 10 f0
+table MMCM 64 LKTABLE 40 ffcfafa401
+table MMCM 64 TABLE 10 f0
+const PLL FILTREG1_RESERVED[3]
+const PLL LOCKREG3_RESERVED[0]
+table PLL 2 LKTABLE 40 31be8fa401
+table PLL 2 TABLE 10 dc
+table PLL 3 LKTABLE 40 423e8fa401
+table PLL 3 TABLE 10 17c
+table PLL 5 LKTABLE 40 73be8fa401
+table PLL 5 TABLE 10 1ec
+table PLL 7 LKTABLE 40 9cfe8fa401
+table PLL 7 TABLE 10 3ac
+table PLL 8 LKTABLE 40 b5be8fa401
+table PLL 8 TABLE 10 3b4
+table PLL 57 LKTABLE 40 ffcfafa401
+table PLL 57 TABLE 10 130
+table PLL 58 LKTABLE 40 ffcfafa401
+table PLL 58 TABLE 10 130
+table PLL 59 LKTABLE 40 ffcfafa401
+table PLL 59 TABLE 10 130
+table PLL 61 LKTABLE 40 ffcfafa401
+table PLL 61 TABLE 10 90
+table PLL 62 LKTABLE 40 ffcfafa401
+table PLL 62 TABLE 10 90
+table PLL 64 LKTABLE 40 ffcfafa401
+table PLL 64 TABLE 10 90

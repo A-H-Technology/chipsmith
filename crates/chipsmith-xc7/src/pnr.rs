@@ -31,6 +31,19 @@ pub struct ClockTiming {
     /// The longest path from a register on the clock to one on the same
     /// clock, setup included.
     pub critical: Ps,
+    /// A PLL's or MMCM's output: its frequency, which follows from the
+    /// block's counters and its CLKIN1_PERIOD.
+    pub hz: Option<f64>,
+}
+
+/// A PLL or MMCM, and the clock on its CLKIN1, for checking the period it
+/// was solved for against the clock's frequency.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CmtInput {
+    pub cell: String,
+    /// The clock's name, as [`ClockTiming::name`] has it.
+    pub clock: String,
+    pub period_ps: u32,
 }
 
 /// What the back end made.
@@ -55,6 +68,7 @@ pub struct Report {
     pub iterations: usize,
     pub route_seconds: f64,
     pub clocks: Vec<ClockTiming>,
+    pub cmt_inputs: Vec<CmtInput>,
 }
 
 /// Places, routes and writes the FASM of `netlist` (synthesis' yosys JSON);
@@ -220,7 +234,40 @@ pub fn run(
         iterations,
         route_seconds,
         clocks,
+        cmt_inputs: d
+            .cells
+            .iter()
+            .zip(&packed.conf)
+            .filter_map(|(c, conf)| match conf {
+                Conf::Cmt(cmt) => Some(CmtInput {
+                    cell: c.name.clone(),
+                    clock: c.net("CLKIN1").map_or_else(String::new, |n| clock_name(d, n)),
+                    period_ps: cmt.clkin_period_ps,
+                }),
+                _ => None,
+            })
+            .collect(),
     })
+}
+
+/// A clock's name: a port's (`clk`) or a cell output's (`pll.CLKOUT0`),
+/// through a BUFG to what feeds it.
+fn clock_name(d: &place::Design, clk: NetId) -> String {
+    let mut net = clk;
+    if let Some((c, _)) = &d.nets[net as usize].driver {
+        if d.cells[*c as usize].kind == Kind::Bufg {
+            if let Some(i) = d.cells[*c as usize].net("I0") {
+                net = i;
+            }
+        }
+    }
+    match &d.nets[net as usize].driver {
+        Some((c, port)) => match &d.cells[*c as usize].kind {
+            Kind::Pad { port, .. } => port.clone(),
+            _ => format!("{}.{port}", d.cells[*c as usize].name),
+        },
+        None => format!("net {net}"),
+    }
 }
 
 /// Debugging (`CHIPSMITH_XC7_REACH`): every sink reachable from its source
@@ -414,23 +461,18 @@ fn clock_timing(
             eprintln!("  {at:8.0} ps  {}", timing.graph.name(node));
         }
     }
-    let name_of = |clk: NetId| -> String {
-        // A clock through a BUFG is named after what feeds the BUFG.
+    let name_of = |clk: NetId| clock_name(d, clk);
+    let hz_of = |clk: NetId| -> Option<f64> {
         let mut net = clk;
         if let Some((c, _)) = &d.nets[net as usize].driver {
             if d.cells[*c as usize].kind == Kind::Bufg {
-                if let Some(i) = d.cells[*c as usize].net("I0") {
-                    net = i;
-                }
+                net = d.cells[*c as usize].net("I0")?;
             }
         }
-        match &d.nets[net as usize].driver {
-            Some((c, port)) => match &d.cells[*c as usize].kind {
-                Kind::Pad { port, .. } => port.clone(),
-                _ => format!("{}.{port}", d.cells[*c as usize].name),
-            },
-            None => format!("net {net}"),
-        }
+        let (c, port) = d.nets[net as usize].driver.as_ref()?;
+        let Conf::Cmt(cmt) = &conf[*c as usize] else { return None };
+        let k: usize = port.strip_prefix("CLKOUT")?.parse().ok()?;
+        Some(cmt.config.output_ratio(k)? * 1e12 / f64::from(cmt.clkin_period_ps))
     };
     let mut out: Vec<ClockTiming> = timing
         .graph
@@ -440,6 +482,7 @@ fn clock_timing(
         .map(|p| ClockTiming {
             name: name_of(p.from),
             critical: p.critical,
+            hz: hz_of(p.from),
         })
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));

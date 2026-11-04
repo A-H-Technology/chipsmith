@@ -34,7 +34,7 @@ pub const LIBRARY_NAME: &str = "chipsmith-xc7/cells.v";
 /// (`tests/models.rs`).
 pub const MODELS: &str = include_str!("../sim.v");
 /// The cells [`MODELS`] models.
-pub const MODELLED: [&str; 2] = [RAMB18E1, RAMB36E1];
+pub const MODELLED: [&str; 6] = [RAMB18E1, RAMB36E1, "XC7_PLL", "XC7_MMCM", "PLLE2_ADV", "MMCME2_ADV"];
 
 /// yosys' `xilinx/cells_sim.v` without its models of [`MODELLED`]
 /// (timing only, no behaviour), so they stay blackboxes for [`MODELS`].

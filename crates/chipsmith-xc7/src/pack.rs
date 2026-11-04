@@ -63,11 +63,21 @@ pub(crate) enum Conf {
     Bram(Box<crate::bram::Config>),
     /// A DSP48E1; its pins are its site's (`A0`, `OPMODE3`, `CLK`, ...).
     Dsp(Box<crate::dsp::Config>),
+    /// A PLL or MMCM, and its input clock's period (CLKIN1_PERIOD).
+    Cmt(Box<CmtConf>),
     Bufg,
     Bscan,
     Ps7,
     Gnd,
     Vcc,
+}
+
+/// A clock management tile's block: what its bits hold, and the period of
+/// the clock on CLKIN1 that the outputs' frequencies follow from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CmtConf {
+    pub config: crate::cmt::Config,
+    pub clkin_period_ps: u32,
 }
 
 /// The packed design: the placer's cells and nets, each cell's
@@ -87,6 +97,7 @@ fn drives(kind: &Kind, pin: &str) -> bool {
         Kind::Carry => pin.starts_with('O') || pin.starts_with("CO"),
         Kind::Pad { .. } => pin == "O",
         Kind::Bufg => pin == "O",
+        Kind::Cmt { .. } => pin.starts_with("CLKOUT") || pin == "CLKFBOUT" || pin == "LOCKED",
         Kind::Bscan { .. } => pin != "TDO",
         Kind::Ps7 => false,
         Kind::Bram { .. } => pin.starts_with("DO"),
@@ -438,6 +449,44 @@ pub(crate) fn pack(netlist: &Netlist, pins: &BTreeMap<String, String>, db: &Chip
                     pins.push(("O".into(), p.net(o)));
                 }
                 p.push(name, Kind::Bufg, pins, Conf::Bufg);
+            }
+            "PLLE2_ADV" | "MMCME2_ADV" => {
+                let prim = crate::cmt::Prim::from_cell(&g.ty).expect("matched");
+                let net_of = |port: &str| match bit(g, port, 0) {
+                    Some(SigBit::Net(n)) => Some(n),
+                    _ => None,
+                };
+                let used: Vec<bool> = (0..prim.outputs()).map(|k| net_of(&format!("CLKOUT{k}")).is_some()).collect();
+                let config = crate::cmt::Config::from_params(prim, &g.params, &used)
+                    .with_context(|| format!("cell {name}"))?;
+                let period_ns: f64 = match g.params.get("CLKIN1_PERIOD") {
+                    Some(ParamValue::Str(s)) => s.trim().parse().with_context(|| format!("{name}: CLKIN1_PERIOD {s:?}"))?,
+                    _ => bail!("{name}: no CLKIN1_PERIOD"),
+                };
+                let mut pins = Vec::new();
+                for port in ["CLKIN1", "CLKFBIN", "CLKFBOUT"] {
+                    let n = net_of(port).with_context(|| format!("{name}: {port} unconnected"))?;
+                    pins.push((port.to_string(), p.net(n)));
+                }
+                // A reset tied 0 stays unrouted (`crate::cmt::Config::features`).
+                match bit(g, "RST", 0) {
+                    Some(SigBit::Net(n)) => pins.push(("RST".into(), p.net(n))),
+                    None | Some(SigBit::Const(State::Zero)) => {}
+                    Some(b) => bail!("{name}: RST tied to {b:?}: held in reset"),
+                }
+                for k in 0..prim.outputs() {
+                    if let Some(n) = net_of(&format!("CLKOUT{k}")) {
+                        pins.push((format!("CLKOUT{k}"), p.net(n)));
+                    }
+                }
+                if let Some(n) = net_of("LOCKED") {
+                    pins.push(("LOCKED".into(), p.net(n)));
+                }
+                let conf = CmtConf {
+                    config,
+                    clkin_period_ps: (period_ns * 1000.0).round() as u32,
+                };
+                p.push(name, Kind::Cmt { prim }, pins, Conf::Cmt(Box::new(conf)));
             }
             "BSCANE2" => {
                 let chain = match param_bits(g, "JTAG_CHAIN") {
