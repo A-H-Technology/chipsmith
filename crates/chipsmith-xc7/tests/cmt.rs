@@ -107,3 +107,97 @@ fn vivados_bits_decode_to_the_attributes() {
     }
     assert!(refused.contains(&"d5/blk1".to_string()), "{refused:?}");
 }
+
+/// A decimal (`62.5`) as a fraction.
+fn decimal(s: &str) -> (u64, u64) {
+    let (int, frac) = s.split_once('.').unwrap_or((s, ""));
+    let den = 10u64.pow(frac.len() as u32);
+    let num: u64 = format!("{int}{frac}").parse().unwrap();
+    let g = gcd(num, den);
+    (num / g, den / g)
+}
+
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
+/// Vivado's clocking wizard's choices (data/clk_wiz.txt) against
+/// `Request::solve`: every request with an exact answer gets the wizard's
+/// counters, but for the MMCM's low frequencies listed here, where the
+/// wizard's jitter model takes other counters for the same frequencies
+/// (bench/cmt/README.md). A request the wizard could only approximate is
+/// refused.
+#[test]
+fn the_clocking_wizards_counters() {
+    use chipsmith_xc7::cmt::{OutputRequest, Request};
+    let known: &[&str] = &[
+        // The jitter model's own choices, the same frequencies.
+        "MMCM {125 25}",
+        // A 33% duty no counter makes: the wizard takes 32.5% at an
+        // 800 MHz VCO, chipsmith the nearest of its own candidates.
+        "MMCM {125 40%33}",
+        // The wizard approximates (63.99, 47.99 MHz) where a 1200 MHz VCO
+        // makes both exactly (CLKOUT0 /18.75, CLKOUT1 /25).
+        "MMCM {125 64,48}",
+        "MMCM {125 12.5}",
+        "MMCM {125 8}",
+        "MMCM {125 31.25}",
+        // A phase on a fractional divider, which chipsmith doesn't build.
+        "MMCM {125 100@30}",
+    ];
+    let (mut agree, mut differ, mut refused) = (0, Vec::new(), 0);
+    for line in include_str!("data/clk_wiz.txt").lines().filter(|l| !l.starts_with('#')) {
+        if line.contains(" ERR ") {
+            continue;
+        }
+        let (req, rest) = line.split_once("} ").unwrap();
+        let (prim_s, req) = req.split_once(" {").unwrap();
+        let prim = if prim_s == "PLL" { Prim::Pll } else { Prim::Mmcm };
+        let (fin, outs) = req.split_once(' ').unwrap();
+        let (fin_n, fin_d) = decimal(fin);
+        // 1e6 / f_in MHz in ps, if whole.
+        if (1_000_000 * fin_d) % fin_n != 0 {
+            continue;
+        }
+        let period = (1_000_000 * fin_d / fin_n) as u32;
+        let mut outputs = vec![None; prim.outputs()];
+        for (k, o) in outs.split(',').enumerate() {
+            let (o, duty) = o.split_once('%').map_or((o, 50.0), |(o, d)| (o, d.parse().unwrap()));
+            let (f, phase) = o.split_once('@').map_or((o, 0.0), |(f, p)| (f, p.parse::<f64>().unwrap()));
+            let (n, d) = decimal(f);
+            // f_out / f_in = (n / d) / (fin_n / fin_d).
+            let (mul, div) = (n * fin_d, d * fin_n);
+            let g = gcd(mul, div);
+            let period_out = f64::from(period) * (div / g) as f64 / (mul / g) as f64;
+            outputs[k] = Some(OutputRequest {
+                multiply: (mul / g) as u32,
+                divide: (div / g) as u32,
+                phase_ps: (phase / 360.0 * period_out).round() as i32,
+                duty_percent: duty as u32,
+            });
+        }
+        let r = Request { prim, inclk_period_ps: period, outputs, compensation: Compensation::Zhold };
+        let field = |k: &str| rest.split_whitespace().find_map(|w| w.strip_prefix(k)).unwrap();
+        let want_m: f64 = field("M=").parse().unwrap();
+        let want_d: u8 = field("D=").parse().unwrap();
+        let want_o: Vec<f64> = rest
+            .split_whitespace()
+            .filter(|w| w.starts_with('O'))
+            .map(|w| w.split_once('=').unwrap().1.split('/').next().unwrap().parse().unwrap())
+            .collect();
+        let Ok(s) = r.solve() else {
+            refused += 1;
+            continue;
+        };
+        let got_o: Vec<f64> = s.config.outputs().iter().flatten().map(|o| o.divide().value()).collect();
+        let tag = format!("{prim_s} {{{req}}}");
+        if s.config.mult().value() == want_m && s.config.divclk() == want_d && got_o == want_o {
+            agree += 1;
+        } else {
+            differ.push(tag);
+        }
+    }
+    eprintln!("clocking wizard: {agree} agree, {} differ, {refused} refused", differ.len());
+    assert_eq!(differ, known, "requests where chipsmith's counters aren't the wizard's");
+    assert!(agree >= 100, "{agree}");
+}
