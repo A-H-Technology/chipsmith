@@ -126,8 +126,8 @@ const SHA256: (f64, f64) = (15.0, 19.27);
 const PICORV32_LES: (f64, f64) = (890.0, 971.0);
 const SHA256_LES: (f64, f64) = (3440.0, 3672.0);
 /// (bound, before), ns, the default seed: `open` df16e49's (sums as
-/// written, every register one, chains in even slices only, LUT pins by
-/// criticality alone: sha256 18.62, jtag-counter 3.03) above, `xc7-qor`'s
-/// below.
-const ZYBO_SHA256: (f64, f64) = (13.0, 18.62);
+/// written, every register one, LUT pins by criticality alone: sha256
+/// 18.62, jtag-counter 3.03) above, `xc7-qor`'s (13.48, 2.79) below; sums
+/// by arrival without the register copies read 14.41 on sha256.
+const ZYBO_SHA256: (f64, f64) = (14.0, 18.62);
 const ZYBO_JTAG_COUNTER: (f64, f64) = (2.9, 3.03);
