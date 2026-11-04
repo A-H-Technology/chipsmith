@@ -129,6 +129,14 @@ const SINK_GROUP: usize = 8;
 /// Batch size of the batched integer router (`CHIPSMITH_ROUTE_ACCEL`):
 /// the GPU's slots.
 const ACCEL_BATCH: usize = 64;
+/// Iterations the batched integer router runs; A* one net at a time takes
+/// the rest. Run to the end, the integer search stalled on a node or two
+/// that a wide net and another share (sha256 seed 1: 1 overused node from
+/// iteration 30 to 60, batched or not), where A* converges; the first 10
+/// iterations hold about 90% of the search time (sha256, picorv32x24),
+/// and switching after 15 instead gave longer critical paths (sha256 seeds
+/// 0 and 1: 14.74 and 14.69 ns against 14.16 and 14.26).
+const ACCEL_ITERATIONS: usize = 10;
 
 /// What the search reads of a node for every edge into it, side by side:
 /// the search is bound by cache misses on random nodes, and one line per
@@ -214,7 +222,8 @@ pub struct Router<'a> {
     /// The integer search (`bucket`) instead of A* for every net of the
     /// iterations that batch, wide nets' sinks `sink_group` at a time
     /// (`CHIPSMITH_ROUTE_SEARCH=bucket`; the GPU's search, so a GPU and the
-    /// CPU's threads route the same). Repairs use A*.
+    /// CPU's threads route the same). Repairs, and the iterations after
+    /// `batch_iterations`, use A*.
     bucketed: bool,
     /// Sinks of a wide net searched side by side with the integer search
     /// (`CHIPSMITH_ROUTE_SINK_GROUP`).
@@ -381,7 +390,7 @@ impl<'a> Router<'a> {
             batch_iterations: std::env::var("CHIPSMITH_ROUTE_BATCH_ITERATIONS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(if accel.is_some() { usize::MAX } else { 1 }),
+                .unwrap_or(if accel.is_some() { ACCEL_ITERATIONS } else { 1 }),
             batching: match std::env::var("CHIPSMITH_ROUTE_BATCH").as_deref() {
                 Ok("regions") => Batching::Regions,
                 Ok(k) => k.parse().map_or(Batching::Off, Batching::Fixed),

@@ -632,10 +632,12 @@ impl Searcher {
             state_set: false,
             placed: Vec::new(),
             lifted: Vec::new(),
-            labels: client.create_from_slice(u64::as_bytes(&vec![u64::MAX; SLOTS * n])),
-            mark: up32(&vec![0u32; SLOTS * n]),
-            own_mark: up32(&vec![0u32; SLOTS * n]),
-            in_tree: up32(&vec![0u32; SLOTS * n]),
+            // Per slot, per node, filled on the device: uploaded from the
+            // host, these 1.1 GB (sha256) took 12 of a 13 s setup.
+            labels: client.empty(SLOTS * n * 8),
+            mark: client.empty(SLOTS * n * 4),
+            own_mark: client.empty(SLOTS * n * 4),
+            in_tree: client.empty(SLOTS * n * 4),
             gen_max: 0,
             batch: 0,
             b: Buffers {
@@ -670,6 +672,24 @@ impl Searcher {
             n,
             client,
         };
+        unsafe {
+            fill_u64::launch_unchecked(
+                &s.client,
+                count(SLOTS * n),
+                CubeDim::new_1d(UNITS),
+                arg(&s.labels, SLOTS * n),
+                u64::MAX,
+            );
+            for h in [&s.mark, &s.own_mark, &s.in_tree] {
+                fill_u32::launch_unchecked(
+                    &s.client,
+                    count(SLOTS * n),
+                    CubeDim::new_1d(UNITS),
+                    arg(h, SLOTS * n),
+                    0u32,
+                );
+            }
+        }
         Ok(s)
     }
 
@@ -830,7 +850,11 @@ impl Searcher {
         let init_node_h = c.create_from_slice(u32::as_bytes(&init_node));
         let init_dq_h = c.create_from_slice(u64::as_bytes(&init_dq));
         // Never empty: a buffer of nothing can't be made.
-        let own_node_h = c.create_from_slice(u32::as_bytes(if own_node.is_empty() { &[0u32] } else { &own_node }));
+        let own_node_h = c.create_from_slice(u32::as_bytes(if own_node.is_empty() {
+            &[0u32]
+        } else {
+            &own_node
+        }));
         self.batch += 1;
         let t_up = t0.elapsed().as_secs_f64();
         let b = &self.b;

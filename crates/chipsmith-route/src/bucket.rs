@@ -300,7 +300,8 @@ impl Router<'_> {
             }
             l.own_active = true;
         }
-        let tree = self.route_net_bucketed_with(fx, s, &mut l, index, net, crit, keep, own.is_some());
+        let tree =
+            self.route_net_bucketed_with(fx, s, &mut l, index, net, crit, keep, own.is_some());
         l.own_active = false;
         s.labels = l;
         tree
