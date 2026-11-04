@@ -56,6 +56,10 @@ pub struct Options {
     pub distributed_ram: bool,
     /// Memories with synchronous reads in block RAM; else as above.
     pub block_ram: bool,
+    /// Registers read by many cells copied ([`replicate`]). yosys'
+    /// equivalence proof can't tie a copy to its original (induction leaves
+    /// the copy free), so the proofs run without.
+    pub register_copies: bool,
 }
 
 impl Default for Options {
@@ -63,6 +67,7 @@ impl Default for Options {
         Options {
             distributed_ram: true,
             block_ram: true,
+            register_copies: true,
         }
     }
 }
@@ -182,7 +187,7 @@ fn run(m: &mut Module, options: Options, obs: &mut dyn Observer) -> Result<Stats
     lut_cells(m);
     clean(m);
     obs.stage("luts", m);
-    let replicas = replicate::registers(m, replicate::MAX_FANOUT);
+    let replicas = if options.register_copies { replicate::registers(m, replicate::MAX_FANOUT) } else { 0 };
     let bufgs = io::clock_buffers(m);
     clean(m);
     obs.stage("cells", m);

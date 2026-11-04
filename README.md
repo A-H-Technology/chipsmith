@@ -751,7 +751,10 @@ some of them LUT compressors.
 
 Every design is proven equivalent to its RTL by yosys
 (`support::check`, the Cyclone II synthesis tests' check, the netlist's
-primitives read through yosys' own `xilinx/cells_sim.v`): blinky,
+primitives read through yosys' own `xilinx/cells_sim.v`; since branch
+xc7-qor without register copies, `Options::register_copies`, which
+induction can't tie to their originals: the copies are co-simulated
+through the bitstream): blinky,
 jtag-counter (around its BSCANE2), a test of every register shape and
 the carry arithmetic, tri-state and bidirectional pins, and sha256 (whole,
 15 minutes). Designs with RAM32Ms are co-simulated against the RTL
