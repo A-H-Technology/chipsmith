@@ -253,6 +253,11 @@ pub struct Router<'a> {
     steal: Option<f32>,
     /// `repair_critical` runs (`CHIPSMITH_ROUTE_REPAIR=0` turns it off).
     repair: bool,
+    /// Per tile type, per pip: its class among the pips of a tile only one
+    /// net may use between them (`Router::exclusive`), or -1.
+    exclusive: Vec<Option<Vec<i8>>>,
+    /// Per net, the exclusive groups (`group_of`) it may no longer use.
+    banned: std::collections::HashMap<u32, HashSet<u64>>,
     /// Seconds `repair_critical` spent on the repaired nets' searches, the
     /// displaced nets' and timing analyses, for `CHIPSMITH_ROUTE_TRACE`.
     repair_s: Mutex<[f64; 3]>,
@@ -415,6 +420,8 @@ impl<'a> Router<'a> {
             steal: None,
             repair: std::env::var("CHIPSMITH_ROUTE_REPAIR").map_or(true, |v| v != "0"),
             repair_s: Default::default(),
+            exclusive: Vec::new(),
+            banned: Default::default(),
             tile_distance: std::env::var("CHIPSMITH_TILE_DISTANCE")
                 .ok()
                 .and_then(|v| {
@@ -423,6 +430,153 @@ impl<'a> Router<'a> {
                 })
                 .unwrap_or(db.tile_distance),
         }
+    }
+
+    /// Pips constrained across nets, per tile: by tile type, per pip, its
+    /// class, or -1. Classes `2b` and `2b + 1` form bank `b`; in a tile, one
+    /// net at most uses a bank's pips, and a net uses pips of one class.
+    /// What the graph doesn't express of a Cyclone II LAB: each of its two
+    /// clock enables comes from one pair of control lines (class: the
+    /// line), so two enable nets can't both come in on lines 0/1, and an
+    /// enable net on two lines makes two clock domains of one. Checked once
+    /// the routing is legal: a net breaking it is barred from the classes
+    /// it broke it with and rerouted, and negotiation goes on (A*, one net
+    /// at a time). Nothing changes for a routing that keeps to it.
+    pub fn exclusive(&mut self, classes: Vec<Option<Vec<i8>>>) {
+        self.exclusive = classes;
+    }
+
+    /// An edge's exclusive group: its tile and class (`group >> 1` is the
+    /// bank's).
+    fn group_of(&self, e: &Edge) -> Option<u64> {
+        let classes = self.exclusive.get(self.db.tile_type_index(e.tile) as usize)?.as_ref()?;
+        let c = classes[e.pip as usize];
+        (c >= 0).then(|| e.tile as u64 * 128 + c as u64)
+    }
+
+    fn barred(&self, net: u32, e: &Edge) -> bool {
+        !self.banned.is_empty()
+            && self
+                .banned
+                .get(&net)
+                .is_some_and(|b| self.group_of(e).is_some_and(|g| b.contains(&g)))
+    }
+
+    /// Per exclusive group in use, the nets using it, in order.
+    fn exclusive_users(&self, trees: &[Tree]) -> std::collections::BTreeMap<u64, Vec<usize>> {
+        let mut users: std::collections::BTreeMap<u64, Vec<usize>> = Default::default();
+        if self.exclusive.is_empty() {
+            return users;
+        }
+        for (i, t) in trees.iter().enumerate() {
+            for e in &t.pips {
+                if let Some(g) = self.group_of(e) {
+                    let u = users.entry(g).or_default();
+                    if u.last() != Some(&i) {
+                        u.push(i);
+                    }
+                }
+            }
+        }
+        users
+    }
+
+    /// What breaks `exclusive` in `users`: (net, group it must leave), in
+    /// order. Of two nets on a bank the later leaves both its classes; a
+    /// net on two classes of a tile leaves all but one.
+    fn exclusive_breaks(users: &std::collections::BTreeMap<u64, Vec<usize>>) -> Vec<(usize, u64)> {
+        let mut out = Vec::new();
+        // Per tile (`group >> 7`), every (group, net) in it.
+        let mut tile: Vec<(u64, usize)> = Vec::new();
+        let flush = |tile: &mut Vec<(u64, usize)>, out: &mut Vec<(usize, u64)>| {
+            for bank in tile.iter().map(|&(g, _)| g >> 1).collect::<std::collections::BTreeSet<_>>() {
+                let first = tile.iter().filter(|&&(g, _)| g >> 1 == bank).map(|&(_, n)| n).min();
+                for &(g, n) in tile.iter() {
+                    if g >> 1 == bank && Some(n) != first {
+                        out.push((n, bank << 1));
+                        out.push((n, bank << 1 | 1));
+                    }
+                }
+            }
+            let mut nets: Vec<usize> = tile.iter().map(|&(_, n)| n).collect();
+            nets.sort_unstable();
+            nets.dedup();
+            for n in nets {
+                let mut mine: Vec<u64> = tile.iter().filter(|&&(_, m)| m == n).map(|&(g, _)| g).collect();
+                mine.sort_unstable();
+                // It keeps its first class another net doesn't bar it from.
+                let keep = mine.iter().copied().find(|&g| !out.contains(&(n, g)));
+                for &g in &mine {
+                    if Some(g) != keep {
+                        out.push((n, g));
+                    }
+                }
+            }
+            tile.clear();
+        };
+        for (&g, nets) in users {
+            if tile.first().is_some_and(|&(h, _)| h >> 7 != g >> 7) {
+                flush(&mut tile, &mut out);
+            }
+            tile.extend(nets.iter().map(|&n| (g, n)));
+        }
+        flush(&mut tile, &mut out);
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Whether `exclusive` breaks with the trees of `changed` in place of
+    /// what `users` (from before the change) has of them.
+    fn breaks_exclusive(
+        &self,
+        users: &std::collections::BTreeMap<u64, Vec<usize>>,
+        trees: &[Tree],
+        changed: &[usize],
+    ) -> bool {
+        let mut now = users.clone();
+        for u in now.values_mut() {
+            u.retain(|n| !changed.contains(n));
+        }
+        for &j in changed {
+            for e in &trees[j].pips {
+                if let Some(g) = self.group_of(e) {
+                    let u = now.entry(g).or_default();
+                    if !u.contains(&j) {
+                        u.push(j);
+                    }
+                }
+            }
+        }
+        now.retain(|_, u| !u.is_empty());
+        !Self::exclusive_breaks(&now).is_empty()
+    }
+
+    /// Bar every net that breaks `exclusive` from the groups it breaks it
+    /// with and reroute it; whether any was.
+    fn bar_conflicts(
+        &mut self,
+        s: &mut Scratch,
+        nets: &[NetReq],
+        trees: &mut [Tree],
+        crit: &[Vec<f32>],
+        trace: bool,
+    ) -> Result<bool> {
+        let mut redo: std::collections::BTreeSet<usize> = Default::default();
+        for (j, g) in Self::exclusive_breaks(&self.exclusive_users(trees)) {
+            self.banned.entry(j as u32).or_default().insert(g);
+            redo.insert(j);
+        }
+        for &j in &redo {
+            let old = std::mem::take(&mut trees[j]);
+            self.lift(&old);
+            trees[j] = self.route_net(s, j as u32, &nets[j], &crit[j], None, None)?;
+            self.place_tree(&trees[j]);
+        }
+        if trace && !redo.is_empty() {
+            eprintln!("route: {} nets broke an exclusive group, rerouted without it", redo.len());
+        }
+        Ok(!redo.is_empty())
     }
 
     /// Routing delays by the graph's wire types, for a device
@@ -727,7 +881,12 @@ impl<'a> Router<'a> {
             // few hundred nets whose convergence the one-at-a-time order
             // settles faster (sha256: 50 iterations batched throughout,
             // 21 one at a time).
-            if self.batching != Batching::Off && iteration <= self.batch_iterations {
+            // Once a net is barred from an exclusive group, which only A*
+            // knows of, one net at a time.
+            if self.batching != Batching::Off
+                && iteration <= self.batch_iterations
+                && self.banned.is_empty()
+            {
                 // The nets that may reroute are batched once, before any of
                 // them moves; then batch by batch, each batch's nets
                 // against the routing as it stood when the batch began.
@@ -1062,7 +1221,7 @@ impl<'a> Router<'a> {
             if let (true, Some(g)) = (trace, &searcher) {
                 eprintln!("route: GPU batches so far {:.2} s, {} launches ({:.2} s uploading, {:.2} s in kernels, {:.2} s reading trees), {} slots given up", g.busy_s, g.batches, g.phase_s[0], g.phase_s[1], g.phase_s[2], g.gave_up);
             }
-            if overused.is_empty() {
+            if overused.is_empty() && !self.bar_conflicts(&mut scratch, nets, &mut trees, &crit, trace)? {
                 let analysis = if self.repair {
                     self.repair_critical(&mut scratch, nets, &mut trees, &crit, analysis, trace)?
                 } else {
@@ -1107,6 +1266,7 @@ impl<'a> Router<'a> {
         let started = std::time::Instant::now();
         let before = analysis.critical;
         let (mut tried, mut kept) = (0, 0);
+        let mut users = self.exclusive_users(trees);
         for _ in 0..REPAIR_ROUNDS {
             let arcs = Self::net_arcs(nets, trees);
             // Per net, its sinks' criticalities, in `net_arcs`' order.
@@ -1132,11 +1292,14 @@ impl<'a> Router<'a> {
             for (_, i, critical) in todo.into_iter().take(REPAIR_NETS) {
                 tried += 1;
                 if let Some(a) =
-                    self.repair_net(s, nets, trees, crit, i, &critical, analysis.critical)?
+                    self.repair_net(s, nets, trees, crit, i, &critical, analysis.critical, &users)?
                 {
                     analysis = a;
                     improved = true;
                     kept += 1;
+                    if !users.is_empty() {
+                        users = self.exclusive_users(trees);
+                    }
                 }
             }
             if !improved {
@@ -1166,6 +1329,7 @@ impl<'a> Router<'a> {
         i: usize,
         critical: &[bool],
         limit: Ps,
+        users: &std::collections::BTreeMap<u64, Vec<usize>>,
     ) -> Result<Option<timing::Analysis>> {
         let worst = |t: &Tree| {
             t.sink_delay
@@ -1234,7 +1398,10 @@ impl<'a> Router<'a> {
             }
         }
         self.clock(1, t);
-        if legal {
+        // A repair that puts a net into another's exclusive group is undone
+        // as one that leaves a node overused is.
+        let changed: Vec<usize> = saved.iter().map(|(j, _)| *j).collect();
+        if legal && !self.breaks_exclusive(users, trees, &changed) {
             let t = std::time::Instant::now();
             let a = self.timing.analyse(&Self::net_arcs(nets, trees));
             self.clock(2, t);
@@ -1526,6 +1693,7 @@ impl<'a> Router<'a> {
             for e in self.db.downhill(node) {
                 if !self.usable(e)
                     || self.reserved_for_other(e.dst, net)
+                    || self.barred(net, e)
                     || !self.node[e.dst as usize].bbox.overlaps(region)
                     || allowed.is_some_and(|a| {
                         e.dst != sink && !a[self.db.node_type[e.dst as usize] as usize]
@@ -1658,6 +1826,24 @@ mod tests {
         assert!(trees[0].nodes.contains(&node("N")));
         assert!(trees[1].nodes.contains(&node("M")));
         assert!(router.node.iter().all(|n| n.occ <= 1));
+    }
+
+    #[test]
+    fn exclusive_banks_hold_one_net_and_a_net_one_class() {
+        let users = |v: &[(u64, &[usize])]| -> std::collections::BTreeMap<u64, Vec<usize>> {
+            v.iter().map(|&(g, n)| (g, n.to_vec())).collect()
+        };
+        // Tile 0: nets 1 and 2 on bank 0 (classes 0 and 1); net 3 alone on
+        // bank 1. Tile 1: net 2 on bank 0 alone, no conflict.
+        let u = users(&[(0, &[1]), (1, &[2]), (2, &[3]), (128, &[2])]);
+        assert_eq!(Router::exclusive_breaks(&u), vec![(2, 0), (2, 1)]);
+        // A net on classes 0 and 2 of a tile keeps the first.
+        let u = users(&[(0, &[1]), (2, &[1])]);
+        assert_eq!(Router::exclusive_breaks(&u), vec![(1, 2)]);
+        // Net 2 on classes 1 and 2, net 1 on bank 0: net 2 keeps class 2.
+        let u = users(&[(0, &[1]), (1, &[2]), (2, &[2])]);
+        assert_eq!(Router::exclusive_breaks(&u), vec![(2, 0), (2, 1)]);
+        assert!(Router::exclusive_breaks(&users(&[(0, &[1]), (3, &[2])])).is_empty());
     }
 
     #[test]
