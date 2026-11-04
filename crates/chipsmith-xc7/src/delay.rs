@@ -80,6 +80,9 @@ const CLOCK_MARGIN: Ps = 140.0;
 #[derive(Debug, Clone, Default)]
 pub struct DspDelays {
     pub a_to_p: Ps,
+    /// A cascade's: into the lower DSP's PCOUT, from PCIN to the upper's P.
+    pub a_to_pcout: Ps,
+    pub pcin_to_p: Ps,
     pub setup_areg: Ps,
     pub setup_mreg: Ps,
     pub setup_preg: Ps,
@@ -100,6 +103,8 @@ impl DspDelays {
         };
         Ok(DspDelays {
             a_to_p: get("DSP48E1_AREG_0_A_INPUT_DIRECT_MREG_0_PREG_0_USE_DPORT_FALSE_USE_MULT_MULTIPLY", "IOPATH", "A", "P")?,
+            a_to_pcout: get("DSP48E1_AREG_0_A_INPUT_DIRECT_MREG_0_PREG_0_USE_DPORT_FALSE_USE_MULT_MULTIPLY", "IOPATH", "A", "PCOUT")?,
+            pcin_to_p: get("DSP48E1_PREG_0", "IOPATH", "PCIN", "P")?,
             setup_areg: get("DSP48E1_AREG_1_A_INPUT_DIRECT", "SETUP", "A", "")?,
             setup_mreg: get("DSP48E1_AREG_0_A_INPUT_DIRECT_MREG_1_USE_DPORT_FALSE_USE_MULT_MULTIPLY", "SETUP", "A", "")?,
             setup_preg: get(

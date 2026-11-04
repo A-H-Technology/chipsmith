@@ -164,19 +164,6 @@ pub fn export(db: &ChipDb, routed: &Routed, pins: &BTreeMap<String, String>, per
                 lut = Some(l);
             }
         }
-        if g.ty == "DSP48E1" {
-            // A DSP column's cascade wires are always connected, so the
-            // decoder reads each block's PCIN, ACIN, ... as the PCOUT, ACOUT,
-            // ... below it, and Vivado's timer times those arcs whatever
-            // OPMODE selects. chipsmith builds no cascades: they go to 0.
-            // Remove once it does (only cut what OPMODE and A_/B_INPUT
-            // leave unread).
-            for p in g.ports.iter_mut() {
-                if matches!(p.name.as_str(), "PCIN" | "ACIN" | "BCIN" | "CARRYCASCIN" | "MULTSIGNIN") {
-                    p.sig.iter_mut().for_each(|b| *b = SigBit::ZERO);
-                }
-            }
-        }
         cells.push(C {
             name: c.name.clone(),
             g,
@@ -189,6 +176,34 @@ pub fn export(db: &ChipDb, routed: &Routed, pins: &BTreeMap<String, String>, per
                 if let Some(&k) = constant.get(b) {
                     *b = k;
                 }
+            }
+        }
+    }
+    // A DSP column's cascade wires are always connected, so the decoder
+    // reads each block's PCIN, ACIN, ... as the PCOUT, ACOUT, ... below it,
+    // and Vivado's timer times those arcs whatever OPMODE selects: what
+    // OPMODE and A_/B_INPUT leave unread goes to 0. chipsmith builds no
+    // carry or sign cascade.
+    for c in cells.iter_mut().filter(|c| c.g.ty == "DSP48E1") {
+        let opmode: Option<u64> = c.g.ports.iter().find(|p| p.name == "OPMODE").and_then(|p| {
+            p.sig.iter().enumerate().try_fold(0u64, |v, (k, b)| match b {
+                SigBit::Const(s) => Some(v | u64::from(*s == State::One) << k),
+                _ => None,
+            })
+        });
+        let reads_pcin = opmode.is_none_or(|o| matches!(o >> 4 & 7, 1 | 5));
+        let cascade = |name: &str| matches!(c.g.params.get(name), Some(ParamValue::Str(v)) if v == "CASCADE");
+        let (acin, bcin) = (cascade("A_INPUT"), cascade("B_INPUT"));
+        for p in c.g.ports.iter_mut() {
+            let unread = match p.name.as_str() {
+                "PCIN" => !reads_pcin,
+                "ACIN" => !acin,
+                "BCIN" => !bcin,
+                "CARRYCASCIN" | "MULTSIGNIN" => true,
+                _ => false,
+            };
+            if unread {
+                p.sig.iter_mut().for_each(|b| *b = SigBit::ZERO);
             }
         }
     }

@@ -16,6 +16,7 @@ mod dsp;
 mod ff;
 mod io;
 mod ram;
+mod replicate;
 
 use anyhow::{bail, Context, Result};
 use chipsmith_netlist::{attr, is_set, CellKind, Design, Module, SigBit, State};
@@ -38,6 +39,8 @@ pub struct Stats {
     /// The LUT mapping: gates in, LUTs out, their depth.
     pub lutmap: lutmap::Stats,
     pub registers: usize,
+    /// Copies of registers read by many cells, among `registers`.
+    pub replicas: usize,
     pub carry4s: usize,
     pub ram32ms: usize,
     /// Block RAM in RAMB18 halves (a RAMB36E1 is two).
@@ -53,6 +56,10 @@ pub struct Options {
     pub distributed_ram: bool,
     /// Memories with synchronous reads in block RAM; else as above.
     pub block_ram: bool,
+    /// Registers read by many cells copied ([`replicate`]). yosys'
+    /// equivalence proof can't tie a copy to its original (induction leaves
+    /// the copy free), so the proofs run without.
+    pub register_copies: bool,
 }
 
 impl Default for Options {
@@ -60,6 +67,7 @@ impl Default for Options {
         Options {
             distributed_ram: true,
             block_ram: true,
+            register_copies: true,
         }
     }
 }
@@ -146,7 +154,9 @@ fn run(m: &mut Module, options: Options, obs: &mut dyn Observer) -> Result<Stats
     // with adders, which become carry chains like any other.
     let dsps = dsp::map(m);
     obs.stage("dsp", m);
-    alumacc::alumacc(m);
+    // Sums by arrival, as the Cyclone II's (sha256 by Vivado: README,
+    // since branch xc7-qor).
+    alumacc::alumacc_with(m, alumacc::SumOrder::Arrival);
     opt::opt(m, removable);
     obs.stage("alumacc", m);
     let bram_halves = if options.block_ram { bram::map(m) } else { 0 };
@@ -177,14 +187,15 @@ fn run(m: &mut Module, options: Options, obs: &mut dyn Observer) -> Result<Stats
     lut_cells(m);
     clean(m);
     obs.stage("luts", m);
-
+    let replicas = if options.register_copies { replicate::registers(m, replicate::MAX_FANOUT) } else { 0 };
     let bufgs = io::clock_buffers(m);
     clean(m);
     obs.stage("cells", m);
     clean::purge_wires(m);
     Ok(Stats {
         lutmap,
-        registers,
+        registers: registers + replicas,
+        replicas,
         carry4s,
         ram32ms,
         bram_halves,
