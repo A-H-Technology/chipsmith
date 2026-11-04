@@ -166,6 +166,9 @@ pub(crate) struct Design {
     pub drams: Vec<Dram>,
     /// Hard blocks, by [`Hard`] kind: block RAM, then DSP cells.
     pub hard: [Vec<CellId>; 2],
+    /// Per DSP in `hard`, the DSP it cascades into (PCOUT -> PCIN), which
+    /// moves with it in the same tile's upper site and isn't in `hard`.
+    pub cascaded: Vec<Option<CellId>>,
     /// Each BLE's register's control set, numbered densely.
     pub ble_cs: Vec<Option<u32>>,
 }
@@ -183,11 +186,29 @@ pub(crate) fn build(cells: Vec<Cell>, nets: Vec<Net>, pairs: &[(CellId, CellId)]
         carries: Vec::new(),
         drams: Vec::new(),
         hard: [Vec::new(), Vec::new()],
+        cascaded: Vec::new(),
         ble_cs: Vec::new(),
     };
+    // A DSP whose PCIN its cascade partner's PCOUT drives, by lower DSP.
+    let mut upper: HashMap<CellId, CellId> = HashMap::default();
+    for (c, cell) in d.cells.iter().enumerate() {
+        let Some(lower) = cell.net("PCIN0").and_then(|n| d.nets[n as usize].driver.as_ref()) else {
+            continue;
+        };
+        if Hard::of(&d.cells[lower.0 as usize].kind) == Some(Hard::Dsp) && lower.1 == "PCOUT0" {
+            upper.insert(lower.0, c as CellId);
+        }
+    }
+    let uppers: std::collections::HashSet<CellId> = upper.values().copied().collect();
     for c in 0..d.cells.len() as CellId {
         if let Some(h) = Hard::of(&d.cells[c as usize].kind) {
+            if uppers.contains(&c) {
+                continue;
+            }
             d.hard[h as usize].push(c);
+            if h == Hard::Dsp {
+                d.cascaded.push(upper.get(&c).copied());
+            }
         }
     }
     // Which object each LUT and register went into.
@@ -387,6 +408,14 @@ pub(crate) fn build(cells: Vec<Cell>, nets: Vec<Net>, pairs: &[(CellId, CellId)]
 }
 
 impl Design {
+    /// The DSP hard block `b` cascades into, in its tile's upper site.
+    fn upper(&self, h: Hard, b: u32) -> Option<CellId> {
+        match h {
+            Hard::Dsp => self.cascaded[b as usize],
+            Hard::Bram => None,
+        }
+    }
+
     /// Which nets count for wirelength, and their cells.
     fn index_nets(&mut self) {
         self.net_cells = vec![Vec::new(); self.nets.len()];
@@ -570,7 +599,9 @@ impl Timing {
                             .then(|| ["A", "B"].iter().position(|x| *x == name))
                             .flatten()
                     };
+                    let is_pcout = |p: &str| p.strip_prefix("PCOUT").is_some_and(|i| i.chars().all(|c| c.is_ascii_digit()));
                     let outs: Vec<&str> = ports.iter().copied().filter(|p| is_p(p)).collect();
+                    let pcouts: Vec<&str> = ports.iter().copied().filter(|p| is_pcout(p)).collect();
                     for &p in &ports {
                         let n = node(&mut g, p);
                         if is_p(p) {
@@ -598,6 +629,16 @@ impl Timing {
                                     let to = node(&mut g, o);
                                     g.add_arc(n, to, dl.a_to_p);
                                 }
+                                for &o in &pcouts {
+                                    let to = node(&mut g, o);
+                                    g.add_arc(n, to, dl.a_to_pcout);
+                                }
+                            }
+                        } else if p.starts_with("PCIN") {
+                            // A cascade's upper DSP, never registered.
+                            for &o in &outs {
+                                let to = node(&mut g, o);
+                                g.add_arc(n, to, dl.pcin_to_p);
                             }
                         } else if p.starts_with("CE") || p.starts_with("RST") {
                             g.set_setup(n, dl.setup_control + delays.clock_margin);
@@ -1006,11 +1047,12 @@ impl<'a> State<'a> {
         }
     }
 
+    /// A RAMB36E1, or two cascaded DSPs: the whole tile.
     fn hard_full(&self, h: Hard, b: u32) -> bool {
         matches!(
             self.d.cells[self.d.hard[h as usize][b as usize] as usize].kind,
             Kind::Bram { size: crate::bram::Size::Full, .. }
-        )
+        ) || (h == Hard::Dsp && self.d.cascaded[b as usize].is_some())
     }
 
     /// The slots hard block `b` takes at `slot`; None where it can't go.
@@ -1102,7 +1144,11 @@ impl<'a> State<'a> {
                     occ[k as usize] = Some(b);
                 }
                 self.hard_slot[h as usize][b as usize] = pos;
-                self.cell_xy[d.hard[h as usize][b as usize] as usize] = self.g.hard[h as usize][pos as usize / 2].xy;
+                let xy = self.g.hard[h as usize][pos as usize / 2].xy;
+                self.cell_xy[d.hard[h as usize][b as usize] as usize] = xy;
+                if let Some(u) = d.upper(h, b) {
+                    self.cell_xy[u as usize] = xy;
+                }
                 true
             }
             Obj::Carry(_) | Obj::Dram(_) => {
@@ -1198,7 +1244,10 @@ impl<'a> State<'a> {
                 let r = &d.drams[r as usize];
                 out.extend(r.lut6.iter().chain(&r.lut5));
             }
-            Obj::Hard(h, b) => out.push(d.hard[h as usize][b as usize]),
+            Obj::Hard(h, b) => {
+                out.push(d.hard[h as usize][b as usize]);
+                out.extend(d.upper(h, b));
+            }
         }
     }
 
@@ -1641,6 +1690,9 @@ fn sites(d: &Design, g: &Grid, s: &State, fixed: &[(CellId, String, Xy)]) -> Vec
                 _ => tile.half[slot % 2].clone(),
             };
             out[c as usize] = Some((site, Bel::Site));
+            if let Some(u) = d.upper(h, b as u32) {
+                out[u as usize] = Some((tile.half[1].clone(), Bel::Site));
+            }
         }
     }
     for (c, site, _) in fixed {
@@ -1895,9 +1947,12 @@ fn global<'a>(
     // their own).
     let mut hard_obj: [Vec<u32>; 2] = [Vec::new(), Vec::new()];
     for h in Hard::ALL {
-        for &c in &d.hard[h as usize] {
+        for (b, &c) in d.hard[h as usize].iter().enumerate() {
             let o = p.add_object(5, &[(0, 0.0)]);
             obj_of[c as usize] = Some(o);
+            if let Some(u) = d.upper(h, b as u32) {
+                obj_of[u as usize] = Some(o);
+            }
             hard_obj[h as usize].push(o);
         }
     }
@@ -2119,6 +2174,7 @@ mod tests {
             carries,
             drams: Vec::new(),
             hard: [Vec::new(), Vec::new()],
+            cascaded: Vec::new(),
             ble_cs: Vec::new(),
         };
         d.ble_cs = d

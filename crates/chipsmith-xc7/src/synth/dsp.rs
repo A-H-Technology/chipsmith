@@ -386,7 +386,8 @@ impl Plan {
     fn build(&self, m: &mut Module, name: &str, cx: Context, out: &mut Vec<Cell>) -> SigSpec {
         let pairs = self.pairs();
         let single = pairs.len() == 1;
-        let mut sum: Option<SigSpec> = None;
+        // Each DSP: its limbs, configuration, operands and P.
+        let mut dsps: Vec<((usize, usize), Dsp, [SigSpec; 2], SigSpec)> = Vec::new();
         for (i, j) in pairs {
             let (a, b) = (&self.a[i], &self.b[j]);
             let p = m.new_sig(48);
@@ -476,11 +477,64 @@ impl Plan {
                 }
             }
             dsp.clk = clk;
-            out.push(Cell {
-                name: format!("{name}.dsp{i}_{j}"),
-                kind: dsp.cell((&operands[0], a.signed), (&operands[1], b.signed), p.clone()),
-                attributes: Default::default(),
-            });
+            dsps.push(((i, j), dsp, operands, p));
+        }
+        // A's limb times two B limbs 17 bits apart in two DSPs that
+        // cascade, as Vivado builds them: the upper adds the lower's P
+        // shifted down 17 bits (PCIN >>> 17), so the two make one partial
+        // product and one adder less in the fabric. Only DSPs without
+        // registers: one with a stage the other lacks would add its PCIN a
+        // cycle off.
+        let cascades = |lo: &((usize, usize), Dsp, [SigSpec; 2], SigSpec), hi: &((usize, usize), Dsp, [SigSpec; 2], SigSpec)| {
+            let ((i, j), (i2, j2)) = (lo.0, hi.0);
+            i == i2 && j % 2 == 0 && j2 == j + 1 && lo.1.is_combinational() && hi.1.is_combinational()
+        };
+        let mut sum: Option<SigSpec> = None;
+        let mut k = 0;
+        while k < dsps.len() {
+            let pair = k + 1 < dsps.len() && cascades(&dsps[k], &dsps[k + 1]);
+            let ((i, j), _, _, _) = dsps[k];
+            let shift = self.shift(i, j);
+            let signed = |d: &((usize, usize), Dsp, [SigSpec; 2], SigSpec)| (self.a[d.0 .0].signed, self.b[d.0 .1].signed);
+            let part: SigSpec = if pair {
+                let (lo, hi) = (&dsps[k], &dsps[k + 1]);
+                let pcout = m.new_sig(48);
+                let (sa, sb) = signed(lo);
+                out.push(Cell {
+                    name: format!("{name}.dsp{i}_{j}"),
+                    kind: lo.1.cell((&lo.2[0], sa), (&lo.2[1], sb), lo.3.clone(), Cascade::Out(pcout.clone())),
+                    attributes: Default::default(),
+                });
+                let (sa, sb) = signed(hi);
+                out.push(Cell {
+                    name: format!("{name}.dsp{i}_{}", j + 1),
+                    kind: hi.1.cell((&hi.2[0], sa), (&hi.2[1], sb), hi.3.clone(), Cascade::In(pcout)),
+                    attributes: Default::default(),
+                });
+                // The lower's low 17 bits, then the upper's P (sign
+                // extended to 48 bits as a single DSP's).
+                (0..self.width)
+                    .map(|b| match b.checked_sub(shift) {
+                        None => SigBit::ZERO,
+                        Some(b) if b < B_UNSIGNED => lo.3[b],
+                        Some(b) => hi.3[(b - B_UNSIGNED).min(47)],
+                    })
+                    .collect()
+            } else {
+                let d = &dsps[k];
+                let (sa, sb) = signed(d);
+                out.push(Cell {
+                    name: format!("{name}.dsp{i}_{j}"),
+                    kind: d.1.cell((&d.2[0], sa), (&d.2[1], sb), d.3.clone(), Cascade::None),
+                    attributes: Default::default(),
+                });
+                (0..self.width)
+                    .map(|b| match b.checked_sub(shift) {
+                        None => SigBit::ZERO,
+                        Some(b) => d.3[b.min(47)],
+                    })
+                    .collect()
+            };
             sum = Some(match sum {
                 None => part,
                 Some(acc) => {
@@ -498,9 +552,19 @@ impl Plan {
                     y
                 }
             });
+            k += if pair { 2 } else { 1 };
         }
         sum.expect("a planned product has a DSP")
     }
+}
+
+/// A DSP48E1's place in a cascade.
+enum Cascade {
+    None,
+    /// The lower of two: its PCOUT.
+    Out(SigSpec),
+    /// The upper: PCIN, which it adds shifted down 17 bits.
+    In(SigSpec),
 }
 
 /// One DSP48E1's register stages: A, B, M, P.
@@ -511,9 +575,14 @@ struct Dsp {
 }
 
 impl Dsp {
-    /// A DSP48E1 computing P = A * B, A and B extended to its 30 and 18
-    /// bits, its registers on `stage`.
-    fn cell(&self, (a, a_signed): (&SigSpec, bool), (b, b_signed): (&SigSpec, bool), p: SigSpec) -> CellKind {
+    fn is_combinational(&self) -> bool {
+        self.stage.iter().all(Option::is_none)
+    }
+
+    /// A DSP48E1 computing P = A * B (plus PCIN >>> 17 at a cascade's
+    /// upper end), A and B extended to its 30 and 18 bits, its registers on
+    /// `stage`.
+    fn cell(&self, (a, a_signed): (&SigSpec, bool), (b, b_signed): (&SigSpec, bool), p: SigSpec, cascade: Cascade) -> CellKind {
         let port = |name: &str, dir, sig: SigSpec| GenericPort {
             name: name.into(),
             dir: Some(dir),
@@ -557,7 +626,12 @@ impl Dsp {
             port("C", Dir::In, konst(0, 48)),
             port("D", Dir::In, konst(0, 25)),
             port("CLK", Dir::In, bit(self.clk.map_or(SigBit::ZERO, |c| c.sig))),
-            port("OPMODE", Dir::In, konst(0b000_0101, 7)),
+            // Z: 0, or PCIN >>> 17 (101); X and Y: the product.
+            port(
+                "OPMODE",
+                Dir::In,
+                konst(if matches!(cascade, Cascade::In(_)) { 0b101_0101 } else { 0b000_0101 }, 7),
+            ),
             port("ALUMODE", Dir::In, konst(0, 4)),
             port("INMODE", Dir::In, konst(0, 5)),
             port("CARRYINSEL", Dir::In, konst(0, 3)),
@@ -577,6 +651,11 @@ impl Dsp {
             ports.push(port(z, Dir::In, bit(SigBit::ZERO)));
         }
         ports.push(port("P", Dir::Out, p));
+        match cascade {
+            Cascade::None => {}
+            Cascade::Out(pcout) => ports.push(port("PCOUT", Dir::Out, pcout)),
+            Cascade::In(pcin) => ports.push(port("PCIN", Dir::In, pcin)),
+        }
         CellKind::Other(Generic {
             ty: DSP48E1.into(),
             params,
@@ -628,5 +707,40 @@ mod tests {
         // 26 x 22 signed: the 22 bits fit A whole, the 26 split on B.
         let p = Plan::of(&mul(m, 26, 22, true, 48)).unwrap();
         assert_eq!((p.blocks(), p.a[0].bits.len()), (2, 22));
+    }
+
+    /// 32 x 32 -> 64 unsigned: each of A's two limbs times B's two in a
+    /// cascaded pair (the upper's OPMODE adds PCIN >>> 17, its PCIN the
+    /// lower's PCOUT), so one adder sums the two pairs, not three the four.
+    #[test]
+    fn b_limbs_cascade_in_pairs() {
+        let mut m = Module::new("t");
+        let b = mul(&mut m, 32, 32, false, 64);
+        m.add_cell("p", CellKind::Binary(b));
+        assert_eq!(map(&mut m), 4);
+        let port = |g: &Generic, name: &str| g.ports.iter().find(|p| p.name == name).map(|p| p.sig.clone());
+        let dsps: Vec<&Generic> = m
+            .cells
+            .iter()
+            .filter_map(|c| match &c.kind {
+                CellKind::Other(g) if g.ty == DSP48E1 => Some(g),
+                _ => None,
+            })
+            .collect();
+        let uppers: Vec<&&Generic> = dsps.iter().filter(|g| port(g, "PCIN").is_some()).collect();
+        assert_eq!(uppers.len(), 2);
+        for u in uppers {
+            let opmode = port(u, "OPMODE").unwrap();
+            let v = opmode.iter().enumerate().fold(0, |v, (k, b)| v | u64::from(*b == SigBit::ONE) << k);
+            assert_eq!(v, 0b101_0101, "Z = PCIN >>> 17, X = Y = M");
+            let pcin = port(u, "PCIN").unwrap();
+            assert!(dsps.iter().any(|l| port(l, "PCOUT") == Some(pcin.clone())), "PCIN is a lower DSP's PCOUT");
+        }
+        let adders = m
+            .cells
+            .iter()
+            .filter(|c| matches!(&c.kind, CellKind::Binary(b) if b.op == BinaryOp::Add))
+            .count();
+        assert_eq!(adders, 1);
     }
 }
