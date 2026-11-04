@@ -61,7 +61,7 @@ def main():
         for site in t.get("sites", {}):
             site_tile[site] = tile
     blocks = []
-    for d in sorted(harvest.glob("d*"), key=lambda p: int(p.name[1:])):
+    for d in sorted(harvest.glob("[df]*"), key=lambda p: (p.name[0] == "f", int(p.name[1:]))):
         fasm = d / "top.fasm"
         if not fasm.exists():
             continue
@@ -82,7 +82,7 @@ def main():
                 "# bench/cmt/extract.py): per block its attributes, then the features\n"
                 "# Vivado set in its site, one per set bit.\n")
         for name, cell, b, own in blocks:
-            zhold = cell == "blk0"
+            zhold = cell == "blk0" or b.get("zhold", False)
             a = [f"CLKIN1_PERIOD={b['period']:.3f}", f"DIVCLK_DIVIDE={b['divclk']}",
                  f"BANDWIDTH={b['bandwidth']}", f"COMPENSATION={'ZHOLD' if zhold else 'INTERNAL'}"]
             a.append(f"CLKFBOUT_MULT={int(b['mult'])}" if b["prim"] == "PLL" else f"CLKFBOUT_MULT_F={b['mult']:.3f}")

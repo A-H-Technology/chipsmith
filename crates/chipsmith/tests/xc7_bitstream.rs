@@ -389,6 +389,19 @@ fn design_built(file: &str, top: &str) {
     check(top, &example_at(&dir), &bit, &s, 3000);
 }
 
+/// A PLL's clocks (phase, x2, a 25% duty cycle) through the bitstream: its
+/// counters decoded and modelled, against the request's model.
+#[test]
+fn cmt() {
+    design_built("cmt.v", "cmt");
+}
+
+/// zybo-pll's two clocks.
+#[test]
+fn zybo_pll() {
+    built("zybo-pll", 3000);
+}
+
 /// Every register shape and the carry arithmetic, through the bitstream.
 #[test]
 fn registers_and_arithmetic() {

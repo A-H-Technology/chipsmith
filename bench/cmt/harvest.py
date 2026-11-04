@@ -32,7 +32,7 @@ LIMITS = {
 }
 
 
-def block(rng, prim, mult, fractional):
+def block(rng, prim, mult, fractional, bandwidth=None, zhold=False):
     lim = LIMITS[prim]
     lo, hi = lim["vco"]
     # D = 1: the input is the phase detector's.
@@ -76,10 +76,10 @@ def block(rng, prim, mult, fractional):
         else:
             duty = 0.5
         outs.append(dict(divide=o, phase=phase, duty=duty))
-    bw = rng.choice(["OPTIMIZED"] * 6 + ["LOW", "HIGH"])
+    bw = bandwidth or rng.choice(["OPTIMIZED"] * 6 + ["LOW", "HIGH"])
     fb_phase = 0.0
     return dict(prim=prim, mult=mult, divclk=divclk, period=period, bandwidth=bw,
-                fb_phase=fb_phase, outs=outs)
+                fb_phase=fb_phase, outs=outs, zhold=zhold)
 
 
 def fmt(v):
@@ -99,7 +99,7 @@ def verilog(blocks):
         # The first block (a PLL) is fed straight from the pin, with its
         # feedback through a BUFG (ZHOLD, the wizard's way); the others from
         # the BUFG, with internal feedback.
-        zhold = b == 0
+        zhold = b == 0 or blk.get("zhold", False)
         params = [f".CLKIN1_PERIOD({fmt(blk['period'])})",
                   f".DIVCLK_DIVIDE({blk['divclk']})",
                   f".BANDWIDTH(\"{blk['bandwidth']}\")",
@@ -173,8 +173,42 @@ if {![file exists $root/%(d)s/top.bit]} {
 """
 
 
+# The (kind, multiplier) pairs the 32 designs leave without a BANDWIDTH
+# OPTIMIZED block, which `harvest.py <dir> fill` builds: two PLLs and two
+# MMCMs a design, the first MMCMs with ZHOLD feedback (its bit is otherwise
+# unseen).
+FILL = {
+    "PLL": [4, 6, 9, 13, 17, 19, 20, 21, 25, 26, 28, 36, 38, 41, 42, 43, 60, 63],
+    "MMCM": [8, 12, 16, 17, 18, 19, 28, 31, 32, 39, 40, 46, 47, 49, 52, 53, 55, 57, 60, 62],
+}
+
+
+def fill(out):
+    tcl = [TCL_HEAD]
+    plls, mmcms = list(FILL["PLL"]), list(FILL["MMCM"])
+    i = 0
+    while plls or mmcms:
+        rng = random.Random(5000 + i)
+        take = lambda xs, default: xs.pop(0) if xs else default
+        p = [take(plls, 7), take(plls, 8)]
+        m = [take(mmcms, 8), take(mmcms, 10)]
+        blocks = [block(rng, "PLL", p[0], False, "OPTIMIZED"), block(rng, "PLL", p[1], False, "OPTIMIZED"),
+                  block(rng, "MMCM", float(m[0]), False, "OPTIMIZED", zhold=i < 3),
+                  block(rng, "MMCM", float(m[1]), False, "OPTIMIZED")]
+        d = out / f"f{i}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "top.v").write_text(verilog(blocks))
+        (d / "pins.xdc").write_text(XDC)
+        (d / "blocks.json").write_text(json.dumps(blocks, indent=1))
+        tcl.append(TCL_DESIGN % dict(d=f"f{i}"))
+        i += 1
+    (out / "fill.tcl").write_text("".join(tcl))
+
+
 def main():
     out = Path(sys.argv[1])
+    if len(sys.argv) > 2 and sys.argv[2] == "fill":
+        return fill(out)
     count = int(sys.argv[2]) if len(sys.argv) > 2 else 32
     out.mkdir(parents=True, exist_ok=True)
     tcl = [TCL_HEAD]
