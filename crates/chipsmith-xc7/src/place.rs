@@ -634,8 +634,10 @@ impl Timing {
                                     g.add_arc(n, to, dl.a_to_pcout);
                                 }
                             }
-                        } else if p.starts_with("PCIN") {
-                            // A cascade's upper DSP, never registered.
+                        } else if p.starts_with("PCIN") && !(inreg[0] || inreg[1]) {
+                            // A cascade's upper DSP. With registered
+                            // operands its P launches from the clock (the
+                            // lower's PCOUT as late as its own product).
                             for &o in &outs {
                                 let to = node(&mut g, o);
                                 g.add_arc(n, to, dl.pcin_to_p);

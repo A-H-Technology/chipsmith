@@ -702,6 +702,11 @@ to 32 words with one write port and asynchronous reads onto RAM32Ms,
 memories with synchronous reads onto block RAM (below), products onto
 DSP48E1s (below), every port bit through IBUF/OBUF/OBUFT/IOBUF and every
 clock through a BUFG. Latches and asynchronous loads aren't mapped yet.
+Since branch xc7-qor sums of three or more terms are built by arrival,
+as the Cyclone II's (`SumOrder::Arrival`), and a register read by more
+than 32 cell inputs is copied, each copy taking a run of the readers in
+netlist order (`synth/replicate.rs`), as Vivado's synthesis copies
+sha256's round counter; a register that clocks others stays one.
 
 The packer puts two LUTs in one LUT6 (LUT6_2, one out of O6 and one out of
 O5) where their inputs together are five nets or fewer and they share at
@@ -864,13 +869,18 @@ Checked:
 | mul_mixed | 12 signed x 9 unsigned, and 7 x 5 | 2 DSPs | 1 DSP, 31 LUTs, 12 FFs | 306,000 | 102,000 | 102,000 |
 | mul_pipe | 25 x 18 signed, three stages, reset | 1 DSP (AREG/BREG, MREG, PREG) | 1 DSP | 386,871 | 128,957 | 128,957 |
 | mul_regs | 24 x 17 unsigned, enables | 1 DSP (AREG/BREG, PREG) | 1 DSP | 368,754 | 122,918 | 122,918 |
-| mul_split | 26 x 22 signed | 2 DSPs, 31 LUTs, 12 CARRY4s, 48 FFs | 2 DSPs (cascaded), 17 FFs | 431,856 | 143,952 | 143,952 |
-| mul_wide | 32 x 32 unsigned | 4 DSPs, 134 LUTs, 48 CARRY4s, 64 FFs | (too many pins for the board) | 575,808 | | |
+| mul_split | 26 x 22 signed | 2 DSPs (cascaded, since branch xc7-qor; 31 LUTs and 12 CARRY4s before), 48 FFs | 2 DSPs (cascaded), 17 FFs | 431,856 | 143,952 | 143,952 |
+| mul_wide | 32 x 32 unsigned | 4 DSPs (two cascaded pairs since branch xc7-qor; before, 134 LUTs, 48 CARRY4s), 64 FFs | (too many pins for the board) | 575,808 | | |
 
-Vivado sums a split product's partial products in the DSPs themselves
-(PCIN, shifted 17 bits, OPMODE 1010101) and builds a 7 x 5 product in
-LUTs; chipsmith sums in carry chains and takes every product to DSPs. On
-the board: owed.
+Since branch xc7-qor chipsmith sums a split product's partial products
+in the DSPs where Vivado does: A's limb times two of B's limbs 17 bits
+apart is a cascaded pair, the upper adding the lower's P shifted down 17
+bits (PCIN, OPMODE 1010101), placed together in one DSP tile; what is
+left sums in carry chains. A pair cascades where both DSPs have the same
+operand registers and neither M nor P, and a cascade is two DSPs: Vivado
+also takes mul_split's product register into the upper DSP's P, 31 FFs
+fewer. Vivado also builds a 7 x 5 product in LUTs;
+chipsmith takes every product to DSPs. On the board: owed.
 
 Zybo limits:
 
@@ -892,8 +902,8 @@ Zybo limits:
   IRQF2P tied to 0 Linux stays up. A design that connects the PS7's pins
   is rejected (`crates/chipsmith-xc7/src/pack.rs`).
 - Cells: what synthesis makes ("7-series synthesis", above). No SRLs,
-  MUXF7/F8, latches or I/O-tile registers; no DSP48E1 cascades, ALU
-  modes or pre-adder (a product only).
+  MUXF7/F8, latches or I/O-tile registers; no DSP48E1 ALU modes or
+  pre-adder (a product, or a cascaded pair's sum).
 - Timing is chipsmith's estimate (`crates/chipsmith-xc7/src/delay.rs`,
   ADR-0016): routing per node as fitted to Vivado's timer on chipsmith's
   own routing, cell delays from prjxray-db's SDF with the register's as
@@ -933,10 +943,13 @@ to the FASM, and since 2026-11-02 to the `.bit` (ADR-0013):
   137.7-155.7 against 131.0-158.0); placement 4 to 5 times faster on
   picorv32 and riscv-bram.
 - **Site routing** (`phys.rs`): each cell port is one site pin, by rule:
-  a logic LUT's inputs on the fastest pins, the most critical by the
-  placement's timing first (a site pin costs 0.56 ns into the slice at
-  `<L>1`, 0.03 ns at `<L>6`; `<L>6` down, `<L>5` down beside a 5LUT,
-  whose `<L>6` is tied high), a register's D from the 6LUT beside it,
+  a logic LUT's inputs on the pins their drivers reach soonest by the
+  routing graph's delays, the most critical by the placement's timing
+  first (since branch xc7-qor; before, the fastest pins: a site pin costs
+  0.56 ns into the slice at `<L>1`, 0.03 ns at `<L>6`, but
+  zybo-jtag-counter's register reached `D6` beside it only by a long line
+  out and back, `D5` by one pip; `<L>5` down beside a 5LUT, whose `<L>6`
+  is tied high), a register's D from the 6LUT beside it,
   the CARRY4's sum or the `<L>X` bypass, a RAM32M's write data (bit 0,
   the 5LUT's half, on `<L>I`, bit 1 on `<L>X`: Vivado's mapping, which
   chipsmith had the other way round until branch xc7-timing) with `<L>6`
@@ -1025,8 +1038,10 @@ clock short of its `[clocks]` fails the build.
 
 Vivado builds most of bram-selftest's memories in registers and 1,768
 MUXF7s: it won't put a memory in a block where a register with an initial
-value drives its address. mult-selftest's split products it sums in
-cascaded DSPs (four fewer DSPs than chipsmith's).
+value drives its address. mult-selftest's four fewer DSPs aren't its
+cascades (chipsmith cascades the same pairs since branch xc7-qor): it
+builds the three 9 x 9 products in LUTs and the 18 x 18 unsigned one on
+one DSP, B's top bit added through C.
 
 #### Timing against Vivado
 

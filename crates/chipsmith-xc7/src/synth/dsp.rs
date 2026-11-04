@@ -482,12 +482,12 @@ impl Plan {
         // A's limb times two B limbs 17 bits apart in two DSPs that
         // cascade, as Vivado builds them: the upper adds the lower's P
         // shifted down 17 bits (PCIN >>> 17), so the two make one partial
-        // product and one adder less in the fabric. Only DSPs without
-        // registers: one with a stage the other lacks would add its PCIN a
-        // cycle off.
+        // product and one adder less in the fabric. Only DSPs with the same
+        // operand registers and no M or P: one with a stage the other lacks
+        // would add its PCIN a cycle off.
         let cascades = |lo: &((usize, usize), Dsp, [SigSpec; 2], SigSpec), hi: &((usize, usize), Dsp, [SigSpec; 2], SigSpec)| {
             let ((i, j), (i2, j2)) = (lo.0, hi.0);
-            i == i2 && j % 2 == 0 && j2 == j + 1 && lo.1.is_combinational() && hi.1.is_combinational()
+            i == i2 && j % 2 == 0 && j2 == j + 1 && lo.1.cascades_with(&hi.1)
         };
         let mut sum: Option<SigSpec> = None;
         let mut k = 0;
@@ -575,8 +575,10 @@ struct Dsp {
 }
 
 impl Dsp {
-    fn is_combinational(&self) -> bool {
-        self.stage.iter().all(Option::is_none)
+    /// Whether `upper` can add this DSP's P from PCIN in the same cycle:
+    /// the same operand registers on the same clock, neither M nor P.
+    fn cascades_with(&self, upper: &Dsp) -> bool {
+        self.stage == upper.stage && self.clk == upper.clk && self.stage[2..].iter().all(Option::is_none)
     }
 
     /// A DSP48E1 computing P = A * B (plus PCIN >>> 17 at a cascade's
