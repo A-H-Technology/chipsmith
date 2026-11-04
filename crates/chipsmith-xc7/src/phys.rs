@@ -229,14 +229,48 @@ impl Builder<'_> {
 /// reaches every pin about as fast, and takes them by [`lut_pin`]'s order.
 const PIN_SEARCH_NODES: usize = 3000;
 
-/// Each (site, letter)'s logic LUT inputs on the pins their drivers reach
-/// soonest, the most critical input first (a pair's input by the more
-/// critical of its two LUTs' connections). The fastest site pin isn't
-/// always the nearest: a register's `DQ` reaches its own slice's `D5` by
-/// one pip, and `D6` (zybo-jtag-counter's counter) only by a long line out
-/// and back. Delays are the routing graph's (each node's, as the router
-/// times them), with no other net in the way; a pin no search reached
-/// counts as far, and ties go to [`lut_pin`]'s order.
+/// Every input's weight is its criticality plus this, so the inputs off
+/// the critical paths still take pins near their drivers.
+const PIN_WEIGHT_FLOOR: f32 = 0.1;
+
+/// The pin (index) of each input that makes the weighted sum of their
+/// costs least, `None` with more inputs than pins: a search over the
+/// assignments (six pins at most), ties to the earlier pins in order.
+fn assign(inputs: &[(usize, f32, Vec<Ps>)], pins: usize) -> Option<Vec<usize>> {
+    fn go(inputs: &[(usize, f32, Vec<Ps>)], k: usize, used: u32, sum: f32, cur: &mut Vec<usize>, best: &mut Option<(f32, Vec<usize>)>) {
+        if best.as_ref().is_some_and(|(b, _)| sum >= *b) {
+            return;
+        }
+        let Some((_, w, cost)) = inputs.get(k) else {
+            *best = Some((sum, cur.clone()));
+            return;
+        };
+        for (j, &c) in cost.iter().enumerate() {
+            if used & 1 << j == 0 {
+                cur.push(j);
+                go(inputs, k + 1, used | 1 << j, sum + w * c, cur, best);
+                cur.pop();
+            }
+        }
+    }
+    if inputs.len() > pins {
+        return None;
+    }
+    let mut best = None;
+    go(inputs, 0, 0, 0.0, &mut Vec::new(), &mut best);
+    best.map(|(_, v)| v)
+}
+
+/// Each (site, letter)'s logic LUT inputs on the pins that make their
+/// drivers' delays to them least, each delay weighted by its input's
+/// criticality (a pair's input by the more critical of its two LUTs'
+/// connections). The fastest site pin isn't always the nearest:
+/// zybo-jtag-counter's register reached the `D6` beside it by a long line
+/// out and back, where pins chosen for their own delay alone put it.
+/// Delays are the routing graph's (each node's, as the router times them),
+/// with no other net in the way; a pin a search didn't reach counts as
+/// that search's horizon plus the pin's own delay, and ties go to
+/// [`lut_pin`]'s order.
 fn route_pins(b: &Builder, placement: &Placement, node_delay: &[Ps]) -> Result<HashMap<(String, usize), Vec<usize>>> {
     let d = &b.p.design;
     // Per (site, letter): per input, its net and criticality.
@@ -292,20 +326,28 @@ fn route_pins(b: &Builder, placement: &Placement, node_delay: &[Ps]) -> Result<H
             let (cx, cy) = (v[x].map_or(0.0, |t| t.1), v[y].map_or(0.0, |t| t.1));
             cy.total_cmp(&cx).then(x.cmp(&y))
         });
+        // Per driven input: its weight and its cost on each pin, a pin its
+        // search didn't reach counting as the search's horizon plus the
+        // pin's own delay.
+        let mut cost: Vec<(usize, f32, Vec<Ps>)> = Vec::new();
+        for &i in &order {
+            let (net, crit) = v[i].expect("filtered");
+            let (delays, horizon) = match source(net)? {
+                Some(s) => search(b.db, node_delay, s, &nodes),
+                None => (vec![Ps::INFINITY; nodes.len()], 0.0),
+            };
+            let c = delays
+                .iter()
+                .zip(&nodes)
+                .map(|(&d, &n)| if d.is_finite() { d } else { horizon + node_delay.get(n as usize).copied().unwrap_or(0.0) })
+                .collect();
+            cost.push((i, crit + PIN_WEIGHT_FLOOR, c));
+        }
         let mut free = vec![true; candidates.len()];
         let mut pins = vec![0; v.len()];
-        for i in order {
-            let (net, _) = v[i].expect("filtered");
-            let delays = match source(net)? {
-                Some(s) => search(b.db, node_delay, s, &nodes),
-                None => vec![Ps::INFINITY; nodes.len()],
-            };
-            let best = (0..candidates.len())
-                .filter(|&j| free[j])
-                .min_by(|&x, &y| delays[x].total_cmp(&delays[y]).then(x.cmp(&y)))
-                .context("a LUT with more inputs than pins")?;
-            free[best] = false;
-            pins[i] = candidates[best];
+        for (k, j) in assign(&cost, candidates.len()).context("a LUT with more inputs than pins")?.into_iter().enumerate() {
+            free[j] = false;
+            pins[cost[k].0] = candidates[j];
         }
         // An input nothing drives (none in a mapped LUT) takes what's left.
         for (i, p) in pins.iter_mut().enumerate() {
@@ -321,14 +363,16 @@ fn route_pins(b: &Builder, placement: &Placement, node_delay: &[Ps]) -> Result<H
 }
 
 /// The delay from `from` to each of `to` by Dijkstra over the routing
-/// graph, infinite for one not settled within [`PIN_SEARCH_NODES`].
-fn search(db: &ChipDb, node_delay: &[Ps], from: NodeId, to: &[NodeId]) -> Vec<Ps> {
+/// graph, infinite for one not settled within [`PIN_SEARCH_NODES`], and
+/// the delay the search got to.
+fn search(db: &ChipDb, node_delay: &[Ps], from: NodeId, to: &[NodeId]) -> (Vec<Ps>, Ps) {
     use std::cmp::Reverse;
     let mut out = vec![Ps::INFINITY; to.len()];
     let mut left = to.len();
     let mut best: HashMap<NodeId, Ps> = HashMap::from([(from, 0.0)]);
     let mut heap = std::collections::BinaryHeap::from([(Reverse(0u32), from)]);
     let mut settled = 0;
+    let mut horizon = 0.0;
     while let Some((Reverse(at), n)) = heap.pop() {
         let at = f32::from_bits(at);
         if best.get(&n).is_some_and(|&b| b < at) {
@@ -341,6 +385,7 @@ fn search(db: &ChipDb, node_delay: &[Ps], from: NodeId, to: &[NodeId]) -> Vec<Ps
             }
         }
         settled += 1;
+        horizon = at;
         if left == 0 || settled >= PIN_SEARCH_NODES {
             break;
         }
@@ -353,7 +398,7 @@ fn search(db: &ChipDb, node_delay: &[Ps], from: NodeId, to: &[NodeId]) -> Vec<Ps
             }
         }
     }
-    out
+    (out, horizon)
 }
 
 impl Builder<'_> {
@@ -838,6 +883,17 @@ pub(crate) fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The more critical input reached no pin (far away, every pin about
+    /// as near); the other, nearly as critical, reached pin 6 only. The far
+    /// one takes the next fastest pin, not the near one's.
+    #[test]
+    fn a_far_input_leaves_a_near_one_its_pin() {
+        let far = (0, 0.9 + PIN_WEIGHT_FLOOR, vec![1000.0 + 30.0, 1000.0 + 120.0, 1000.0 + 560.0]);
+        let near = (1, 0.5 + PIN_WEIGHT_FLOOR, vec![312.0, 1000.0 + 120.0, 1000.0 + 560.0]);
+        assert_eq!(assign(&[far.clone(), near.clone()], 3), Some(vec![1, 0]));
+        assert_eq!(assign(&[far, near], 1), None);
+    }
 
     #[test]
     fn small_luts_repeat_over_the_unused_inputs() {

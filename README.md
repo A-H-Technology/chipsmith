@@ -947,9 +947,10 @@ to the FASM, and since 2026-11-02 to the `.bit` (ADR-0013):
   routing graph's delays, the most critical by the placement's timing
   first (since branch xc7-qor; before, the fastest pins: a site pin costs
   0.56 ns into the slice at `<L>1`, 0.03 ns at `<L>6`, but
-  zybo-jtag-counter's register reached `D6` beside it only by a long line
-  out and back, `D5` by one pip; `<L>5` down beside a 5LUT, whose `<L>6`
-  is tied high), a register's D from the 6LUT beside it,
+  zybo-jtag-counter's register reached the `D6` beside it by a long line
+  out and back; the pins' assignment makes the inputs' delays, weighted by
+  criticality, least; `<L>5` down beside a 5LUT, whose `<L>6` is tied
+  high), a register's D from the 6LUT beside it,
   the CARRY4's sum or the `<L>X` bypass, a RAM32M's write data (bit 0,
   the 5LUT's half, on `<L>I`, bit 1 on `<L>X`: Vivado's mapping, which
   chipsmith had the other way round until branch xc7-timing) with `<L>6`

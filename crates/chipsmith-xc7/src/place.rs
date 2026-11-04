@@ -24,12 +24,12 @@
 //!   RAMB36E1 in the whole tile; a DSP48E1 in either site of a DSP tile.
 //!   These hard blocks move by swapping places with their own kind.
 //!
-//! RAMs go in the even slice of a tile (X0, the SLICEM of a CLBLM), carry
-//! chains in either: a sum's chain beside the chain that reads it, in one
-//! tile, as Vivado places them (since branch xc7-qor). Pins are where the
-//! manifest put them; the BSCAN for USER<n> is BSCAN_X0Y<n-1>; the PS7
-//! has the one PS7 site; each BUFGCTRL takes the free one nearest its
-//! source.
+//! Carry chains and RAMs go in the even slice of a tile (X0, the SLICEM of a
+//! CLBLM). Chains in either slice were tried (branch xc7-qor, README):
+//! they cost zybo-jtag-counter and picorv32 more than they gave sha256.
+//! Pins are where the manifest put them; the BSCAN for USER<n> is
+//! BSCAN_X0Y<n-1>; the PS7 has the one PS7 site; each BUFGCTRL takes the
+//! free one nearest its source.
 //!
 //! The cost is half-perimeter wirelength, x counted at half weight: grid x
 //! advances by two or more per interconnect column (site columns are
@@ -1159,7 +1159,7 @@ impl<'a> State<'a> {
                 };
                 let fits = slices.iter().all(|&s| {
                     let sl = &self.g.slices[s as usize];
-                    (sl.even || matches!(o, Obj::Carry(_)))
+                    sl.even
                         && (sl.slicem || !matches!(o, Obj::Dram(_)))
                         && self.slice_macro[s as usize].is_none()
                         && (0..SLOTS).all(|k| self.occ[s as usize * SLOTS + k] == Occ::Free)
@@ -1524,7 +1524,6 @@ fn anneal(s: &mut State, rng: &mut Rng, start: Start) -> u64 {
         let y = from.xy.1 + rng.offset(ri);
         let even = match o {
             Obj::Ble(_) => rng.below(2) == 0,
-            Obj::Carry(_) => rng.below(2) == 0,
             _ => true,
         };
         let pos = match o {
@@ -2255,11 +2254,8 @@ mod tests {
         assert_eq!(s.carry_root[0], target);
         let lut_slice = s.ble_slot[0] / SLOTS as u32;
         assert!(!g.chain(target, 2).unwrap().contains(&lut_slice));
-        // An odd slice takes a chain too, beside the even one: two chains
-        // of one sum's tree in one tile.
+        // The odd slices never host a chain.
         let m = s.moves_to(Obj::Carry(0), 1).unwrap();
-        assert!(s.apply(&m).is_some());
-        assert_eq!(s.carry_root[0], 1);
-        assert_eq!(g.chain(1, 2).unwrap(), vec![1, 3]);
+        assert!(s.apply(&m).is_none());
     }
 }
