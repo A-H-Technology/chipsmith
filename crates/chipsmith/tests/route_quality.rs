@@ -39,7 +39,13 @@ fn build(example: &str) -> String {
     if dir.exists() {
         std::fs::remove_dir_all(&dir).unwrap();
     }
-    copy_dir(&Path::new(ROOT).join("examples").join(example), &dir);
+    let examples = Path::new(ROOT).join("examples");
+    copy_dir(&examples.join(example), &dir);
+    // The examples its manifest takes sources from ("../sha256/src/*.v").
+    let manifest = std::fs::read_to_string(dir.join("chipsmith.toml")).unwrap();
+    for sibling in manifest.split("\"../").skip(1).filter_map(|s| s.split('/').next()) {
+        copy_dir(&examples.join(sibling), &dir.parent().unwrap().join(sibling));
+    }
     let out = Command::new(env!("CARGO_BIN_EXE_chipsmith"))
         .arg("-C")
         .arg(&dir)
@@ -127,7 +133,7 @@ const PICORV32_LES: (f64, f64) = (890.0, 971.0);
 const SHA256_LES: (f64, f64) = (3440.0, 3672.0);
 /// (bound, before), ns, the default seed: `open` df16e49's (sums as
 /// written, every register one, LUT pins by criticality alone: sha256
-/// 18.62, jtag-counter 3.03) above, `xc7-qor`'s (13.48, 2.79) below; sums
+/// 18.62, jtag-counter 3.03) above, `xc7-qor`'s (13.76, 2.79) below; sums
 /// by arrival without the register copies read 14.41 on sha256.
 const ZYBO_SHA256: (f64, f64) = (14.0, 18.62);
 const ZYBO_JTAG_COUNTER: (f64, f64) = (2.9, 3.03);
