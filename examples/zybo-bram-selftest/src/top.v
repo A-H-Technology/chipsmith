@@ -158,7 +158,13 @@ module top(input clk, output [3:0] led);
   wire e_c9 = w1 && (q_ca != x_a[17:9] || q_cb != x_c[8:0])
            || v1 && (q_ca != x_c[8:0] || q_cb != x_c[8:0]);
 
-  wire bad = e_s9 | e_d9 | e_b16 | e_w32 | e_t18 | e_o9 | e_r18 | e_s8 | e_c9;
+  // Each memory's compare registered, the error counted a cycle later: a
+  // block's read (2.45 ns to its data out), its compare, the OR of all
+  // nine and the counter's enable in one cycle miss 125 MHz at Vivado's
+  // slow corner (Vivado's own build of it makes 118 MHz).
+  reg [8:0] e1 = 0;
+  always @(posedge clk) e1 <= {e_s9, e_d9, e_b16, e_w32, e_t18, e_o9, e_r18, e_s8, e_c9};
+  wire bad = |e1;
   always @(posedge clk) if (bad && ~&errors) errors <= errors + 1'b1;
   assign led = {pass[15:13], errors != 0};
 

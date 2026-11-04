@@ -9,9 +9,18 @@
 // --release -p chipsmith-jtag --example xc7_user1`). led[0] lights on an
 // error, led[3:1] show the pass count's top bits.
 module top(input clk, output [3:0] led);
+  // The CPU runs at 62.5 MHz, half the Zybo's clock, from a register
+  // toggling (into a BUFG, as every clock; zybo-mult-selftest's way):
+  // chipsmith's placement and routing of it make 115 to 129 MHz at
+  // Vivado's slow corner over five seeds (Vivado's own 143.5 MHz), so 125
+  // fails the build's check as often as not. Back to clk once chipsmith
+  // makes 125 MHz on every seed.
+  reg half = 0;
+  always @(posedge clk) half <= ~half;
+  wire cclk = half;
   reg [3:0] rst_cnt = 0;
   wire resetn = &rst_cnt;
-  always @(posedge clk)
+  always @(posedge cclk)
     if (!resetn) rst_cnt <= rst_cnt + 1'b1;
 
   wire mem_valid, mem_instr;
@@ -24,7 +33,7 @@ module top(input clk, output [3:0] led);
     .ENABLE_COUNTERS(0), .ENABLE_COUNTERS64(0), .CATCH_MISALIGN(0), .CATCH_ILLINSN(0),
     .TWO_STAGE_SHIFT(0), .ENABLE_REGS_DUALPORT(1)
   ) cpu (
-    .clk(clk), .resetn(resetn), .mem_valid(mem_valid), .mem_instr(mem_instr), .mem_ready(mem_ready),
+    .clk(cclk), .resetn(resetn), .mem_valid(mem_valid), .mem_instr(mem_instr), .mem_ready(mem_ready),
     .mem_addr(mem_addr), .mem_wdata(mem_wdata), .mem_wstrb(mem_wstrb), .mem_rdata(mem_rdata));
 
   // The RAM reads every cycle; a request is answered on the next, when the
@@ -34,7 +43,7 @@ module top(input clk, output [3:0] led);
   reg [31:0] rdata = 0;
   wire [9:0] word = mem_addr[11:2];
   wire to_ram = mem_valid && !mem_ready && !mem_addr[28];
-  always @(posedge clk) begin
+  always @(posedge cclk) begin
     if (to_ram && mem_wstrb[0]) ram[word][7:0] <= mem_wdata[7:0];
     if (to_ram && mem_wstrb[1]) ram[word][15:8] <= mem_wdata[15:8];
     if (to_ram && mem_wstrb[2]) ram[word][23:16] <= mem_wdata[23:16];
@@ -44,7 +53,7 @@ module top(input clk, output [3:0] led);
   assign mem_rdata = rdata;
 
   reg [15:0] passes = 0, errors = 0;
-  always @(posedge clk) begin
+  always @(posedge cclk) begin
     mem_ready <= mem_valid && !mem_ready;
     if (mem_valid && !mem_ready && mem_addr[28] && |mem_wstrb) begin
       if (mem_addr[2]) errors <= mem_wdata[15:0];

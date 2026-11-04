@@ -359,6 +359,7 @@ fn distributed_ram() {
         Options {
             distributed_ram: false,
             block_ram: false,
+            register_copies: false,
         },
     );
     prove("lutram_logic", &logic, &[]);
@@ -488,6 +489,7 @@ fn zybo_picorv32() {
         Options {
             distributed_ram: false,
             block_ram: false,
+            register_copies: false,
         },
     );
     prove("zybo_picorv32_logic", &logic, &[]);
@@ -510,6 +512,17 @@ fn zybo_sha256() {
         "zybo-sha256",
         &counts(&s.cells),
         &synth_xilinx(&s.dir, "top", &files),
+    );
+    // The proof without register copies (Options::register_copies); the
+    // copies are co-simulated through the bitstream (xc7_bitstream).
+    let s = synthesize(
+        "zybo_sha256_proof",
+        "top",
+        &files,
+        Options {
+            register_copies: false,
+            ..Options::default()
+        },
     );
     prove("zybo_sha256", &s, &[]);
 }

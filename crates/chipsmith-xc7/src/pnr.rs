@@ -3,11 +3,11 @@
 //! routing (`crate::phys`), router (`chipsmith_route`) and FASM writer
 //! (`crate::fasm`), with a timing report of the routed design.
 //!
-//! Timing is prjxray-db's slow corner (`crate::delay`): cell delays from
-//! Vivado's SDF, routing per hop by wire class (the mean intrinsic delay of
-//! the pips into singles, doubles, quads, hexes and site pins). prjxray's
-//! pip delays leave out the wires' RC, so routed paths come out short of
-//! Vivado's; clocks are taken to arrive everywhere at once.
+//! Timing is Vivado's slow corner as `crate::delay` models it: cell delays
+//! from prjxray-db's SDF (the register's as Vivado's timer has them), each
+//! routing node's delay by its class as fitted to Vivado's net delays, a
+//! site input's own delay into its site, and a margin for the clock tree,
+//! whose clocks are otherwise taken to arrive everywhere at once.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -57,20 +57,6 @@ pub struct Report {
     pub clocks: Vec<ClockTiming>,
 }
 
-/// The routing delay of a node, by the wire class `crate::xray` gave it.
-fn wire_delay(delays: &Delays, class: &str) -> Ps {
-    match class {
-        "SINGLE" => delays.single,
-        "DOUBLE" => delays.double,
-        "QUAD" => delays.quad,
-        "HEX" => delays.hex,
-        // A long line spans 18 tiles: three hexes' worth.
-        "LONG_H" | "LONG_V" => 3.0 * delays.hex,
-        "PINFEED" | "BYPASS" | "FAN" | "CONTROL" => delays.imux,
-        _ => 0.0,
-    }
-}
-
 /// Places, routes and writes the FASM of `netlist` (synthesis' yosys JSON);
 /// `pins` maps each port bit to its package pin; `family` is prjxray-db's
 /// directory of the part's family.
@@ -92,7 +78,6 @@ pub fn run(
     let placement = place::place(db, Some(delays), d)?;
     let place_seconds = started.elapsed().as_secs_f64();
 
-    let ph = phys::build(db, &packed, &placement, family)?;
     // Each cell's site and bel, beside the FASM.
     let mut text = String::new();
     for (c, at) in d.cells.iter().zip(&placement.sites) {
@@ -136,6 +121,8 @@ pub fn run(
             }
         }
     }
+    let node_delays = crate::delay::node_delays(db, family)?;
+    let ph = phys::build(db, &packed, &placement, family, &node_delays)?;
     let reqs: Vec<NetReq> = ph
         .nets
         .iter()
@@ -172,7 +159,7 @@ pub fn run(
     };
     let started = Instant::now();
     let mut router = Router::new(db, &design);
-    router.set_wire_delays(|class| wire_delay(delays, class));
+    router.set_node_delays(&node_delays);
     for (i, r) in ph.nets.iter().enumerate() {
         // A BUFG's net stays on the clock tree: its bounding box rarely
         // holds the clock rows it passes through, and inside the box the
@@ -201,7 +188,10 @@ pub fn run(
     let text = fasm::write(db, &ph, &pips)?;
     std::fs::write(fasm_out, text).with_context(|| format!("writing {}", fasm_out.display()))?;
 
-    let clocks = clock_timing(d, &packed.conf, &timing, &ph.nets, &trees);
+    if let Some(path) = std::env::var_os("CHIPSMITH_XC7_CONNS") {
+        conns_dump(db, &timing, delays, &ph.nets, &trees, &placement.sites, &path)?;
+    }
+    let clocks = clock_timing(d, &packed.conf, &timing, &ph.nets, &trees, &placement.sites)?;
     let count = |f: &dyn Fn(&Kind, &Conf) -> bool| {
         d.cells
             .iter()
@@ -318,13 +308,53 @@ fn check(db: &ChipDb, nets: &[NetReq], trees: &[Tree]) -> Result<()> {
 
 /// Each clock's own critical path over the routed design: the placer's
 /// connections with their routed delays (0 inside a slice).
+/// CHIPSMITH_XC7_CONNS=<file>: every routed connection's tile distance
+/// (dx, dy), the placer's estimate, the routed delay (ps) and the sink
+/// port, to fit the placer's estimate to the router's.
+#[allow(clippy::too_many_arguments)]
+fn conns_dump(
+    db: &ChipDb,
+    timing: &place::Timing,
+    delays: &Delays,
+    nets: &[phys::RouteNet],
+    trees: &[Tree],
+    sites: &[Option<(String, place::Bel)>],
+    path: &std::ffi::OsStr,
+) -> Result<()> {
+    let mut delay: std::collections::HashMap<(NetId, CellId, &str), Ps> = std::collections::HashMap::new();
+    for (r, t) in nets.iter().zip(trees) {
+        for (ports, &dl) in r.sink_ports.iter().zip(&t.sink_delay) {
+            for (c, p) in ports {
+                delay.insert((r.net, *c, p.as_str()), dl);
+            }
+        }
+    }
+    let xy = |c: CellId| -> Option<(i32, i32)> {
+        let (site, _) = sites[c as usize].as_ref()?;
+        let (x, y) = db.tile_xy(db.sites.get(site)?.tile);
+        Some((x as i32, y as i32))
+    };
+    let mut text = String::new();
+    for c in &timing.conns {
+        let port = timing.graph.name(c.to);
+        let port = port.rsplit_once('.').map_or(port, |p| p.1);
+        let (Some(dl), Some(a), Some(b)) = (delay.get(&(c.net, c.to_cell, port)), xy(c.from_cell), xy(c.to_cell)) else {
+            continue;
+        };
+        let (dx, dy) = (a.0 - b.0, a.1 - b.1);
+        text += &format!("{dx}\t{dy}\t{:.0}\t{dl:.0}\t{port}\n", delays.route(dx, dy));
+    }
+    std::fs::write(path, text).with_context(|| format!("writing {}", path.to_string_lossy()))
+}
+
 fn clock_timing(
     d: &place::Design,
     conf: &[Conf],
     timing: &place::Timing,
     nets: &[phys::RouteNet],
     trees: &[Tree],
-) -> Vec<ClockTiming> {
+    sites: &[Option<(String, place::Bel)>],
+) -> Result<Vec<ClockTiming>> {
     let mut delay: std::collections::HashMap<(NetId, CellId, &str), Ps> =
         std::collections::HashMap::new();
     for (r, t) in nets.iter().zip(trees) {
@@ -348,6 +378,36 @@ fn clock_timing(
         })
         .collect();
     let _ = conf;
+    // CHIPSMITH_XC7_ENDPOINTS=<file>: every path end's site, bel, port,
+    // arrival (`-` if no timed path reaches it) and setup (ps), to hold
+    // against another timer's
+    // (`bench/zybo-timing.sh`).
+    if let Some(path) = std::env::var_os("CHIPSMITH_XC7_ENDPOINTS") {
+        let a = timing.graph.analyse(&arcs);
+        let at: std::collections::HashMap<&str, &(String, place::Bel)> = d
+            .cells
+            .iter()
+            .zip(sites)
+            .filter_map(|(c, s)| Some((c.name.as_str(), s.as_ref()?)))
+            .collect();
+        let mut text = String::new();
+        for n in 0..timing.graph.len() as u32 {
+            let Some(setup) = timing.graph.setup(n) else {
+                continue;
+            };
+            // `-`: no timed path reaches it.
+            let arrival = a.arrival(n).map_or("-".to_string(), |t| format!("{t:.0}"));
+            let name = timing.graph.name(n);
+            let Some((cell, port)) = name.rsplit_once('.') else {
+                continue;
+            };
+            let Some((site, bel)) = at.get(cell) else {
+                continue;
+            };
+            text += &format!("{site}\t{}\t{port}\t{arrival}\t{setup:.0}\n", bel.vivado_name());
+        }
+        std::fs::write(&path, text).with_context(|| format!("writing {}", path.to_string_lossy()))?;
+    }
     // CHIPSMITH_XC7_PATH=1: the critical path, node by node, on stderr.
     if std::env::var("CHIPSMITH_XC7_PATH").is_ok_and(|v| v == "1") {
         for (node, at) in timing.graph.analyse(&arcs).path {
@@ -383,5 +443,5 @@ fn clock_timing(
         })
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
+    Ok(out)
 }

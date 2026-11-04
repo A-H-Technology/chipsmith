@@ -11,8 +11,8 @@ So:
 
 ## Considered options
 
-- Sum the partial products in the DSPs (PCIN shifted 17 bits, as Vivado does): no LUTs or carry chains for the sum, and cascaded DSPs stacked in one column. It needs the placer to keep cascaded DSPs adjacent, a constraint it doesn't have. The decoder already reads Vivado's cascades.
-- Keep small products in LUTs, as Vivado does for 7 x 5: depends on a cost model of LUTs against DSPs that chipsmith doesn't have. The DE2's mapper takes every product to a block too.
+- Sum the partial products in the DSPs (PCIN shifted 17 bits, as Vivado does): no LUTs or carry chains for the sum, and cascaded DSPs stacked in one column. It needed the placer to keep cascaded DSPs adjacent, a constraint it didn't have. Taken for pairs since branch xc7-qor (below).
+- Keep small products in LUTs, as Vivado does for 7 x 5 and for zybo-mult-selftest's three 9 x 9 products: depends on a cost model of LUTs against DSPs that chipsmith doesn't have. The DE2's mapper takes every product to a block too. With them, and an 18 x 18 unsigned product on one DSP (B's top bit added through C), Vivado builds mult-selftest on 10 DSPs to chipsmith's 14.
 - A behavioural model of chipsmith's own, as for block RAM: yosys' is complete for what's built, and Vivado's agrees with it.
 
 ## Consequences
@@ -20,3 +20,4 @@ So:
 - The DE2 standard applies: every shape co-simulates against its RTL after synthesis (`tests/synth.rs`, `dsp_shapes`) and through the bitstream (`crates/chipsmith/tests/xc7_bitstream.rs`, `dsp`), and Vivado's bitstreams of the same RTL decode to netlists that co-simulate too. The board check is owed.
 - A design with more products than DSPs maps the rest to logic. Products of a constant stay in logic.
 - Falling-edge registers around a product cost fabric registers until the co-simulation can fold IS_CLK_INVERTED the way the decoder does.
+- Since branch xc7-qor, a split product's partial products sum in the DSPs where they can: A's limb times two of B's limbs 17 bits apart is a cascaded pair, the upper DSP adding the lower's P shifted down 17 bits (OPMODE 1010101, PCOUT to PCIN), as Vivado builds them. The placer moves a pair as one block taking a DSP tile whole (DSP_0, then DSP_1, on the tile's always-on PCOUT-to-PCIN pips), as it moves a RAMB36E1. A pair cascades where both DSPs have the same operand registers and neither M nor P (a stage on one alone would add PCIN a cycle off), and chains stop at two DSPs, one tile. zybo-mult-selftest: 851 LUT6 sites and 96 CARRY4s to 639 and 43 (Vivado's own 671 LUTs), 14 DSPs as before.

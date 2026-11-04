@@ -51,6 +51,50 @@ impl LutSize {
     }
 }
 
+/// The area a LUT costs the mapper, by its number of inputs (0 to 6).
+/// Uniform where every LUT takes a site of its own, as the Cyclone II's LE
+/// and the 7-series LUT6 do. A fracturable 6-LUT is not uniform: Agilex's
+/// ALM holds one 6-input LUT or two of up to five inputs that share two of
+/// its eight pins, so a 6-input cut costs about two smaller ones and
+/// minimising LUTs alone fills ALMs with half-used 6-LUTs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LutCost([u32; 7]);
+
+impl LutCost {
+    /// Every LUT 1: the mapper minimises LUTs.
+    pub const UNIFORM: LutCost = LutCost([1; 7]);
+
+    /// Cost per input count; `None` if any is 0 (a free LUT would let area
+    /// recovery duplicate logic without bound).
+    pub fn by_inputs(cost: [u32; 7]) -> Option<LutCost> {
+        cost.iter().all(|&c| c > 0).then_some(LutCost(cost))
+    }
+
+    fn of(self, inputs: usize) -> u32 {
+        self.0[inputs]
+    }
+}
+
+/// What the mapper optimises beyond depth. [`MapOptions::DEFAULT`] is the
+/// mapping the Cyclone II and 7-series flows have always had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapOptions {
+    pub cost: LutCost,
+    /// Keep a node's best cut among its candidates in the area passes. Its
+    /// fanins' cut lists change between passes, so the cut may not be
+    /// enumerated again, and the node can be left with no cut within its
+    /// required depth: the mapping comes out deeper than the depth pass's
+    /// (sha256 at K = 6: 8 levels instead of 7). ABC keeps it.
+    pub keep_best_cut: bool,
+}
+
+impl MapOptions {
+    pub const DEFAULT: MapOptions = MapOptions {
+        cost: LutCost::UNIFORM,
+        keep_best_cut: false,
+    };
+}
+
 /// Cuts kept per node.
 const CUTS: usize = 8;
 /// Area-flow passes after the depth pass.
@@ -474,6 +518,7 @@ struct NodeMap {
 
 struct Mapper<'a> {
     k: LutSize,
+    opts: MapOptions,
     aig: &'a Aig,
     /// AIG nodes outputs read (their LUTs must exist).
     roots: Vec<u32>,
@@ -483,7 +528,7 @@ struct Mapper<'a> {
 }
 
 impl<'a> Mapper<'a> {
-    fn new(net: &'a Network, k: LutSize) -> Self {
+    fn new(net: &'a Network, k: LutSize, opts: MapOptions) -> Self {
         let aig = &net.aig;
         let n = aig.nodes.len();
         let mut nodes = vec![NodeMap::default(); n];
@@ -519,6 +564,7 @@ impl<'a> Mapper<'a> {
         }
         Mapper {
             k,
+            opts,
             aig,
             roots,
             nodes,
@@ -536,18 +582,19 @@ impl<'a> Mapper<'a> {
     }
 
     fn cut_flow(&self, cut: &Cut) -> f32 {
-        1.0 + cut
-            .leaves
-            .iter()
-            .map(|&l| {
-                let l = l as usize;
-                if self.aig.is_and(l as u32) {
-                    self.nodes[l].flow / self.refs[l]
-                } else {
-                    0.0
-                }
-            })
-            .sum::<f32>()
+        self.opts.cost.of(cut.leaves.len()) as f32
+            + cut
+                .leaves
+                .iter()
+                .map(|&l| {
+                    let l = l as usize;
+                    if self.aig.is_and(l as u32) {
+                        self.nodes[l].flow / self.refs[l]
+                    } else {
+                        0.0
+                    }
+                })
+                .sum::<f32>()
     }
 
     /// The cuts a fanin literal offers: the fanin itself as a leaf, plus its
@@ -585,7 +632,8 @@ impl<'a> Mapper<'a> {
                     continue;
                 }
                 let k = self.k;
-                let tt = stretch(k, x.tt, &x.leaves, &leaves) & stretch(k, y.tt, &y.leaves, &leaves);
+                let tt =
+                    stretch(k, x.tt, &x.leaves, &leaves) & stretch(k, y.tt, &y.leaves, &leaves);
                 let cut = reduce(k, Cut { leaves, tt });
                 if !cuts.contains(&cut) {
                     cuts.push(cut);
@@ -613,6 +661,13 @@ impl<'a> Mapper<'a> {
                 continue;
             }
             let mut cuts = self.enumerate(v);
+            if self.opts.keep_best_cut && required.is_some() {
+                let n = &self.nodes[v as usize];
+                let best = &n.cuts[n.best];
+                if !cuts.contains(best) {
+                    cuts.push(best.clone());
+                }
+            }
             let key = |m: &Mapper, c: &Cut| (m.cut_depth(c), m.cut_flow(c), c.leaves.len());
             match required {
                 None => cuts.sort_by(|a, b| {
@@ -728,10 +783,10 @@ impl<'a> Mapper<'a> {
         refs
     }
 
-    /// Reference `leaves`; returns how many LUTs that brings into the cover
-    /// (this one included), recursing into newly referenced ANDs.
+    /// Reference `leaves`; returns the area of the LUTs that brings into
+    /// the cover (this one included), recursing into newly referenced ANDs.
     fn reference(&self, refs: &mut [u32], leaves: &[u32]) -> u32 {
-        let mut area = 1;
+        let mut area = self.opts.cost.of(leaves.len());
         for &l in leaves {
             refs[l as usize] += 1;
             if refs[l as usize] == 1 && self.aig.is_and(l) {
@@ -743,7 +798,7 @@ impl<'a> Mapper<'a> {
 
     /// The inverse of `reference`.
     fn dereference(&self, refs: &mut [u32], leaves: &[u32]) -> u32 {
-        let mut area = 1;
+        let mut area = self.opts.cost.of(leaves.len());
         for &l in leaves {
             refs[l as usize] -= 1;
             if refs[l as usize] == 0 && self.aig.is_and(l) {
@@ -873,8 +928,8 @@ struct Mapping {
     stats: Stats,
 }
 
-fn compute(net: &Network, k: LutSize) -> Mapping {
-    let mut m = Mapper::new(net, k);
+fn compute(net: &Network, k: LutSize, opts: MapOptions) -> Mapping {
+    let mut m = Mapper::new(net, k, opts);
     let mask = k.mask();
     m.pass(None);
     let mut cover = m.cover();
@@ -1016,7 +1071,7 @@ fn leaf_json(l: Leaf) -> Value {
 /// Map the gates of module `top` in `json` to `$lut` cells, in place.
 pub fn map(json: &mut Value) -> Result<Stats> {
     let net = Network::read(&json["modules"]["top"])?;
-    let mapping = compute(&net, LutSize::FOUR);
+    let mapping = compute(&net, LutSize::FOUR, MapOptions::DEFAULT);
 
     let cells = json["modules"]["top"]["cells"]
         .as_object_mut()
@@ -1102,6 +1157,11 @@ pub fn map_module(module: &mut Module) -> Result<Stats> {
 
 /// [`map_module`] to LUTs of `k` inputs.
 pub fn map_module_k(module: &mut Module, k: LutSize) -> Result<Stats> {
+    map_module_with(module, k, MapOptions::DEFAULT)
+}
+
+/// [`map_module_k`] with other [`MapOptions`] than the default.
+pub fn map_module_with(module: &mut Module, k: LutSize, opts: MapOptions) -> Result<Stats> {
     let mut driver: HashMap<u64, (Op, Vec<Sig>)> = HashMap::new();
     let mut read = Vec::new();
     let mut gate_cells = Vec::new();
@@ -1167,7 +1227,7 @@ pub fn map_module_k(module: &mut Module, k: LutSize) -> Result<Stats> {
     }
     let net_at = |i: u64| nets[i as usize].expect("the mapper only names the module's nets");
     let net = Network::build(GateList::new(driver, read, gate_cells, max_bit))?;
-    let mapping = compute(&net, k);
+    let mapping = compute(&net, k, opts);
 
     let mut keep = is_gate.into_iter();
     module
@@ -1226,10 +1286,13 @@ mod tests {
         let m = k.mask();
         let tt = stretch(k, VAR[0] & VAR[1] & m, &[1, 3], &[1, 2, 3]);
         assert_eq!(tt, VAR[0] & VAR[2] & m);
-        let c = reduce(k, Cut {
-            leaves: vec![1, 2, 3],
-            tt,
-        });
+        let c = reduce(
+            k,
+            Cut {
+                leaves: vec![1, 2, 3],
+                tt,
+            },
+        );
         assert_eq!(c.leaves, vec![1, 3]);
         assert_eq!(c.tt, VAR[0] & VAR[1] & m);
     }

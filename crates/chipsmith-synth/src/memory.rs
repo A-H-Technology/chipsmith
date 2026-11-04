@@ -580,21 +580,25 @@ fn through_muxes(
 /// read is enabled, the write is exactly the bypass's.
 fn and_of(m: &Module, e: SigBit, we: SigBit, enables: &[Ctrl]) -> bool {
     let SigBit::Net(n) = e else { return false };
-    let is_en = |x: SigBit| enables.iter().any(|c| c.polarity == Polarity::Pos && c.sig == x);
+    let is_en = |x: SigBit| {
+        enables
+            .iter()
+            .any(|c| c.polarity == Polarity::Pos && c.sig == x)
+    };
     let pair = |a: SigBit, b: SigBit| (a == we && is_en(b)) || (b == we && is_en(a));
     m.cells.iter().any(|c| match &c.kind {
         CellKind::Gate(g) if g.op() == GateOp::And && g.y == e => {
             let i = g.inputs();
             i.len() == 2 && pair(i[0], i[1])
         }
-        CellKind::Binary(b)
-            if matches!(b.op, BinaryOp::And | BinaryOp::LogicAnd) && b.y == [e] =>
-        {
+        CellKind::Binary(b) if matches!(b.op, BinaryOp::And | BinaryOp::LogicAnd) && b.y == [e] => {
             b.a.sig.len() == 1 && b.b.sig.len() == 1 && pair(b.a.sig[0], b.b.sig[0])
         }
-        CellKind::Mux(mx) => mx.y.iter().position(|&y| y == SigBit::Net(n)).is_some_and(|j| {
-            mx.a[j] == SigBit::ZERO && pair(mx.s, mx.b[j])
-        }),
+        CellKind::Mux(mx) => {
+            mx.y.iter()
+                .position(|&y| y == SigBit::Net(n))
+                .is_some_and(|j| mx.a[j] == SigBit::ZERO && pair(mx.s, mx.b[j]))
+        }
         _ => false,
     })
 }
@@ -618,7 +622,9 @@ fn output_register(
         for (j, w) in mem.wr.iter().enumerate() {
             let hit = bypass.is_some_and(|(we, d)| {
                 w.addr == rd.addr
-                    && w.en.get(k).is_some_and(|&e| e == we || and_of(m, e, we, &this.en))
+                    && w.en
+                        .get(k)
+                        .is_some_and(|&e| e == we || and_of(m, e, we, &this.en))
                     && w.data.get(k) == Some(&d)
             });
             if bypassed[j].is_some_and(|x| x != hit) {

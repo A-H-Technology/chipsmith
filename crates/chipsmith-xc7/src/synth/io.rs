@@ -113,11 +113,16 @@ pub fn pads(m: &mut Module) -> Result<()> {
     Ok(())
 }
 
-/// The clock pins of the cells synthesis makes.
-fn clock_port(ty: &str, port: &str) -> bool {
+/// The clock pins of the cells synthesis makes. A block RAM's or a DSP's
+/// clock left off here stays on the pin's net, which the router then
+/// takes through the general interconnect beside the BUFG.
+pub(super) fn clock_port(ty: &str, port: &str) -> bool {
     matches!(
         (ty, port),
-        ("FDRE" | "FDSE" | "FDCE" | "FDPE", "C") | ("RAM32M", "WCLK")
+        ("FDRE" | "FDSE" | "FDCE" | "FDPE", "C")
+            | ("RAM32M", "WCLK")
+            | ("RAMB18E1" | "RAMB36E1", "CLKARDCLK" | "CLKBWRCLK")
+            | ("DSP48E1", "CLK")
     )
 }
 

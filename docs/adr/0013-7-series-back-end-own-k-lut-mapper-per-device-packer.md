@@ -24,5 +24,5 @@ The bitstream is checked by reading it back: `bit2fasm` and `chipsmith_xc7::deco
 - No external program in the build: no nextpnr (nor its 2.5-minute chip database), no prjxray tool. The devshell keeps them as oracles.
 - What chipsmith packs is what its synthesis makes. Not yet supported: block RAM, DSPs, SRLs, MUXF7/F8, LUT6_2 (5LUTs are used only by RAM32Ms), latches, I/O-tile registers, and a design that drives the PS7.
 - The placer is still the 7-series annealer, not chipsmith-place's electrostatic placer (ADR-0012). Above a few thousand LUTs it is the slowest stage.
-- Timing is prjxray-db's delays without wire RC, so the reported Fmax is an estimate above Vivado's. Vivado can't take chipsmith's routing, so the comparison is between the tools.
+- Timing is prjxray-db's delays without wire RC, so the reported Fmax is an estimate above Vivado's. Vivado can't take chipsmith's routing, so the comparison is between the tools. (Superseded by ADR-0016: Vivado takes chipsmith's routing, and the delays are fitted to its timer.)
 - bit2fasm reads no bits of single-IOB (`_SING`) I/O tiles, so the check takes their pin paths as given.

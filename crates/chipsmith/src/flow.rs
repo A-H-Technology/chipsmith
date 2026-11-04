@@ -727,12 +727,13 @@ fn xc7_synth(verilog: &[PathBuf], top: &str, netlist: &Path) -> Result<Vec<PathB
     let out = xsynth::synthesize(design)?;
     let s = out.stats;
     say!(
-        "{} gates ({} AIG ANDs) to {} LUTs, depth {}; {} registers, {} CARRY4s, {} RAM32Ms, {} block RAM (RAMB18 halves), {} DSP48E1s, {} BUFGs in {:.1} s",
+        "{} gates ({} AIG ANDs) to {} LUTs, depth {}; {} registers ({} copies), {} CARRY4s, {} RAM32Ms, {} block RAM (RAMB18 halves), {} DSP48E1s, {} BUFGs in {:.1} s",
         s.lutmap.gates,
         s.lutmap.and_nodes,
         s.lutmap.luts,
         s.lutmap.depth,
         s.registers,
+        s.replicas,
         s.carry4s,
         s.ram32ms,
         s.bram_halves,
@@ -776,8 +777,12 @@ fn xc7_pnr(
         r.dsps
     );
     say!(
-        "placed {} cells, wirelength {:.0} (from {:.0}), estimated critical path {:.2} ns, {} moves on {} threads in {:.1} s",
+        "placed {} cells ({} BLEs, {} carry chains, {} RAMs; {} start), wirelength {:.0} (from {:.0}), estimated critical path {:.2} ns, {} moves on {} threads in {:.1} s",
         r.place.cells,
+        r.place.bles,
+        r.place.carry_chains,
+        r.place.rams,
+        if r.place.electro { "electrostatic" } else { "greedy" },
         r.place.wirelength,
         r.place.initial_wirelength,
         r.place.critical / 1000.0,

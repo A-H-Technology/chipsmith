@@ -4,9 +4,12 @@
 //! little above what branch `qor3` builds (docs/vs-quartus.md, round 3) and
 //! below what came before, so losing the sums ordered by arrival (sha256,
 //! femtorv32), the shared sums or the synchronous load (picorv32's and
-//! sha256's LEs) fails here, as does losing `qor2`'s routing. The build is deterministic, so a bound only
-//! moves when the flow does. Needs `CHIPSMITH_CYCLONE2_DB`: run in the
-//! devshell. sha256 takes a few minutes.
+//! sha256's LEs) fails here, as does losing `qor2`'s routing. On the Zybo
+//! the bounds are on the estimate (fitted to Vivado, ADR-0016) and sit
+//! between branch `xc7-qor`'s and what came before. The build is
+//! deterministic, so a bound only moves when the flow does. Needs
+//! `CHIPSMITH_CYCLONE2_DB` and `CHIPSMITH_PRJXRAY_DB`: run in the devshell.
+//! sha256 takes a few minutes on either board.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -36,7 +39,13 @@ fn build(example: &str) -> String {
     if dir.exists() {
         std::fs::remove_dir_all(&dir).unwrap();
     }
-    copy_dir(&Path::new(ROOT).join("examples").join(example), &dir);
+    let examples = Path::new(ROOT).join("examples");
+    copy_dir(&examples.join(example), &dir);
+    // The examples its manifest takes sources from ("../sha256/src/*.v").
+    let manifest = std::fs::read_to_string(dir.join("chipsmith.toml")).unwrap();
+    for sibling in manifest.split("\"../").skip(1).filter_map(|s| s.split('/').next()) {
+        copy_dir(&examples.join(sibling), &dir.parent().unwrap().join(sibling));
+    }
     let out = Command::new(env!("CARGO_BIN_EXE_chipsmith"))
         .arg("-C")
         .arg(&dir)
@@ -89,6 +98,24 @@ fn sha256() {
     at_most("sha256", "LEs", les("sha256", &report), SHA256_LES);
 }
 
+/// A Zybo build's critical path for `clock`, ns, from "clock <name>: <ns>
+/// ns, Fmax ...".
+fn clock_ns(example: &str, report: &str, clock: &str) -> f64 {
+    number(example, report, &format!("clock {clock}:"), &format!("clock {clock}: "))
+}
+
+#[test]
+fn zybo_sha256() {
+    let report = build("zybo-sha256");
+    at_most("zybo-sha256", "critical path, ns", clock_ns("zybo-sha256", &report, "CLOCK_50"), ZYBO_SHA256);
+}
+
+#[test]
+fn zybo_jtag_counter() {
+    let report = build("zybo-jtag-counter");
+    at_most("zybo-jtag-counter", "critical path, ns", clock_ns("zybo-jtag-counter", &report, "clk"), ZYBO_JTAG_COUNTER);
+}
+
 #[test]
 fn picorv32_les() {
     let report = build("picorv32");
@@ -104,3 +131,9 @@ const SHA256: (f64, f64) = (15.0, 19.27);
 /// load, 3,538 without its constant legs).
 const PICORV32_LES: (f64, f64) = (890.0, 971.0);
 const SHA256_LES: (f64, f64) = (3440.0, 3672.0);
+/// (bound, before), ns, the default seed: `open` df16e49's (sums as
+/// written, every register one, LUT pins by criticality alone: sha256
+/// 18.62, jtag-counter 3.03) above, `xc7-qor`'s (13.76, 2.79) below; sums
+/// by arrival without the register copies read 14.41 on sha256.
+const ZYBO_SHA256: (f64, f64) = (14.0, 18.62);
+const ZYBO_JTAG_COUNTER: (f64, f64) = (2.9, 3.03);
