@@ -121,7 +121,8 @@ pub fn run(
             }
         }
     }
-    let ph = phys::build(db, &packed, &placement, family)?;
+    let node_delays = crate::delay::node_delays(db, family)?;
+    let ph = phys::build(db, &packed, &placement, family, &node_delays)?;
     let reqs: Vec<NetReq> = ph
         .nets
         .iter()
@@ -158,7 +159,7 @@ pub fn run(
     };
     let started = Instant::now();
     let mut router = Router::new(db, &design);
-    router.set_node_delays(&crate::delay::node_delays(db, family)?);
+    router.set_node_delays(&node_delays);
     for (i, r) in ph.nets.iter().enumerate() {
         // A BUFG's net stays on the clock tree: its bounding box rarely
         // holds the clock rows it passes through, and inside the box the

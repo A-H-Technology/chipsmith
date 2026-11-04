@@ -6,8 +6,9 @@
 //! The packer and placer have already fixed the shapes (`crate::pack`), so
 //! the site routing follows from them:
 //!
-//! - a logic LUT in the k-th 6LUT reads its inputs on pins `<L>1..<L>k`
-//!   (input i on pin i+1) and drives pin `<L>` from O6;
+//! - a logic LUT in the k-th 6LUT reads its inputs on the pins `<L>1..<L>6`
+//!   their drivers reach soonest, the most critical first ([`route_pins`]),
+//!   its table permuted to match, and drives pin `<L>` from O6;
 //! - a logic LUT in the k-th 5LUT (paired with the 6LUT's, `crate::pack`)
 //!   reads the same pins, drives `<L>MUX` from O5, and `<L>6` is tied high;
 //!   the 5FF beside it takes its D from O5 (`<L>5FFMUX.IN_A`) or `<L>X`
@@ -39,6 +40,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use anyhow::{bail, ensure, Context, Result};
 use chipsmith_route::chipdb::{ChipDb, NodeId};
+use chipsmith_route::timing::Ps;
 
 use crate::pack::{Conf, Packed};
 use crate::place::{Bel, CellId, Kind, NetId, Placement};
@@ -206,26 +208,39 @@ struct Builder<'a> {
     sites: &'a [Option<(String, Bel)>],
     /// The (site, letter)s whose 5LUT holds a cell.
     five_used: HashSet<(String, usize)>,
-    /// Each (site, letter)'s logic LUT inputs (A1 = 0, ...) by rank, the
-    /// most critical first: input `i` takes the `rank[i]`th fastest pin.
-    rank: HashMap<(String, usize), Vec<usize>>,
+    /// Each (site, letter)'s logic LUT inputs' pins (A1 = 0, ...; pins 1 to
+    /// 6), chosen by route delay ([`route_pins`]).
+    pins: HashMap<(String, usize), Vec<usize>>,
 }
 
 impl Builder<'_> {
     /// The pin of LUT input `i` (from 0) of the logic LUT(s) at `site`,
     /// letter `k`.
     fn lut_pin(&self, site: &str, k: usize, i: usize) -> usize {
-        let five = self.five_used.contains(&(site.to_string(), k));
-        let r = self.rank.get(&(site.to_string(), k)).and_then(|r| r.get(i)).copied().unwrap_or(i);
-        lut_pin(five, r)
+        let key = (site.to_string(), k);
+        match self.pins.get(&key).and_then(|p| p.get(i)) {
+            Some(&p) => p,
+            None => lut_pin(self.five_used.contains(&key), i),
+        }
     }
 }
 
-/// Each slice letter's LUT inputs by rank: a pair shares its pins, so an
-/// input ranks by the more critical of its two LUTs' connections to it;
-/// ties keep the input order.
-fn ranks(d: &crate::place::Design, placement: &Placement) -> HashMap<(String, usize), Vec<usize>> {
-    let mut crit: HashMap<(String, usize), Vec<f32>> = HashMap::new();
+/// Searches stop after settling this many nodes: a source further away
+/// reaches every pin about as fast, and takes them by [`lut_pin`]'s order.
+const PIN_SEARCH_NODES: usize = 3000;
+
+/// Each (site, letter)'s logic LUT inputs on the pins their drivers reach
+/// soonest, the most critical input first (a pair's input by the more
+/// critical of its two LUTs' connections). The fastest site pin isn't
+/// always the nearest: a register's `DQ` reaches its own slice's `D5` by
+/// one pip, and `D6` (zybo-jtag-counter's counter) only by a long line out
+/// and back. Delays are the routing graph's (each node's, as the router
+/// times them), with no other net in the way; a pin no search reached
+/// counts as far, and ties go to [`lut_pin`]'s order.
+fn route_pins(b: &Builder, placement: &Placement, node_delay: &[Ps]) -> Result<HashMap<(String, usize), Vec<usize>>> {
+    let d = &b.p.design;
+    // Per (site, letter): per input, its net and criticality.
+    let mut inputs: HashMap<(String, usize), Vec<Option<(NetId, f32)>>> = HashMap::new();
     for (c, cell) in d.cells.iter().enumerate() {
         if cell.kind != (Kind::Lut { dram: false }) {
             continue;
@@ -233,29 +248,112 @@ fn ranks(d: &crate::place::Design, placement: &Placement) -> HashMap<(String, us
         let Some((site, Bel::Lut6(k) | Bel::Lut5(k))) = &placement.sites[c] else {
             continue;
         };
-        let v = crit.entry((site.clone(), *k)).or_default();
-        for (port, _) in &cell.pins {
+        let v = inputs.entry((site.clone(), *k)).or_default();
+        for (port, net) in &cell.pins {
             let Some(i) = port.strip_prefix('A').and_then(|i| i.parse::<usize>().ok()) else {
                 continue;
             };
             if v.len() < i {
-                v.resize(i, 0.0);
+                v.resize(i, None);
             }
             let x = placement.lut_criticality.get(&(c as CellId, port.clone())).copied().unwrap_or(0.0);
-            v[i - 1] = v[i - 1].max(x);
+            let crit = v[i - 1].map_or(x, |(_, y)| x.max(y));
+            v[i - 1] = Some((*net, crit));
         }
     }
-    crit.into_iter()
-        .map(|(key, v)| {
-            let mut order: Vec<usize> = (0..v.len()).collect();
-            order.sort_by(|&a, &b| v[b].total_cmp(&v[a]).then(a.cmp(&b)));
-            let mut rank = vec![0; v.len()];
-            for (r, &i) in order.iter().enumerate() {
-                rank[i] = r;
+    let mut sources: HashMap<NetId, Option<NodeId>> = HashMap::new();
+    let mut source = |net: NetId| -> Result<Option<NodeId>> {
+        if let Some(&s) = sources.get(&net) {
+            return Ok(s);
+        }
+        let s = match &d.nets[net as usize].driver {
+            Some((drv, port)) if net != b.p.gnd && net != b.p.vcc => {
+                let (site, pin, _) = b.output(*drv, port)?;
+                pin_node(b.db, &site, &pin).ok()
             }
-            (key, rank)
-        })
-        .collect()
+            _ => None,
+        };
+        sources.insert(net, s);
+        Ok(s)
+    };
+    let mut keys: Vec<(String, usize)> = inputs.keys().cloned().collect();
+    keys.sort();
+    let mut out = HashMap::new();
+    for key in keys {
+        let v = &inputs[&key];
+        let five = b.five_used.contains(&key);
+        let candidates: Vec<usize> = (0..if five { 5 } else { 6 }).map(|r| lut_pin(five, r)).collect();
+        let nodes: Vec<NodeId> = candidates
+            .iter()
+            .map(|&p| pin_node(b.db, &key.0, &format!("{}{p}", LETTERS[key.1])))
+            .collect::<Result<_>>()?;
+        let mut order: Vec<usize> = (0..v.len()).filter(|&i| v[i].is_some()).collect();
+        order.sort_by(|&x, &y| {
+            let (cx, cy) = (v[x].map_or(0.0, |t| t.1), v[y].map_or(0.0, |t| t.1));
+            cy.total_cmp(&cx).then(x.cmp(&y))
+        });
+        let mut free = vec![true; candidates.len()];
+        let mut pins = vec![0; v.len()];
+        for i in order {
+            let (net, _) = v[i].expect("filtered");
+            let delays = match source(net)? {
+                Some(s) => search(b.db, node_delay, s, &nodes),
+                None => vec![Ps::INFINITY; nodes.len()],
+            };
+            let best = (0..candidates.len())
+                .filter(|&j| free[j])
+                .min_by(|&x, &y| delays[x].total_cmp(&delays[y]).then(x.cmp(&y)))
+                .context("a LUT with more inputs than pins")?;
+            free[best] = false;
+            pins[i] = candidates[best];
+        }
+        // An input nothing drives (none in a mapped LUT) takes what's left.
+        for (i, p) in pins.iter_mut().enumerate() {
+            if v[i].is_none() {
+                let j = free.iter().position(|&f| f).context("a LUT with more inputs than pins")?;
+                free[j] = false;
+                *p = candidates[j];
+            }
+        }
+        out.insert(key, pins);
+    }
+    Ok(out)
+}
+
+/// The delay from `from` to each of `to` by Dijkstra over the routing
+/// graph, infinite for one not settled within [`PIN_SEARCH_NODES`].
+fn search(db: &ChipDb, node_delay: &[Ps], from: NodeId, to: &[NodeId]) -> Vec<Ps> {
+    use std::cmp::Reverse;
+    let mut out = vec![Ps::INFINITY; to.len()];
+    let mut left = to.len();
+    let mut best: HashMap<NodeId, Ps> = HashMap::from([(from, 0.0)]);
+    let mut heap = std::collections::BinaryHeap::from([(Reverse(0u32), from)]);
+    let mut settled = 0;
+    while let Some((Reverse(at), n)) = heap.pop() {
+        let at = f32::from_bits(at);
+        if best.get(&n).is_some_and(|&b| b < at) {
+            continue;
+        }
+        for (j, &t) in to.iter().enumerate() {
+            if t == n && out[j].is_infinite() {
+                out[j] = at;
+                left -= 1;
+            }
+        }
+        settled += 1;
+        if left == 0 || settled >= PIN_SEARCH_NODES {
+            break;
+        }
+        for e in db.downhill(n) {
+            let next = at + node_delay.get(e.dst as usize).copied().unwrap_or(0.0);
+            if best.get(&e.dst).is_none_or(|&b| next < b) {
+                best.insert(e.dst, next);
+                // Non-negative floats order as their bits.
+                heap.push((Reverse(next.to_bits()), e.dst));
+            }
+        }
+    }
+    out
 }
 
 impl Builder<'_> {
@@ -443,7 +541,13 @@ fn nearest_source(db: &ChipDb, names: &[&str]) -> Vec<NodeId> {
 
 /// The physical design: `family` is prjxray-db's directory for the part's
 /// family (`.../zynq7`), for the PS7's pins.
-pub(crate) fn build(db: &ChipDb, p: &Packed, placement: &Placement, family: &std::path::Path) -> Result<Physical> {
+pub(crate) fn build(
+    db: &ChipDb,
+    p: &Packed,
+    placement: &Placement,
+    family: &std::path::Path,
+    node_delay: &[Ps],
+) -> Result<Physical> {
     let d = &p.design;
     let b = Builder {
         db,
@@ -458,8 +562,10 @@ pub(crate) fn build(db: &ChipDb, p: &Packed, placement: &Placement, family: &std
                 _ => None,
             })
             .collect(),
-        rank: ranks(d, placement),
+        pins: HashMap::new(),
     };
+    let pins = route_pins(&b, placement, node_delay)?;
+    let b = Builder { pins, ..b };
     let mut slices: BTreeMap<String, SliceConf> = BTreeMap::new();
     let slice = |slices: &mut BTreeMap<String, SliceConf>, site: &str| -> Result<()> {
         if !slices.contains_key(site) {
