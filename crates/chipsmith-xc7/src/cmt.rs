@@ -349,6 +349,33 @@ impl Config {
         self.outputs[k].map(|o| self.vco_ratio() / o.divide.value())
     }
 
+    /// One line for the build's log: the counters, and what they make of a
+    /// `clkin_period_ps` input.
+    pub fn summary(&self, clkin_period_ps: u32) -> String {
+        let fin = 1e6 / f64::from(clkin_period_ps);
+        let mut out = format!(
+            "CLKFBOUT_MULT {}, DIVCLK_DIVIDE {}, VCO {:.3} MHz",
+            self.mult.value(),
+            self.divclk,
+            fin * self.vco_ratio()
+        );
+        for (k, o) in self.outputs.iter().enumerate() {
+            let Some(o) = o else { continue };
+            out += &format!(
+                "; CLKOUT{k} /{} {:.3} MHz",
+                o.divide.value(),
+                fin * self.output_ratio(k).unwrap_or(0.0)
+            );
+            if o.phase != 0 {
+                out += &format!(" {:.3} deg", o.phase_degrees());
+            }
+            if o.divide.is_whole() && o.high_halves != o.divide.int() {
+                out += &format!(" {:.1}% high", o.duty() * 100.0);
+            }
+        }
+        out
+    }
+
     /// The unisim's attributes, as Vivado names them (UG953).
     /// `clkin_period_ps`: CLKIN1_PERIOD, where known (a decoded block's
     /// isn't in its bits).

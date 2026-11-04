@@ -741,6 +741,19 @@ fn xc7_synth(verilog: &[PathBuf], top: &str, netlist: &Path) -> Result<Vec<PathB
         s.bufgs,
         started.elapsed().as_secs_f64()
     );
+    for m in &out.design.modules {
+        for c in &m.cells {
+            let chipsmith_netlist::CellKind::Other(g) = &c.kind else { continue };
+            let Some(prim) = chipsmith_xc7::cmt::Prim::from_cell(&g.ty) else { continue };
+            let used: Vec<bool> = (0..prim.outputs()).map(|k| g.port(&format!("CLKOUT{k}")).is_some()).collect();
+            let config = chipsmith_xc7::cmt::Config::from_params(prim, &g.params, &used)?;
+            let period = match g.params.get("CLKIN1_PERIOD") {
+                Some(chipsmith_netlist::ParamValue::Str(p)) => (p.parse::<f64>().unwrap_or(0.0) * 1000.0).round() as u32,
+                _ => 0,
+            };
+            say!("{} {}: {}", prim.cell(), c.name, config.summary(period.max(1)));
+        }
+    }
     let mut json = Vec::new();
     chipsmith_netlist::write_json(&out.design, &mut json)?;
     let mut json: serde_json::Value = serde_json::from_slice(&json)?;
