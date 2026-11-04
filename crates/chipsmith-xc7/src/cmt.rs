@@ -577,11 +577,11 @@ impl Config {
     /// (`ZINV_RST`). Bits that aren't exactly what [`Config::features`]
     /// writes for the counters found, the lock and filter tables included,
     /// are an error: a block chipsmith can't vouch for.
-    pub fn from_features(prim: Prim, bits: &BTreeSet<String>) -> Result<(Config, bool)> {
-        let compensation = [Compensation::Zhold, Compensation::Internal]
-            .into_iter()
-            .find(|&c| bits.contains(compensation_feature(prim, c)))
-            .with_context(|| format!("{}: no compensation bit", prim.cell()))?;
+    ///
+    /// `routed`: the compensation the feedback's routing makes. A PLL's
+    /// bits say it too, and must agree; an MMCM's are the same for both.
+    pub fn from_features(prim: Prim, bits: &BTreeSet<String>, routed: Compensation) -> Result<(Config, bool)> {
+        let compensation = routed;
         let field = |name: &str, width: u32| -> u16 {
             (0..width).filter(|i| bits.contains(&format!("{name}[{i}]"))).fold(0, |v, i| v | 1 << i)
         };
@@ -648,14 +648,13 @@ impl Config {
     }
 }
 
-/// The compensation's bit. MMCM ZHOLD is prjxray's name, not yet seen in
-/// a Vivado bitstream (bench/cmt/README.md).
+/// The compensation's bit. Vivado sets an MMCM's COMP.Z_ZHOLD for ZHOLD
+/// as for INTERNAL (bench/cmt's f0-f2), never prjxray's COMP.ZHOLD.
 fn compensation_feature(prim: Prim, c: Compensation) -> &'static str {
     match (prim, c) {
         (Prim::Pll, Compensation::Zhold) => "COMPENSATION.ZHOLD_NO_CLKIN_BUF",
         (Prim::Pll, Compensation::Internal) => "COMPENSATION.Z_ZHOLD_OR_CLKIN_BUF",
-        (Prim::Mmcm, Compensation::Zhold) => "COMP.ZHOLD",
-        (Prim::Mmcm, Compensation::Internal) => "COMP.Z_ZHOLD",
+        (Prim::Mmcm, _) => "COMP.Z_ZHOLD",
     }
 }
 

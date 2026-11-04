@@ -89,16 +89,21 @@ fn features_are_vivados() {
 fn vivados_bits_decode_to_the_attributes() {
     let mut refused = Vec::new();
     for b in blocks().iter().filter(|b| optimized(b)) {
-        // A count over 64 that Vivado cut to 6 bits: refused, as below.
-        let Ok(want) = Config::from_params(b.prim, &b.params, &b.used) else {
-            refused.push(b.name.clone());
-            continue;
+        // A count over 64 that Vivado cut to 6 bits: refused, and nothing
+        // else is.
+        let want = match Config::from_params(b.prim, &b.params, &b.used) {
+            Ok(c) => c,
+            Err(e) => {
+                assert!(format!("{e:#}").contains("at most 64"), "{}: {e:#}", b.name);
+                refused.push(b.name.clone());
+                continue;
+            }
         };
-        let (got, reset) = Config::from_features(b.prim, &b.bits)
+        let (got, reset) = Config::from_features(b.prim, &b.bits, compensation(b))
             .unwrap_or_else(|e| panic!("{}: {e:#}", b.name));
         assert!(!reset, "{}", b.name);
         assert_eq!(got, want, "{}", b.name);
         assert_eq!(got.compensation(), compensation(b), "{}", b.name);
     }
-    assert_eq!(refused, ["d5/blk1"], "blocks chipsmith refuses");
+    assert!(refused.contains(&"d5/blk1".to_string()), "{refused:?}");
 }

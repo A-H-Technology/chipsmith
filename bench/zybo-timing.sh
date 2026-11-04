@@ -58,9 +58,9 @@ for name in "$@"; do
         || { tail -5 "$s/build.log"; exit 1; }
     # A clock short of its [clocks] frequency fails the build after the
     # FASM is written: Vivado can still time it.
-    # The slowest clock from a pin (a BSCAN's TCK isn't exported), then
-    # every clock's.
-    est=$(grep -E '^ *clock [^ .]+: ' "$s/build.log" | grep -o 'Fmax [0-9.]* MHz' | sort -k2 -n | head -1)
+    # The slowest clock from a pin or a PLL (a BSCAN's TCK isn't
+    # exported), then every clock's.
+    est=$(grep -E '^ *clock [^ ]+: ' "$s/build.log" | grep -v 'TCK: ' | grep -o 'Fmax [0-9.]* MHz' | sort -k2 -n | head -1)
     est="$est ($(grep -E '^ *clock ' "$s/build.log" | sed -E 's/^ *clock ([^:]+):.*Fmax ([0-9.]+) MHz.*/\1 \2/' | paste -sd, -))"
     if [[ -n "${ZYBO_NO_VIVADO:-}" ]]; then
         # Screening by the estimate alone.

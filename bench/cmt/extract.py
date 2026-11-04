@@ -61,7 +61,8 @@ def main():
         for site in t.get("sites", {}):
             site_tile[site] = tile
     blocks = []
-    for d in sorted(harvest.glob("[df]*"), key=lambda p: (p.name[0] == "f", int(p.name[1:]))):
+    designs = [d for d in harvest.iterdir() if d.is_dir() and re.fullmatch(r"[df]\d+", d.name)]
+    for d in sorted(designs, key=lambda p: (p.name[0] == "f", int(p.name[1:]))):
         fasm = d / "top.fasm"
         if not fasm.exists():
             continue

@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{bail, Context, Result};
 use chipsmith_netlist::{Design, Dir, Module, SigBit, State, Wire};
 use chipsmith_route::chipdb::{ChipDb, NodeId};
 
@@ -1281,13 +1281,8 @@ fn cmt_cell(
     } else {
         bail!("{site}: CLKFBIN is {fbin:?}, neither CLKFBOUT nor CLKFBOUT through a BUFG");
     };
-    let (config, reset) = crate::cmt::Config::from_features(prim, bits).with_context(|| site.to_string())?;
-    ensure!(
-        config.compensation() == routed,
-        "{site}: compensation {} in the bits, feedback routed as {}",
-        config.compensation().name(),
-        routed.name()
-    );
+    // The bits' compensation must be the routing's (`from_features`).
+    let (config, reset) = crate::cmt::Config::from_features(prim, bits, routed).with_context(|| site.to_string())?;
     let r = d.resolve_pin(site, "RST")?;
     let rst = if reset {
         r

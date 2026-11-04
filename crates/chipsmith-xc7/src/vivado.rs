@@ -90,7 +90,7 @@ fn location(db: &ChipDb, slice_sites: &BTreeMap<String, String>, name: &str, ty:
     if let Some(site) = name.strip_prefix("bufg_") {
         return Some((site.to_string(), None));
     }
-    if let Some(site) = name.strip_suffix(".dsp") {
+    if let Some(site) = name.strip_suffix(".dsp").or_else(|| name.strip_suffix(".cmt")) {
         return Some((site.to_string(), None));
     }
     if let Some((tile, h)) = name.split_once(".ramb18_y") {
@@ -116,6 +116,10 @@ fn location(db: &ChipDb, slice_sites: &BTreeMap<String, String>, name: &str, ty:
         _ => return None,
     };
     Some((site, Some(bel)))
+}
+
+fn is_cmt(ty: &str) -> bool {
+    crate::cmt::Prim::from_cell(ty).is_some()
 }
 
 /// A Vivado-safe cell name: the decoder's, dots made underscores.
@@ -275,6 +279,8 @@ pub fn export(db: &ChipDb, routed: &Routed, pins: &BTreeMap<String, String>, per
         }
     }
     for c in &cells {
+        // A decoded block's input period isn't in its bits: the clock pins'.
+        let period = is_cmt(&c.g.ty).then(|| format!(".CLKIN1_PERIOD({period_ns:.3})"));
         let params: Vec<String> = c
             .g
             .params
@@ -284,8 +290,11 @@ pub fn export(db: &ChipDb, routed: &Routed, pins: &BTreeMap<String, String>, per
                     let bits: String = b.0.iter().rev().map(|s| if *s == State::One { '1' } else { '0' }).collect();
                     format!(".{k}({}'b{bits})", b.0.len())
                 }
+                // A PLL's or MMCM's numbers are reals to Vivado.
+                ParamValue::Str(s) if is_cmt(&c.g.ty) && s.parse::<f64>().is_ok() => format!(".{k}({s})"),
                 ParamValue::Str(s) => format!(".{k}(\"{s}\")"),
             })
+            .chain(period)
             .collect();
         let conns: Vec<String> = c
             .g
@@ -343,11 +352,24 @@ pub fn export(db: &ChipDb, routed: &Routed, pins: &BTreeMap<String, String>, per
         })
         .collect();
     let port_of = |c: &C, name: &str| c.g.ports.iter().find(|p| p.name == name).map(|p| p.sig[0]);
+    // A PLL's or MMCM's CLKIN1 from a port: that port is a clock too, and
+    // Vivado derives the outputs' clocks from it.
+    let mut clocked = HashSet::new();
+    for c in cells.iter().filter(|c| is_cmt(&c.g.ty)) {
+        let i = port_of(c, "CLKIN1").context("CLKIN1")?;
+        if let Some(port) = driver_port.get(&i) {
+            if clocked.insert(port.clone()) {
+                writeln!(xdc, "create_clock -period {period_ns:.3} -name {port} [get_ports {{{port}}}]")?;
+            }
+        }
+    }
     let mut generated = Vec::new();
     for c in cells.iter().filter(|c| c.g.ty == "BUFG") {
         let i = port_of(c, "I").context("a BUFG without I")?;
         if let Some(port) = driver_port.get(&i) {
-            writeln!(xdc, "create_clock -period {period_ns:.3} -name {port} [get_ports {{{port}}}]")?;
+            if clocked.insert(port.clone()) {
+                writeln!(xdc, "create_clock -period {period_ns:.3} -name {port} [get_ports {{{port}}}]")?;
+            }
             continue;
         }
         // A register toggling (D its own Q through a LUT1 inverter) makes a
