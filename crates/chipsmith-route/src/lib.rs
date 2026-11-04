@@ -256,6 +256,9 @@ pub struct Router<'a> {
     /// Per tile type, per pip: its class among the pips of a tile only one
     /// net may use between them (`Router::exclusive`), or -1.
     exclusive: Vec<Option<Vec<i8>>>,
+    /// Per tile, how many (net, class) uses of `exclusive` pips it takes;
+    /// a tile not in it, any number.
+    exclusive_capacity: std::collections::HashMap<u32, u8>,
     /// Per net, the exclusive groups (`group_of`) it may no longer use.
     banned: std::collections::HashMap<u32, HashSet<u64>>,
     /// Seconds `repair_critical` spent on the repaired nets' searches, the
@@ -421,6 +424,7 @@ impl<'a> Router<'a> {
             repair: std::env::var("CHIPSMITH_ROUTE_REPAIR").map_or(true, |v| v != "0"),
             repair_s: Default::default(),
             exclusive: Vec::new(),
+            exclusive_capacity: Default::default(),
             banned: Default::default(),
             tile_distance: std::env::var("CHIPSMITH_TILE_DISTANCE")
                 .ok()
@@ -433,17 +437,19 @@ impl<'a> Router<'a> {
     }
 
     /// Pips constrained across nets, per tile: by tile type, per pip, its
-    /// class, or -1. Classes `2b` and `2b + 1` form bank `b`; in a tile, one
-    /// net at most uses a bank's pips, and a net uses pips of one class.
-    /// What the graph doesn't express of a Cyclone II LAB: each of its two
-    /// clock enables comes from one pair of control lines (class: the
-    /// line), so two enable nets can't both come in on lines 0/1, and an
-    /// enable net on two lines makes two clock domains of one. Checked once
-    /// the routing is legal: a net breaking it is barred from the classes
-    /// it broke it with and rerouted, and negotiation goes on (A*, one net
-    /// at a time). Nothing changes for a routing that keeps to it.
-    pub fn exclusive(&mut self, classes: Vec<Option<Vec<i8>>>) {
+    /// class, or -1. A use is a net on pips of a class. Classes `2b` and
+    /// `2b + 1` form bank `b`, which takes one use per tile; a tile in
+    /// `capacity` takes that many uses in all. What the graph doesn't
+    /// express of a Cyclone II LAB: each of its two clock enables comes
+    /// from one pair of control lines (class: the line), and each line an
+    /// enable net comes in on is a clock domain, of two (capacity: two less
+    /// the LAB's domains without an enable). Checked once the routing is
+    /// legal: a net breaking it is barred from the classes it broke it with
+    /// and rerouted, and negotiation goes on (A*, one net at a time).
+    /// Nothing changes for a routing that keeps to it.
+    pub fn exclusive(&mut self, classes: Vec<Option<Vec<i8>>>, capacity: std::collections::HashMap<u32, u8>) {
         self.exclusive = classes;
+        self.exclusive_capacity = capacity;
     }
 
     /// An edge's exclusive group: its tile and class (`group >> 1` is the
@@ -482,43 +488,46 @@ impl<'a> Router<'a> {
     }
 
     /// What breaks `exclusive` in `users`: (net, group it must leave), in
-    /// order. Of two nets on a bank the later leaves both its classes; a
-    /// net on two classes of a tile leaves all but one.
-    fn exclusive_breaks(users: &std::collections::BTreeMap<u64, Vec<usize>>) -> Vec<(usize, u64)> {
+    /// order. A bank's first use (by net, then class) stays and the others
+    /// leave it; then, past a tile's capacity, a net with more than one use
+    /// keeps its first.
+    fn exclusive_breaks(&self, users: &std::collections::BTreeMap<u64, Vec<usize>>) -> Vec<(usize, u64)> {
         let mut out = Vec::new();
-        // Per tile (`group >> 7`), every (group, net) in it.
-        let mut tile: Vec<(u64, usize)> = Vec::new();
-        let flush = |tile: &mut Vec<(u64, usize)>, out: &mut Vec<(usize, u64)>| {
-            for bank in tile.iter().map(|&(g, _)| g >> 1).collect::<std::collections::BTreeSet<_>>() {
-                let first = tile.iter().filter(|&&(g, _)| g >> 1 == bank).map(|&(_, n)| n).min();
-                for &(g, n) in tile.iter() {
-                    if g >> 1 == bank && Some(n) != first {
-                        out.push((n, bank << 1));
-                        out.push((n, bank << 1 | 1));
+        // Per tile (`group >> 7`), its uses as (net, group), in order.
+        let mut tile: Vec<(usize, u64)> = Vec::new();
+        let flush = |tile: &mut Vec<(usize, u64)>, out: &mut Vec<(usize, u64)>| {
+            let Some(&(_, g0)) = tile.first() else { return };
+            tile.sort_unstable();
+            let mut kept: Vec<(usize, u64)> = Vec::new();
+            for &(n, g) in tile.iter() {
+                if let Some(&(m, _)) = kept.iter().find(|&&(_, h)| h >> 1 == g >> 1) {
+                    // Another net's bank: all of it; its own other class:
+                    // that one.
+                    out.push((n, g));
+                    if m != n {
+                        out.push((n, g ^ 1));
                     }
+                } else {
+                    kept.push((n, g));
                 }
             }
-            let mut nets: Vec<usize> = tile.iter().map(|&(_, n)| n).collect();
-            nets.sort_unstable();
-            nets.dedup();
-            for n in nets {
-                let mut mine: Vec<u64> = tile.iter().filter(|&&(_, m)| m == n).map(|&(g, _)| g).collect();
-                mine.sort_unstable();
-                // It keeps its first class another net doesn't bar it from.
-                let keep = mine.iter().copied().find(|&g| !out.contains(&(n, g)));
-                for &g in &mine {
-                    if Some(g) != keep {
-                        out.push((n, g));
-                    }
+            let cap = self.exclusive_capacity.get(&((g0 >> 7) as u32)).map_or(usize::MAX, |&c| c as usize);
+            let mut over = kept.len().saturating_sub(cap);
+            let mut seen: Vec<usize> = Vec::new();
+            for &(n, g) in &kept {
+                if over > 0 && seen.contains(&n) {
+                    out.push((n, g));
+                    over -= 1;
                 }
+                seen.push(n);
             }
             tile.clear();
         };
         for (&g, nets) in users {
-            if tile.first().is_some_and(|&(h, _)| h >> 7 != g >> 7) {
+            if tile.first().is_some_and(|&(_, h)| h >> 7 != g >> 7) {
                 flush(&mut tile, &mut out);
             }
-            tile.extend(nets.iter().map(|&n| (g, n)));
+            tile.extend(nets.iter().map(|&n| (n, g)));
         }
         flush(&mut tile, &mut out);
         out.sort_unstable();
@@ -549,7 +558,7 @@ impl<'a> Router<'a> {
             }
         }
         now.retain(|_, u| !u.is_empty());
-        !Self::exclusive_breaks(&now).is_empty()
+        !self.exclusive_breaks(&now).is_empty()
     }
 
     /// Bar every net that breaks `exclusive` from the groups it breaks it
@@ -563,7 +572,7 @@ impl<'a> Router<'a> {
         trace: bool,
     ) -> Result<bool> {
         let mut redo: std::collections::BTreeSet<usize> = Default::default();
-        for (j, g) in Self::exclusive_breaks(&self.exclusive_users(trees)) {
+        for (j, g) in self.exclusive_breaks(&self.exclusive_users(trees)) {
             self.banned.entry(j as u32).or_default().insert(g);
             redo.insert(j);
         }
@@ -1829,21 +1838,30 @@ mod tests {
     }
 
     #[test]
-    fn exclusive_banks_hold_one_net_and_a_net_one_class() {
+    fn exclusive_banks_hold_one_use_and_tiles_their_capacity() {
+        let db = grid(2, 1);
+        let design = Design {
+            nets: Vec::new(),
+            fixed_inputs: HashSet::new(),
+            timing: timing::Graph::default(),
+        };
+        let mut router = Router::new(&db, &design);
+        // Tile 1 takes one use; tile 0 any number.
+        router.exclusive(Vec::new(), [(1, 1)].into_iter().collect());
         let users = |v: &[(u64, &[usize])]| -> std::collections::BTreeMap<u64, Vec<usize>> {
             v.iter().map(|&(g, n)| (g, n.to_vec())).collect()
         };
-        // Tile 0: nets 1 and 2 on bank 0 (classes 0 and 1); net 3 alone on
-        // bank 1. Tile 1: net 2 on bank 0 alone, no conflict.
-        let u = users(&[(0, &[1]), (1, &[2]), (2, &[3]), (128, &[2])]);
-        assert_eq!(Router::exclusive_breaks(&u), vec![(2, 0), (2, 1)]);
-        // A net on classes 0 and 2 of a tile keeps the first.
-        let u = users(&[(0, &[1]), (2, &[1])]);
-        assert_eq!(Router::exclusive_breaks(&u), vec![(1, 2)]);
-        // Net 2 on classes 1 and 2, net 1 on bank 0: net 2 keeps class 2.
-        let u = users(&[(0, &[1]), (1, &[2]), (2, &[2])]);
-        assert_eq!(Router::exclusive_breaks(&u), vec![(2, 0), (2, 1)]);
-        assert!(Router::exclusive_breaks(&users(&[(0, &[1]), (3, &[2])])).is_empty());
+        // Nets 1 and 2 on bank 0 of tile 0: the later leaves it. Net 3
+        // alone on bank 1.
+        let u = users(&[(0, &[1]), (1, &[2]), (2, &[3])]);
+        assert_eq!(router.exclusive_breaks(&u), vec![(2, 0), (2, 1)]);
+        // One net on both lines of a bank: its second use leaves.
+        let u = users(&[(0, &[1]), (1, &[1])]);
+        assert_eq!(router.exclusive_breaks(&u), vec![(1, 1)]);
+        // One net on two banks: fine in tile 0, past tile 1's capacity.
+        assert!(router.exclusive_breaks(&users(&[(0, &[1]), (2, &[1])])).is_empty());
+        let u = users(&[(128, &[1]), (130, &[1])]);
+        assert_eq!(router.exclusive_breaks(&u), vec![(1, 130)]);
     }
 
     #[test]
