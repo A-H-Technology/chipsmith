@@ -10,7 +10,7 @@
 //! then a control step per slot (finish a sink: walk its branch back,
 //! graft it onto the tree, seed the next sink), then relaxation of the
 //! frontier within each slot's bucket, then compaction into the next
-//! frontier. A label is `(4095 - generation) << 52 | cost << 24 | edge`
+//! frontier. A label is `(255 - generation) << 56 | cost << 24 | edge`
 //! and is only ever lowered by an atomic minimum, so the labels after a
 //! round don't depend on the order of its relaxations; every decision
 //! reads values from the round's start. The trees are the CPU search's
@@ -112,6 +112,8 @@ fn slot_kernel(
     inp: &[u32],
     init_node: &[u32],
     init_dq: &[u64],
+    own_node: &[u32],
+    own_mark: &mut [u32],
     out: &mut [u32],
     gen: &mut [u32],
     slot_round: &mut [u32],
@@ -148,7 +150,8 @@ fn slot_kernel(
 ) {
     // inp: per slot source, net, region, first sink; then one more first
     // sink; then per slot where its starting tree is in `init_*`, its
-    // length, and where its tree goes in the tree pool; then (sink,
+    // length, and where its tree goes in the tree pool; then where its
+    // previous tree is in `own_node` and its length; then (sink,
     // criticality) pairs.
     let s = CUBE_POS as usize;
     let k = slots as usize;
@@ -170,6 +173,14 @@ fn slot_kernel(
         tree_dq[tb + i0] = init_dq[io + i0];
         in_tree[base + node as usize] = batch;
         i0 += nt;
+    }
+    // The net's previous tree, still in the occupancy: not another net's.
+    let oo = inp[o_tree + 3 * k + s] as usize;
+    let ol = inp[o_tree + 4 * k + s] as usize;
+    let mut i1 = t;
+    while i1 < ol {
+        own_mark[base + own_node[oo + i1] as usize] = batch;
+        i1 += nt;
     }
     // scal: bound, sink_g, crit; misc: cur_sink, sink_box, next_sink, frontier size.
     if t == 0 {
@@ -205,8 +216,8 @@ fn slot_kernel(
             let mut ph = phase[s];
             if ph == 0u32 {
                 let sl = labels[base + misc[s * 4] as usize].load();
-                let reached = (sl >> 52) == (4095u64 - gen[s] as u64);
-                let sg = (sl >> 24) & 268435455u64;
+                let reached = (sl >> 56) == (255u64 - gen[s] as u64);
+                let sg = (sl >> 24) & 4294967295u64;
                 let fm = fmin[s].load();
                 let empty = fsize == 0;
                 if reached && (empty || sg <= fm) {
@@ -218,7 +229,7 @@ fn slot_kernel(
                     if reached {
                         scal[s * 3 + 1] = sg;
                     } else {
-                        scal[s * 3 + 1] = 268435456u64;
+                        scal[s * 3 + 1] = 4294967296u64;
                     }
                 }
             }
@@ -313,7 +324,7 @@ fn slot_kernel(
         if ph == 2u32 || ph == 3u32 {
             running = false;
         } else {
-            let tag = (4095u64 - gen[s] as u64) << 52;
+            let tag = (255u64 - gen[s] as u64) << 56;
             let cq = scal[s * 3 + 2];
             if ph == 6u32 {
                 // The new search's seeds: every tree node.
@@ -322,8 +333,8 @@ fn slot_kernel(
                 while i < tl {
                     let node = tree_node[tb + i];
                     let mut g = cq * tree_dq[tb + i] / 1024u64;
-                    if g > 268435455u64 {
-                        g = 268435455u64;
+                    if g > 4294967295u64 {
+                        g = 4294967295u64;
                     }
                     labels[base + node as usize].fetch_min(tag | (g << 24) | 16777215u64);
                     mark[base + node as usize].store(round);
@@ -362,16 +373,20 @@ fn slot_kernel(
                                     }
                                 }
                                 if allowed {
+                                    let mut o = occ[d];
+                                    if own_mark[base + d] == batch {
+                                        o -= 1u32;
+                                    }
                                     let cong =
-                                        (1u64 + hist[d] as u64) * (1024u64 + pf_q * occ[d] as u64);
+                                        (1u64 + hist[d] as u64) * (1024u64 + pf_q * o as u64);
                                     let mut cost =
                                         ((1024u64 - cq) * cong + cq * delay_q[d] as u64) / 1024u64;
-                                    if cost > 1048576u64 {
-                                        cost = 1048576u64;
+                                    if cost > 2147483648u64 {
+                                        cost = 2147483648u64;
                                     }
                                     let mut g2 = gv + cost;
-                                    if g2 > 268435455u64 {
-                                        g2 = 268435455u64;
+                                    if g2 > 4294967295u64 {
+                                        g2 = 4294967295u64;
                                     }
                                     if g2 < sg {
                                         let new = tag | (g2 << 24) | e as u64;
@@ -397,7 +412,7 @@ fn slot_kernel(
             while i < nc && i < fcap {
                 let v = n_node[fb + i];
                 f_node[fb + i] = v;
-                f_g[fb + i] = (labels[base + v as usize].load() >> 24) & 268435455u64;
+                f_g[fb + i] = (labels[base + v as usize].load() >> 24) & 4294967295u64;
                 i += nt;
             }
             sync_cube();
@@ -477,6 +492,9 @@ pub struct SlotNet<'a> {
     /// units.
     pub init: &'a [NodeId],
     pub init_dq: &'a [u64],
+    /// The net's previous tree where it is still in the occupancy (else
+    /// empty): the search doesn't count it as another net's.
+    pub own: &'a [NodeId],
     /// Sinks in search order, with their criticalities in fixed point.
     pub sinks: Vec<(NodeId, u64)>,
     pub region: chipdb::Box,
@@ -537,6 +555,7 @@ pub struct Searcher {
     lifted: Vec<u32>,
     labels: Handle,
     mark: Handle,
+    own_mark: Handle,
     in_tree: Handle,
     gen_max: u32,
     batch: u32,
@@ -557,8 +576,21 @@ pub struct Searcher {
     pub phase_s: [f64; 3],
 }
 
+/// Keep compiled kernels in the user's cache directory (CubeCL's
+/// `persistence`), so a run doesn't recompile them (about 1.5 s). Before the
+/// first device: CubeCL's configuration is fixed once read, and whichever of
+/// the placer and the router gets here first sets the same one.
+fn cache_kernels() {
+    use cubecl::config::{cache::CacheConfig, CubeClRuntimeConfig, RuntimeConfig};
+    let mut config = CubeClRuntimeConfig::default();
+    config.compilation.cache = true;
+    config.environment.path = CacheConfig::Global;
+    CubeClRuntimeConfig::try_set(config);
+}
+
 impl Searcher {
     pub fn new(rt: Runtime, db: &ChipDb, fx: &Fixed, owner: &[u32]) -> Result<Searcher, String> {
+        cache_kernels();
         let device = match rt {
             Runtime::Cuda => cubecl::Device::cuda(0),
             Runtime::Hip => cubecl::Device::rocm(0),
@@ -602,6 +634,7 @@ impl Searcher {
             lifted: Vec::new(),
             labels: client.create_from_slice(u64::as_bytes(&vec![u64::MAX; SLOTS * n])),
             mark: up32(&vec![0u32; SLOTS * n]),
+            own_mark: up32(&vec![0u32; SLOTS * n]),
             in_tree: up32(&vec![0u32; SLOTS * n]),
             gen_max: 0,
             batch: 0,
@@ -716,7 +749,8 @@ impl Searcher {
         // Labels are stamped by generation: start every slot afresh once
         // the stamps could run out in this batch.
         let searches: u32 = nets.iter().map(|x| x.sinks.len() as u32).max().unwrap_or(0) + 1;
-        if self.gen_max + searches >= 4094 {
+        assert!(searches < 254, "a slot of {searches} searches");
+        if self.gen_max + searches >= 254 {
             unsafe {
                 fill_u64::launch_unchecked(
                     c,
@@ -778,6 +812,13 @@ impl Searcher {
         }
         inp.extend(nets.iter().map(|x| x.init.len() as u32));
         inp.extend(&tree_off);
+        let mut at = 0u32;
+        for x in nets {
+            inp.push(at);
+            at += x.own.len() as u32;
+        }
+        inp.extend(nets.iter().map(|x| x.own.len() as u32));
+        let own_node: Vec<u32> = nets.iter().flat_map(|x| x.own.iter().copied()).collect();
         let o_sinks = inp.len() as u32;
         for x in nets {
             for &(sk, cq) in &x.sinks {
@@ -788,6 +829,8 @@ impl Searcher {
         let inp_h = c.create_from_slice(u32::as_bytes(&inp));
         let init_node_h = c.create_from_slice(u32::as_bytes(&init_node));
         let init_dq_h = c.create_from_slice(u64::as_bytes(&init_dq));
+        // Never empty: a buffer of nothing can't be made.
+        let own_node_h = c.create_from_slice(u32::as_bytes(if own_node.is_empty() { &[0u32] } else { &own_node }));
         self.batch += 1;
         let t_up = t0.elapsed().as_secs_f64();
         let b = &self.b;
@@ -808,6 +851,8 @@ impl Searcher {
                 arg(&inp_h, inp.len()),
                 arg(&init_node_h, init_node.len()),
                 arg(&init_dq_h, init_dq.len()),
+                arg(&own_node_h, own_node.len()),
+                arg(&self.own_mark, SLOTS * n),
                 arg(&b.out, SLOTS * (2 + 3 * OUT_CAP)),
                 arg(&b.gen, SLOTS),
                 arg(&b.slot_round, SLOTS),
@@ -888,6 +933,7 @@ impl crate::Router<'_> {
         crit: &[Vec<f32>],
         olds: &[crate::Tree],
         keep: bool,
+        present: bool,
     ) -> Vec<(anyhow::Result<crate::Tree>, f64)> {
         let fx = self.fixed.as_ref().expect("the GPU searches in integers");
         g.sync(&self.node);
@@ -897,15 +943,19 @@ impl crate::Router<'_> {
             let starts: Vec<crate::bucket::Start> = chunk
                 .iter()
                 .zip(olds)
-                .map(|(&i, old)| self.start_tree(fx, s, &nets[i], &crit[i], keep.then_some(old)))
+                .map(|(&i, old)| {
+                    self.start_tree(fx, s, &nets[i], &crit[i], keep.then_some(old), present)
+                })
                 .collect();
             let slots: Vec<SlotNet> = chunk
                 .iter()
                 .zip(&starts)
-                .map(|(&i, st)| SlotNet {
+                .zip(olds)
+                .map(|((&i, st), old)| SlotNet {
                     net: i as u32,
                     init: &st.tree.nodes,
                     init_dq: &st.dq,
+                    own: if present { &old.nodes } else { &[] },
                     sinks: self
                         .sink_order(&nets[i], &crit[i])
                         .iter()
@@ -926,6 +976,7 @@ impl crate::Router<'_> {
                         &nets[i],
                         &crit[i],
                         keep.then_some(old),
+                        present.then_some(old),
                     ),
                 };
                 out.push((tree, 0.0));
@@ -958,6 +1009,7 @@ impl crate::Router<'_> {
                     net: index,
                     init: &st.tree.nodes,
                     init_dq: &st.dq,
+                    own: &[],
                     sinks: vec![(net.sinks[i], Fixed::crit_q(crit[i]))],
                     region,
                 })

@@ -17,11 +17,15 @@ use super::*;
 /// Fixed point: one unit of cost (an R4 wire's delay, or an uncongested
 /// node) is this much.
 pub const SCALE: u64 = 1024;
-/// A node costs at most this, so a path's cost fits in 28 bits (the GPU
-/// packs it with a batch stamp and an edge).
-pub const COST_CAP: u64 = 1 << 20;
-/// A path's cost saturates here (28 bits, as the GPU packs it).
-pub const G_MAX: u64 = (1 << 28) - 1;
+/// A node costs at most this. It was 2^20 (a thousand uncongested nodes),
+/// to fit a path's cost in 28 bits; by the 25th iteration or so present
+/// congestion times history passed it on every overused node, which then
+/// stopped growing dearer than a detour, and PathFinder stalled (sha256:
+/// 3 overused nodes from iteration 35 to 60).
+pub const COST_CAP: u64 = 1 << 31;
+/// A path's cost saturates here (32 bits, as the GPU packs it with an
+/// 8-bit generation and a 24-bit edge).
+pub const G_MAX: u64 = (1 << 32) - 1;
 /// `via` of a node the search started from.
 pub const SEED: u32 = (1 << 24) - 1;
 /// Bucket width: a round relaxes nodes within this of the best estimate
@@ -116,9 +120,32 @@ pub struct Labels {
     label: Vec<u64>,
     stamp: Vec<u32>,
     gen: u32,
+    /// The searching net's previous tree, where equal to `own_gen`, while
+    /// it is still in the occupancy (`own_active`): the search doesn't
+    /// count it as another net's.
+    own: Vec<u32>,
+    own_gen: u32,
+    own_active: bool,
 }
 
 impl Labels {
+    fn ensure(&mut self, n: usize) {
+        if self.label.len() != n {
+            *self = Labels {
+                label: vec![0; n],
+                stamp: vec![0; n],
+                own: vec![0; n],
+                ..Default::default()
+            };
+        }
+    }
+
+    /// 1 for a node of the searching net's previous tree still counted in
+    /// the occupancy.
+    fn own(&self, n: usize) -> u16 {
+        (self.own_active && self.own[n] == self.own_gen) as u16
+    }
+
     fn get(&self, n: usize) -> u64 {
         if self.stamp[n] == self.gen {
             self.label[n]
@@ -154,13 +181,7 @@ impl Router<'_> {
         region: chipdb::Box,
         work: &mut [u64; 3],
     ) -> Option<Branch> {
-        if l.label.len() != self.node.len() {
-            *l = Labels {
-                label: vec![0; self.node.len()],
-                stamp: vec![0; self.node.len()],
-                gen: 0,
-            };
-        }
+        l.ensure(self.node.len());
         l.gen += 1;
         let pf_q = q(self.present_factor);
         let allowed = self.confined.get(&net);
@@ -234,8 +255,8 @@ impl Router<'_> {
                         continue;
                     }
                     let ni = &self.node[m];
-                    let g2 =
-                        (gv + fx.cost(m, ni.hist as u64, ni.occ as u64, pf_q, crit_q)).min(G_MAX);
+                    let occ = (ni.occ - l.own(m)) as u64;
+                    let g2 = (gv + fx.cost(m, ni.hist as u64, occ, pf_q, crit_q)).min(G_MAX);
                     if sink_g.is_some_and(|sg| g2 >= sg) {
                         continue;
                     }
@@ -268,9 +289,19 @@ impl Router<'_> {
         net: &NetReq,
         crit: &[f32],
         keep: Option<&Tree>,
+        own: Option<&Tree>,
     ) -> Result<Tree> {
         let mut l = std::mem::take(&mut s.labels);
-        let tree = self.route_net_bucketed_with(fx, s, &mut l, index, net, crit, keep);
+        if let Some(own) = own {
+            l.ensure(self.node.len());
+            l.own_gen += 1;
+            for &n in &own.nodes {
+                l.own[n as usize] = l.own_gen;
+            }
+            l.own_active = true;
+        }
+        let tree = self.route_net_bucketed_with(fx, s, &mut l, index, net, crit, keep, own.is_some());
+        l.own_active = false;
         s.labels = l;
         tree
     }
@@ -284,6 +315,7 @@ impl Router<'_> {
         net: &NetReq,
         crit: &[f32],
         keep: Option<&Tree>,
+        own_counted: bool,
     ) -> Start {
         s.tree_generation += 1;
         let gen = s.tree_generation;
@@ -297,7 +329,7 @@ impl Router<'_> {
         s.tree_pos[net.source as usize] = 0;
         s.delay_to[net.source as usize] = self.node[net.source as usize].delay;
         if let Some(old) = keep.filter(|t| !t.nodes.is_empty()) {
-            self.keep_branches(s, net, crit, old, &mut tree);
+            self.keep_branches(s, net, crit, old, &mut tree, own_counted);
         }
         let delays: Vec<Ps> = tree.nodes.iter().map(|&n| s.delay_to[n as usize]).collect();
         // Each tree node's delay in `Fixed` units, along its parents.
@@ -387,8 +419,9 @@ impl Router<'_> {
         net: &NetReq,
         crit: &[f32],
         keep: Option<&Tree>,
+        own_counted: bool,
     ) -> Result<Tree> {
-        let mut st = self.start_tree(fx, s, net, crit, keep);
+        let mut st = self.start_tree(fx, s, net, crit, keep, own_counted);
         let region = self.search_region(index, net);
         for i in self.sink_order(net, crit) {
             let sink = net.sinks[i];
@@ -445,7 +478,7 @@ impl Router<'_> {
         pool: &[Mutex<Option<Scratch>>],
         #[cfg(feature = "gpu")] mut gpu: Option<&mut crate::gpu::Searcher>,
     ) -> Result<Tree> {
-        let mut st = self.start_tree(fx, s, net, crit, keep);
+        let mut st = self.start_tree(fx, s, net, crit, keep, false);
         let region = self.search_region(index, net);
         let order = self.sink_order(net, crit);
         let mut l = std::mem::take(&mut s.labels);

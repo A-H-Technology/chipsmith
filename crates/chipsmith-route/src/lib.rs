@@ -244,6 +244,9 @@ pub struct Router<'a> {
     steal: Option<f32>,
     /// `repair_critical` runs (`CHIPSMITH_ROUTE_REPAIR=0` turns it off).
     repair: bool,
+    /// Seconds `repair_critical` spent on the repaired nets' searches, the
+    /// displaced nets' and timing analyses, for `CHIPSMITH_ROUTE_TRACE`.
+    repair_s: Mutex<[f64; 3]>,
 }
 
 /// Which nets of an iteration may go into one batch of `Batching::Fixed`'s
@@ -402,6 +405,7 @@ impl<'a> Router<'a> {
             confined: Default::default(),
             steal: None,
             repair: std::env::var("CHIPSMITH_ROUTE_REPAIR").map_or(true, |v| v != "0"),
+            repair_s: Default::default(),
             tile_distance: std::env::var("CHIPSMITH_TILE_DISTANCE")
                 .ok()
                 .and_then(|v| {
@@ -668,6 +672,7 @@ impl<'a> Router<'a> {
         if self.bucketed && self.fixed.is_none() {
             self.fixed = Some(bucket::Fixed::new(self));
         }
+        let t_setup = std::time::Instant::now();
         #[cfg(feature = "gpu")]
         let mut searcher = match (self.gpu_runtime, &self.fixed) {
             (Some(rt), Some(fx)) => {
@@ -675,6 +680,9 @@ impl<'a> Router<'a> {
             }
             _ => None,
         };
+        if std::env::var_os("CHIPSMITH_ROUTE_TRACE").is_some() {
+            eprintln!("route: setup {:.2} s", t_setup.elapsed().as_secs_f64());
+        }
         let mut trees: Vec<Tree> = vec![Tree::default(); nets.len()];
         // Per net, per sink: how critical its connection is. Nothing is
         // known before the first routing.
@@ -759,25 +767,41 @@ impl<'a> Router<'a> {
                     if batch.is_empty() {
                         continue;
                     }
-                    for &i in &batch {
-                        for &n in &trees[i].nodes {
-                            self.node[n as usize].occ -= 1;
-                        }
-                        #[cfg(feature = "gpu")]
-                        if let Some(g) = searcher.as_mut() {
-                            g.note_lifted(&trees[i].nodes);
-                        }
-                    }
                     let mut olds: Vec<Tree> = batch
                         .iter()
                         .map(|&i| std::mem::take(&mut trees[i]))
                         .collect();
+                    // Whether each net's previous tree is off the
+                    // occupancy yet.
+                    let mut lifted = vec![false; batch.len()];
                     rerouted += batch.len();
                     let mut batch = batch;
                     // With the integer search, the nets that collided go
                     // again side by side, against what the others
                     // committed, until none collides.
                     loop {
+                        // Side by side with the integer search, each net
+                        // sees the others of its batch where they were
+                        // until they commit, and its own previous tree as
+                        // gone: ripped up all at once, a net kept its
+                        // branch through the sink of another net of its
+                        // batch every iteration, and the other had to
+                        // share it (sha256: 3 overused nodes for 25
+                        // iterations). Otherwise (A*, or alone) each is
+                        // ripped up first.
+                        let present = self.fixed.is_some() && batch.len() > 1;
+                        if !present {
+                            for (old, up) in olds.iter().zip(lifted.iter_mut()) {
+                                if !*up {
+                                    self.lift(old);
+                                    #[cfg(feature = "gpu")]
+                                    if let Some(g) = searcher.as_mut() {
+                                        g.note_lifted(&old.nodes);
+                                    }
+                                    *up = true;
+                                }
+                            }
+                        }
                         let this = &*self;
                         let route = |s: &mut Scratch,
                                      i: usize,
@@ -850,6 +874,7 @@ impl<'a> Router<'a> {
                                         &crit,
                                         &olds,
                                         keep,
+                                        present,
                                     )
                                 }
                                 #[cfg(not(feature = "gpu"))]
@@ -875,6 +900,7 @@ impl<'a> Router<'a> {
                                                 &nets[i],
                                                 &crit[i],
                                                 keep.then_some(old),
+                                                present.then_some(old),
                                             );
                                             (tree, 0.0)
                                         }
@@ -891,8 +917,11 @@ impl<'a> Router<'a> {
                         // would otherwise trade the same wire back and forth
                         // every iteration and never converge.
                         batch_stamp += 1;
-                        let (mut again, mut again_olds) = (Vec::new(), Vec::new());
-                        for ((&i, (tree, wide)), old) in batch.iter().zip(routed).zip(olds) {
+                        let (mut again, mut again_olds, mut again_lifted) =
+                            (Vec::new(), Vec::new(), Vec::new());
+                        for (((&i, (tree, wide)), old), up) in
+                            batch.iter().zip(routed).zip(olds).zip(lifted)
+                        {
                             let mut tree = tree?;
                             t_wide += wide;
                             if tree.nodes.iter().any(|&n| taken[n as usize] == batch_stamp) {
@@ -900,6 +929,7 @@ impl<'a> Router<'a> {
                                 if self.fixed.is_some() {
                                     again.push(i);
                                     again_olds.push(old);
+                                    again_lifted.push(up);
                                     continue;
                                 }
                                 tree = self.route_net(
@@ -910,6 +940,13 @@ impl<'a> Router<'a> {
                                     keep.then_some(&old),
                                     Some(&pool),
                                 )?;
+                            }
+                            if !up {
+                                self.lift(&old);
+                                #[cfg(feature = "gpu")]
+                                if let Some(g) = searcher.as_mut() {
+                                    g.note_lifted(&old.nodes);
+                                }
                             }
                             for &n in &tree.nodes {
                                 self.node[n as usize].occ += 1;
@@ -926,6 +963,7 @@ impl<'a> Router<'a> {
                         }
                         batch = again;
                         olds = again_olds;
+                        lifted = again_lifted;
                     }
                 }
                 for s in pool.iter_mut() {
@@ -1097,8 +1135,9 @@ impl<'a> Router<'a> {
             }
         }
         if trace {
+            let [fresh, displaced, timing] = *self.repair_s.lock().expect("unpoisoned");
             eprintln!(
-                "route: repair: {kept} of {tried} nets rerouted for delay, critical {:.2} -> {:.2} ns in {:.1} s",
+                "route: repair: {kept} of {tried} nets rerouted for delay, critical {:.2} -> {:.2} ns in {:.1} s ({fresh:.2} s searching for delay, {displaced:.2} s rerouting displaced nets, {timing:.2} s in timing analyses)",
                 before / 1000.0,
                 analysis.critical / 1000.0,
                 started.elapsed().as_secs_f64()
@@ -1130,10 +1169,13 @@ impl<'a> Router<'a> {
         // (net, its tree before), to put back.
         let mut saved: Vec<(usize, Tree)> = Vec::new();
         let ones = vec![1.0; nets[i].sinks.len()];
+        let t = std::time::Instant::now();
         self.lift(&trees[i]);
         self.steal = Some(REPAIR_STEAL);
         let routed = self.route_net(s, i as u32, &nets[i], &ones, None, None);
         self.steal = None;
+        self.clock(0, t);
+        let t = std::time::Instant::now();
         let old = std::mem::take(&mut trees[i]);
         let fresh = match routed {
             Ok(t) if worst(&t) < worst(&old) - 1.0 => t,
@@ -1182,8 +1224,11 @@ impl<'a> Router<'a> {
                 }
             }
         }
+        self.clock(1, t);
         if legal {
+            let t = std::time::Instant::now();
             let a = self.timing.analyse(&Self::net_arcs(nets, trees));
+            self.clock(2, t);
             if a.critical <= limit {
                 return Ok(Some(a));
             }
@@ -1194,6 +1239,11 @@ impl<'a> Router<'a> {
             trees[j] = old;
         }
         Ok(None)
+    }
+
+    /// Add the time since `t` to `repair_s[k]`.
+    fn clock(&self, k: usize, t: std::time::Instant) {
+        self.repair_s.lock().expect("unpoisoned")[k] += t.elapsed().as_secs_f64();
     }
 
     /// Take a tree's nodes off the occupancy, or put them on.
@@ -1245,7 +1295,7 @@ impl<'a> Router<'a> {
         s.tree_pos[net.source as usize] = 0;
         s.delay_to[net.source as usize] = self.node[net.source as usize].delay;
         if let Some(old) = keep.filter(|t| !t.nodes.is_empty()) {
-            self.keep_branches(s, net, crit, old, &mut tree);
+            self.keep_branches(s, net, crit, old, &mut tree, false);
         }
         // Each tree node's delay from the source, in tree order: where a
         // search starts from it.
@@ -1354,7 +1404,8 @@ impl<'a> Router<'a> {
     }
 
     /// Copy into `tree` (holding only the source) the branches of `old`
-    /// that stay: those on no node another net uses that lead to a sink
+    /// that stay: those on no node another net uses (`old` itself is in the
+    /// occupancy if `own_counted`) that lead to a sink
     /// whose connection isn't critical enough to reroute. On a congested
     /// net with hundreds of sinks, one shared wire otherwise reroutes all
     /// of them.
@@ -1365,6 +1416,7 @@ impl<'a> Router<'a> {
         crit: &[f32],
         old: &Tree,
         tree: &mut Tree,
+        own_counted: bool,
     ) {
         let gen = s.tree_generation;
         for (&sink, &c) in net.sinks.iter().zip(crit) {
@@ -1379,7 +1431,8 @@ impl<'a> Router<'a> {
         let mut clear = vec![false; len];
         clear[0] = true;
         for i in 1..len {
-            clear[i] = clear[old.parent[i] as usize] && self.node[old.nodes[i] as usize].occ == 0;
+            clear[i] = clear[old.parent[i] as usize]
+                && self.node[old.nodes[i] as usize].occ <= own_counted as u16;
         }
         let mut needed = vec![false; len];
         for i in (1..len).rev() {
