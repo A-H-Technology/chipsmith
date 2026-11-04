@@ -547,9 +547,22 @@ pub struct Gpu {
     evaluated: usize,
 }
 
+/// Keep compiled kernels in the user's cache directory (CubeCL's
+/// `persistence`), so a run doesn't recompile them (about 1.5 s). Before the
+/// first device: CubeCL's configuration is fixed once read, and whichever of
+/// the placer and the router gets here first sets the same one.
+fn cache_kernels() {
+    use cubecl::config::{cache::CacheConfig, CubeClRuntimeConfig, RuntimeConfig};
+    let mut config = CubeClRuntimeConfig::default();
+    config.compilation.cache = true;
+    config.environment.path = CacheConfig::Global;
+    CubeClRuntimeConfig::try_set(config);
+}
+
 impl Gpu {
     /// Upload `f` and the start. Errs when the runtime has no device.
     pub fn new(rt: Runtime, f: Flat, weights: &[f32], start: &[Pos]) -> Result<Gpu, String> {
+        cache_kernels();
         let device = match rt {
             Runtime::Cuda => cubecl::Device::cuda(0),
             Runtime::Hip => cubecl::Device::rocm(0),

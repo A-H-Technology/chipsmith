@@ -99,6 +99,70 @@ pub struct ClockPair {
     pub critical: Ps,
 }
 
+/// Per tile type, per pip: for `CTRL<k> -> LE<n>.ENA`, its control line
+/// `k`, else -1 (`Router::exclusive`). A LAB's clock enable 1 comes from
+/// lines 0/1 and enable 0 from 2/3, and each line it comes from is a clock
+/// domain of its own (`bitstream::logic::clock_slots`).
+/// Per LAB with registers: how many clock domains with an enable it has
+/// room for, two less those without one (a clock net and edge).
+fn enable_capacity(db: &ChipDb, json: &Value) -> Result<HashMap<u32, u8>> {
+    let mut plain: HashMap<u32, HashSet<(u64, bool)>> = HashMap::new();
+    for (name, cell) in json["modules"]["top"]["cells"].as_object().context("no cells")? {
+        if cell["type"].as_str() != Some("LCELL_FF") {
+            continue;
+        }
+        let bel = cell["attributes"]["NEXTPNR_BEL"]
+            .as_str()
+            .with_context(|| format!("{name} is not placed"))?;
+        let (tile_name, _) = bel.split_once('/').context("bel name")?;
+        let (x, y) = tile_xy(tile_name).with_context(|| format!("tile {tile_name}"))?;
+        let tile = db
+            .tile_index(x, y)
+            .with_context(|| format!("{name}: tile {tile_name} off chip"))?;
+        let domains = plain.entry(tile).or_default();
+        if let (Some(clk), None) = (net_of(cell, "CLK"), net_of(cell, "ENA")) {
+            let inv = cell["parameters"]["CLK_INV"]
+                .as_str()
+                .is_some_and(|v| v.chars().any(|ch| ch == '1'));
+            domains.insert((clk, inv));
+        }
+    }
+    Ok(plain
+        .into_iter()
+        .map(|(tile, d)| (tile, 2u8.saturating_sub(d.len() as u8)))
+        .collect())
+}
+
+fn enable_pairs(db: &ChipDb) -> Vec<Option<Vec<i8>>> {
+    db.tile_types
+        .iter()
+        .map(|tt| {
+            let mut any = false;
+            let classes = tt
+                .pips
+                .iter()
+                .map(|&(src, dst)| {
+                    let line = tt.wires.get(src).strip_prefix("CTRL").and_then(|k| k.parse::<u8>().ok());
+                    let ena = tt
+                        .wires
+                        .get(dst)
+                        .strip_prefix("LE")
+                        .and_then(|r| r.split_once('.'))
+                        .is_some_and(|(k, pin)| pin == "ENA" && k.parse::<u8>().is_ok());
+                    match line {
+                        Some(k @ 0..=3) if ena => {
+                            any = true;
+                            k as i8
+                        }
+                        _ => -1,
+                    }
+                })
+                .collect();
+            any.then_some(classes)
+        })
+        .collect()
+}
+
 /// Route `placed`, write `routed`.
 pub fn route_file(db: &ChipDb, placed: &Path, routed: &Path) -> Result<Stats> {
     let text =
@@ -106,6 +170,7 @@ pub fn route_file(db: &ChipDb, placed: &Path, routed: &Path) -> Result<Stats> {
     let mut json: Value = serde_json::from_str(&text)?;
     let design = read_design(db, &json)?;
     let mut router = Router::new(db, &design);
+    router.exclusive(enable_pairs(db), enable_capacity(db, &json)?);
     let (trees, iterations, analysis) = router.route(&design.nets)?;
     if let Some(out) = std::env::var_os("CHIPSMITH_DUMP_CONNECTIONS") {
         dump_connections(db, &router, &design, &trees, Path::new(&out))?;

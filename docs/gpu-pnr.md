@@ -348,6 +348,129 @@ The first version made 6 launches and a host round-trip per round
 (picorv32: 52 s for 11,698 rounds); one launch per batch with the rounds
 inside the kernel took that to 2.5 s.
 
+### The batched router throughout (`CHIPSMITH_ROUTE_ACCEL`, branch gpu-route)
+
+Since qor2/qor3 routing is most of a large build, and the router above
+only batched the first iteration. Profile of the default router (A*, one
+net at a time), seed 0 at load 15 to 20, before this branch:
+
+| | sha256 | picorv32x24 |
+|---|---|---|
+| route | 132 s, 20 iterations | 378 s, 31 iterations |
+| iteration 1 | 18.1 s, 5,556 nets | 96.3 s, 34,982 nets |
+| iterations 2 to 9 | 89.8 s, 600 to 2,200 nets each | 255.4 s, 1,900 to 12,700 nets each |
+| iterations 10 on | 12.3 s, 50 to 500 nets each | 9.0 s, 5 to 1,200 nets each |
+| nets of 32 sinks or more | 44% of the search | 23% |
+| delay-only repair | 12.3 s (22 of 512 nets kept) | 17.2 s (67 of 512) |
+
+`CHIPSMITH_ROUTE_ACCEL=cpu` (rayon), `cuda` or `hip` now runs the
+integer search (`bucket.rs`) for every net of the first 10 iterations,
+in batches of 64 in net order, and A* one net at a time after that:
+
+- Later iterations: a net's kept branches (`keep_branches`) are its
+  slot's starting tree on the GPU (a tree pool sized per batch); rip-ups
+  and commits go up as occupancy deltas, the whole state once per
+  iteration (history). Nets of a batch see each other's previous trees
+  until they commit and their own as gone: ripped up all at once, a net
+  kept its branch through another's sink every iteration (sha256: 3
+  overused nodes for 25 iterations). Nets that collide go again side by
+  side against what the others committed, until none collides.
+- Wide nets (32 sinks or more) are batches of their own; their sinks go 8
+  at a time side by side, one GPU launch per group (a slot per sink,
+  each from the tree as the group began).
+- Path costs are 32 bits (they were 28, node costs capped at 2^20): by
+  iteration 25 congestion times history passed the cap on every overused
+  node, which then cost no more than a detour, and PathFinder stalled.
+- The CPU's integer search takes each round from a heap instead of a
+  pass over the frontier (same labels, so still the GPU's trees).
+- The GPU fills its per-slot buffers (1.1 GB on sha256) on the device:
+  uploading them was 12 of a 13 s setup, now 1.8 s. CubeCL's kernel cache
+  (`persistence`, in the user's cache directory) is on in the placer and
+  the router.
+
+Five placement seeds each (the default placer), routed from the same
+`placed.json` (`bench/route-accel.sh`), load 13 to 20, shared machine,
+`open` 876791c merged (sha256 seed 0 routes the same before and after).
+Times marked * ran beside other builds; serial is the same batched
+integer router on one thread, seed 0:
+
+| design, seed | A* s | CPU serial s | CPU rayon (8) s | GPU s | A* ns / iterations | batched ns / iterations |
+|---|---|---|---|---|---|---|
+| sha256 0 | 82.8 | 242.3 | 89.6 | 41.9 | 13.75 / 20 | 14.16 / 19 |
+| sha256 1 | 95.7 | | 185.5* | 67.0* | 13.85 / 20 | 14.26 / 21 |
+| sha256 2 | 83.7 | | 119.3 | 60.9 | 14.17 / 22 | 14.28 / 29 |
+| sha256 3 | 92.1 | | 122.7 | 53.7 | 14.03 / 19 | 13.95 / 22 |
+| sha256 4 | 94.6 | | 107.7 | 50.8 | 14.35 / 31 | 14.10 / 23 |
+| picorv32x24 0 | 273.2 | 653.5 | 244.0 | 133.6 | 9.12 / 31 | 8.85 / 27 |
+| picorv32x24 1 | 288.5 | | 778.7* | 211.4* | 9.10 / 39 | 9.03 / 36 |
+| picorv32x24 2 | 325.3 | | 352.5 | 155.0 | 9.13 / 32 | 9.01 / 33 |
+| picorv32x24 3 | 411.9* | | 689.5* | 216.3* | 9.00 / 23 | 9.05 / 28 |
+| picorv32x24 4 | did not converge in 60 | | 725.1* | 168.8* | | 11.75 / 41 |
+
+- Speed: the GPU routes sha256 1.7 times faster than A* (medians 92.1
+  against 53.7 s) and picorv32x24 2.0 to 2.1 times (seeds 0 and 2). On
+  the CPU the batched router is no faster than A* (rayon) or 3 times
+  slower (one thread): the integer search does more work than A*, and the
+  GPU's gain is the GPU's.
+- Critical paths: sha256's median 14.16 against A*'s 14.03 ns (+0.9%),
+  picorv32x24's 9.03 against 9.11 (-0.9%, A*'s four that converged),
+  every seed within the other's spread. Seed 4 of picorv32x24 is a bad
+  placement: A* stalls on one node from iteration 30, the batched router
+  converges at 11.75 ns.
+- Determinism: on every run above the CPU's threads and the GPU give
+  byte-identical `routed.json` and RBFs, and serial the same as rayon
+  (seed 0 of both designs); two GPU runs of sha256 too.
+- Where the GPU's time goes (picorv32x24 seed 0, 133.6 s): iterations 1
+  to 10 92.7 s against A*'s 241.9 s, of it wide nets 50.4 s against A*'s
+  57.4 s (19,374 launches, most of them 8 sinks of a wide net in a
+  64-slot launch); iterations 11 on (A*) 21.6 s; repair 9.0 s; setup
+  1.4 s.
+
+What was tried and dropped, with data:
+
+- The integer search to the last iteration: sha256 seed 1 stalled with
+  one overused node (a 160-sink net and a 15-sink net on a LAB's local
+  line) from iteration 30 to 60, batched or one net at a time (so the
+  search, not the batching); A* converged. Switching to A* after 10
+  iterations converged on both seeds tried, after 15 gave longer paths
+  (sha256 seeds 0, 1: 14.74, 14.69 ns against 14.16, 14.26).
+- Batches that keep nets sharing an overused node apart
+  (`CHIPSMITH_ROUTE_SCHEDULE=overuse`) and batches by regions
+  (`regions`): kept as settings; overuse didn't converge on sha256 seed 0
+  (4 to 6 overused nodes from iteration 30), before the switch to A*.
+- Wider sink groups (`CHIPSMITH_ROUTE_SINK_GROUP`) to fill a launch: 32
+  and 64 didn't converge on sha256 seed 0 (64: 200 s in wide nets); 8
+  stays.
+- The delay-only repair on the GPU: its delay searches are about 1 s of
+  2 to 9 s (512 nets, one at a time, each kept or undone on a timing
+  analysis); a GPU launch costs about 4 to 8 ms against about 2 ms per
+  CPU search.
+- The default when a GPU is present: the GPU's routes equal the CPU's
+  batched router's, but not A*'s, and on the CPU the batched router is
+  slower than A*. Auto-detection would either route differently with and
+  without a GPU or slow every machine without one, so the setting stays
+  explicit, as ADR-0012 decided for placement. The `gpu` feature stays
+  off in the nix package.
+
+Found on the way, older than this branch: the router didn't know that a
+Cyclone II LAB takes each clock enable from a pair of its control lines
+(lines 0/1, 2/3) and that each line an enable comes in on is a clock
+domain, two at most. sha256 seed 1 (batched) and picorv32x24 seed 3 (A*,
+the default) routed and then failed in the bitstream ("two enables want
+clock 1"); picorv32x24 seed 1 batched, "3 clock domains". The back end
+now declares the control-line pips (`Router::exclusive`): one use (a
+net on a line) per pair, and per LAB as many uses as it has clock
+domains free (two less its registers' clocks without an enable); once
+the routing is legal a net breaking it is barred and rerouted (A* from
+then on), and a delay repair breaking it is undone. A routing that keeps
+to it is unchanged: all 34 DE2 examples (`bench/speed.sh`, seed 0) give
+the same RBFs as `open` 876791c, so none needed Quartus validation. The
+picorv32x24 conflicts came from the delay repair, which now refuses
+them; picorv32x24 seed 3 with A* routes at 9.00 ns, as before, and its
+bitstream builds. A first, stricter rule (one line per enable net)
+changed two examples: it refused legal repairs, de2-ioregs 5.40 ->
+5.97 ns.
+
 ### The GPU router's prototype: breadth-first, rejected
 
 `experiments/gpu-bench route` takes the nets of a real routing
@@ -523,12 +646,12 @@ place by clusters again, as on `open`.
 
 ## Left
 
-- Routing is now most of a large build. On the GPU it needs wide nets
-  (a net's sinks one after another make a long slot) and the later,
-  incremental iterations (their kept branches would be the slot's
-  starting tree); and batches whose nets see each other less: 64-net
-  batches cost picorv32x24 more iterations (20 against 17 above, 27
-  against 15 from another placement).
+- Routing on the GPU: wide nets are now half of the GPU's iterations
+  (8 sinks per 64-slot launch). Filling a launch with the groups of
+  several wide nets, or one search to many sinks, is next. The batched
+  router's iterations from 11 on and the repair stay A* on the CPU.
+- PathFinder can stall on one node a wide net shares (A*, picorv32x24
+  seed 4; the integer search, sha256 seed 1). Not investigated.
 - The anneal is down to 26 s on picorv32x24 (8 million moves on 8
   threads). The batched detailed placer matches it on wirelength but not
   on critical path; a timing-aware selection (best of several rounds, as
@@ -536,7 +659,6 @@ place by clusters again, as on `open`.
 - sha256 places 4% slower on the GPU than on the CPU in three runs.
 - The global placement's fixed cost (fillers over the whole chip) keeps
   designs under 700 LEs on the cluster flow.
-- The GPU compiles its kernels on every run (~1.5 s); CubeCL's
-  `persistence` feature would cache them.
-- HIP builds but has not run (no AMD GPU here).
+- HIP builds but has not run (no AMD GPU here), the router's batches
+  included.
 - The xc7 back end doesn't use `chipsmith-place` yet.
