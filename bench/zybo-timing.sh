@@ -72,8 +72,10 @@ for name in "$@"; do
     systemd-run --user --scope -q -p MemoryMax=20G -p MemorySwapMax=0 "$xc7_re/tools/import.sh" "$s" > "$s/import.log" 2>&1 \
         || { tail -5 "$s/import.log"; exit 1; }
     wns=$(grep -A8 '^| Design Timing Summary' "$s/timing_summary.rpt" | tail -3 | head -1 | awk '{print $1}')
-    viv=$(python3 -c "print(f'{1000 / (8 - $wns):.1f}')")
     clocks=$(python3 bench/zybo-clocks.py "$s/timing_summary.rpt")
+    # The slowest clock's, by its own period (a PLL's needn't be 8 ns).
+    viv=$(echo "$clocks" | grep -o '[0-9.]* MHz' | sort -n | head -1 | cut -d' ' -f1)
+    [[ -n $viv ]] || viv=$(python3 -c "print(f'{1000 / (8 - $wns):.1f}')")
     echo "$name seed $seed: chipsmith ${est:-no estimate}, Vivado on chipsmith's routing Fmax $viv MHz (WNS $wns ns; per clock: $clocks); $(head -1 "$s/import.txt")"
     dirs+=("$s")
   done
