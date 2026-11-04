@@ -21,7 +21,7 @@ nextpnr, no prjxray tool, only prjxray-db's data.
 | device | board | build | on hardware |
 |---|---|---|---|
 | EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis): LUT/carry/register logic, M4K RAM blocks and embedded multipliers (below), global clocks from pins and from logic (a register, the JTAG block's TCK; one clock per LAB), PLLs (`CY2_PLL`; both on the board 2026-10-26, examples/de2-jtag-counter on TCK and examples/de2-pll-counter at 100 and 40 MHz from CLOCK_50; 2026-10-30 a PLL clock on its PLL's clock output pin, 2026-10-31 on any pin or into logic as data, the DE2's SDRAM run at 100 MHz with 0 errors by examples/sdram-selftest, its SRAM by examples/sram-selftest); pins input, output, tri-state, bidirectional, open drain, at 3.3-V LVTTL (any current) or LVCMOS or 2.5-V inputs, with pull-up or bus hold and I/O-cell registers (with the cell's clock enables, asynchronous clears and presets and falling-edge clocks as Quartus packs them since 2026-10-31, examples/de2-ioregs; an output or OE register's synchronous reset as logic on its D; Manifest, below) | yes (2026-10-25, chipsmith's own synthesis end to end, checked over JTAG: examples/de2-jtag-counter (its earlier CLOCK_50-sampled version) reads back `"DE2!"` at 50.00 MHz after a JTAG load and after `flash --persist` (loader synthesized by chipsmith too, EPCS written, verified and reloaded from; 2026-10-26 also after a power cycle); picorv32 with the same readback added runs its loop at 3.33 MHz. 2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
-| xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes, with no external tool but GHDL for VHDL (2026-11-01: chipsmith's own Verilog front end, synthesis, packing, placement, routing and FASM; 2026-11-02: frames and `.bit`; "The Zybo flow", below): LUT1-LUT6, CARRY4, FDRE/FDSE/FDCE/FDPE, RAM32M, block RAM (RAMB18E1, since 2026-11-02; "7-series block RAM", below), multipliers (DSP48E1, since 2026-11-02; "7-series multipliers", below), LUT6_2 pairs, LVCMOS33 pins, BUFGs, BSCANs and the PS7 | yes, with the earlier flow (2026-10-24, yosys and nextpnr around chipsmith's placement and routing: zybo-jtag-counter read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga). chipsmith's own flow is checked at the bitstream instead (decoded and co-simulated against the RTL, below), not yet on the board |
+| xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes, with no external tool but GHDL for VHDL (2026-11-01: chipsmith's own Verilog front end, synthesis, packing, placement, routing and FASM; 2026-11-02: frames and `.bit`; "The Zybo flow", below): LUT1-LUT6, CARRY4, FDRE/FDSE/FDCE/FDPE, RAM32M, block RAM (RAMB18E1, since 2026-11-02; "7-series block RAM", below), multipliers (DSP48E1, since 2026-11-02; "7-series multipliers", below), LUT6_2 pairs, LVCMOS33 pins, BUFGs, BSCANs, PLLs and MMCMs (PLLE2_ADV, MMCME2_ADV, since 2026-11-04; ADR-0017) and the PS7 | yes, with the earlier flow (2026-10-24, yosys and nextpnr around chipsmith's placement and routing: zybo-jtag-counter read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga). chipsmith's own flow is checked at the bitstream instead (decoded and co-simulated against the RTL, below), not yet on the board |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
 LEDs, 875 LEs and two M4Ks (its register file); a build takes 43 to 58 s
@@ -664,6 +664,9 @@ The Zybo examples:
   ```
 
   With zybo-blinky loaded instead, the same read returns all zeros.
+- `examples/zybo-pll`: a PLL's 125 MHz and 62.5 MHz, the second 90
+  degrees later, each with a counter on two of the LEDs (`XC7_PLL`, "The
+  Zybo flow", below). Builds in about 20 s.
 - `examples/zybo-picorv32`: `examples/picorv32`'s sources with its ports
   on arbitrary Zybo balls, a placement and routing bench, not for
   hardware. Builds in about 2 minutes.
@@ -948,6 +951,30 @@ to the FASM, and since 2026-11-02 to the `.bit` (ADR-0013):
   by Vivado on picorv32's five seeds, even (145.4 against 145.1 MHz,
   137.7-155.7 against 131.0-158.0); placement 4 to 5 times faster on
   picorv32 and riscv-bram.
+- **Clocks** (`cmt.rs`, since 2026-11-04, ADR-0017): `XC7_PLL` and
+  `XC7_MMCM` ask for a PLLE2_ADV or MMCME2_ADV by ratio, CY2_PLL's terms
+  (ADR-0008): `INCLK0_INPUT_FREQUENCY` in ps, per output
+  `CLK<k>_MULTIPLY_BY`, `_DIVIDE_BY`, `_PHASE_SHIFT` (ps) and
+  `_DUTY_CYCLE` (%), `COMPENSATION` `"ZHOLD"` (feedback through a BUFG,
+  the default) or `"INTERNAL"`:
+
+  ```verilog
+  XC7_PLL #(.INCLK0_INPUT_FREQUENCY(8000), .CLK0_MULTIPLY_BY(3), .CLK0_DIVIDE_BY(5))
+    pll (.INCLK(clk), .ARESET(1'b0), .CLK0(clk75), .LOCKED(locked));
+  ```
+
+  Synthesis finds the counters Vivado's clocking wizard would (110 of 117
+  of its exact answers, every PLL one; bench/cmt/README.md) and the build
+  log names them (`PLLE2_ADV pll: CLKFBOUT_MULT 33, DIVCLK_DIVIDE 5, VCO
+  825.000 MHz; CLKOUT0 /11 75.000 MHz`). A request no counters make
+  exactly is an error. The block goes in the tile nearest its input,
+  which a clock pin reaches by its CCIO; the outputs' frequencies come
+  from the counters, so their clocks are checked with no `[clocks]` entry,
+  and the pin's `[clocks]` frequency must be the period the block was
+  solved for. The bits are Vivado's for the same counters: 113 harvested
+  blocks match bit for bit, lock and filter tables included (`tests/cmt.rs`).
+  Not built: phase on a fractional divider, BANDWIDTH LOW/HIGH, DRP,
+  dynamic phase shift, CLKIN2.
 - **Site routing** (`phys.rs`): each cell port is one site pin, by rule:
   a logic LUT's inputs on the pins their drivers reach soonest by the
   routing graph's delays, the most critical by the placement's timing

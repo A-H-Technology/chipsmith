@@ -373,7 +373,7 @@ pub fn export(db: &ChipDb, routed: &Routed, pins: &BTreeMap<String, String>, per
             continue;
         }
         // A register toggling (D its own Q through a LUT1 inverter) makes a
-        // clock of half its clock's frequency (zybo-mult-selftest's).
+        // clock of half its clock's frequency.
         let Some(ff) = cells.iter().find(|f| f.g.ty.starts_with("FD") && port_of(f, "Q") == Some(i)) else {
             continue;
         };

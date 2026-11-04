@@ -265,14 +265,15 @@ fn zybo_bram_selftest() {
     built("zybo-bram-selftest", 17000);
 }
 
-/// Three passes over the nine products (1,152 cycles each).
+/// Three passes over the nine products (1,152 cycles each of the PLL's
+/// 3/5 of the input clock: 1,920 of the input's).
 #[test]
 fn zybo_mult_selftest() {
-    built("zybo-mult-selftest", 3600);
+    built("zybo-mult-selftest", 5800);
 }
 
-/// Two passes of the program out of block RAM (about 20,000 cycles each:
-/// the CPU runs on half the clock).
+/// The program's passes out of block RAM, the CPU on the PLL's clock: the
+/// 50,000 cycles that held two passes at half the clock hold more.
 #[test]
 fn zybo_riscv_bram() {
     built("zybo-riscv-bram", 50000);
