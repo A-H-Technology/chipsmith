@@ -81,6 +81,7 @@ fn features_are_vivados() {
             failures.push(format!("{}: ours only {extra:?}, Vivado's only {missing:?}", b.name));
         }
     }
+    eprintln!("{checked} OPTIMIZED blocks compared");
     assert!(checked > 0);
     assert!(failures.is_empty(), "{} of {checked} blocks differ:\n{}", failures.len(), failures.join("\n"));
 }
@@ -105,6 +106,7 @@ fn vivados_bits_decode_to_the_attributes() {
         assert_eq!(got, want, "{}", b.name);
         assert_eq!(got.compensation(), compensation(b), "{}", b.name);
     }
+    eprintln!("{} refused (a count over 64)", refused.len());
     assert!(refused.contains(&"d5/blk1".to_string()), "{refused:?}");
 }
 
