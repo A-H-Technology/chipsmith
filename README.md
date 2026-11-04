@@ -1022,16 +1022,16 @@ at a load of 15 to 30:
 |---|---|---|---|---|---|---|
 | zybo-blinky | 28 / 1 | 27 / 27 | 7 / 7 | 7 | 1.5 + 2.4 s | 375.9 / 392.5 / 391.5 / 390.3 MHz |
 | zybo-jtag-counter (clk) | 96 / 51 | 128 / 128 | 8 / 8 | 54 | 2.3 + 2.1 s | 358.3 / 378.1 / 352.5 / 377.8 MHz |
-| zybo-picorv32 | 666 / 589 | 362 / 375 | 58 / 51 | 251 | 19.0 + 33.9 s | 145.2 / 144.9 / 167.9 / 156.9 MHz |
-| zybo-sha256 | 2,326 / 2,012 | 2,035 / 1,934 | 160 / 112 | 1,078 | 174 + 134 s | 74.2 / 71.5 / 61.0 / 82.8 MHz |
+| zybo-picorv32 | 666 / 589 | 362 / 375 | 58 / 51 | 251 | 10.9 + 31.2 s | 157.5 / 157.9 / 167.9 / 156.9 MHz |
+| zybo-sha256 | 2,326 / 2,012 | 2,035 / 1,934 | 160 / 112 | 1,078 | 182 + 175 s | 72.7 / 71.8 / 61.0 / 82.8 MHz |
 
-The self-tests against Vivado the same way (2026-11-03; Vivado's own
+The self-tests against Vivado the same way (2026-11-04, branch xc7-qor; Vivado's own
 2026-11-02, bram-selftest's on its earlier RTL):
 
 | design | LUTs chipsmith / Vivado | registers | block RAM | DSPs | Fmax chipsmith (estimate) / Vivado on chipsmith's / Vivado's own |
 |---|---|---|---|---|---|
-| zybo-bram-selftest | 257 / 10,646 | 192 / 8,346 | 9 RAMB18 / 3 tiles | | 155.4 / 158.9 / 118.1 MHz |
-| zybo-mult-selftest (its 62.5 MHz test clock) | 850 / 671 | 428 / 446 | | 14 / 10 | 71.0 / 69.4 MHz / not timed |
+| zybo-bram-selftest | 259 / 10,646 | 193 / 8,346 | 9 RAMB18 / 3 tiles | | 145.1 / 143.6 / 118.1 MHz |
+| zybo-mult-selftest (its 62.5 MHz test clock) | 639 / 671 | 456 / 446 | | 14 / 10 | 78.9 / 75.0 MHz / not timed |
 | zybo-riscv-bram (its CPU's 62.5 MHz clock) | 941 / 779 | 509 / 528 | 2 RAMB18 / 1 tile | | 120.1 / 121.6 / 143.5 MHz (Vivado's at 125 MHz) |
 
 bram-selftest registers each memory's compare and counts an error a
@@ -1090,6 +1090,44 @@ out of them); 140 ps on every path end for the clock tree. Per design
 Before, the block RAMs' and DSPs' clocks came through general
 interconnect (below), which is most of riscv-bram's, bram-selftest's
 and mult-selftest's difference.
+
+Branch xc7-qor (2026-11-04): sums by arrival, register copies, LUT pins
+by route delay, cascaded DSPs. Vivado on chipsmith's routing, five seeds
+each (`ZYBO_SEEDS="0 1 2 3 4"`), the slowest logic clock:
+
+| design | open df16e49 | xc7-qor | Vivado's own |
+|---|---|---|---|
+| zybo-blinky | 392.5 MHz (every seed) | 392.5 MHz (every seed) | 390.3 MHz |
+| zybo-jtag-counter | 340.6-364.2 MHz | 343.2-378.1 (mean 364.9) | 377.8 MHz |
+| zybo-picorv32 | 137.7-155.7 (mean 145.4) | 131.9-158.2 (mean 147.0) | 156.9 MHz |
+| zybo-sha256 | 49.0-51.6 (mean 50.0) | 71.8-80.8 (mean 75.8) | 82.8 MHz |
+| zybo-bram-selftest | 137.0-158.9 (mean 149.4) | 143.6-152.9 (mean 150.3) | 118.1 MHz (earlier RTL) |
+| zybo-mult-selftest (62.5 MHz clock) | 66.9-69.7 (mean 68.6) | 70.7-76.1 (mean 74.6) | not timed |
+| zybo-riscv-bram (CPU clock) | 114.6-129.0 (mean 123.1) | 117.4-127.0 (mean 122.2) | 143.5 MHz (at 125) |
+
+sha256's is mostly the sums: by arrival alone 63.8-71.9 (mean 68.7); its
+round counter's 201-load register, copied, is the rest. Its critical path
+is now control (a LUT to 166 loads, then nets of 33 and 32 loads at 3.1
+and 3.7 ns) where Vivado's is the adders. Tried and rejected, by Vivado
+unless said:
+
+- carry-save sums (the three terms ready first as XOR and majority, one
+  chain per three terms, Vivado's ternary adder): sha256's CARRY4s 160 to
+  112, Vivado's count, but 55.9 MHz on seed 0 against 68.5 by arrival (the
+  majority LUTs add a level per three terms);
+- LUT copies as register copies: sha256 78.0 against 85.5 MHz on seed 0,
+  by the estimate, with 258 copies;
+- register copies from 16 or 24 loads: by the estimate within seed noise
+  of 32, with 259 and 170 copies to 128;
+- carry chains in either slice of a tile: sha256 the same (72.6 MHz mean
+  over four seeds), zybo-jtag-counter 310.2-378.1 (mean 354.3), its
+  counter's registers reaching their own LUTs through detours in the odd
+  slice, picorv32's estimate 129.1 against 145.2 MHz;
+- LUT pins by the least criticality-weighted sum of delays, not the most
+  critical input first: bram-selftest 137.4-154.3 (mean 143.5), picorv32
+  mean 142.0, jtag-counter mean 361.5;
+- more priority cuts (16) and area passes (4 and 4) in the LUT mapper:
+  picorv32 613 to 611 LUTs.
 
 What timing Vivado's way found and fixed: a LUT's inputs went on A1 up,
 the slowest pins (now the fastest, the most critical first); block RAM
