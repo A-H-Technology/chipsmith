@@ -18,6 +18,8 @@ def table(title):
 period = {r[0]: float(r[-2]) for r in table("Clock Summary") if len(r) >= 4}
 out = []
 for r in table("Intra Clock Table"):
-    if r[0] in period and re.match(r"-?\d", r[1]):
+    # A clock with only pulse-width checks (a PLL's feedback) has no setup
+    # columns: its first number is a pulse-width slack, not WNS.
+    if r[0] in period and len(r) >= 9 and re.match(r"-?\d", r[1]):
         out.append(f"{r[0]} {1000 / (period[r[0]] - float(r[1])):.1f} MHz")
 print(", ".join(out))

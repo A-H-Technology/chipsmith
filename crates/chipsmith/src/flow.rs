@@ -29,7 +29,7 @@ use std::process::{Command, Stdio};
 
 use std::time::Instant;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 
 use crate::cache::{self, say, Stamp};
 use chipsmith_cyclone2::bitstream;
@@ -741,6 +741,19 @@ fn xc7_synth(verilog: &[PathBuf], top: &str, netlist: &Path) -> Result<Vec<PathB
         s.bufgs,
         started.elapsed().as_secs_f64()
     );
+    for m in &out.design.modules {
+        for c in &m.cells {
+            let chipsmith_netlist::CellKind::Other(g) = &c.kind else { continue };
+            let Some(prim) = chipsmith_xc7::cmt::Prim::from_cell(&g.ty) else { continue };
+            let used: Vec<bool> = (0..prim.outputs()).map(|k| g.port(&format!("CLKOUT{k}")).is_some()).collect();
+            let config = chipsmith_xc7::cmt::Config::from_params(prim, &g.params, &used)?;
+            let period = match g.params.get("CLKIN1_PERIOD") {
+                Some(chipsmith_netlist::ParamValue::Str(p)) => (p.parse::<f64>().unwrap_or(0.0) * 1000.0).round() as u32,
+                _ => 0,
+            };
+            say!("{} {}: {}", prim.cell(), c.name, config.summary(period.max(1)));
+        }
+    }
     let mut json = Vec::new();
     chipsmith_netlist::write_json(&out.design, &mut json)?;
     let mut json: serde_json::Value = serde_json::from_slice(&json)?;
@@ -797,17 +810,33 @@ fn xc7_pnr(
         r.iterations,
         r.route_seconds
     );
+    // A PLL's outputs follow from the input period it was solved for, so
+    // that has to be the pin's.
+    for i in &r.cmt_inputs {
+        if let Some(f) = clocks.get(&i.clock) {
+            let want = 1e6 / f.mhz();
+            ensure!(
+                (want - f64::from(i.period_ps)).abs() < 0.5,
+                "{}: INCLK0_INPUT_FREQUENCY {} ps, but clock {} is {} MHz ({want:.0} ps)",
+                i.cell,
+                i.period_ps,
+                i.clock,
+                f.mhz()
+            );
+        }
+    }
     let mut failed = Vec::new();
     for c in &r.clocks {
         let ns = c.critical / 1000.0;
         let fmax = if ns > 0.0 { 1e3 / ns as f64 } else { f64::INFINITY };
-        match clocks.get(&c.name) {
-            Some(f) => {
-                let slack = f.period_ns() - ns as f64;
+        let period_ns = clocks.get(&c.name).map(|f| f.period_ns()).or(c.hz.map(|hz| 1e9 / hz));
+        match period_ns {
+            Some(period) => {
+                let slack = period - ns as f64;
                 say!(
-                    "clock {}: {ns:.2} ns, Fmax {fmax:.1} MHz at {} MHz, slack {slack:.3} ns (estimate)",
+                    "clock {}: {ns:.2} ns, Fmax {fmax:.1} MHz at {:.3} MHz, slack {slack:.3} ns (estimate)",
                     c.name,
-                    f.mhz()
+                    1e3 / period
                 );
                 if slack < 0.0 {
                     failed.push(c.name.clone());

@@ -9,19 +9,19 @@
 // --release -p chipsmith-jtag --example xc7_user1`). led[0] lights on an
 // error, led[3:1] show the pass count's top bits.
 module top(input clk, output [3:0] led);
-  // The CPU runs at 62.5 MHz, half the Zybo's clock, from a register
-  // toggling (into a BUFG, as every clock; zybo-mult-selftest's way):
-  // chipsmith's placement and routing of it make 115 to 129 MHz at
-  // Vivado's slow corner over five seeds (Vivado's own 143.5 MHz), so 125
-  // fails the build's check as often as not. Back to clk once chipsmith
-  // makes 125 MHz on every seed.
-  reg half = 0;
-  always @(posedge clk) half <= ~half;
-  wire cclk = half;
+  // The CPU runs at 112.5 MHz, 9/10 of the Zybo's clock, from a PLL;
+  // reset holds until it has locked. chipsmith's placement and routing
+  // of it made 114.8 to 128.9 MHz at Vivado's slow corner over five seeds
+  // (bench/zybo-timing.sh), so 125 failed on four (README, "The Zybo
+  // flow").
+  wire cclk, locked;
+  XC7_PLL #(.INCLK0_INPUT_FREQUENCY(8000), .CLK0_MULTIPLY_BY(9), .CLK0_DIVIDE_BY(10))
+    pll (.INCLK(clk), .ARESET(1'b0), .CLK0(cclk), .LOCKED(locked));
   reg [3:0] rst_cnt = 0;
   wire resetn = &rst_cnt;
   always @(posedge cclk)
-    if (!resetn) rst_cnt <= rst_cnt + 1'b1;
+    if (!locked) rst_cnt <= 0;
+    else if (!resetn) rst_cnt <= rst_cnt + 1'b1;
 
   wire mem_valid, mem_instr;
   reg mem_ready = 0;

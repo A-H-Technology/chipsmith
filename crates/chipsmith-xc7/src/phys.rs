@@ -129,10 +129,20 @@ pub(crate) struct DspConf {
     pub config: crate::dsp::Config,
 }
 
+/// A used PLLE2_ADV or MMCME2_ADV: its tile, what it holds, and whether
+/// RST is routed from a signal.
+#[derive(Debug, Clone)]
+pub(crate) struct CmtSite {
+    pub tile: u32,
+    pub config: crate::cmt::Config,
+    pub reset: bool,
+}
+
 pub(crate) struct Physical {
     pub nets: Vec<RouteNet>,
     pub brams: Vec<BramConf>,
     pub dsps: Vec<DspConf>,
+    pub cmts: Vec<CmtSite>,
     pub slices: BTreeMap<String, SliceConf>,
     pub pads: Vec<PadConf>,
     pub bufgs: Vec<String>,
@@ -456,7 +466,7 @@ impl Builder<'_> {
                 "T" => Ok(End::Pin(site.clone(), "T".into())),
                 _ => bail!("{}: pin buffer port {port}", cell.name),
             },
-            (Kind::Bufg, _) | (Kind::Bscan { .. }, _) => pin(port.to_string()),
+            (Kind::Bufg, _) | (Kind::Bscan { .. }, _) | (Kind::Cmt { .. }, _) => pin(port.to_string()),
             (Kind::Bram { .. }, _) => pin(self.bram_pin(site, port)?),
             (Kind::Dsp { .. }, _) => pin(port.to_string()),
             (kind, bel) => bail!("{}: {kind:?} at {bel:?}", cell.name),
@@ -483,7 +493,7 @@ impl Builder<'_> {
                 (s, format!("{}MUX", LETTERS[k]), Some((k, mux)))
             }
             (Kind::Pad { site, .. }, _) => (site.clone(), "I".into(), None),
-            (Kind::Bufg, _) | (Kind::Bscan { .. }, _) => (s, port.to_string(), None),
+            (Kind::Bufg, _) | (Kind::Bscan { .. }, _) | (Kind::Cmt { .. }, _) => (s, port.to_string(), None),
             (Kind::Bram { .. }, _) => (s.clone(), self.bram_pin(&s, port)?, None),
             (Kind::Dsp { .. }, _) => (s, port.to_string(), None),
             (kind, bel) => bail!("{}: output {port} of {kind:?} at {bel:?}", cell.name),
@@ -651,6 +661,7 @@ pub(crate) fn build(
     let mut ps7 = false;
     let mut brams = Vec::new();
     let mut dsps = Vec::new();
+    let mut cmts = Vec::new();
     for (c, cell) in d.cells.iter().enumerate() {
         let c = c as CellId;
         match (&cell.kind, &p.conf[c as usize]) {
@@ -748,6 +759,14 @@ pub(crate) fn build(
             }
             (Kind::Bscan { chain }, Conf::Bscan) => bscans.push((b.at(c)?.0.to_string(), *chain)),
             (Kind::Ps7, Conf::Ps7) => ps7 = true,
+            (Kind::Cmt { .. }, Conf::Cmt(conf)) => {
+                let (site, _) = b.at(c)?;
+                cmts.push(CmtSite {
+                    tile: db.sites[site].tile,
+                    config: conf.config.clone(),
+                    reset: cell.net("RST").is_some(),
+                });
+            }
             (Kind::Dsp { .. }, Conf::Dsp(config)) => {
                 let (site, _) = b.at(c)?;
                 let s = &db.sites[site];
@@ -831,6 +850,7 @@ pub(crate) fn build(
         nets,
         brams,
         dsps,
+        cmts,
         slices,
         pads,
         bufgs,

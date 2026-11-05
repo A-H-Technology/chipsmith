@@ -288,6 +288,8 @@ pub fn decode_routed(
     let mut bscans: Vec<String> = Vec::new();
     let mut rams: BTreeMap<(u32, usize), RamHalf> = BTreeMap::new();
     let mut dsps: BTreeMap<(u32, usize), DspSite> = BTreeMap::new();
+    // PLLs and MMCMs: per tile, the block's kind and set bits.
+    let mut cmts: BTreeMap<u32, (crate::cmt::Prim, std::collections::BTreeSet<String>)> = BTreeMap::new();
     for (tname, feats) in &tiles {
         let Some(&tile) = tile_of.get(tname.as_str()) else {
             continue;
@@ -419,6 +421,21 @@ pub fn decode_routed(
                         e.2 |= output;
                     }
                     None => iobs.push((site, input, output)),
+                }
+            } else if let Some(prim) = crate::cmt::Prim::from_cell(half) {
+                let name = parts[1..].join(".");
+                let bits = &mut cmts.entry(tile).or_insert_with(|| (prim, Default::default())).1;
+                match f.value.as_ref() {
+                    Some((lo, v)) => {
+                        for (i, &b) in v.iter().enumerate() {
+                            if b {
+                                bits.insert(format!("{name}[{}]", *lo as usize + i));
+                            }
+                        }
+                    }
+                    None => {
+                        bits.insert(name);
+                    }
                 }
             } else if half == "DSP48" && parts.len() >= 3 {
                 let k: usize = parts[1].strip_prefix("DSP_").context("a DSP site")?.parse()?;
@@ -570,6 +587,29 @@ pub fn decode_routed(
         let o = d.net();
         d.source.insert(d.pin(site, "O")?, o);
         bufg_out.push(o);
+    }
+    // Each PLL's or MMCM's outputs: CLKFBOUT, the CLKOUTs it enables, LOCKED.
+    let mut cmt_out: Vec<(String, crate::cmt::Prim, Vec<(String, SigBit)>)> = Vec::new();
+    for (&tile, (prim, bits)) in &cmts {
+        let site = db
+            .sites
+            .iter()
+            .find(|(_, s)| s.tile == tile && s.ty == prim.cell())
+            .map(|(n, _)| n.clone())
+            .with_context(|| format!("tile {}: no {} site", db.tile_names[tile as usize], prim.cell()))?;
+        let mut outs = Vec::new();
+        let mut ports = vec!["CLKFBOUT".to_string(), "LOCKED".to_string()];
+        ports.extend(
+            (0..prim.outputs())
+                .filter(|k| bits.contains(&format!("CLKOUT{k}_CLKOUT1_OUTPUT_ENABLE[0]")))
+                .map(|k| format!("CLKOUT{k}")),
+        );
+        for p in ports {
+            let n = d.net();
+            d.source.insert(d.pin(&site, &p)?, n);
+            outs.push((p, n));
+        }
+        cmt_out.push((site, *prim, outs));
     }
     for site in &bscans {
         let s = &db.sites[site];
@@ -742,9 +782,15 @@ pub fn decode_routed(
     for ((tile, h), r) in &rams {
         bram_half(&mut d, *tile, *h, r, &ram_out[&(*tile, *h)])?;
     }
+    let mut bufg_io = Vec::new();
     for (site, o) in bufgs.iter().zip(&bufg_out) {
         let i = d.resolve_pin(site, "I0")?;
         d.m.add_cell(format!("bufg_{site}"), cells::bufg(i, *o));
+        bufg_io.push((i, *o));
+    }
+    for ((site, prim, outs), (prim2, bits)) in cmt_out.iter().zip(cmts.values()) {
+        debug_assert_eq!(prim, prim2);
+        cmt_cell(&mut d, site, *prim, bits, outs, &bufg_io)?;
     }
     for site in &bscans {
         let tdo = d.resolve_pin(site, "TDO")?;
@@ -1205,6 +1251,71 @@ fn dsp_cell(d: &mut Decoder, site: &str, s: &DspSite, outs: &[(String, SigBit)])
         CellKind::Other(Generic {
             ty: "DSP48E1".into(),
             params: config.params(),
+            ports,
+        }),
+    );
+    Ok(())
+}
+
+/// A PLL or MMCM of the site's bits. Its feedback is read off the routing:
+/// CLKFBIN from CLKFBOUT itself (INTERNAL) or through a BUFG (ZHOLD); any
+/// other feedback and the block wouldn't make the clocks its counters say.
+/// RST reads inverted unless `ZINV_RST` (an unrouted pin reads 1, so 0).
+fn cmt_cell(
+    d: &mut Decoder,
+    site: &str,
+    prim: crate::cmt::Prim,
+    bits: &std::collections::BTreeSet<String>,
+    outs: &[(String, SigBit)],
+    bufg_io: &[(SigBit, SigBit)],
+) -> Result<()> {
+    use crate::cmt::Compensation;
+    use chipsmith_netlist::{CellKind, Dir as PDir, Generic, GenericPort};
+    let out = |p: &str| outs.iter().find(|(n, _)| n == p).map(|(_, b)| *b).expect("every block has CLKFBOUT and LOCKED");
+    let fbout = out("CLKFBOUT");
+    let fbin = d.resolve_pin(site, "CLKFBIN")?;
+    let routed = if fbin == fbout {
+        Compensation::Internal
+    } else if bufg_io.iter().any(|&(i, o)| i == fbout && o == fbin) {
+        Compensation::Zhold
+    } else {
+        bail!("{site}: CLKFBIN is {fbin:?}, neither CLKFBOUT nor CLKFBOUT through a BUFG");
+    };
+    // The bits' compensation must be the routing's (`from_features`).
+    let (config, reset) = crate::cmt::Config::from_features(prim, bits, routed).with_context(|| site.to_string())?;
+    let r = d.resolve_pin(site, "RST")?;
+    let rst = if reset {
+        r
+    } else {
+        match r {
+            SigBit::Const(State::One) => SigBit::ZERO,
+            SigBit::Const(State::Zero) => SigBit::ONE,
+            b => {
+                let n = d.net();
+                d.m.add_cell(format!("{site}.inv_RST"), cells::lut(&[b], 0b01, n));
+                n
+            }
+        }
+    };
+    let clkin = d.resolve_pin(site, "CLKIN1")?;
+    let port = |name: &str, dir: PDir, b: SigBit| GenericPort {
+        name: name.into(),
+        dir: Some(dir),
+        sig: vec![b],
+    };
+    let mut ports = vec![
+        port("CLKIN1", PDir::In, clkin),
+        port("CLKFBIN", PDir::In, fbin),
+        port("RST", PDir::In, rst),
+    ];
+    for (p, b) in outs {
+        ports.push(port(p, PDir::Out, *b));
+    }
+    d.m.add_cell(
+        format!("{site}.cmt"),
+        CellKind::Other(Generic {
+            ty: prim.cell().into(),
+            params: config.params(None),
             ports,
         }),
     );

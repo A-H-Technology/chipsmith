@@ -235,3 +235,80 @@ endmodule
   parameter DISABLE_JTAG = "FALSE";
   parameter integer JTAG_CHAIN = 1;
 endmodule
+
+// A clock management tile's PLL or MMCM asked for by ratio, as the DE2's
+// CY2_PLL (ADR-0008): the input period in picoseconds, per output
+// f_in * MULTIPLY_BY / DIVIDE_BY, a phase shift in picoseconds (negative:
+// earlier) and a duty cycle in percent. COMPENSATION "ZHOLD" feeds back
+// through a BUFG, "INTERNAL" inside the tile (`crate::cmt`).
+(* blackbox *) module XC7_PLL (input INCLK, input ARESET, output CLK0, CLK1, CLK2, CLK3, CLK4, CLK5, output LOCKED);
+  parameter INCLK0_INPUT_FREQUENCY = 8000;
+  parameter COMPENSATION = "ZHOLD";
+  parameter CLK0_MULTIPLY_BY = 1;
+  parameter CLK0_DIVIDE_BY = 1;
+  parameter CLK0_PHASE_SHIFT = 0;
+  parameter CLK0_DUTY_CYCLE = 50;
+  parameter CLK1_MULTIPLY_BY = 1;
+  parameter CLK1_DIVIDE_BY = 1;
+  parameter CLK1_PHASE_SHIFT = 0;
+  parameter CLK1_DUTY_CYCLE = 50;
+  parameter CLK2_MULTIPLY_BY = 1;
+  parameter CLK2_DIVIDE_BY = 1;
+  parameter CLK2_PHASE_SHIFT = 0;
+  parameter CLK2_DUTY_CYCLE = 50;
+  parameter CLK3_MULTIPLY_BY = 1;
+  parameter CLK3_DIVIDE_BY = 1;
+  parameter CLK3_PHASE_SHIFT = 0;
+  parameter CLK3_DUTY_CYCLE = 50;
+  parameter CLK4_MULTIPLY_BY = 1;
+  parameter CLK4_DIVIDE_BY = 1;
+  parameter CLK4_PHASE_SHIFT = 0;
+  parameter CLK4_DUTY_CYCLE = 50;
+  parameter CLK5_MULTIPLY_BY = 1;
+  parameter CLK5_DIVIDE_BY = 1;
+  parameter CLK5_PHASE_SHIFT = 0;
+  parameter CLK5_DUTY_CYCLE = 50;
+endmodule
+(* blackbox *) module XC7_MMCM (input INCLK, input ARESET, output CLK0, CLK1, CLK2, CLK3, CLK4, CLK5, CLK6, output LOCKED);
+  parameter INCLK0_INPUT_FREQUENCY = 8000;
+  parameter COMPENSATION = "ZHOLD";
+  parameter CLK0_MULTIPLY_BY = 1;
+  parameter CLK0_DIVIDE_BY = 1;
+  parameter CLK0_PHASE_SHIFT = 0;
+  parameter CLK0_DUTY_CYCLE = 50;
+  parameter CLK1_MULTIPLY_BY = 1;
+  parameter CLK1_DIVIDE_BY = 1;
+  parameter CLK1_PHASE_SHIFT = 0;
+  parameter CLK1_DUTY_CYCLE = 50;
+  parameter CLK2_MULTIPLY_BY = 1;
+  parameter CLK2_DIVIDE_BY = 1;
+  parameter CLK2_PHASE_SHIFT = 0;
+  parameter CLK2_DUTY_CYCLE = 50;
+  parameter CLK3_MULTIPLY_BY = 1;
+  parameter CLK3_DIVIDE_BY = 1;
+  parameter CLK3_PHASE_SHIFT = 0;
+  parameter CLK3_DUTY_CYCLE = 50;
+  parameter CLK4_MULTIPLY_BY = 1;
+  parameter CLK4_DIVIDE_BY = 1;
+  parameter CLK4_PHASE_SHIFT = 0;
+  parameter CLK4_DUTY_CYCLE = 50;
+  parameter CLK5_MULTIPLY_BY = 1;
+  parameter CLK5_DIVIDE_BY = 1;
+  parameter CLK5_PHASE_SHIFT = 0;
+  parameter CLK5_DUTY_CYCLE = 50;
+  parameter CLK6_MULTIPLY_BY = 1;
+  parameter CLK6_DIVIDE_BY = 1;
+  parameter CLK6_PHASE_SHIFT = 0;
+  parameter CLK6_DUTY_CYCLE = 50;
+endmodule
+
+// What synthesis makes of them (`crate::cmt::Config::params`), and what the
+// decoder reads back: the pins chipsmith connects.
+(* blackbox *) module PLLE2_ADV (input CLKIN1, input CLKFBIN, input RST, output CLKFBOUT,
+                                 output CLKOUT0, CLKOUT1, CLKOUT2, CLKOUT3, CLKOUT4, CLKOUT5,
+                                 output LOCKED);
+endmodule
+(* blackbox *) module MMCME2_ADV (input CLKIN1, input CLKFBIN, input RST, output CLKFBOUT,
+                                  output CLKOUT0, CLKOUT1, CLKOUT2, CLKOUT3, CLKOUT4, CLKOUT5,
+                                  CLKOUT6, output LOCKED);
+endmodule

@@ -2,6 +2,7 @@
 //! the prjxray-db routing graph, placement, routing and the Zynq `.bin`.
 
 pub mod bram;
+pub mod cmt;
 pub mod decode;
 pub mod delay;
 pub mod dsp;

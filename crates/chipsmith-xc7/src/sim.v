@@ -437,3 +437,156 @@ module RAMB36E1 (
     assign ECCPARITY = 0;
     assign RDADDRECC = 0;
 endmodule
+
+// PLLs and MMCMs (XC7_PLL, XC7_MMCM as a design asks for them; PLLE2_ADV,
+// MMCME2_ADV as synthesis and the decoder make them), ideal: each measures
+// its input's period, locks on the 8th rising edge after reset, and from
+// then runs every output at its period, phase and duty cycle relative to
+// that edge. The two sides of a co-simulation then make the same clocks
+// exactly when the counters make what the request asked for. Feedback
+// isn't modelled (the decoder checks that CLKFBIN is CLKFBOUT's).
+//
+// cs_ratio[k]: output k's period over the input's; cs_phase[k]: its shift,
+// in its own periods (0 to 1); cs_duty[k]: high, of its period. Index 7 is
+// CLKFBOUT.
+`define CS_CMT_CORE(CLKIN, RST) \
+  real cs_ratio [0:7]; \
+  real cs_phase [0:7]; \
+  real cs_duty [0:7]; \
+  realtime cs_last = 0, cs_period = 0; \
+  integer cs_edges = 0; \
+  reg cs_locked = 0; \
+  always @(posedge CLKIN or posedge RST) \
+    if (RST) begin cs_edges = 0; cs_locked = 0; end \
+    else begin \
+      if (cs_edges > 0) cs_period = $realtime - cs_last; \
+      cs_last = $realtime; \
+      cs_edges = cs_edges + 1; \
+      if (cs_edges == 8) cs_locked = 1; \
+    end \
+  genvar cs_k; \
+  generate for (cs_k = 0; cs_k < 8; cs_k = cs_k + 1) begin : cs_out \
+    reg o = 0; \
+    always @(posedge cs_locked) begin \
+      #(cs_phase[cs_k] * cs_ratio[cs_k] * cs_period); \
+      while (cs_locked) begin \
+        o = 1; #(cs_duty[cs_k] * cs_ratio[cs_k] * cs_period); \
+        o = 0; #((1.0 - cs_duty[cs_k]) * cs_ratio[cs_k] * cs_period); \
+      end \
+    end \
+  end endgenerate
+
+// A fraction's part in [0, 1).
+`define CS_WRAP(x) ((x) - $floor(x))
+
+`define CS_REQ_OUT(k, mul, div, ph, du) \
+    cs_ratio[k] = 1.0 * div / mul; \
+    cs_phase[k] = `CS_WRAP(1.0 * ph / (1.0 * INCLK0_INPUT_FREQUENCY * div / mul)); \
+    cs_duty[k] = du / 100.0;
+
+`define CS_REQUEST \
+  parameter INCLK0_INPUT_FREQUENCY = 8000; \
+  parameter COMPENSATION = "ZHOLD"; \
+  parameter CLK0_MULTIPLY_BY = 1, CLK0_DIVIDE_BY = 1, CLK0_PHASE_SHIFT = 0, CLK0_DUTY_CYCLE = 50; \
+  parameter CLK1_MULTIPLY_BY = 1, CLK1_DIVIDE_BY = 1, CLK1_PHASE_SHIFT = 0, CLK1_DUTY_CYCLE = 50; \
+  parameter CLK2_MULTIPLY_BY = 1, CLK2_DIVIDE_BY = 1, CLK2_PHASE_SHIFT = 0, CLK2_DUTY_CYCLE = 50; \
+  parameter CLK3_MULTIPLY_BY = 1, CLK3_DIVIDE_BY = 1, CLK3_PHASE_SHIFT = 0, CLK3_DUTY_CYCLE = 50; \
+  parameter CLK4_MULTIPLY_BY = 1, CLK4_DIVIDE_BY = 1, CLK4_PHASE_SHIFT = 0, CLK4_DUTY_CYCLE = 50; \
+  parameter CLK5_MULTIPLY_BY = 1, CLK5_DIVIDE_BY = 1, CLK5_PHASE_SHIFT = 0, CLK5_DUTY_CYCLE = 50; \
+  parameter CLK6_MULTIPLY_BY = 1, CLK6_DIVIDE_BY = 1, CLK6_PHASE_SHIFT = 0, CLK6_DUTY_CYCLE = 50; \
+  `CS_CMT_CORE(INCLK, ARESET) \
+  initial begin \
+    `CS_REQ_OUT(0, CLK0_MULTIPLY_BY, CLK0_DIVIDE_BY, CLK0_PHASE_SHIFT, CLK0_DUTY_CYCLE) \
+    `CS_REQ_OUT(1, CLK1_MULTIPLY_BY, CLK1_DIVIDE_BY, CLK1_PHASE_SHIFT, CLK1_DUTY_CYCLE) \
+    `CS_REQ_OUT(2, CLK2_MULTIPLY_BY, CLK2_DIVIDE_BY, CLK2_PHASE_SHIFT, CLK2_DUTY_CYCLE) \
+    `CS_REQ_OUT(3, CLK3_MULTIPLY_BY, CLK3_DIVIDE_BY, CLK3_PHASE_SHIFT, CLK3_DUTY_CYCLE) \
+    `CS_REQ_OUT(4, CLK4_MULTIPLY_BY, CLK4_DIVIDE_BY, CLK4_PHASE_SHIFT, CLK4_DUTY_CYCLE) \
+    `CS_REQ_OUT(5, CLK5_MULTIPLY_BY, CLK5_DIVIDE_BY, CLK5_PHASE_SHIFT, CLK5_DUTY_CYCLE) \
+    `CS_REQ_OUT(6, CLK6_MULTIPLY_BY, CLK6_DIVIDE_BY, CLK6_PHASE_SHIFT, CLK6_DUTY_CYCLE) \
+    cs_ratio[7] = 1.0; cs_phase[7] = 0.0; cs_duty[7] = 0.5; \
+  end \
+  assign LOCKED = cs_locked;
+
+module XC7_PLL (input INCLK, input ARESET, output CLK0, CLK1, CLK2, CLK3, CLK4, CLK5, output LOCKED);
+  `CS_REQUEST
+  assign {CLK5, CLK4, CLK3, CLK2, CLK1, CLK0} =
+    {cs_out[5].o, cs_out[4].o, cs_out[3].o, cs_out[2].o, cs_out[1].o, cs_out[0].o};
+endmodule
+
+module XC7_MMCM (input INCLK, input ARESET, output CLK0, CLK1, CLK2, CLK3, CLK4, CLK5, CLK6, output LOCKED);
+  `CS_REQUEST
+  assign {CLK6, CLK5, CLK4, CLK3, CLK2, CLK1, CLK0} =
+    {cs_out[6].o, cs_out[5].o, cs_out[4].o, cs_out[3].o, cs_out[2].o, cs_out[1].o, cs_out[0].o};
+endmodule
+
+// The unisims, with the attributes as `crate::cmt::Config::params` writes
+// them: whole numbers as numbers, the rest as decimal strings.
+`define CS_REAL(s) cs_real(s)
+`define CS_UNISIM_OUT(k, divide, phase, duty) \
+    cs_ratio[k] = 1.0 * DIVCLK_DIVIDE * divide / cs_mult; \
+    cs_phase[k] = `CS_WRAP(`CS_REAL(phase) / 360.0); \
+    cs_duty[k] = `CS_REAL(duty);
+`define CS_UNISIM_PARAMS \
+  parameter BANDWIDTH = "OPTIMIZED"; \
+  parameter COMPENSATION = "ZHOLD"; \
+  parameter CLKIN1_PERIOD = "8.000"; \
+  parameter DIVCLK_DIVIDE = 1; \
+  parameter CLKFBOUT_PHASE = "0.000"; \
+  parameter CLKOUT0_PHASE = "0.000", CLKOUT0_DUTY_CYCLE = "0.500000"; \
+  parameter CLKOUT1_DIVIDE = 1, CLKOUT1_PHASE = "0.000", CLKOUT1_DUTY_CYCLE = "0.500000"; \
+  parameter CLKOUT2_DIVIDE = 1, CLKOUT2_PHASE = "0.000", CLKOUT2_DUTY_CYCLE = "0.500000"; \
+  parameter CLKOUT3_DIVIDE = 1, CLKOUT3_PHASE = "0.000", CLKOUT3_DUTY_CYCLE = "0.500000"; \
+  parameter CLKOUT4_DIVIDE = 1, CLKOUT4_PHASE = "0.000", CLKOUT4_DUTY_CYCLE = "0.500000"; \
+  parameter CLKOUT5_DIVIDE = 1, CLKOUT5_PHASE = "0.000", CLKOUT5_DUTY_CYCLE = "0.500000"; \
+  function real cs_real(input [8*16-1:0] s); \
+    real r; integer n; \
+    begin n = $sscanf(s, "%f", r); cs_real = r; end \
+  endfunction \
+  real cs_mult;
+
+module PLLE2_ADV (input CLKIN1, input CLKFBIN, input RST, output CLKFBOUT, output CLKOUT0, CLKOUT1,
+                  CLKOUT2, CLKOUT3, CLKOUT4, CLKOUT5, output LOCKED);
+  `CS_UNISIM_PARAMS
+  parameter CLKFBOUT_MULT = 5;
+  parameter CLKOUT0_DIVIDE = 1;
+  `CS_CMT_CORE(CLKIN1, RST)
+  initial begin
+    cs_mult = CLKFBOUT_MULT;
+    `CS_UNISIM_OUT(0, CLKOUT0_DIVIDE, CLKOUT0_PHASE, CLKOUT0_DUTY_CYCLE)
+    `CS_UNISIM_OUT(1, CLKOUT1_DIVIDE, CLKOUT1_PHASE, CLKOUT1_DUTY_CYCLE)
+    `CS_UNISIM_OUT(2, CLKOUT2_DIVIDE, CLKOUT2_PHASE, CLKOUT2_DUTY_CYCLE)
+    `CS_UNISIM_OUT(3, CLKOUT3_DIVIDE, CLKOUT3_PHASE, CLKOUT3_DUTY_CYCLE)
+    `CS_UNISIM_OUT(4, CLKOUT4_DIVIDE, CLKOUT4_PHASE, CLKOUT4_DUTY_CYCLE)
+    `CS_UNISIM_OUT(5, CLKOUT5_DIVIDE, CLKOUT5_PHASE, CLKOUT5_DUTY_CYCLE)
+    cs_ratio[6] = 1.0; cs_phase[6] = 0.0; cs_duty[6] = 0.5;
+    cs_ratio[7] = 1.0 * DIVCLK_DIVIDE; cs_phase[7] = 0.0; cs_duty[7] = 0.5;
+  end
+  assign {CLKOUT5, CLKOUT4, CLKOUT3, CLKOUT2, CLKOUT1, CLKOUT0} =
+    {cs_out[5].o, cs_out[4].o, cs_out[3].o, cs_out[2].o, cs_out[1].o, cs_out[0].o};
+  assign CLKFBOUT = cs_out[7].o;
+  assign LOCKED = cs_locked;
+endmodule
+
+module MMCME2_ADV (input CLKIN1, input CLKFBIN, input RST, output CLKFBOUT, output CLKOUT0, CLKOUT1,
+                   CLKOUT2, CLKOUT3, CLKOUT4, CLKOUT5, CLKOUT6, output LOCKED);
+  `CS_UNISIM_PARAMS
+  parameter CLKFBOUT_MULT_F = "5.000";
+  parameter CLKOUT0_DIVIDE_F = "1.000";
+  parameter CLKOUT6_DIVIDE = 1, CLKOUT6_PHASE = "0.000", CLKOUT6_DUTY_CYCLE = "0.500000";
+  `CS_CMT_CORE(CLKIN1, RST)
+  initial begin
+    cs_mult = `CS_REAL(CLKFBOUT_MULT_F);
+    `CS_UNISIM_OUT(0, `CS_REAL(CLKOUT0_DIVIDE_F), CLKOUT0_PHASE, CLKOUT0_DUTY_CYCLE)
+    `CS_UNISIM_OUT(1, CLKOUT1_DIVIDE, CLKOUT1_PHASE, CLKOUT1_DUTY_CYCLE)
+    `CS_UNISIM_OUT(2, CLKOUT2_DIVIDE, CLKOUT2_PHASE, CLKOUT2_DUTY_CYCLE)
+    `CS_UNISIM_OUT(3, CLKOUT3_DIVIDE, CLKOUT3_PHASE, CLKOUT3_DUTY_CYCLE)
+    `CS_UNISIM_OUT(4, CLKOUT4_DIVIDE, CLKOUT4_PHASE, CLKOUT4_DUTY_CYCLE)
+    `CS_UNISIM_OUT(5, CLKOUT5_DIVIDE, CLKOUT5_PHASE, CLKOUT5_DUTY_CYCLE)
+    `CS_UNISIM_OUT(6, CLKOUT6_DIVIDE, CLKOUT6_PHASE, CLKOUT6_DUTY_CYCLE)
+    cs_ratio[7] = 1.0 * DIVCLK_DIVIDE; cs_phase[7] = 0.0; cs_duty[7] = 0.5;
+  end
+  assign {CLKOUT6, CLKOUT5, CLKOUT4, CLKOUT3, CLKOUT2, CLKOUT1, CLKOUT0} =
+    {cs_out[6].o, cs_out[5].o, cs_out[4].o, cs_out[3].o, cs_out[2].o, cs_out[1].o, cs_out[0].o};
+  assign CLKFBOUT = cs_out[7].o;
+  assign LOCKED = cs_locked;
+endmodule

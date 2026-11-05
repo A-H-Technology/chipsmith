@@ -265,14 +265,15 @@ fn zybo_bram_selftest() {
     built("zybo-bram-selftest", 17000);
 }
 
-/// Three passes over the nine products (1,152 cycles each).
+/// Three passes over the nine products (1,152 cycles each of the PLL's
+/// 3/5 of the input clock: 1,920 of the input's).
 #[test]
 fn zybo_mult_selftest() {
-    built("zybo-mult-selftest", 3600);
+    built("zybo-mult-selftest", 5800);
 }
 
-/// Two passes of the program out of block RAM (about 20,000 cycles each:
-/// the CPU runs on half the clock).
+/// The program's passes out of block RAM, the CPU on the PLL's clock: the
+/// 50,000 cycles that held two passes at half the clock hold more.
 #[test]
 fn zybo_riscv_bram() {
     built("zybo-riscv-bram", 50000);
@@ -387,6 +388,19 @@ fn design_built(file: &str, top: &str) {
     let bit = PathBuf::from(String::from_utf8(out.stdout).unwrap().trim());
     prjxray_agrees(&bit, &s);
     check(top, &example_at(&dir), &bit, &s, 3000);
+}
+
+/// A PLL's clocks (phase, x2, a 25% duty cycle) through the bitstream: its
+/// counters decoded and modelled, against the request's model.
+#[test]
+fn cmt() {
+    design_built("cmt.v", "cmt");
+}
+
+/// zybo-pll's two clocks.
+#[test]
+fn zybo_pll() {
+    built("zybo-pll", 3000);
 }
 
 /// Every register shape and the carry arithmetic, through the bitstream.

@@ -12,6 +12,7 @@
 mod arith;
 mod bram;
 pub mod cells;
+mod cmt;
 mod dsp;
 mod ff;
 mod io;
@@ -188,6 +189,7 @@ fn run(m: &mut Module, options: Options, obs: &mut dyn Observer) -> Result<Stats
     clean(m);
     obs.stage("luts", m);
     let replicas = if options.register_copies { replicate::registers(m, replicate::MAX_FANOUT) } else { 0 };
+    cmt::lower(m)?;
     let bufgs = io::clock_buffers(m);
     clean(m);
     obs.stage("cells", m);

@@ -7,7 +7,7 @@
 // products that differed (saturating): a good board shows the passes
 // rising and 0 errors (`cargo run --release -p chipsmith-jtag --example
 // xc7_user1`). led[0] lights on an error, led[3:1] show the pass count's
-// top bits. The test logic runs at 62.5 MHz (below).
+// top bits. The test logic runs at 75 MHz from a PLL (below).
 //
 //   0  9 x 9 unsigned              (one DSP)
 //   1  9 x 9 signed
@@ -19,14 +19,13 @@
 //   7  32 x 32 unsigned to 64 bits (four DSPs and adders)
 //   8  24 x 24 signed to 48 bits   (two DSPs and adders)
 module top(input clk, output [3:0] led);
-  // The test runs at 62.5 MHz, half the Zybo's clock: the 32 x 32 product
-  // (four DSPs and their sum) takes about 14 ns, and the operands hold
-  // still all slot long, which the DE2's test relies on, but chipsmith has
-  // no multicycle constraints. A register toggling makes the clock (into
-  // a BUFG, as every clock).
-  reg half = 0;
-  always @(posedge clk) half <= ~half;
-  wire tclk = half;
+  // The test runs at 75 MHz, 3/5 of the Zybo's clock, from a PLL: the
+  // 32 x 32 product (four DSPs and their sum) takes about 13 ns, and the
+  // operands hold still all slot long, which the DE2's test relies on, but
+  // chipsmith has no multicycle constraints.
+  wire tclk;
+  XC7_PLL #(.INCLK0_INPUT_FREQUENCY(8000), .CLK0_MULTIPLY_BY(3), .CLK0_DIVIDE_BY(5))
+    pll (.INCLK(clk), .ARESET(1'b0), .CLK0(tclk));
   // x^64 + x^63 + x^61 + x^60 + 1, maximal.
   reg [63:0] lfsr = 64'h9E3779B97F4A7C15;
   wire [31:0] a = lfsr[31:0], b = lfsr[63:32];
