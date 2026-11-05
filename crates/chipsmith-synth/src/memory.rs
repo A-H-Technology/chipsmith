@@ -12,6 +12,8 @@ use chipsmith_netlist::{
     SigBit, SigSpec, State, SyncEnable, Wire, Word,
 };
 
+use rustc_hash::FxHashMap;
+
 use crate::rewrite::{inits, Namer, Subst};
 use crate::techmap::extend;
 
@@ -790,6 +792,158 @@ struct AddrHold {
     en: Ctrl,
     d: SigBit,
     q: SigBit,
+}
+
+/// A read port [`read_early`] moves: its index, the holds its address
+/// registers' enables need, and its address on the edge before.
+type EarlyRead = (usize, Vec<AddrHold>, SigSpec);
+
+/// Quartus' register file read (femtorv32's `rs1 <= registerFile[a]`
+/// with `a` a register): a read port with its output register merged
+/// ([`merge_registers`]) whose address comes from registers on its clock
+/// reads on the edge before instead, at those registers' next value, and
+/// its output register goes back into LEs after it. The block's clock to
+/// output then ends at an LE register instead of starting the logic the
+/// read data feeds.
+///
+/// The early read takes the old data of a write on that edge, where the
+/// RTL's read on the next edge sees the new: so only where no write ever
+/// comes on the edge before one the register loads on, nor does it load on
+/// the first edge ([`crate::hazard::never_after`]). Needs power-up values
+/// decided ([`crate::undef::refine`]). Only where `accept` takes the
+/// memory with its ports moved. Returns the ports moved.
+pub fn read_early(m: &mut Module, accept: impl Fn(&Mem) -> bool) -> usize {
+    let init = inits(m);
+    let mut q_of: FxHashMap<Net, (usize, usize)> = FxHashMap::default();
+    for (i, c) in m.cells.iter().enumerate() {
+        if let CellKind::Ff(ff) = &c.kind {
+            for (k, b) in ff.q.iter().enumerate() {
+                if let SigBit::Net(n) = b {
+                    q_of.insert(*n, (i, k));
+                }
+            }
+        }
+    }
+    // Per memory: the ports to move.
+    let mut plans: Vec<(usize, Vec<EarlyRead>)> = Vec::new();
+    for (ci, c) in m.cells.iter().enumerate() {
+        let CellKind::Mem(mem) = &c.kind else {
+            continue;
+        };
+        if mem.rd.iter().any(|r| r.wide_continuation) {
+            continue;
+        }
+        let mut ports = Vec::new();
+        for (pi, rd) in mem.rd.iter().enumerate() {
+            let Some(s) = &rd.sync else { continue };
+            if s.arst != SigBit::ZERO
+                || s.srst != SigBit::ZERO
+                || s.transparent.iter().any(|&t| t)
+                || mem.wr.iter().any(|w| w.clk != Some(s.clk))
+            {
+                continue;
+            }
+            let mut addr = Vec::new();
+            let mut holds = Vec::new();
+            let ok = rd.addr.iter().all(|b| {
+                let SigBit::Net(n) = b else {
+                    addr.push(*b);
+                    return true;
+                };
+                let Some(&(cell, bit)) = q_of.get(n) else {
+                    return false;
+                };
+                let CellKind::Ff(Ff {
+                    kind:
+                        FfKind::Dff {
+                            clk,
+                            d,
+                            control: DffControl::Plain { en },
+                        },
+                    ..
+                }) = &m.cells[cell].kind
+                else {
+                    return false;
+                };
+                if *clk != s.clk {
+                    return false;
+                }
+                if let Some(en) = en {
+                    holds.push(AddrHold {
+                        bit: addr.len(),
+                        en: *en,
+                        d: d[bit],
+                        q: *b,
+                    });
+                }
+                addr.push(d[bit]);
+                true
+            });
+            if !ok {
+                continue;
+            }
+            let writes: Vec<SigBit> = mem.wr.iter().flat_map(|w| w.en.iter().copied()).collect();
+            if !crate::hazard::never_after(m, s.clk, &writes, s.en, &init) {
+                continue;
+            }
+            ports.push((pi, holds, addr));
+        }
+        if !ports.is_empty() {
+            plans.push((ci, ports));
+        }
+    }
+    let mut namer = Namer::new(m, "memearly");
+    let mut moved = 0;
+    for (ci, ports) in plans {
+        let n = ports.len();
+        let CellKind::Mem(mem) = &m.cells[ci].kind else {
+            unreachable!()
+        };
+        let mut mem = mem.clone();
+        let mut regs = Vec::new();
+        for (pi, holds, mut addr) in ports {
+            for h in holds {
+                let y = SigBit::Net(m.new_net());
+                let (a, b) = match h.en.polarity {
+                    Polarity::Pos => (h.q, h.d),
+                    Polarity::Neg => (h.d, h.q),
+                };
+                regs.push(CellKind::Gate(
+                    Gate::new(GateOp::Mux, &[a, b, h.en.sig], y).expect("a mux's inputs"),
+                ));
+                addr[h.bit] = y;
+            }
+            let rd = &mut mem.rd[pi];
+            let s = rd.sync.as_mut().expect("a synchronous port");
+            let q = rd.data.clone();
+            let data: SigSpec = (0..q.len()).map(|_| SigBit::Net(m.new_net())).collect();
+            let en = (s.en != SigBit::ONE).then(|| Ctrl::pos(s.en));
+            regs.push(CellKind::Ff(Ff {
+                q,
+                kind: FfKind::Dff {
+                    clk: s.clk,
+                    d: data.clone(),
+                    control: DffControl::Plain { en },
+                },
+            }));
+            rd.addr = addr;
+            rd.data = data;
+            s.en = SigBit::ONE;
+            // A write on the edge never matters (`never_after`).
+            s.collision_x = vec![true; mem.wr.len()];
+            s.init_value = Const::filled(State::X, mem.width);
+        }
+        if !accept(&mem) {
+            // Only nets were made: nothing reads them.
+            continue;
+        }
+        moved += n;
+        m.cells[ci].kind = CellKind::Mem(mem);
+        for k in regs {
+            m.add_cell(namer.fresh(), k);
+        }
+    }
+    moved
 }
 
 /// `memory_map`: every memory left becomes a register per word (named

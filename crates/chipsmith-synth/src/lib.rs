@@ -8,6 +8,7 @@ pub mod clean;
 pub mod divmod;
 pub mod flatten;
 pub mod fsm;
+pub mod hazard;
 pub mod lutmap;
 pub mod memory;
 pub mod opt;

@@ -96,6 +96,7 @@ struct Synthesized {
     rtl: PathBuf,
     stages: Stages,
     netlist: PathBuf,
+    early_reads: usize,
 }
 
 fn synthesize(name: &str, top: &str, files: &[PathBuf]) -> Synthesized {
@@ -133,9 +134,10 @@ fn synthesize_inner(
     let dir = scratch(name);
     let rtl = support::rtl(&dir, top, reference);
     let mut stages = Stages::default();
-    let out = synthesize_observed(support::frontend(top, files), io_registers, &mut stages)
-        .unwrap_or_else(|e| panic!("{name}: {e:#}"))
-        .design;
+    let synthesized = synthesize_observed(support::frontend(top, files), io_registers, &mut stages)
+        .unwrap_or_else(|e| panic!("{name}: {e:#}"));
+    let early_reads = synthesized.stats.early_reads;
+    let out = synthesized.design;
     let netlist = dir.join("chipsmith.json");
     support::write(&out, &netlist);
     Synthesized {
@@ -143,6 +145,7 @@ fn synthesize_inner(
         rtl,
         stages,
         netlist,
+        early_reads,
     }
 }
 
@@ -1828,6 +1831,60 @@ fn m4k_cosim_register_files() {
         assert!(r.compared > 32 * COSIM_CYCLES as u64, "{name}: {r:?}");
         eprintln!("m4k register file {name}: {r:?}");
     }
+}
+
+/// femtorv32's register file (`memory::read_early`): read in decode at the
+/// instruction register's fields, written in execute. No write comes on
+/// the edge before decode (fetch), so the blocks read on that edge, at the
+/// instruction register's next value, and the read registers are LEs
+/// after them. With a write in fetch too they can't: the read registers
+/// stay in the blocks. Co-simulated both ways from power-up; fails if the
+/// first isn't moved, the second is, or either reads wrong.
+#[test]
+fn m4k_reads_early() {
+    let design = |write_in_fetch: bool| {
+        let fetch_write = if write_in_fetch { " || st == 0" } else { "" };
+        format!(
+            "module top(input clk, input rst_n, input [31:0] fetch, input [31:0] d,
+           output [31:0] q1, output [31:0] q2, output [1:0] state);
+  reg [31:0] m [0:31];
+  reg [1:0] st = 0;
+  reg [31:0] ir = 0;
+  reg [31:0] r1, r2;
+  always @(posedge clk) begin
+    if (!rst_n) st <= 0;
+    else case (st) 0: st <= 1; 1: st <= 2; default: st <= 0; endcase
+    if (st == 0) ir <= fetch;
+    if (st == 1) begin r1 <= m[ir[4:0]]; r2 <= m[ir[9:5]]; end
+    if ((st == 2{fetch_write}) && ir[14:10] != 0) m[ir[14:10]] <= d ^ r1;
+  end
+  assign q1 = r1;
+  assign q2 = r2;
+  assign state = st;
+endmodule"
+        )
+    };
+    let mut early = Vec::new();
+    for (name, hazard) in [("early", false), ("hazard", true)] {
+        let dir = scratch(&format!("m4k-read-{name}-src"));
+        let f = dir.join("top.v");
+        std::fs::write(&f, design(hazard)).unwrap();
+        let s = synthesize(&format!("m4k-read-{name}"), "top", &[f]);
+        assert_eq!(blocks_in(&s.netlist), 2, "{name}: blocks");
+        let r = support::cosim(
+            &s.dir,
+            &s.rtl,
+            s.stages.refined.as_ref().unwrap(),
+            s.stages.cells.as_ref().unwrap(),
+            COSIM_CYCLES,
+            11,
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(r.compared > 32 * COSIM_CYCLES as u64, "{name}: {r:?}");
+        eprintln!("m4k read {name}: {r:?}");
+        early.push(s.early_reads);
+    }
+    assert_eq!(early, [2, 0], "reads moved: [safe, hazard]");
 }
 
 /// The co-simulation isn't vacuous: two address pins of a block swapped,
