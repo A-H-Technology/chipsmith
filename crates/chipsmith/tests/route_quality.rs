@@ -132,10 +132,12 @@ fn picorv32_les() {
 
 /// (bound, before), ns: `open` 80351e1's (sums as written; femtorv32
 /// 13.76, sha256 19.27) above, `qor3`'s (12.99, 13.76) below. femtorv32's
-/// bound is `qor4`'s since: 12.25 with its register file read on the edge
-/// before (12.98 without). mult-selftest: 13.02 with a 32 x 32 product's
-/// partial products packed into three operands (14.70 added one by one).
-const FEMTORV32: (f64, f64) = (12.6, 12.98);
+/// bound is `qor4`'s since: 10.49 with its register file read on the edge
+/// before, the block's output register timed as such (12.98 without the
+/// early read, whose path starts at the block's unregistered output).
+/// mult-selftest: 13.24 with a 32 x 32 product's partial products packed
+/// into three operands (14.70 added one by one).
+const FEMTORV32: (f64, f64) = (11.5, 12.98);
 const MULT_SELFTEST: (f64, f64) = (13.6, 14.70);
 const SHA256: (f64, f64) = (15.0, 19.27);
 /// (bound, before), LEs: `qor3`'s picorv32 875 (971 without shared sums,

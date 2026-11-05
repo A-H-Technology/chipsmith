@@ -241,6 +241,8 @@ struct Cell {
     sload_inv: bool,
     /// A multiplier's A_REG, B_REG, P_REG.
     mult_regs: [bool; 3],
+    /// An M4K's read data pins behind its output registers.
+    m4k_outreg: Vec<String>,
     /// Pin buffers: the top-level port they serve (`LEDR[0]`).
     port: Option<String>,
     /// Pin buffers: which of their I/O-cell registers they use (input,
@@ -622,6 +624,18 @@ fn read_design(json: &Value) -> Result<Design> {
             aclr_inv: flag("ACLR_INV"),
             sload_inv: flag("SLOAD_INV"),
             mult_regs: mult::Regs::PARAMS.map(flag),
+            m4k_outreg: if c["type"] == "CY2_M4K" {
+                let ports: Vec<&str> = c["connections"]
+                    .as_object()
+                    .map(|o| o.keys().map(|k| k.as_str()).collect())
+                    .unwrap_or_default();
+                crate::route::m4k_registered_outputs(c, &ports)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            } else {
+                Vec::new()
+            },
             port: c["attributes"]["PORT"].as_str().map(str::to_string),
             io_regs: [
                 register_param::INPUT,
@@ -810,6 +824,9 @@ fn read_design(json: &Value) -> Result<Design> {
         let ports: Vec<Cow<str>> = c.connections().map(|(p, _)| p.name()).collect();
         let ports: Vec<&str> = ports.iter().map(|p| p.as_ref()).collect();
         timing.add_cell(&c.name, ty, &ports, le as u8);
+        if !c.m4k_outreg.is_empty() {
+            timing.add_m4k_output_registers(&c.name, c.m4k_outreg.iter().map(String::as_str));
+        }
         if c.kind == Kind::Block(Block::Mult) {
             let [a, b, p] = c.mult_regs;
             timing.add_mult_registers(&c.name, a, b, p);

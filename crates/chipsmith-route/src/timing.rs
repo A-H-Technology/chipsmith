@@ -131,6 +131,12 @@ fn register_setup(port: &str) -> Option<Ps> {
 /// plus the 124 ps the block's clock arrives after an LE register's (cell
 /// delay 0.661 vs 0.537 ns; skew isn't otherwise modelled).
 const M4K_TCO: Ps = 209.0 + 2993.0 + 124.0;
+/// M4K read clock to data out through the block's output register:
+/// quartus_sta on femtorv32's register file (`qor4`, B_OUTREG on clock 1)
+/// gives the register's 209 ps uTco and 88 ps to `portbdataout`, plus
+/// the 99 ps the block's clock 1 arrives after an LE register's (cell
+/// delay 0.636 vs 0.537 ns).
+const M4K_OUTREG_TCO: Ps = 209.0 + 88.0 + 99.0;
 /// M4K input register setup: quartus_sta's 142 ps cell delay into the
 /// address register and its -35 ps uTsu, less the same 124 ps of later
 /// clock.
@@ -264,6 +270,16 @@ impl Graph {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// An M4K's read data pins that its output register drives
+    /// (`add_cell` timed them all as unregistered).
+    pub fn add_m4k_output_registers<'a>(&mut self, cell: &str, pins: impl IntoIterator<Item = &'a str>) {
+        for p in pins {
+            if let Some(&n) = self.index.get(&(cell.to_string(), p.to_string())) {
+                self.launch[n as usize] = Some(M4K_OUTREG_TCO);
+            }
         }
     }
 
@@ -622,6 +638,10 @@ mod tests {
         ];
         let t = g.analyse(&nets);
         assert_eq!(t.critical, M4K_TCO + 500.0 + 84.0 + TSU);
+        // Behind its output register the read data launches 2.9 ns earlier.
+        g.add_m4k_output_registers("m", ["DO0"]);
+        let t = g.analyse(&nets);
+        assert_eq!(t.critical, M4K_OUTREG_TCO + 500.0 + 84.0 + TSU);
         assert!(t.criticality(&nets[1]) < 1.0);
     }
 
