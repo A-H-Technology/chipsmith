@@ -1,0 +1,11 @@
+[package]
+name = "chipsmith-quartus-prime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Intel Quartus Prime Lite product description for chipsmith"
+
+[dependencies]
+chipsmith-quartus-common = { path = "../vendor-quartus-common", version = "0.1.0" }

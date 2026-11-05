@@ -1,0 +1,18 @@
+[package]
+name = "chipsmith-vendor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "A command-line FPGA toolchain manager and build system for Intel/Altera FPGAs"
+
+[[bin]]
+name = "chipsmith-vendor"
+path = "src/main.rs"
+
+[dependencies]
+facet = "0.46"
+figue = "2"
+chipsmith-core = { path = "../vendor-core", version = "0.1.0" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

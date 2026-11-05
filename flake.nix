@@ -14,7 +14,7 @@
       ...
     }:
     let
-      tests = import ./nix/tests {
+      tests = import ./nix/vendor/tests {
         inherit self;
         pkgs = nixpkgs.legacyPackages.x86_64-linux;
       };
@@ -25,7 +25,7 @@
         pkgs = nixpkgs.legacyPackages.${system};
       in
       {
-        packages.default = pkgs.callPackage ./nix/package.nix { };
+        packages.chipsmith-vendor = pkgs.callPackage ./nix/vendor/package.nix { };
 
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
@@ -40,7 +40,7 @@
             just
 
             # what chipsmith shells out to when it patches a Quartus install
-            # for NixOS — see crates/chipsmith-quartus-common/src/nixos.rs
+            # for NixOS — see crates/vendor-quartus-common/src/nixos.rs
             patchelf
             bubblewrap
             unzip
@@ -49,12 +49,12 @@
       }
     )
     // {
-      nixosModules.default = import ./nix/module.nix { inherit self; };
+      nixosModules.chipsmith-vendor = import ./nix/vendor/module.nix { inherit self; };
 
-      lib = import ./nix/lib.nix { inherit self; };
+      vendorLib = import ./nix/vendor/lib.nix { inherit self; };
 
-      checks.x86_64-linux = tests.checks;
+      checks.x86_64-linux = nixpkgs.lib.mapAttrs' (n: nixpkgs.lib.nameValuePair "vendor-${n}") tests.checks;
       # e2e tests whose inputs nobody can fetch anonymously; see nix/tests
-      legacyPackages.x86_64-linux = tests.manual;
+      legacyPackages.x86_64-linux = nixpkgs.lib.mapAttrs' (n: nixpkgs.lib.nameValuePair "vendor-${n}") tests.manual;
     };
 }

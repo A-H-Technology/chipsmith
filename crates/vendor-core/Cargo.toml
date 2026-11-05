@@ -1,0 +1,16 @@
+[package]
+name = "chipsmith-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Public API and backend routing for chipsmith"
+
+[dependencies]
+chipsmith-toolchain = { path = "../vendor-toolchain", version = "0.1.0" }
+chipsmith-quartus-common = { path = "../vendor-quartus-common", version = "0.1.0" }
+chipsmith-quartus-prime = { path = "../vendor-quartus-prime", version = "0.1.0" }
+chipsmith-quartus-ii-13 = { path = "../vendor-quartus-ii-13", version = "0.1.0" }
+chipsmith-quartus-pro = { path = "../vendor-quartus-pro", version = "0.1.0" }
+chipsmith-sim = { path = "../vendor-sim", version = "0.1.0" }

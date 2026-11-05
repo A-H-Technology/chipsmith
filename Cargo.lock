@@ -120,16 +120,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "chipsmith-cli"
-version = "0.1.0"
-dependencies = [
- "chipsmith-core",
- "facet",
- "figue",
- "tokio",
-]
-
-[[package]]
 name = "chipsmith-core"
 version = "0.1.0"
 dependencies = [
@@ -194,6 +184,16 @@ dependencies = [
  "facet-toml",
  "glob",
  "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "chipsmith-vendor"
+version = "0.1.0"
+dependencies = [
+ "chipsmith-core",
+ "facet",
+ "figue",
  "tokio",
 ]
 
