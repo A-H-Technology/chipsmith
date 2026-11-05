@@ -9,10 +9,11 @@
 #
 #   <example> seed <s> les <n> est <MHz> identical yes|no sta <MHz>
 #
-# where sta is 1000 / (20 - slack): every example here has a 50 MHz
-# CLOCK_50 and nothing else (sdram-selftest's PLL clocks aside; its
-# worst path is reported against the clock it ends on). Needs the
-# devshell (CHIPSMITH_CYCLONE2_DB) and CYCLONE2_RE as quartus-timing.sh.
+# est is the slowest constrained clock's estimated Fmax, and sta is
+# quartus_sta's worst setup path's, 1000 / (relationship - slack): every
+# example here has a 50 MHz CLOCK_50, and PLL clocks are derived from it
+# (sdram-selftest's worst path is on its 100 MHz one). Needs the devshell
+# (CHIPSMITH_CYCLONE2_DB) and CYCLONE2_RE as quartus-timing.sh.
 set -euo pipefail
 root=$(dirname "$(dirname "$(realpath "$0")")")
 bin=$(realpath "$1")
@@ -31,7 +32,7 @@ for name in "$@"; do
             continue
         fi
         les=$(sed -n 's/^ *\([0-9]*\) LEs, .*pins.*/\1/p' "$dir/build.log" | tail -1)
-        est=$(sed -n 's/.*clock CLOCK_50 .*Fmax \([0-9.]*\) MHz.*/\1/p' "$dir/build.log" | tail -1)
+        est=$(sed -n 's/.*clock .*Fmax \([0-9.]*\) MHz, slack.*/\1/p' "$dir/build.log" | sort -g | head -1)
         printf 'create_clock -name {CLOCK_50} -period 20 [get_ports {CLOCK_50}]\n' > "$dir/top.sdc"
         if grep -q CY2_PLL "$dir"/src/*.v 2>/dev/null; then
             echo "derive_pll_clocks" >> "$dir/top.sdc"
@@ -39,9 +40,10 @@ for name in "$@"; do
         rbf=$(ls "$dir"/build/*.rbf)
         q=$("$root/bench/quartus-timing.sh" "$dir/build/routed.json" "$rbf" "$dir/quartus" "$dir/top.sdc" 2> "$dir/quartus.err") \
             || q="identical - slack -"
-        read -r _ id _ slack _ <<< "$q"
-        sta=-
-        [[ $slack != - ]] && sta=$(awk -v s="$slack" 'BEGIN { printf "%.2f", 1000 / (20 - s) }')
+        read -r _ id _ _ <<< "$q"
+        # Summary columns: slack, from, to, launch, latch, relationship, ...
+        sta=$(awk -F';' '/^; [-0-9.]+ *;/ { printf "%.2f", 1000 / ($7 - $2); exit }' "$dir/quartus/summary.txt" 2>/dev/null)
+        sta=${sta:--}
         echo "$name seed $seed les $les est $est identical $id sta $sta"
     done
 done

@@ -111,9 +111,16 @@ fn register_setup(port: &str) -> Option<Ps> {
         "DATAIN" => 84.0 + TSU,
         "SDATA" => 366.0 - lut_pin_extra(2) + TSU,
         // LAB-wide enable, sync clear and sync load reach the register
-        // through the LAB control lines; their own DMF arcs aren't
-        // identified yet, so they count like SDATA. Unknown, not measured.
-        "ENA" | "SCLR" | "SLOAD" => 366.0 + TSU,
+        // through the LAB control lines (routed as such: quartus_sta's
+        // interconnect into them, LAB_CONTROL_MUX included, came to 1.02x
+        // the model's). Their arcs into the register, quartus_sta's
+        // `CYCLONEII_LCELL_FF` cell element after `|ena`, `|sclr` and
+        // `|sload` on chipsmith's femtorv32 and picorv32 (`qor4`), the
+        // same on every path: 660 ps (800 paths), 510 (451), 659 (43).
+        // SDATA's measured the same way gave the DMF's 366.
+        "ENA" => 660.0 + TSU,
+        "SCLR" => 510.0 + TSU,
+        "SLOAD" => 659.0 + TSU,
         _ => return None,
     })
 }
