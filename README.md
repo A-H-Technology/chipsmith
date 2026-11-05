@@ -680,15 +680,19 @@ The Zybo examples:
 - `examples/zybo-mult-selftest`: `examples/mult-selftest` on DSP48E1s
   (fourteen): nine product shapes against a shift-and-add reference,
   `"MUL!"`, the passes and the errors in USER1. Its test logic runs at
-  62.5 MHz from a register toggling on the 125 MHz clock: the 32 x 32
-  product and its sum take about 13 ns, and chipsmith has no multicycle
-  constraints (76.1 MHz estimated; a clock from logic isn't checked
-  against a frequency).
+  75 MHz from a PLL (3/5 of the 125 MHz clock, since branch xc7-mmcm; a
+  register toggling made 62.5 MHz before): the 32 x 32 product and its
+  sum take about 13 ns, and chipsmith has no multicycle constraints.
+  Vivado on chipsmith's routing: 75.6 to 78.8 MHz over five seeds.
 - `examples/zybo-riscv-bram`: PicoRV32 running a self-checking program
   (`prog/selftest.S`, `prog/build.sh` assembles it) out of one 1,024 x 32
   block RAM that also holds its data: each pass writes 64 words and some
   of their bytes and reads them back. `"RV32"`, the passes and the errors
-  in USER1. 139.6 MHz estimated at 125 MHz.
+  in USER1. The CPU runs at 112.5 MHz from a PLL (9/10 of the 125 MHz
+  clock, since branch xc7-mmcm; 62.5 MHz from a toggling register
+  before), its reset held until the PLL locks: Vivado on chipsmith's
+  routing makes 114.2 to 128.1 MHz over five seeds, so 125 MHz would fail
+  on four.
 
 #### 7-series synthesis
 
@@ -1134,6 +1138,21 @@ each (`ZYBO_SEEDS="0 1 2 3 4"`), the slowest logic clock:
 | zybo-bram-selftest | 137.0-158.9 (mean 149.4) | 143.6-152.9 (mean 150.3) | 118.1 MHz (earlier RTL) |
 | zybo-mult-selftest (62.5 MHz clock) | 66.9-69.7 (mean 68.6) | 70.7-76.1 (mean 74.6) | not timed |
 | zybo-riscv-bram (CPU clock) | 114.6-129.0 (mean 123.1) | 117.4-127.0 (mean 122.2) | 143.5 MHz (at 125) |
+
+Branch xc7-mmcm (2026-11-05): the two self-tests on PLL clocks (ADR-0017),
+the toggling registers gone. Vivado on chipsmith's routing, five seeds,
+the PLL's clock:
+
+| design | clock | chipsmith's estimate | Vivado on chipsmith's routing | endpoints, \|error\| median / p95 |
+|---|---|---|---|---|
+| zybo-mult-selftest | 75 MHz (PLL 3/5: VCO 825 MHz, /11) | 77.1-81.5 MHz | 75.6-78.8 (mean 77.1) | 2.7% / 9.7% (4,355) |
+| zybo-riscv-bram (CPU) | 112.5 MHz (PLL 9/10: VCO 900 MHz, /8) | 117.8-134.4 MHz | 114.2-128.1 (mean 122.3) | 4.5% / 12.6% (5,180) |
+| zybo-riscv-bram (CPU), asked for 125 MHz | 125 MHz (PLL 1/1: VCO 875 MHz, /7) | the same placements | 114.8-128.9 (mean 123.0): four of five fail | 4.5% / 12.6% |
+
+The placement and routing don't depend on the frequency asked for (the
+same seed gives the same estimate at 112.5 and 125 MHz); Vivado's own
+figures move by up to 0.8 MHz with the PLL's VCO. mult-selftest at 75 MHz
+has 0.6 MHz to spare on its slowest seed.
 
 sha256's is mostly the sums: by arrival alone 63.8-71.9 (mean 68.7); its
 round counter's 201-load register, copied, is the rest. Its critical path
