@@ -463,6 +463,10 @@ impl Graph {
         loop {
             while i < order.len() {
                 for &a in &fanout[order[i] as usize] {
+                    // A cut arc already gave up its claim on its target.
+                    if cut[a] {
+                        continue;
+                    }
                     let to = arcs[a].to as usize;
                     indegree[to] -= 1;
                     if indegree[to] == 0 {
