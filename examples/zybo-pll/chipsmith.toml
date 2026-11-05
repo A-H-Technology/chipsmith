@@ -1,0 +1,19 @@
+# Clocks from the clock management tiles: a PLL makes 125 MHz and
+# 62.5 MHz 90 degrees later from the Zybo's 125 MHz, each with a counter
+# of its own on the LEDs. A bench and a test for XC7_PLL (crates/chipsmith-xc7/src/cmt.rs).
+[project]
+name = "pll"
+top = "top"
+sources = ["src/*.v"]
+
+[target]
+device = "xc7z010clg400-1"
+
+# Original Zybo (now "Zybo (legacy)"), Digilent Zybo-Master.xdc.
+[pins]
+clk = "L16"
+led = ["M14", "M15", "G14", "D18"]
+
+# The Zybo's 125 MHz clock on L16.
+[clocks]
+clk = "125 MHz"

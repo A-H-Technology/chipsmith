@@ -24,7 +24,25 @@ rustPlatform.buildRustPackage {
     "-p"
     "chipsmith-vendor"
   ];
-  cargoTestFlags = [ "--workspace" ];
+  # The vendor crates only: the open ones are the chipsmith package's.
+  cargoTestFlags = [
+    "-p"
+    "chipsmith-vendor"
+    "-p"
+    "chipsmith-core"
+    "-p"
+    "chipsmith-quartus-common"
+    "-p"
+    "chipsmith-quartus-ii-13"
+    "-p"
+    "chipsmith-quartus-prime"
+    "-p"
+    "chipsmith-quartus-pro"
+    "-p"
+    "chipsmith-sim"
+    "-p"
+    "chipsmith-toolchain"
+  ];
 
   # The Nix Compat paths, fixed at build time. Being strings in the binary
   # makes them runtime references, so they are in chipsmith's closure: present

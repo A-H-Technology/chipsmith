@@ -108,7 +108,9 @@ let
 
         with subtest("the derivation builds in the sandbox, on the Toolchain the module mounted"):
             out = builder.succeed("nix-build --no-out-link ${inVm}", timeout=3600).strip()
-            builder.succeed(f"test -s {out}/${(builtins.fromTOML (builtins.readFile (project + "/chipsmith.toml"))).project.name}.sof")
+            builder.succeed(f"test -s {out}/${
+              (builtins.fromTOML (builtins.readFile (project + "/chipsmith.toml"))).project.name
+            }.sof")
             print(builder.succeed(f"ls -la {out}; cat {out}/*.sta.summary || true"))
       '';
     };

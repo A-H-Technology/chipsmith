@@ -4,14 +4,17 @@ permissions:
   pull-requests: write
   contents: write
 
+# Off: nothing in this workspace is published to crates.io yet. Turn it back
+# on (restore the `push: branches: [main]` trigger and drop the job's `if`)
+# once there is a decision to publish, and set `publish = false` on whatever
+# shouldn't go out with it.
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
   release-plz:
     name: Release-plz
+    if: false
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

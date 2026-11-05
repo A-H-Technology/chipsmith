@@ -1,0 +1,20 @@
+# picorv32 (examples/picorv32's sources) on the Zybo's part: a placement and
+# routing bench, not for hardware. The DE2's ports land on arbitrary balls,
+# and KEY/LEDR/LEDG don't exist on a Zybo. With no [clocks], nextpnr times
+# the clock at its default 12 MHz and reports the Fmax reached.
+[project]
+name = "picorv32"
+top = "top"
+sources = ["../picorv32/src/*.v"]
+
+[target]
+device = "xc7z010clg400-1"
+
+[pins]
+CLOCK_50 = "L16"
+KEY = ["R18", "P16", "V16", "Y16"]
+LEDR = [
+    "A20", "B19", "B20", "C20", "D18", "D19", "D20", "E17", "E18",
+    "E19", "F16", "F17", "F19", "F20", "G14", "G15", "G17", "G18",
+]
+LEDG = ["G19", "G20", "H15", "H16", "H17", "H18", "H20", "J14", "J15"]

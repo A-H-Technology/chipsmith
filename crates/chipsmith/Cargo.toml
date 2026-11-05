@@ -1,0 +1,27 @@
+[package]
+name = "chipsmith"
+description = "An open FPGA toolchain: HDL in, bitstream out, chip programmed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Placement on a GPU (CHIPSMITH_ACCEL=cuda or hip; ADR-0012).
+gpu = ["chipsmith-cyclone2/gpu"]
+
+[dependencies]
+chipsmith-cyclone2.workspace = true
+chipsmith-jtag.workspace = true
+chipsmith-netlist.workspace = true
+chipsmith-route.workspace = true
+chipsmith-synth.workspace = true
+chipsmith-verilog.workspace = true
+chipsmith-xc7.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+glob.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true

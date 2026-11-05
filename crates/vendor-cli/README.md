@@ -32,8 +32,10 @@ Requires a recent stable Rust — CI builds against `stable`, which is what the
 cargo install --path crates/vendor-cli
 ```
 
-On NixOS, `nix develop` gives you a shell with Rust, `just`, `ghdl` and the
-tools chipsmith shells out to when it patches a Quartus install.
+On NixOS, `nix build .#chipsmith-vendor` builds it with `unzip` wrapped in
+and the Nix Compat paths baked in. The repo's `nix develop` shell (the open
+toolchain's) has Rust, `just` and `ghdl`; add `unzip` with
+`nix shell nixpkgs#unzip` to install Device Support from a `cargo run`.
 
 ## `chipsmith.toml`
 

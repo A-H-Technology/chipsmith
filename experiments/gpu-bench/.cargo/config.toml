@@ -1,0 +1,7 @@
+# cubecl-llvm 0.11.3 emits the bundled LLVM's static libs, but pliron-llvm,
+# which calls into them, lands after it on the link line, and GNU ld scans
+# each archive once: undefined LLVM_InitializeNativeTarget, LLVMOrc*. lld
+# resolves regardless of order. No upstream issue yet; drop this once
+# `cargo build` links with the default linker.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]

@@ -1,0 +1,17 @@
+# An M4K self-test read back over JTAG: memories in most M4K modes written
+# and read back over and over, the passes and the errors in USER1.
+[project]
+name = "m4k-selftest"
+top = "top"
+sources = ["src/*.v"]
+
+[target]
+device = "EP2C35F672C6"
+
+# Terasic DE2 user manual, tables 4.3 and 4.6
+[pins]
+CLOCK_50 = "PIN_N2"
+LEDR = ["PIN_AE23", "PIN_AF23", "PIN_AB21", "PIN_AC22"]
+
+[clocks]
+CLOCK_50 = "50 MHz"

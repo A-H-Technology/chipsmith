@@ -1,10 +1,48 @@
 [workspace]
-members = ["crates/*"]
 resolver = "2"
+members = ["crates/*"]
+# A bare `cargo build`/`cargo test` (and the nix package) is the open
+# toolchain. The vendor-tool runner in crates/vendor-* builds with
+# `-p chipsmith-vendor` or `--workspace`.
+default-members = [
+    "crates/chipsmith",
+    "crates/chipsmith-cyclone2",
+    "crates/chipsmith-jtag",
+    "crates/chipsmith-netlist",
+    "crates/chipsmith-place",
+    "crates/chipsmith-route",
+    "crates/chipsmith-synth",
+    "crates/chipsmith-verilog",
+    "crates/chipsmith-xc7",
+]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/cramt/chipsmith"
+repository = "https://github.com/A-H-Technology/chipsmith"
+# Only the crates/vendor-* ones take this.
 authors = ["Alexandra Østermark <alex.cramt@gmail.com>"]
+
+[workspace.dependencies]
+chipsmith-cyclone2 = { path = "crates/chipsmith-cyclone2" }
+chipsmith-jtag = { path = "crates/chipsmith-jtag" }
+chipsmith-netlist = { path = "crates/chipsmith-netlist" }
+chipsmith-place = { path = "crates/chipsmith-place" }
+chipsmith-route = { path = "crates/chipsmith-route" }
+chipsmith-synth = { path = "crates/chipsmith-synth" }
+chipsmith-verilog = { path = "crates/chipsmith-verilog" }
+chipsmith-xc7 = { path = "crates/chipsmith-xc7" }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+glob = "0.3"
+rusb = "0.9"
+rustc-hash = "2"
+serde_json = "1"
+rayon = "1"
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+lzma-rust2 = { version = "0.21", default-features = false, features = ["std", "xz"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "0.9"

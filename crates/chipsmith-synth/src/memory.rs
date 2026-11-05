@@ -1,0 +1,1202 @@
+//! Memories: `proc`'s `$memrd`/`$memwr`/`$meminit` cells collected into
+//! one `$mem_v2` each (yosys' `memory_collect`), registers on a read port
+//! merged into it (`memory_dff`), and memories no RAM block takes turned
+//! into registers and multiplexers (`memory_map`).
+
+use std::collections::HashMap;
+
+use anyhow::{bail, ensure, Context, Result};
+use chipsmith_netlist::{
+    attr, Binary, BinaryOp, Bmux, Cell, CellKind, Const, Ctrl, DffControl, Ff, FfKind, Gate,
+    GateOp, Generic, Mem, MemRd, MemRdSync, MemWr, Module, Mux, Net, Operand, ParamValue, Polarity,
+    SigBit, SigSpec, State, SyncEnable, Wire, Word,
+};
+
+use rustc_hash::FxHashMap;
+
+use crate::rewrite::{inits, Namer, Subst};
+use crate::techmap::extend;
+
+fn param<'a>(g: &'a Generic, name: &str) -> Result<&'a ParamValue> {
+    g.params
+        .get(name)
+        .with_context(|| format!("{} without {name}", g.ty))
+}
+
+fn int(g: &Generic, name: &str) -> Result<i64> {
+    param(g, name)?
+        .bits()
+        .and_then(Const::as_i64)
+        .with_context(|| format!("{}: {name} is not a number", g.ty))
+}
+
+fn flag(g: &Generic, name: &str) -> Result<bool> {
+    Ok(param(g, name)?.bits().is_some_and(Const::as_bool))
+}
+
+fn konst(g: &Generic, name: &str) -> Result<Const> {
+    param(g, name)?
+        .bits()
+        .cloned()
+        .with_context(|| format!("{}: {name} is not bits", g.ty))
+}
+
+fn sig(g: &Generic, name: &str) -> Result<SigSpec> {
+    Ok(g.port(name)
+        .with_context(|| format!("{} without port {name}", g.ty))?
+        .sig
+        .clone())
+}
+
+fn memid(g: &Generic) -> Option<&str> {
+    g.params.get("MEMID").and_then(ParamValue::str)
+}
+
+fn konst_of(s: &[SigBit]) -> Option<Const> {
+    s.iter()
+        .map(|b| match b {
+            SigBit::Const(s) => Some(*s),
+            SigBit::Net(_) => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(Const)
+}
+
+fn clock(g: &Generic) -> Result<Option<Ctrl>> {
+    Ok(if flag(g, "CLK_ENABLE")? {
+        Some(Ctrl {
+            sig: sig(g, "CLK")?[0],
+            polarity: Polarity::from_bool(flag(g, "CLK_POLARITY")?),
+        })
+    } else {
+        None
+    })
+}
+
+/// `memory_collect`: every RTLIL memory and its port cells into one
+/// `$mem_v2`.
+pub fn collect(m: &mut Module) -> Result<()> {
+    if m.memories.is_empty() {
+        return Ok(());
+    }
+    let mut by_mem: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, c) in m.cells.iter().enumerate() {
+        if let CellKind::Other(g) = &c.kind {
+            if g.ty.starts_with("$mem") && g.ty != "$mem_v2" {
+                let id = memid(g).with_context(|| format!("{} without MEMID", c.name))?;
+                by_mem.entry(id.to_string()).or_default().push(i);
+            }
+        }
+    }
+    let mut remove = vec![false; m.cells.len()];
+    let mut mems = Vec::new();
+    for memory in std::mem::take(&mut m.memories) {
+        let id = format!("\\{}", memory.name.trim_start_matches('\\'));
+        let cells = by_mem.remove(&id).unwrap_or_default();
+        let (mut rd, mut wr, mut init) = (Vec::new(), Vec::new(), Vec::new());
+        for &i in &cells {
+            remove[i] = true;
+            let CellKind::Other(g) = &m.cells[i].kind else {
+                unreachable!()
+            };
+            match g.ty.as_str() {
+                "$memrd" | "$memrd_v2" => rd.push((m.cells[i].name.clone(), g.clone())),
+                "$memwr" | "$memwr_v2" => {
+                    let key = if g.ty == "$memwr" {
+                        "PRIORITY"
+                    } else {
+                        "PORTID"
+                    };
+                    wr.push((int(g, key)?, g.clone()));
+                }
+                "$meminit" | "$meminit_v2" => init.push((int(g, "PRIORITY")?, g.clone())),
+                other => bail!("memory {id}: {other} cells are not supported"),
+            }
+        }
+        wr.sort_by_key(|(k, _)| *k);
+        init.sort_by_key(|(k, _)| *k);
+        let width = memory.width;
+        let size = memory.size;
+        let abits = rd
+            .iter()
+            .map(|(_, g)| sig(g, "ADDR").map(|a| a.len()))
+            .chain(wr.iter().map(|(_, g)| sig(g, "ADDR").map(|a| a.len())))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .max()
+            .unwrap_or(0);
+
+        let mut contents = vec![State::X; size * width];
+        for (_, g) in &init {
+            let addr = konst_of(&sig(g, "ADDR")?)
+                .and_then(|c| c.as_i64())
+                .with_context(|| format!("memory {id}: non-constant init address"))?;
+            let data = konst_of(&sig(g, "DATA")?)
+                .with_context(|| format!("memory {id}: non-constant init data"))?;
+            let en = if g.ty == "$meminit_v2" {
+                konst_of(&sig(g, "EN")?)
+                    .with_context(|| format!("memory {id}: non-constant init enable"))?
+            } else {
+                Const::filled(State::One, width)
+            };
+            let first = (addr - memory.start_offset) as usize * width;
+            for (k, s) in data.0.iter().enumerate() {
+                let i = first + k;
+                if i < contents.len() && en.0[k % width] == State::One {
+                    contents[i] = *s;
+                }
+            }
+        }
+
+        let nw = wr.len();
+        let wr_ports: Vec<MemWr> = wr
+            .iter()
+            .enumerate()
+            .map(|(i, (_, g))| -> Result<MemWr> {
+                let clk = clock(g)?;
+                let priority = if g.ty == "$memwr" {
+                    // Old-style: a later port wins over earlier ones on the
+                    // same clock.
+                    (0..nw)
+                        .map(|j| j < i && clock(&wr[j].1).ok().flatten() == clk && clk.is_some())
+                        .collect()
+                } else {
+                    let mask = konst(g, "PRIORITY_MASK")?;
+                    wr.iter()
+                        .map(|(portid, _)| mask.0.get(*portid as usize) == Some(&State::One))
+                        .collect()
+                };
+                ensure!(
+                    sig(g, "DATA")?.len() == width,
+                    "memory {id}: wide write ports are not supported"
+                );
+                Ok(MemWr {
+                    clk,
+                    en: sig(g, "EN")?,
+                    addr: extend(&sig(g, "ADDR")?, abits, false),
+                    data: sig(g, "DATA")?,
+                    wide_continuation: false,
+                    priority,
+                })
+            })
+            .collect::<Result<_>>()?;
+        let mut rd_ports = Vec::new();
+        rd.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, g) in &rd {
+            let data = sig(g, "DATA")?;
+            ensure!(
+                data.len() == width,
+                "memory {id}: wide read port {name} is not supported"
+            );
+            let clk = clock(g)?;
+            let sync = match clk {
+                None => None,
+                Some(clk) => {
+                    let transparent = if g.ty == "$memrd" {
+                        let t = flag(g, "TRANSPARENT")?;
+                        wr_ports.iter().map(|w| t && w.clk == Some(clk)).collect()
+                    } else {
+                        bail!("memory {id}: synchronous $memrd_v2 port {name} is not supported");
+                    };
+                    let x = Const::filled(State::X, width);
+                    Some(MemRdSync {
+                        clk,
+                        en: sig(g, "EN")?[0],
+                        arst: SigBit::ZERO,
+                        srst: SigBit::ZERO,
+                        ce_over_srst: false,
+                        init_value: x.clone(),
+                        arst_value: x.clone(),
+                        srst_value: x,
+                        transparent,
+                        collision_x: vec![false; nw],
+                    })
+                }
+            };
+            rd_ports.push(MemRd {
+                addr: extend(&sig(g, "ADDR")?, abits, false),
+                data,
+                wide_continuation: false,
+                sync,
+            });
+        }
+        mems.push((
+            memory.attributes.clone(),
+            Mem {
+                memid: id,
+                size,
+                offset: memory.start_offset,
+                width,
+                abits,
+                init: Const(contents),
+                rd: rd_ports,
+                wr: wr_ports,
+            },
+        ));
+    }
+    if let Some(id) = by_mem.keys().next() {
+        bail!("memory cells for {id}, which isn't a memory of the module");
+    }
+    let mut it = remove.into_iter();
+    m.cells.retain(|_| !it.next().expect("one flag per cell"));
+    let mut namer = Namer::new(m, "mem");
+    for (attributes, mem) in mems {
+        let name = namer.fresh();
+        let id = m.add_cell(name, CellKind::Mem(mem));
+        m.cells[id].attributes = attributes;
+    }
+    Ok(())
+}
+
+/// Who reads each net: (cell, is a register's D input, bit within D).
+fn readers(m: &Module) -> Vec<Vec<(usize, Option<usize>)>> {
+    let mut out = vec![Vec::new(); m.net_count()];
+    for (i, c) in m.cells.iter().enumerate() {
+        if let CellKind::Ff(_) = &c.kind {
+            c.kind.for_each_port(|p| {
+                if p.dir == Some(chipsmith_netlist::Dir::In) {
+                    for (k, b) in p.bits.iter().enumerate() {
+                        if let SigBit::Net(n) = b {
+                            out[n.index()].push((i, (p.name == "D").then_some(k)));
+                        }
+                    }
+                }
+            });
+            continue;
+        }
+        c.kind.for_each_port(|p| {
+            if p.dir.is_none_or(|d| d.reads()) {
+                for b in p.bits {
+                    if let SigBit::Net(n) = b {
+                        out[n.index()].push((i, None));
+                    }
+                }
+            }
+        });
+    }
+    for (_, w, dir) in m.ports() {
+        if dir.drives() {
+            for b in &w.bits {
+                if let SigBit::Net(n) = b {
+                    out[n.index()].push((usize::MAX, None));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A register's clocking, if it is a plain or synchronously reset
+/// edge-triggered one: what a read port can take over.
+#[derive(Clone, PartialEq)]
+struct Clocking {
+    clk: Ctrl,
+    /// Enables that must all be active, innermost first: proc nests one
+    /// multiplexer per `if` around an assignment.
+    en: Vec<Ctrl>,
+    srst: Option<(Ctrl, bool)>,
+}
+
+fn clocking(ff: &Ff<Word>) -> Option<Clocking> {
+    let FfKind::Dff { clk, control, .. } = &ff.kind else {
+        return None;
+    };
+    match control {
+        DffControl::Plain { en } => Some(Clocking {
+            clk: *clk,
+            en: en.iter().copied().collect(),
+            srst: None,
+        }),
+        DffControl::Sync { srst, en, .. } => Some(Clocking {
+            clk: *clk,
+            en: match en {
+                SyncEnable::Always => Vec::new(),
+                SyncEnable::EnableOverReset(c) => vec![*c],
+                SyncEnable::ResetOverEnable(_) => return None,
+            },
+            srst: Some((*srst, matches!(en, SyncEnable::EnableOverReset(_)))),
+        }),
+        _ => None,
+    }
+}
+
+/// Removes bits `drop` from a word-level register.
+pub(crate) fn drop_bits(ff: &mut Ff<Word>, drop: &[bool]) {
+    let keep = |s: &mut SigSpec| {
+        let mut it = drop.iter();
+        s.retain(|_| !*it.next().expect("one flag per bit"));
+    };
+    let keepc = |c: &mut Const| {
+        let mut it = drop.iter();
+        c.0.retain(|_| !*it.next().expect("one flag per bit"));
+    };
+    keep(&mut ff.q);
+    if let FfKind::Dff { d, control, .. } = &mut ff.kind {
+        keep(d);
+        if let DffControl::Sync { value, .. } | DffControl::Async { value, .. } = control {
+            keepc(value);
+        }
+    }
+}
+
+/// `memory_dff`: a register on every bit of an asynchronous read port's
+/// data (and nothing else reading the data) becomes the port's clock:
+/// the read happens at the edge, before any write on it, so it returns the
+/// old data. Failing that, a register on its whole address does: then the
+/// read sees writes on the same edge (new data).
+///
+/// Only where `accept` takes the memory with its registers merged: a
+/// memory that will be registers and multiplexers anyway is better off
+/// keeping its registers where they are.
+pub fn merge_registers(m: &mut Module, accept: impl Fn(&Mem) -> bool) -> Result<()> {
+    let init = inits(m);
+    let readers = readers(m);
+    let mut ff_drop: HashMap<usize, Vec<bool>> = HashMap::new();
+    let mut updates: Vec<(usize, usize, MemRd, PortLogic)> = Vec::new();
+    // Driver of each net among registers' Q: (cell, bit).
+    let mut q_of = vec![None; m.net_count()];
+    for (i, c) in m.cells.iter().enumerate() {
+        if let CellKind::Ff(ff) = &c.kind {
+            for (k, b) in ff.q.iter().enumerate() {
+                if let SigBit::Net(n) = b {
+                    q_of[n.index()] = Some((i, k));
+                }
+            }
+        }
+    }
+    for (ci, c) in m.cells.iter().enumerate() {
+        let CellKind::Mem(mem) = &c.kind else {
+            continue;
+        };
+        let mut candidate = mem.clone();
+        let mut drops = ff_drop.clone();
+        let mut ports = Vec::new();
+        for (pi, rd) in mem.rd.iter().enumerate() {
+            if rd.sync.is_some() {
+                continue;
+            }
+            if let Some((port, enables)) = output_register(m, &readers, &init, mem, rd, &mut drops)
+            {
+                ports.push((pi, port, (enables, Vec::new())));
+                continue;
+            }
+            if let Some((port, holds)) = address_register(m, &q_of, &init, mem, rd) {
+                ports.push((pi, port, (Vec::new(), holds)));
+            }
+        }
+        for (pi, port, _) in &ports {
+            candidate.rd[*pi] = port.clone();
+        }
+        if !ports.is_empty() && accept(&candidate) {
+            updates.extend(ports.into_iter().map(|(pi, p, l)| (ci, pi, p, l)));
+            ff_drop = drops;
+        }
+    }
+    let mut namer = Namer::new(m, "memen");
+    for (ci, pi, mut port, (enables, holds)) in updates {
+        for h in holds {
+            let y = SigBit::Net(m.new_net());
+            let (a, b) = match h.en.polarity {
+                Polarity::Pos => (h.q, h.d),
+                Polarity::Neg => (h.d, h.q),
+            };
+            let g = Gate::new(GateOp::Mux, &[a, b, h.en.sig], y).expect("a mux's inputs");
+            m.add_cell(namer.fresh(), CellKind::Gate(g));
+            port.addr[h.bit] = y;
+        }
+        if let Some(sync) = &mut port.sync {
+            let mut en: Option<SigBit> = None;
+            for e in enables {
+                let mut gate = |op: GateOp, inputs: &[SigBit]| {
+                    let y = SigBit::Net(m.new_net());
+                    let g = Gate::new(op, inputs, y).expect("the gate's inputs");
+                    m.add_cell(namer.fresh(), CellKind::Gate(g));
+                    y
+                };
+                let term = match e.polarity {
+                    Polarity::Pos => e.sig,
+                    Polarity::Neg => gate(GateOp::Not, &[e.sig]),
+                };
+                en = Some(match en {
+                    None => term,
+                    Some(a) => gate(GateOp::And, &[a, term]),
+                });
+            }
+            sync.en = en.unwrap_or(SigBit::ONE);
+        }
+        if let CellKind::Mem(mem) = &mut m.cells[ci].kind {
+            mem.rd[pi] = port;
+        }
+    }
+    for (ci, drop) in ff_drop {
+        if let CellKind::Ff(ff) = &mut m.cells[ci].kind {
+            drop_bits(ff, &drop);
+        }
+    }
+    m.cells
+        .retain(|c| !matches!(&c.kind, CellKind::Ff(ff) if ff.width() == 0));
+    Ok(())
+}
+
+/// What [`through_muxes`] finds: the register, its bit, its clocking, the
+/// reset value and the write a bypass reads through (enable, data).
+type ReadRegister = (
+    usize,
+    usize,
+    Clocking,
+    Option<State>,
+    Option<(SigBit, SigBit)>,
+);
+
+/// The register a read data bit goes into: straight, or through the
+/// multiplexers `proc` makes of an enable (`en ? data : q`) and a
+/// synchronous reset (`rst ? value : data`), which `opt_dff` would only
+/// later fold into the register. Returns the register, its bit, its
+/// clocking with those folded in, and the reset value.
+/// Multiplexers [`through_muxes`] follows from a read to its register:
+/// enough for a few nested `if`s, a reset and a bypass.
+const MAX_LAYERS: usize = 6;
+
+fn through_muxes(
+    m: &Module,
+    readers: &[Vec<(usize, Option<usize>)>],
+    n: Net,
+) -> Option<ReadRegister> {
+    enum Layer {
+        En(Ctrl, SigBit),
+        Srst(Ctrl, State),
+        /// `we ? wdata : data`: a write's new data, read through; or,
+        /// with the register's own output for `wdata`, an active-low
+        /// enable (`hold ? q : data`).
+        Bypass(SigBit, SigBit),
+    }
+    let mut layers = Vec::new();
+    let mut cur = n;
+    loop {
+        match readers[cur.index()][..] {
+            [(cell, Some(bit))] => {
+                let CellKind::Ff(ff) = &m.cells[cell].kind else {
+                    return None;
+                };
+                let mut c = clocking(ff)?;
+                if layers.is_empty() {
+                    return Some((cell, bit, c, None, None));
+                }
+                // proc's registers are plain; the muxes are all there is.
+                if !c.en.is_empty() || c.srst.is_some() {
+                    return None;
+                }
+                for l in &mut layers {
+                    if let Layer::Bypass(hold, q) = *l {
+                        if q == ff.q[bit] {
+                            let neg = Ctrl {
+                                sig: hold,
+                                polarity: Polarity::Neg,
+                            };
+                            *l = Layer::En(neg, q);
+                        }
+                    }
+                }
+                let mut value = None;
+                let mut bypass = None;
+                for l in &layers {
+                    match *l {
+                        // Only innermost: what the read itself returns.
+                        Layer::Bypass(we, d) => {
+                            if !matches!(layers.first(), Some(Layer::Bypass(..)))
+                                || bypass.is_some()
+                            {
+                                return None;
+                            }
+                            bypass = Some((we, d));
+                        }
+                        Layer::En(e, hold) => {
+                            if hold != ff.q[bit] {
+                                return None;
+                            }
+                            c.en.push(e);
+                        }
+                        Layer::Srst(r, v) => {
+                            if c.srst.is_some() {
+                                return None;
+                            }
+                            value = Some(v);
+                            c.srst = Some((r, false));
+                        }
+                    }
+                }
+                // A reset inside the enables (`en ? (rst ? v : data) : q`)
+                // only acts on enabled edges; one outside them
+                // (`rst ? v : (en ? data : q)`) on every edge. A reset
+                // between two enables is neither.
+                if let Some((r, _)) = c.srst {
+                    let around: Vec<&Layer> = layers
+                        .iter()
+                        .filter(|l| !matches!(l, Layer::Bypass(..)))
+                        .collect();
+                    let at = around.iter().position(|l| matches!(l, Layer::Srst(..)));
+                    match at {
+                        Some(0) if around.len() > 1 => c.srst = Some((r, true)),
+                        Some(i) if i + 1 == around.len() => {}
+                        _ => return None,
+                    }
+                }
+                return Some((cell, bit, c, value, bypass));
+            }
+            [(cell, None)] if layers.len() < MAX_LAYERS => {
+                // usize::MAX: a module port reads it.
+                let Some(CellKind::Mux(mx)) = m.cells.get(cell).map(|c| &c.kind) else {
+                    return None;
+                };
+                let me = SigBit::Net(cur);
+                let j = (0..mx.y.len()).find(|&j| mx.a[j] == me || mx.b[j] == me)?;
+                // A constant select (an `if` on a tied-off input) passes
+                // the data on or drops it.
+                if let SigBit::Const(v) = mx.s {
+                    let taken = if v == State::One { mx.b[j] } else { mx.a[j] };
+                    if taken != me {
+                        return None;
+                    }
+                    cur = mx.y[j].net()?;
+                    continue;
+                }
+                let s = Ctrl::pos(mx.s);
+                if mx.b[j] == me && mx.a[j] != me {
+                    layers.push(Layer::En(s, mx.a[j]));
+                } else if let (true, SigBit::Const(v)) = (mx.a[j] == me, mx.b[j]) {
+                    layers.push(Layer::Srst(s, v));
+                } else if mx.a[j] == me {
+                    layers.push(Layer::Bypass(mx.s, mx.b[j]));
+                } else {
+                    return None;
+                }
+                cur = mx.y[j].net()?;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Whether write enable `e` is `we` and an enable the read sits under
+/// (`if (en) begin if (we) m[a] <= d; q <= we ? d : m[a]; end`): while the
+/// read is enabled, the write is exactly the bypass's.
+fn and_of(m: &Module, e: SigBit, we: SigBit, enables: &[Ctrl]) -> bool {
+    let SigBit::Net(n) = e else { return false };
+    let is_en = |x: SigBit| {
+        enables
+            .iter()
+            .any(|c| c.polarity == Polarity::Pos && c.sig == x)
+    };
+    let pair = |a: SigBit, b: SigBit| (a == we && is_en(b)) || (b == we && is_en(a));
+    m.cells.iter().any(|c| match &c.kind {
+        CellKind::Gate(g) if g.op() == GateOp::And && g.y == e => {
+            let i = g.inputs();
+            i.len() == 2 && pair(i[0], i[1])
+        }
+        CellKind::Binary(b) if matches!(b.op, BinaryOp::And | BinaryOp::LogicAnd) && b.y == [e] => {
+            b.a.sig.len() == 1 && b.b.sig.len() == 1 && pair(b.a.sig[0], b.b.sig[0])
+        }
+        CellKind::Mux(mx) => {
+            mx.y.iter()
+                .position(|&y| y == SigBit::Net(n))
+                .is_some_and(|j| mx.a[j] == SigBit::ZERO && pair(mx.s, mx.b[j]))
+        }
+        _ => false,
+    })
+}
+
+fn output_register(
+    m: &Module,
+    readers: &[Vec<(usize, Option<usize>)>],
+    init: &rustc_hash::FxHashMap<Net, State>,
+    mem: &Mem,
+    rd: &MemRd,
+    ff_drop: &mut HashMap<usize, Vec<bool>>,
+) -> Option<(MemRd, Vec<Ctrl>)> {
+    let mut found: Vec<(usize, usize, Option<State>)> = Vec::new();
+    let mut clk: Option<Clocking> = None;
+    // Bypassed write ports: per write port, whether every data bit reads
+    // its new data through (then the read is transparent to it) or none.
+    let mut bypassed: Vec<Option<bool>> = vec![None; mem.wr.len()];
+    for (k, b) in rd.data.iter().enumerate() {
+        let SigBit::Net(n) = b else { return None };
+        let (cell, bit, this, value, bypass) = through_muxes(m, readers, *n)?;
+        for (j, w) in mem.wr.iter().enumerate() {
+            let hit = bypass.is_some_and(|(we, d)| {
+                w.addr == rd.addr
+                    && w.en
+                        .get(k)
+                        .is_some_and(|&e| e == we || and_of(m, e, we, &this.en))
+                    && w.data.get(k) == Some(&d)
+            });
+            if bypassed[j].is_some_and(|x| x != hit) {
+                return None;
+            }
+            bypassed[j] = Some(hit);
+        }
+        if bypass.is_some() && !bypassed.contains(&Some(true)) {
+            return None;
+        }
+        if ff_drop.get(&cell).is_some_and(|d| d[bit]) {
+            return None;
+        }
+        if clk.as_ref().is_some_and(|c| *c != this) {
+            return None;
+        }
+        clk = Some(this);
+        found.push((cell, bit, value));
+    }
+    let clk = clk?;
+    // The enable and reset must be active high for the port's signals.
+    if clk.srst.is_some_and(|(r, _)| r.polarity == Polarity::Neg) {
+        return None;
+    }
+    let mut data = Vec::new();
+    let (mut init_value, mut srst_value) = (Vec::new(), Vec::new());
+    for &(cell, bit, mux_value) in &found {
+        let CellKind::Ff(ff) = &m.cells[cell].kind else {
+            unreachable!()
+        };
+        let q = ff.q[bit];
+        data.push(q);
+        init_value.push(
+            q.net()
+                .and_then(|n| init.get(&n))
+                .copied()
+                .unwrap_or(State::X),
+        );
+        srst_value.push(mux_value.unwrap_or(match &ff.kind {
+            FfKind::Dff {
+                control: DffControl::Sync { value, .. },
+                ..
+            } => value.0[bit],
+            _ => State::X,
+        }));
+        ff_drop
+            .entry(cell)
+            .or_insert_with(|| vec![false; ff.width()])[bit] = true;
+    }
+    let enables = clk.en.clone();
+    let port = MemRd {
+        addr: rd.addr.clone(),
+        data,
+        wide_continuation: false,
+        sync: Some(MemRdSync {
+            clk: clk.clk,
+            // Anything but one active-high enable: the logic
+            // `merge_registers` makes.
+            en: enables.first().map_or(SigBit::ONE, |e| e.sig),
+            arst: SigBit::ZERO,
+            srst: clk.srst.map_or(SigBit::ZERO, |(r, _)| r.sig),
+            ce_over_srst: clk.srst.is_some_and(|(_, ce)| ce),
+            init_value: Const(init_value),
+            arst_value: Const::filled(State::X, mem.width),
+            srst_value: Const(srst_value),
+            transparent: bypassed.iter().map(|x| *x == Some(true)).collect(),
+            collision_x: vec![false; mem.wr.len()],
+        }),
+    };
+    Some((port, enables))
+}
+
+fn address_register(
+    m: &Module,
+    q_of: &[Option<(usize, usize)>],
+    init: &rustc_hash::FxHashMap<Net, State>,
+    mem: &Mem,
+    rd: &MemRd,
+) -> Option<(MemRd, Vec<AddrHold>)> {
+    // A power-up address would be lost (yosys' `memory_dff` refuses too).
+    if rd
+        .addr
+        .iter()
+        .any(|b| b.net().is_some_and(|n| init.contains_key(&n)))
+    {
+        return None;
+    }
+    let mut clk: Option<Ctrl> = None;
+    let mut addr = Vec::new();
+    let mut holds = Vec::new();
+    for b in &rd.addr {
+        let n = match b {
+            SigBit::Net(n) => *n,
+            // A constant address bit stays constant.
+            SigBit::Const(_) => {
+                addr.push(*b);
+                continue;
+            }
+        };
+        let (cell, bit) = q_of[n.index()]?;
+        let CellKind::Ff(ff) = &m.cells[cell].kind else {
+            return None;
+        };
+        let FfKind::Dff {
+            clk: c,
+            d,
+            control: DffControl::Plain { en },
+        } = &ff.kind
+        else {
+            return None;
+        };
+        if clk.is_some_and(|k| k != *c) {
+            return None;
+        }
+        clk = Some(*c);
+        // An enabled register's next address is `en ? d : q`: the block
+        // reads it on every edge, as Quartus does.
+        if let Some(en) = *en {
+            holds.push(AddrHold {
+                bit: addr.len(),
+                en,
+                d: d[bit],
+                q: *b,
+            });
+        }
+        addr.push(d[bit]);
+    }
+    let clk = clk?;
+    // Every write port on this clock is seen; one on another clock can't
+    // be ordered against the read.
+    if mem.wr.iter().any(|w| w.clk != Some(clk)) {
+        return None;
+    }
+    let x = Const::filled(State::X, mem.width);
+    let port = MemRd {
+        addr,
+        data: rd.data.clone(),
+        wide_continuation: false,
+        sync: Some(MemRdSync {
+            clk,
+            en: SigBit::ONE,
+            arst: SigBit::ZERO,
+            srst: SigBit::ZERO,
+            ce_over_srst: false,
+            init_value: x.clone(),
+            arst_value: x.clone(),
+            srst_value: x,
+            transparent: vec![true; mem.wr.len()],
+            collision_x: vec![false; mem.wr.len()],
+        }),
+    };
+    Some((port, holds))
+}
+
+/// The logic a merged read port needs in front of it: an output
+/// register's enables to AND together, an address register's holds.
+type PortLogic = (Vec<Ctrl>, Vec<AddrHold>);
+
+/// An address bit from an enabled register, which needs `en ? d : q` in
+/// front of the block (`merge_registers` makes it).
+struct AddrHold {
+    bit: usize,
+    en: Ctrl,
+    d: SigBit,
+    q: SigBit,
+}
+
+/// A read port [`read_early`] moves: its index, the holds its address
+/// registers' enables need, and its address on the edge before.
+type EarlyRead = (usize, Vec<AddrHold>, SigSpec);
+
+/// Quartus' register file read (femtorv32's `rs1 <= registerFile[a]`
+/// with `a` a register): a read port with its output register merged
+/// ([`merge_registers`]) whose address comes from registers on its clock
+/// reads on the edge before instead, at those registers' next value, and
+/// its output register goes back into LEs after it. The block's clock to
+/// output then ends at an LE register instead of starting the logic the
+/// read data feeds.
+///
+/// The early read takes the old data of a write on that edge, where the
+/// RTL's read on the next edge sees the new: so only where no write ever
+/// comes on the edge before one the register loads on, nor does it load on
+/// the first edge ([`crate::hazard::never_after`]). Needs power-up values
+/// decided ([`crate::undef::refine`]). Only where `accept` takes the
+/// memory with its ports moved. Returns the ports moved.
+pub fn read_early(m: &mut Module, accept: impl Fn(&Mem) -> bool) -> usize {
+    let init = inits(m);
+    let mut q_of: FxHashMap<Net, (usize, usize)> = FxHashMap::default();
+    for (i, c) in m.cells.iter().enumerate() {
+        if let CellKind::Ff(ff) = &c.kind {
+            for (k, b) in ff.q.iter().enumerate() {
+                if let SigBit::Net(n) = b {
+                    q_of.insert(*n, (i, k));
+                }
+            }
+        }
+    }
+    // Per memory: the ports to move.
+    let mut plans: Vec<(usize, Vec<EarlyRead>)> = Vec::new();
+    for (ci, c) in m.cells.iter().enumerate() {
+        let CellKind::Mem(mem) = &c.kind else {
+            continue;
+        };
+        if mem.rd.iter().any(|r| r.wide_continuation) {
+            continue;
+        }
+        let mut ports = Vec::new();
+        for (pi, rd) in mem.rd.iter().enumerate() {
+            let Some(s) = &rd.sync else { continue };
+            if s.arst != SigBit::ZERO
+                || s.srst != SigBit::ZERO
+                || s.transparent.iter().any(|&t| t)
+                || mem.wr.iter().any(|w| w.clk != Some(s.clk))
+            {
+                continue;
+            }
+            let mut addr = Vec::new();
+            let mut holds = Vec::new();
+            let ok = rd.addr.iter().all(|b| {
+                let SigBit::Net(n) = b else {
+                    addr.push(*b);
+                    return true;
+                };
+                let Some(&(cell, bit)) = q_of.get(n) else {
+                    return false;
+                };
+                let CellKind::Ff(Ff {
+                    kind:
+                        FfKind::Dff {
+                            clk,
+                            d,
+                            control: DffControl::Plain { en },
+                        },
+                    ..
+                }) = &m.cells[cell].kind
+                else {
+                    return false;
+                };
+                if *clk != s.clk {
+                    return false;
+                }
+                if let Some(en) = en {
+                    holds.push(AddrHold {
+                        bit: addr.len(),
+                        en: *en,
+                        d: d[bit],
+                        q: *b,
+                    });
+                }
+                addr.push(d[bit]);
+                true
+            });
+            if !ok {
+                continue;
+            }
+            let writes: Vec<SigBit> = mem.wr.iter().flat_map(|w| w.en.iter().copied()).collect();
+            if !crate::hazard::never_after(m, s.clk, &writes, s.en, &init) {
+                continue;
+            }
+            ports.push((pi, holds, addr));
+        }
+        if !ports.is_empty() {
+            plans.push((ci, ports));
+        }
+    }
+    let mut namer = Namer::new(m, "memearly");
+    let mut moved = 0;
+    for (ci, ports) in plans {
+        let n = ports.len();
+        let CellKind::Mem(mem) = &m.cells[ci].kind else {
+            unreachable!()
+        };
+        let mut mem = mem.clone();
+        let mut regs = Vec::new();
+        for (pi, holds, mut addr) in ports {
+            for h in holds {
+                let y = SigBit::Net(m.new_net());
+                let (a, b) = match h.en.polarity {
+                    Polarity::Pos => (h.q, h.d),
+                    Polarity::Neg => (h.d, h.q),
+                };
+                regs.push(CellKind::Gate(
+                    Gate::new(GateOp::Mux, &[a, b, h.en.sig], y).expect("a mux's inputs"),
+                ));
+                addr[h.bit] = y;
+            }
+            let rd = &mut mem.rd[pi];
+            let s = rd.sync.as_mut().expect("a synchronous port");
+            let q = rd.data.clone();
+            let data: SigSpec = (0..q.len()).map(|_| SigBit::Net(m.new_net())).collect();
+            let en = (s.en != SigBit::ONE).then(|| Ctrl::pos(s.en));
+            regs.push(CellKind::Ff(Ff {
+                q,
+                kind: FfKind::Dff {
+                    clk: s.clk,
+                    d: data.clone(),
+                    control: DffControl::Plain { en },
+                },
+            }));
+            rd.addr = addr;
+            rd.data = data;
+            s.en = SigBit::ONE;
+            // A write on the edge never matters (`never_after`).
+            s.collision_x = vec![true; mem.wr.len()];
+            s.init_value = Const::filled(State::X, mem.width);
+        }
+        if !accept(&mem) {
+            // Only nets were made: nothing reads them.
+            continue;
+        }
+        moved += n;
+        m.cells[ci].kind = CellKind::Mem(mem);
+        for k in regs {
+            m.add_cell(namer.fresh(), k);
+        }
+    }
+    moved
+}
+
+/// `memory_map`: every memory left becomes a register per word (named
+/// `memid[i]`, as yosys names them), write logic per word and a multiplexer
+/// tree per read port.
+pub fn map_to_logic(m: &mut Module) -> Result<()> {
+    let mut namer = Namer::new(m, "memmap");
+    let cells = std::mem::take(&mut m.cells);
+    let mut out = Vec::new();
+    let mut new_wires = Vec::new();
+    let mut subst = Subst::new(m);
+    for c in cells {
+        match c.kind {
+            CellKind::Mem(mem) => {
+                let mut add = |kind: CellKind| {
+                    out.push(Cell {
+                        name: namer.fresh(),
+                        kind,
+                        attributes: Default::default(),
+                    })
+                };
+                map_mem(m, &mem, &mut add, &mut new_wires, &mut subst)
+                    .with_context(|| format!("memory {}", mem.memid))?;
+            }
+            kind => out.push(Cell { kind, ..c }),
+        }
+    }
+    m.cells = out;
+    m.wires.extend(new_wires);
+    subst.apply(m);
+    Ok(())
+}
+
+fn konst_sig(v: usize, w: usize) -> SigSpec {
+    Const::from_int(v as i64, w)
+        .0
+        .into_iter()
+        .map(SigBit::Const)
+        .collect()
+}
+
+fn map_mem(
+    m: &mut Module,
+    mem: &Mem,
+    add: &mut impl FnMut(CellKind),
+    wires: &mut Vec<Wire>,
+    subst: &mut Subst,
+) -> Result<()> {
+    ensure!(
+        mem.offset == 0,
+        "a memory starting at a nonzero address is not supported"
+    );
+    let w = mem.width;
+    let clk = match mem.wr.first() {
+        Some(p) => Some(
+            p.clk
+                .context("asynchronous write ports are not supported")?,
+        ),
+        None => None,
+    };
+    ensure!(
+        mem.wr.iter().all(|p| p.clk == clk),
+        "write ports on different clocks are not supported"
+    );
+    let name = mem.memid.trim_start_matches('\\');
+    let words: Vec<SigSpec> = (0..mem.size)
+        .map(|i| {
+            let q = m.new_sig(w);
+            let mut wire = Wire::new(format!("{name}[{i}]"), q.clone());
+            let word = &mem.init.0[i * w..(i + 1) * w];
+            if word.iter().any(|s| *s != State::X) {
+                wire.attributes
+                    .insert(attr::INIT.into(), ParamValue::Bits(Const(word.to_vec())));
+            }
+            wires.push(wire);
+            q
+        })
+        .collect();
+
+    match clk {
+        // A ROM: the words are their contents.
+        None => {
+            for (i, q) in words.iter().enumerate() {
+                for (k, b) in q.iter().enumerate() {
+                    if let SigBit::Net(n) = b {
+                        subst.set(*n, SigBit::Const(mem.init.0[i * w + k]));
+                    }
+                }
+            }
+        }
+        Some(clk) => {
+            for (i, q) in words.iter().enumerate() {
+                let mut data: SigSpec = q.clone();
+                for p in &mem.wr {
+                    let hit = m.new_sig(1)[0];
+                    add(CellKind::Binary(Binary {
+                        op: BinaryOp::Eq,
+                        a: Operand {
+                            sig: p.addr.clone(),
+                            signed: false,
+                        },
+                        b: Operand {
+                            sig: konst_sig(i, p.addr.len().max(1)),
+                            signed: false,
+                        },
+                        y: vec![hit],
+                    }));
+                    // One multiplexer per run of bits sharing an enable.
+                    let mut k = 0;
+                    while k < w {
+                        let en = p.en[k];
+                        let mut end = k + 1;
+                        while end < w && p.en[end] == en {
+                            end += 1;
+                        }
+                        let s = m.new_sig(1)[0];
+                        add(CellKind::Binary(Binary {
+                            op: BinaryOp::And,
+                            a: Operand {
+                                sig: vec![hit],
+                                signed: false,
+                            },
+                            b: Operand {
+                                sig: vec![en],
+                                signed: false,
+                            },
+                            y: vec![s],
+                        }));
+                        let y = m.new_sig(end - k);
+                        add(CellKind::Mux(Mux {
+                            a: data[k..end].to_vec(),
+                            b: p.data[k..end].to_vec(),
+                            s,
+                            y: y.clone(),
+                        }));
+                        data.splice(k..end, y);
+                        k = end;
+                    }
+                }
+                add(CellKind::Ff(Ff {
+                    q: q.clone(),
+                    kind: FfKind::Dff {
+                        clk,
+                        d: data,
+                        control: DffControl::Plain { en: None },
+                    },
+                }));
+            }
+        }
+    }
+
+    // Read ports: a multiplexer tree on the address over the words.
+    let abits = (usize::BITS - mem.size.saturating_sub(1).leading_zeros()) as usize;
+    let mut all: SigSpec = Vec::with_capacity(w << abits);
+    for i in 0..1usize << abits {
+        all.extend(words.get(i).cloned().unwrap_or_else(|| vec![SigBit::X; w]));
+    }
+    for rd in &mem.rd {
+        let mut addr = extend(&rd.addr, abits, false);
+        let data_out = rd.data.clone();
+        let read = |m: &mut Module, add: &mut dyn FnMut(CellKind), addr: SigSpec| -> SigSpec {
+            let y = m.new_sig(w);
+            if abits == 0 {
+                return all.clone();
+            }
+            add(CellKind::Bmux(Bmux {
+                a: all.clone(),
+                s: addr,
+                y: y.clone(),
+            }));
+            y
+        };
+        match &rd.sync {
+            None => {
+                let y = read(m, add, addr);
+                for (o, v) in data_out.iter().zip(y) {
+                    if let SigBit::Net(n) = o {
+                        subst.set(*n, v);
+                    }
+                }
+            }
+            Some(s) => {
+                ensure!(
+                    s.arst == SigBit::ZERO,
+                    "read ports with an asynchronous reset are not supported"
+                );
+                let all_t = s.transparent.iter().all(|&t| t);
+                let none_t = s.transparent.iter().all(|&t| !t);
+                if all_t && !s.transparent.is_empty() {
+                    // Register the address: the words are read after the
+                    // edge that wrote them.
+                    ensure!(
+                        s.en == SigBit::ONE && s.srst == SigBit::ZERO,
+                        "transparent read ports with an enable or reset are not supported"
+                    );
+                    let q = m.new_sig(addr.len());
+                    add(CellKind::Ff(Ff {
+                        q: q.clone(),
+                        kind: FfKind::Dff {
+                            clk: s.clk,
+                            d: addr,
+                            control: DffControl::Plain { en: None },
+                        },
+                    }));
+                    addr = q;
+                    let y = read(m, add, addr);
+                    for (o, v) in data_out.iter().zip(y) {
+                        if let SigBit::Net(n) = o {
+                            subst.set(*n, v);
+                        }
+                    }
+                } else {
+                    ensure!(
+                        none_t,
+                        "read ports transparent to only some write ports are not supported"
+                    );
+                    let y = read(m, add, addr);
+                    let en = (s.en != SigBit::ONE).then_some(Ctrl::pos(s.en));
+                    let control = if s.srst == SigBit::ZERO {
+                        DffControl::Plain { en }
+                    } else {
+                        DffControl::Sync {
+                            srst: Ctrl::pos(s.srst),
+                            value: s.srst_value.clone(),
+                            en: match en {
+                                None => SyncEnable::Always,
+                                Some(e) if s.ce_over_srst => SyncEnable::EnableOverReset(e),
+                                Some(e) => SyncEnable::ResetOverEnable(e),
+                            },
+                        }
+                    };
+                    add(CellKind::Ff(Ff {
+                        q: data_out.clone(),
+                        kind: FfKind::Dff {
+                            clk: s.clk,
+                            d: y,
+                            control,
+                        },
+                    }));
+                    if s.init_value.0.iter().any(|v| *v != State::X) {
+                        wires.push({
+                            let mut wire = Wire::new(
+                                format!("$chipsmith$memrd${}", wires.len()),
+                                data_out.clone(),
+                            );
+                            wire.attributes
+                                .insert(attr::INIT.into(), ParamValue::Bits(s.init_value.clone()));
+                            wire
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}

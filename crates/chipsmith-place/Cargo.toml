@@ -1,0 +1,16 @@
+[package]
+name = "chipsmith-place"
+description = "Device-generic analytic global placement chipsmith's back ends share: bound-to-bound quadratic solve, cut spreading, a legaliser the device supplies"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rayon.workspace = true
+# The GPU engine (`gpu` feature): off by default, so a machine without
+# the CUDA toolkit or ROCm builds chipsmith (ADR-0012).
+cubecl = { version = "=0.11.3", default-features = false, features = ["std", "stdlib", "hip", "cuda", "persistence"], optional = true }
+
+[features]
+gpu = ["dep:cubecl"]

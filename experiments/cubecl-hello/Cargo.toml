@@ -1,0 +1,11 @@
+[package]
+name = "cubecl-hello"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cubecl = { version = "=0.11.3", default-features = false, features = ["std", "stdlib", "hip", "cuda"] }
+
+# Not part of the chipsmith workspace: keeps CubeCL (and the LLVM it
+# bundles) out of every chipsmith build.
+[workspace]

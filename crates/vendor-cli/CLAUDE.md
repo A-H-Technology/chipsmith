@@ -17,16 +17,21 @@ are the names used throughout the code.
 ## Build and test
 
 ```bash
-cargo check                    # type check
-cargo test --workspace         # run all tests 
-cargo fmt                      # format
-cargo fmt --check              # verify formatting
-cargo clippy --workspace --all-targets -- -D warnings
+# The workspace is shared with the open toolchain; name the vendor crates.
+VENDOR="-p chipsmith-vendor -p chipsmith-core -p chipsmith-toolchain -p chipsmith-sim -p 'chipsmith-quartus-*'"
+cargo check -p chipsmith-vendor          # type check
+eval cargo test $VENDOR                  # run the vendor crates' tests
+cargo fmt                                # format
+cargo fmt --check                        # verify formatting
+eval cargo clippy $VENDOR --all-targets -- -D warnings
 ```
 
-Clippy is enforced in CI. On NixOS, `nix develop` provides Rust, `just`, `ghdl`
-and the tools chipsmith shells out to; run anything else missing through
-`nix shell nixpkgs#<pkg>` or `nix run nixpkgs#<pkg>`.
+Clippy is enforced in CI. The root `nix develop` is the open toolchain's
+shell, pinned to cyclone2-re's, and is kept as is: it has Rust, `just` and
+`ghdl`, but not `unzip`, which a `cargo run` chipsmith-vendor needs to unpack
+Device Support packages (`nix shell nixpkgs#unzip`). patchelf and bubblewrap
+come from the Nix Compat paths (`compat.nix`), not PATH. The nix-built
+`.#chipsmith-vendor` wraps `unzip` in.
 
 The examples are runnable: `cd crates/vendor-cli/example && just testbench` exercises the whole
 simulation path on GHDL, without a Quartus install.

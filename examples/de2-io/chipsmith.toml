@@ -1,0 +1,30 @@
+# The DE2's pin settings: I/O-cell registers, pull-ups, bus hold, drive
+# strengths, 3.3-V LVCMOS and a 2.5-V input (chipsmith README, Manifest).
+# Safe to load with nothing plugged into the GPIO_0 header: the only
+# non-LED pin it drives is GPIO_0[4], and only while KEY[0] is held.
+[project]
+name = "de2_io"
+top = "top"
+sources = ["src/*.v"]
+
+[target]
+device = "EP2C35F672C6"
+
+# Pins: Quartus' DE2 board package (qboard-de2-pkg.tcl), the Terasic DE2
+# user manual's tables.
+[pins]
+CLOCK_50 = "PIN_N2"
+SW = ["PIN_N25", "PIN_N26", "PIN_P25", "PIN_AE14"]
+SW_HI = { pins = ["PIN_T7", "PIN_U3", "PIN_U4", "PIN_V1", "PIN_V2"], registers = ["input"] }
+KEY = { pins = ["PIN_G26", "PIN_N23"], standard = "2.5 V" }
+GPIO_PU = { pins = ["PIN_D25", "PIN_J22"], pull = "up" }
+GPIO_BH = { pins = ["PIN_E26", "PIN_E25"], pull = "bus-hold" }
+GPIO_IO = { pin = "PIN_F24", pull = "up", drive = "8 mA", registers = ["input", "output", "output-enable"] }
+LEDR = { pins = ["PIN_AE23", "PIN_AF23", "PIN_AB21", "PIN_AC22", "PIN_AD22"], registers = ["output"] }
+LEDR_IN = ["PIN_AA14", "PIN_Y13", "PIN_AA13", "PIN_AC14", "PIN_AD15", "PIN_AE15"]
+LEDG = { pins = ["PIN_AE22", "PIN_AF22", "PIN_W19", "PIN_V18", "PIN_U18"], drive = "4 mA", registers = ["output"] }
+HEX0 = { pins = ["PIN_AF10", "PIN_AB12", "PIN_AC12", "PIN_AD11", "PIN_AE11", "PIN_V14", "PIN_V13"], standard = "3.3-V LVCMOS" }
+
+# The DE2's 50 MHz oscillator; slack is reported against it.
+[clocks]
+CLOCK_50 = "50 MHz"

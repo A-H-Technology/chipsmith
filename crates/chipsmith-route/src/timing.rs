@@ -1,0 +1,811 @@
+//! Static timing for one clock domain, slow corner (speed grade 6).
+//!
+//! The numbers are Quartus' own, from cyclone2-re's docs/timing-model.md:
+//! cell delays are the decoded DMF values (`ddb_magellan4-6.dmf.ddb`), which
+//! match quartus_sta exactly; routing delays are quartus_sta's median per
+//! element type, because the per-wire RC model that Quartus uses isn't
+//! decoded yet (those medians are within about 30% of the real spread).
+//!
+//! Paths run register to register, which is what Quartus reports for a
+//! design with only a clock constraint: pins are unconstrained, so they
+//! neither launch nor capture.
+
+use std::collections::HashMap;
+
+/// Picoseconds.
+pub type Ps = f32;
+
+/// quartus_sta's median delay of a routing element, by chip database wire
+/// type (docs/timing-model.md, "fdi" table, STA median column).
+pub fn wire_delay(wire_type: &str) -> Ps {
+    match wire_type {
+        "R4" => 235.0,
+        "C4" => 285.0,
+        "R24" => 433.0,
+        "C16" => 465.0,
+        // Block interconnect: the LAB lines feeding LE inputs (STA LAB_LINE).
+        "LOCAL_INTERCONNECT" => 362.0,
+        // An LE's output back into its own LAB (STA LOCAL_LINE).
+        "LOCAL_LINE" => 229.0,
+        "LE_BUFFER" => 56.0,
+        // M4K read data onto the routing. One connection measured, not a
+        // median: M4K_BUFFER, two R4s and a LAB line in 975 ps.
+        "M4K_BUFFER" => 143.0,
+        // Multiplier product bits onto the routing: taken as the M4K's
+        // (one quartus_sta path, DSP_BUFFER to an LE's sdata through an R4
+        // and a LAB line, was 1,232 ps; the model's R4 + LAB line + sdata
+        // account for most of it).
+        "DSP_BUFFER" => 143.0,
+        "IO_DATAIN" => 66.0,
+        "BLK_CLK_BUF" => 96.0,
+        "LAB_CLK" => 363.0,
+        "GLOBAL_CLK_V" => 181.0,
+        "GLOBAL_CLK_H" => 385.0,
+        "CLK_BUFFER" => 118.0,
+        // Pin and LE-internal wires: their delay is part of a cell arc.
+        _ => 0.0,
+    }
+}
+
+/// LUT input to output through each physical input A to D (DMF
+/// `LE_COMB/P2P/InOut`, worst transition).
+const LUT_PIN: [Ps; 4] = [438.0, 420.0, 275.0, 150.0];
+
+/// What a LUT input costs over input D, the fastest: carried by the LE
+/// input's routing node (`LE<k>.A` to `.D`), since the router picks which
+/// physical input a LUT input takes (the LUT mask is permuted to match).
+/// The LUT arcs below are input D's for every input, so a connection pays
+/// for the pin it ends on. Timed by the logical input instead, a LUT input
+/// the router put on A was 288 ps slower in quartus_sta than modelled; on
+/// the 443 LUT inputs of quartus_sta's 300 worst paths of five designs,
+/// 53 ps a LUT on average.
+pub fn lut_pin_extra(pin: usize) -> Ps {
+    LUT_PIN[pin] - LUT_PIN[3]
+}
+
+/// What a connection into a LUT's data input pays for its pin when the
+/// pin isn't known yet (placement): the mean over the four.
+pub const LUT_PIN_EXPECTED: Ps = (438.0 + 420.0 + 275.0 - 3.0 * 150.0) / 4.0;
+
+/// quartus_sta's interconnect element into a LUT's input (`|datab`, after
+/// the LAB line or local line): the mean over 9,000 of them on the 300
+/// worst paths of five designs, 27 ps (datac) to 39 ps (dataa) by input.
+/// Not in the DMF arcs; without it the routed estimate ran 2 to 3% above
+/// quartus_sta once LUT inputs were timed by their pins.
+const LUT_INPUT_IC: Ps = 32.0;
+
+/// LUT input to output for the LE at index `le` of its LAB, less the
+/// physical input's [`lut_pin_extra`], plus [`LUT_INPUT_IC`]. The carry out is slower where the
+/// chain crosses the LAB's half-way buffer (LE 7 to 8, `CHAIN_THROUGH_LCB`)
+/// and where it leaves the LAB (LE 15, `CHAIN_ACROSS_LAB`). Carry LEs
+/// keep their inputs where they are (A and B).
+fn lut_arc(input: &str, output: &str, le: u8) -> Option<Ps> {
+    let crossing = le == 7 || le == 15;
+    Some(match (input, output) {
+        ("DATAA" | "DATAB" | "DATAC" | "DATAD", "COMBOUT") => LUT_PIN[3] + LUT_INPUT_IC,
+        ("CIN", "COMBOUT") => 410.0,
+        // CHAIN_BASE; the crossing variants of DATAA aren't identified.
+        ("DATAA", "COUT") => 414.0 - lut_pin_extra(0) + LUT_INPUT_IC,
+        ("DATAB", "COUT") if crossing => 485.0 - lut_pin_extra(1) + LUT_INPUT_IC,
+        ("DATAB", "COUT") => 393.0 - lut_pin_extra(1) + LUT_INPUT_IC,
+        // The stored cin->cout less its inverted-carry correction:
+        // 230 - 71 through the LCB, 219 - 73 across LABs, 129 - 58 otherwise.
+        ("CIN", "COUT") if le == 7 => 159.0,
+        ("CIN", "COUT") if le == 15 => 146.0,
+        ("CIN", "COUT") => 71.0,
+        _ => return None,
+    })
+}
+
+/// Register clock-to-output (DMF `LE_FF` TCO) plus the register's output
+/// stage, which quartus_sta reports as a 0.088 ns `CYCLONEII_LCELL_FF` element.
+const TCO: Ps = 250.0 + 88.0;
+/// Register setup (DMF `TSU`, −36 ps), counted where the data enters.
+const TSU: Ps = -36.0;
+
+/// What a register input needs before the capturing clock edge.
+fn register_setup(port: &str) -> Option<Ps> {
+    Some(match port {
+        // DMF `I:DATAIN B:FF` 84, `I:SDATA B:FF` 366. SDATA is the LE's
+        // input C, whose node carries part of that (`lut_pin_extra`).
+        "DATAIN" => 84.0 + TSU,
+        "SDATA" => 366.0 - lut_pin_extra(2) + TSU,
+        // LAB-wide enable, sync clear and sync load reach the register
+        // through the LAB control lines (routed as such: quartus_sta's
+        // interconnect into them, LAB_CONTROL_MUX included, came to 1.02x
+        // the model's). Their arcs into the register, quartus_sta's
+        // `CYCLONEII_LCELL_FF` cell element after `|ena`, `|sclr` and
+        // `|sload` on chipsmith's femtorv32 and picorv32 (`qor4`), the
+        // same on every path: 660 ps (800 paths), 510 (451), 659 (43).
+        // SDATA's measured the same way gave the DMF's 366.
+        "ENA" => 660.0 + TSU,
+        "SCLR" => 510.0 + TSU,
+        "SLOAD" => 659.0 + TSU,
+        _ => return None,
+    })
+}
+
+/// M4K read clock to data out, with no output register (the address is
+/// registered, the read data isn't). quartus_sta on an M4K feeding a LUT and
+/// register: address register uTco 209 ps plus 2,993 ps to `portadataout`,
+/// plus the 124 ps the block's clock arrives after an LE register's (cell
+/// delay 0.661 vs 0.537 ns; skew isn't otherwise modelled).
+const M4K_TCO: Ps = 209.0 + 2993.0 + 124.0;
+/// M4K read clock to data out through the block's output register:
+/// quartus_sta on femtorv32's register file (`qor4`, B_OUTREG on clock 1)
+/// gives the register's 209 ps uTco and 88 ps to `portbdataout`, plus
+/// the 99 ps the block's clock 1 arrives after an LE register's (cell
+/// delay 0.636 vs 0.537 ns).
+const M4K_OUTREG_TCO: Ps = 209.0 + 88.0 + 99.0;
+/// M4K input register setup: quartus_sta's 142 ps cell delay into the
+/// address register and its -35 ps uTsu, less the same 124 ps of later
+/// clock.
+const M4K_TSU: Ps = 142.0 - 35.0 - 124.0;
+
+/// An embedded multiplier, data in to product out, unregistered:
+/// quartus_sta on an 18 x 18 product (2026-10-29): 2,679 ps through the
+/// mac_mult and 224 ps through the mac_out it leaves by.
+const MULT_COMB: Ps = 2679.0 + 224.0;
+/// Its input registers' setup and its output register's clock-to-output,
+/// the LE register's until measured (the block's registers are in the
+/// same rows as the LEs', on the same row clocks).
+const MULT_TSU: Ps = TSU;
+const MULT_TCO: Ps = TCO;
+/// Cyclone II I/O-cell registers, for a register-to-register path that
+/// starts or ends in a pin's I/O cell. quartus_sta on examples/de2-io
+/// (2026-10-26): an input register's uTco 143 ps plus 390 ps out through
+/// `regout`; an output or OE register's 269-279 ps cell delay from
+/// `datain` (column 279, row 269) and its −78 ps uTsu. The I/O register's
+/// clock reached it within 3 ps of an LE register's there (more wire,
+/// faster cell), so no skew is modelled.
+const IOE_TCO: Ps = 143.0 + 390.0;
+const IOE_TSU: Ps = 279.0 - 78.0;
+
+/// A delay from one timing node to another.
+#[derive(Debug, Clone, Copy)]
+pub struct Arc {
+    pub from: u32,
+    pub to: u32,
+    pub delay: Ps,
+}
+
+/// Cell ports as timing nodes, and the arcs through cells. Net arcs (the
+/// routing) are supplied to `analyse`, since they change as the router works.
+#[derive(Debug, Default, Clone)]
+pub struct Graph {
+    names: Vec<String>,
+    index: HashMap<(String, String), u32>,
+    cell_arcs: Vec<Arc>,
+    /// Arrival time at the nodes where paths start (register outputs).
+    launch: Vec<Option<Ps>>,
+    /// Setup time at the nodes where paths end (register data inputs).
+    setup: Vec<Option<Ps>>,
+    /// The clock of a path start or end, for designs with several (an
+    /// opaque id the caller hands out, e.g. the clock net). Nodes without
+    /// one belong to clock 0.
+    clocks: HashMap<u32, u32>,
+    /// The LUT a node is a port of (an index into `luts`), for cutting
+    /// latch loops.
+    lut: Vec<Option<u32>>,
+    luts: u32,
+    /// Cut any other combinational loop too (`cut_loops`).
+    cut_loops: bool,
+}
+
+impl Graph {
+    /// The timing node of a cell port, created on first use.
+    pub fn node(&mut self, cell: &str, port: &str) -> u32 {
+        let key = (cell.to_string(), port.to_string());
+        if let Some(&n) = self.index.get(&key) {
+            return n;
+        }
+        let n = self.names.len() as u32;
+        self.names.push(format!("{cell}.{port}"));
+        self.launch.push(None);
+        self.setup.push(None);
+        self.lut.push(None);
+        self.index.insert(key, n);
+        n
+    }
+
+    /// Add a cell's arcs, start points and end points, given the ports it
+    /// has connected and, for a LUT, its LE index in the LAB.
+    pub fn add_cell(&mut self, cell: &str, ty: &str, ports: &[&str], le: u8) {
+        match ty {
+            "LCELL_COMB" => {
+                let lut = self.luts;
+                self.luts += 1;
+                for &p in ports {
+                    let n = self.node(cell, p);
+                    self.lut[n as usize] = Some(lut);
+                }
+                for &i in ports {
+                    for &o in ports {
+                        if let Some(delay) = lut_arc(i, o, le) {
+                            let (from, to) = (self.node(cell, i), self.node(cell, o));
+                            self.cell_arcs.push(Arc { from, to, delay });
+                        }
+                    }
+                }
+            }
+            "LCELL_FF" => {
+                for &p in ports {
+                    if p == "REGOUT" {
+                        let n = self.node(cell, p);
+                        self.launch[n as usize] = Some(TCO);
+                    } else if let Some(s) = register_setup(p) {
+                        let n = self.node(cell, p);
+                        self.setup[n as usize] = Some(s);
+                    }
+                }
+            }
+            "CY2_M4K" => {
+                for &p in ports {
+                    let n = self.node(cell, p);
+                    if p.starts_with("DO") {
+                        self.launch[n as usize] = Some(M4K_TCO);
+                    } else if !matches!(p, "CLK0" | "CLK1") {
+                        self.setup[n as usize] = Some(M4K_TSU);
+                    }
+                }
+            }
+            "CY2_MULT" => {
+                let outs: Vec<&str> = ports
+                    .iter()
+                    .copied()
+                    .filter(|p| p.starts_with("MULTOUT"))
+                    .collect();
+                let data = |p: &&&str| {
+                    p.starts_with("MULTA") || p.starts_with("MULTB") || p.starts_with("SIGN")
+                };
+                for &i in ports.iter().filter(data) {
+                    for &o in &outs {
+                        let (from, to) = (self.node(cell, i), self.node(cell, o));
+                        self.cell_arcs.push(Arc {
+                            from,
+                            to,
+                            delay: MULT_COMB,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// An M4K's read data pins that its output register drives
+    /// (`add_cell` timed them all as unregistered).
+    pub fn add_m4k_output_registers<'a>(&mut self, cell: &str, pins: impl IntoIterator<Item = &'a str>) {
+        for p in pins {
+            if let Some(&n) = self.index.get(&(cell.to_string(), p.to_string())) {
+                self.launch[n as usize] = Some(M4K_OUTREG_TCO);
+            }
+        }
+    }
+
+    /// A Cyclone II multiplier's registers (`add_cell` gave it the
+    /// combinational arcs): an operand register captures its data pins,
+    /// the product register launches the product pins; a registered
+    /// operand's path to an unregistered product starts at the register,
+    /// an unregistered operand's to a registered product ends at it.
+    pub fn add_mult_registers(&mut self, cell: &str, a: bool, b: bool, p: bool) {
+        let nodes: Vec<(String, u32)> = self
+            .index
+            .iter()
+            .filter(|((c, _), _)| c == cell)
+            .map(|((_, port), &n)| (port.clone(), n))
+            .collect();
+        let registered_in =
+            |port: &str| (a && port.starts_with("MULTA")) || (b && port.starts_with("MULTB"));
+        for (port, n) in &nodes {
+            let n = *n as usize;
+            if port.starts_with("MULTOUT") {
+                if p {
+                    self.launch[n] = Some(MULT_TCO);
+                } else if a || b {
+                    self.launch[n] = Some(MULT_TCO + MULT_COMB);
+                }
+            } else if registered_in(port) {
+                self.setup[n] = Some(MULT_TSU);
+            } else if p
+                && !port.starts_with("SIGN")
+                && !matches!(port.as_str(), "CLK" | "ENA" | "ACLR")
+            {
+                self.setup[n] = Some(MULT_TSU + MULT_COMB);
+            }
+        }
+        // Arcs through a register are no longer combinational.
+        let regs: std::collections::HashSet<u32> = nodes
+            .iter()
+            .filter(|(port, _)| registered_in(port) || (p && port.starts_with("MULTOUT")))
+            .map(|(_, n)| *n)
+            .collect();
+        self.cell_arcs
+            .retain(|arc| !regs.contains(&arc.from) && !regs.contains(&arc.to));
+    }
+
+    /// A Cyclone II pin's I/O-cell registers: the input register launches
+    /// at REGOUT, the output and OE registers capture DATAOUT and OE. A pin
+    /// without them neither launches nor captures (pins are unconstrained).
+    pub fn add_ioe_registers(&mut self, cell: &str, input: bool, output: bool, oe: bool) {
+        if input {
+            let n = self.node(cell, "REGOUT");
+            self.launch[n as usize] = Some(IOE_TCO);
+        }
+        for (used, port) in [(output, "DATAOUT"), (oe, "OE")] {
+            if used {
+                let n = self.node(cell, port);
+                self.setup[n as usize] = Some(IOE_TSU);
+            }
+        }
+    }
+
+    /// A delay through a cell, for devices whose cells `add_cell` doesn't
+    /// know (7-series).
+    pub fn add_arc(&mut self, from: u32, to: u32, delay: Ps) {
+        self.cell_arcs.push(Arc { from, to, delay });
+    }
+
+    /// A path start: a register output, `delay` after the clock edge.
+    pub fn set_launch(&mut self, node: u32, delay: Ps) {
+        self.launch[node as usize] = Some(delay);
+    }
+
+    /// A path end: a register input needing `setup` before the edge.
+    pub fn set_setup(&mut self, node: u32, setup: Ps) {
+        self.setup[node as usize] = Some(setup);
+    }
+
+    /// Cut every combinational loop, as Vivado's timer does, rather than
+    /// leave what is in or after one untimed: synthesis can leave a loop no
+    /// value ever takes (two muxes selecting each other), and everything
+    /// downstream of it would go unseen.
+    pub fn cut_loops(&mut self) {
+        self.cut_loops = true;
+    }
+
+    /// Put a path start or end on clock `clock`.
+    pub fn set_clock(&mut self, node: u32, clock: u32) {
+        self.clocks.insert(node, clock);
+    }
+
+    fn clock(&self, node: u32) -> u32 {
+        self.clocks.get(&node).copied().unwrap_or(0)
+    }
+
+    /// The critical path of every pair of launching and capturing clocks
+    /// that has one: each clock's own Fmax is its pair with itself.
+    /// Crossings are listed as found; whether they matter depends on how
+    /// the clocks relate, which the graph doesn't know.
+    pub fn clock_pairs(&self, net_arcs: &[Arc]) -> Vec<ClockPair> {
+        let mut launch_clocks: Vec<u32> = (0..self.len() as u32)
+            .filter(|&v| self.launch[v as usize].is_some())
+            .map(|v| self.clock(v))
+            .collect();
+        launch_clocks.sort();
+        launch_clocks.dedup();
+        let mut out = Vec::new();
+        for &from in &launch_clocks {
+            let mut g = self.clone();
+            for v in 0..g.len() {
+                if g.launch[v].is_some() && self.clock(v as u32) != from {
+                    g.launch[v] = None;
+                }
+            }
+            let a = g.analyse(net_arcs);
+            let mut worst: HashMap<u32, Ps> = HashMap::new();
+            for (v, (arr, s)) in a.arrival.iter().zip(&self.setup).enumerate() {
+                if let (Some(arr), Some(s)) = (arr, s) {
+                    let w = worst.entry(self.clock(v as u32)).or_insert(0.0);
+                    *w = w.max(arr + s);
+                }
+            }
+            let mut to: Vec<(u32, Ps)> = worst.into_iter().collect();
+            to.sort_by_key(|&(c, _)| c);
+            out.extend(
+                to.into_iter()
+                    .map(|(to, critical)| ClockPair { from, to, critical }),
+            );
+        }
+        out
+    }
+
+    pub fn len(&self) -> usize {
+        self.names.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+
+    pub fn name(&self, n: u32) -> &str {
+        &self.names[n as usize]
+    }
+
+    /// A path end's setup time; `None` for a node no path ends at.
+    pub fn setup(&self, n: u32) -> Option<Ps> {
+        self.setup[n as usize]
+    }
+
+    /// Arrival and required times over the cell arcs plus `net_arcs`, with
+    /// the clock period set to the critical path itself (so the worst slack
+    /// is 0 and criticality is relative, as VPR does without a constraint).
+    ///
+    /// A LUT's output wired back into its own input is a latch (Quartus maps
+    /// latches that way); like quartus_sta, which times combinational loops
+    /// as latches, the feedback arc is cut, so paths are timed from the
+    /// latch's data and enable.
+    pub fn analyse(&self, net_arcs: &[Arc]) -> Analysis {
+        let n = self.len();
+        let feedback = |a: &Arc| {
+            self.lut[a.from as usize].is_some()
+                && self.lut[a.from as usize] == self.lut[a.to as usize]
+        };
+        let arcs: Vec<Arc> = self
+            .cell_arcs
+            .iter()
+            .chain(net_arcs.iter().filter(|a| !feedback(a)))
+            .copied()
+            .collect();
+        let mut fanout: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut indegree = vec![0u32; n];
+        for (i, a) in arcs.iter().enumerate() {
+            fanout[a.from as usize].push(i);
+            indegree[a.to as usize] += 1;
+        }
+        // Kahn's order. A combinational loop would leave nodes out; they
+        // keep no arrival and so don't count.
+        let mut order: Vec<u32> = (0..n as u32)
+            .filter(|&v| indegree[v as usize] == 0)
+            .collect();
+        let mut i = 0;
+        let mut cut = vec![false; arcs.len()];
+        loop {
+            while i < order.len() {
+                for &a in &fanout[order[i] as usize] {
+                    let to = arcs[a].to as usize;
+                    indegree[to] -= 1;
+                    if indegree[to] == 0 {
+                        order.push(to as u32);
+                    }
+                }
+                i += 1;
+            }
+            if !self.cut_loops || order.len() == n {
+                break;
+            }
+            // Walk back from a node still waiting through others still
+            // waiting until one repeats: that closes a loop; cut the arc
+            // that closed it and go on.
+            let mut fanin: Vec<Vec<usize>> = vec![Vec::new(); n];
+            for (k, a) in arcs.iter().enumerate() {
+                if !cut[k] && indegree[a.to as usize] > 0 && indegree[a.from as usize] > 0 {
+                    fanin[a.to as usize].push(k);
+                }
+            }
+            let Some(start) = (0..n).find(|&v| indegree[v] > 0 && !fanin[v].is_empty()) else {
+                break;
+            };
+            let mut seen = vec![false; n];
+            let mut v = start;
+            let closing = loop {
+                seen[v] = true;
+                let k = fanin[v][0];
+                let from = arcs[k].from as usize;
+                if seen[from] {
+                    break k;
+                }
+                v = from;
+            };
+            cut[closing] = true;
+            let to = arcs[closing].to as usize;
+            indegree[to] -= 1;
+            if indegree[to] == 0 {
+                order.push(to as u32);
+            }
+        }
+        for (k, c) in cut.iter().enumerate() {
+            if *c {
+                let from = arcs[k].from as usize;
+                fanout[from].retain(|&a| a != k);
+            }
+        }
+
+        let mut arrival: Vec<Option<Ps>> = self.launch.clone();
+        let mut from_arc: Vec<Option<usize>> = vec![None; n];
+        for &v in &order {
+            let Some(t) = arrival[v as usize] else {
+                continue;
+            };
+            for &a in &fanout[v as usize] {
+                let arc = arcs[a];
+                let t2 = t + arc.delay;
+                if arrival[arc.to as usize].is_none_or(|old| t2 > old) {
+                    arrival[arc.to as usize] = Some(t2);
+                    from_arc[arc.to as usize] = Some(a);
+                }
+            }
+        }
+
+        // Critical path: the worst arrival plus setup at an end point.
+        let mut critical = 0.0;
+        let mut worst_end = None;
+        for (v, (a, s)) in arrival.iter().zip(&self.setup).enumerate() {
+            if let (Some(a), Some(s)) = (a, s) {
+                if a + s > critical {
+                    critical = a + s;
+                    worst_end = Some(v as u32);
+                }
+            }
+        }
+
+        let mut required: Vec<Option<Ps>> =
+            self.setup.iter().map(|s| s.map(|s| critical - s)).collect();
+        for &v in order.iter().rev() {
+            for &a in &fanout[v as usize] {
+                let arc = arcs[a];
+                if let Some(r) = required[arc.to as usize] {
+                    let r2 = r - arc.delay;
+                    if required[v as usize].is_none_or(|old| r2 < old) {
+                        required[v as usize] = Some(r2);
+                    }
+                }
+            }
+        }
+
+        let mut path = Vec::new();
+        let mut at = worst_end;
+        while let Some(v) = at {
+            path.push((v, arrival[v as usize].unwrap_or(0.0)));
+            at = from_arc[v as usize].map(|a| arcs[a].from);
+        }
+        path.reverse();
+
+        Analysis {
+            critical,
+            arrival,
+            required,
+            path,
+        }
+    }
+}
+
+/// The longest path from registers on clock `from` to registers on clock
+/// `to`, setup included.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClockPair {
+    pub from: u32,
+    pub to: u32,
+    pub critical: Ps,
+}
+
+#[derive(Debug)]
+pub struct Analysis {
+    /// Longest register-to-register path, setup included: the minimum
+    /// clock period, ignoring clock skew.
+    pub critical: Ps,
+    arrival: Vec<Option<Ps>>,
+    required: Vec<Option<Ps>>,
+    /// The critical path: (node, arrival).
+    pub path: Vec<(u32, Ps)>,
+}
+
+impl Analysis {
+    /// The latest arrival at `node`, if a timed path reaches it.
+    pub fn arrival(&self, node: u32) -> Option<Ps> {
+        self.arrival[node as usize]
+    }
+
+    /// How close `arc` is to the critical path: 1 on it, 0 for an arc with
+    /// a whole critical path of slack or on no timed path at all.
+    pub fn criticality(&self, arc: &Arc) -> f32 {
+        let (Some(a), Some(r)) = (
+            self.arrival[arc.from as usize],
+            self.required[arc.to as usize],
+        ) else {
+            return 0.0;
+        };
+        if self.critical <= 0.0 {
+            return 0.0;
+        }
+        let slack = r - a - arc.delay;
+        (1.0 - slack / self.critical).clamp(0.0, 1.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An M4K's read data into a register, and a register into its address.
+    #[test]
+    fn an_m4k_launches_and_captures() {
+        let mut g = Graph::default();
+        g.add_cell("m", "CY2_M4K", &["CLK0", "WA0", "DO0"], 0);
+        g.add_cell("a", "LCELL_FF", &["REGOUT"], 0);
+        g.add_cell("b", "LCELL_FF", &["DATAIN"], 0);
+        let nets = [
+            Arc {
+                from: g.node("m", "DO0"),
+                to: g.node("b", "DATAIN"),
+                delay: 500.0,
+            },
+            Arc {
+                from: g.node("a", "REGOUT"),
+                to: g.node("m", "WA0"),
+                delay: 500.0,
+            },
+        ];
+        let t = g.analyse(&nets);
+        assert_eq!(t.critical, M4K_TCO + 500.0 + 84.0 + TSU);
+        // Behind its output register the read data launches 2.9 ns earlier.
+        g.add_m4k_output_registers("m", ["DO0"]);
+        let t = g.analyse(&nets);
+        assert_eq!(t.critical, M4K_OUTREG_TCO + 500.0 + 84.0 + TSU);
+        assert!(t.criticality(&nets[1]) < 1.0);
+    }
+
+    /// a (clock 1) -> b (clock 1) and a -> c (clock 2): two pairs.
+    #[test]
+    fn clock_pairs_split_by_launch_and_capture() {
+        let mut g = Graph::default();
+        g.add_cell("a", "LCELL_FF", &["REGOUT"], 0);
+        g.add_cell("b", "LCELL_FF", &["DATAIN"], 0);
+        g.add_cell("c", "LCELL_FF", &["DATAIN"], 0);
+        let (aq, bd, cd) = (
+            g.node("a", "REGOUT"),
+            g.node("b", "DATAIN"),
+            g.node("c", "DATAIN"),
+        );
+        g.set_clock(aq, 1);
+        g.set_clock(bd, 1);
+        g.set_clock(cd, 2);
+        let nets = [
+            Arc {
+                from: aq,
+                to: bd,
+                delay: 100.0,
+            },
+            Arc {
+                from: aq,
+                to: cd,
+                delay: 900.0,
+            },
+        ];
+        let p = g.clock_pairs(&nets);
+        assert_eq!(
+            p,
+            vec![
+                ClockPair {
+                    from: 1,
+                    to: 1,
+                    critical: TCO + 100.0 + 84.0 + TSU
+                },
+                ClockPair {
+                    from: 1,
+                    to: 2,
+                    critical: TCO + 900.0 + 84.0 + TSU
+                },
+            ]
+        );
+    }
+
+    /// reg a -> latch x (COMBOUT back into DATAC) -> reg b: timed from a.
+    #[test]
+    fn a_latch_loop_is_cut() {
+        let mut g = Graph::default();
+        g.add_cell("a", "LCELL_FF", &["REGOUT"], 0);
+        g.add_cell("x", "LCELL_COMB", &["DATAA", "DATAC", "COMBOUT"], 0);
+        g.add_cell("b", "LCELL_FF", &["DATAIN"], 0);
+        let (aq, xa, xc, xo, bd) = (
+            g.node("a", "REGOUT"),
+            g.node("x", "DATAA"),
+            g.node("x", "DATAC"),
+            g.node("x", "COMBOUT"),
+            g.node("b", "DATAIN"),
+        );
+        let arc = |from, to| Arc {
+            from,
+            to,
+            delay: 100.0,
+        };
+        let t = g.analyse(&[arc(aq, xa), arc(xo, xc), arc(xo, bd)]);
+        // The LUT arc is input D's; the routing carries the rest of A's.
+        assert_eq!(
+            t.critical,
+            TCO + 100.0 + 150.0 + LUT_INPUT_IC + 100.0 + 84.0 + TSU
+        );
+    }
+
+    /// reg a -> x -> y -> x (a loop of two cells) -> reg b: untimed unless
+    /// the loop is cut, then timed from a once round.
+    #[test]
+    fn a_loop_of_two_is_cut_on_request() {
+        let mut g = Graph::default();
+        let (aq, xi, xl, xo, yi, yo, bd) = (
+            g.node("a", "Q"),
+            g.node("x", "I0"),
+            g.node("x", "I1"),
+            g.node("x", "O"),
+            g.node("y", "I0"),
+            g.node("y", "O"),
+            g.node("b", "D"),
+        );
+        g.set_launch(aq, 0.0);
+        g.set_setup(bd, 0.0);
+        g.add_arc(xi, xo, 10.0);
+        g.add_arc(xl, xo, 10.0);
+        g.add_arc(yi, yo, 10.0);
+        let arc = |from, to| Arc { from, to, delay: 100.0 };
+        let nets = [arc(aq, xi), arc(xo, yi), arc(yo, xl), arc(xo, bd)];
+        assert_eq!(g.analyse(&nets).critical, 0.0);
+        g.cut_loops();
+        let t = g.analyse(&nets);
+        assert!(t.arrival(bd).is_some());
+        assert!(t.critical >= 210.0, "{}", t.critical);
+    }
+
+    /// reg a -> LUT x (DATAA) -> reg b, and reg a -> reg c directly.
+    #[test]
+    fn critical_path_and_criticality() {
+        let mut g = Graph::default();
+        g.add_cell("a", "LCELL_FF", &["REGOUT"], 0);
+        g.add_cell("x", "LCELL_COMB", &["DATAA", "COMBOUT"], 0);
+        g.add_cell("b", "LCELL_FF", &["DATAIN"], 0);
+        g.add_cell("c", "LCELL_FF", &["DATAIN"], 0);
+        let (aq, xa, xo, bd, cd) = (
+            g.node("a", "REGOUT"),
+            g.node("x", "DATAA"),
+            g.node("x", "COMBOUT"),
+            g.node("b", "DATAIN"),
+            g.node("c", "DATAIN"),
+        );
+        let nets = [
+            Arc {
+                from: aq,
+                to: xa,
+                delay: 600.0,
+            },
+            Arc {
+                from: xo,
+                to: bd,
+                delay: 0.0,
+            },
+            Arc {
+                from: aq,
+                to: cd,
+                delay: 300.0,
+            },
+        ];
+        let t = g.analyse(&nets);
+        let lut = 150.0 + LUT_INPUT_IC;
+        assert_eq!(t.critical, TCO + 600.0 + lut + 84.0 + TSU);
+        assert_eq!(t.criticality(&nets[0]), 1.0);
+        // The short path has (600 + the LUT) - 300 of slack.
+        let slack = 600.0 + lut - 300.0;
+        assert!((t.criticality(&nets[2]) - (1.0 - slack / t.critical)).abs() < 1e-4);
+        assert_eq!(t.path.first().map(|p| p.0), Some(aq));
+        assert_eq!(t.path.last().map(|p| p.0), Some(bd));
+    }
+
+    /// Through each physical input a LUT takes its DMF delay: input D's
+    /// arc plus what the input's routing node adds.
+    #[test]
+    fn a_lut_input_costs_its_physical_pin() {
+        for (pin, dmf) in [438.0, 420.0, 275.0, 150.0].into_iter().enumerate() {
+            assert_eq!(
+                lut_arc("DATAA", "COMBOUT", 0).unwrap() + lut_pin_extra(pin),
+                dmf + LUT_INPUT_IC
+            );
+        }
+        // Carry LEs keep their pins: A and B's carry arcs with the pin.
+        let a = lut_arc("DATAA", "COUT", 0).unwrap() + lut_pin_extra(0);
+        assert_eq!(a, 414.0 + LUT_INPUT_IC);
+        let b = lut_arc("DATAB", "COUT", 3).unwrap() + lut_pin_extra(1);
+        assert_eq!(b, 393.0 + LUT_INPUT_IC);
+        assert_eq!(
+            register_setup("SDATA").unwrap() + lut_pin_extra(2),
+            366.0 + TSU
+        );
+    }
+}
