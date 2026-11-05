@@ -111,9 +111,16 @@ fn register_setup(port: &str) -> Option<Ps> {
         "DATAIN" => 84.0 + TSU,
         "SDATA" => 366.0 - lut_pin_extra(2) + TSU,
         // LAB-wide enable, sync clear and sync load reach the register
-        // through the LAB control lines; their own DMF arcs aren't
-        // identified yet, so they count like SDATA. Unknown, not measured.
-        "ENA" | "SCLR" | "SLOAD" => 366.0 + TSU,
+        // through the LAB control lines (routed as such: quartus_sta's
+        // interconnect into them, LAB_CONTROL_MUX included, came to 1.02x
+        // the model's). Their arcs into the register, quartus_sta's
+        // `CYCLONEII_LCELL_FF` cell element after `|ena`, `|sclr` and
+        // `|sload` on chipsmith's femtorv32 and picorv32 (`qor4`), the
+        // same on every path: 660 ps (800 paths), 510 (451), 659 (43).
+        // SDATA's measured the same way gave the DMF's 366.
+        "ENA" => 660.0 + TSU,
+        "SCLR" => 510.0 + TSU,
+        "SLOAD" => 659.0 + TSU,
         _ => return None,
     })
 }
@@ -124,6 +131,12 @@ fn register_setup(port: &str) -> Option<Ps> {
 /// plus the 124 ps the block's clock arrives after an LE register's (cell
 /// delay 0.661 vs 0.537 ns; skew isn't otherwise modelled).
 const M4K_TCO: Ps = 209.0 + 2993.0 + 124.0;
+/// M4K read clock to data out through the block's output register:
+/// quartus_sta on femtorv32's register file (`qor4`, B_OUTREG on clock 1)
+/// gives the register's 209 ps uTco and 88 ps to `portbdataout`, plus
+/// the 99 ps the block's clock 1 arrives after an LE register's (cell
+/// delay 0.636 vs 0.537 ns).
+const M4K_OUTREG_TCO: Ps = 209.0 + 88.0 + 99.0;
 /// M4K input register setup: quartus_sta's 142 ps cell delay into the
 /// address register and its -35 ps uTsu, less the same 124 ps of later
 /// clock.
@@ -257,6 +270,16 @@ impl Graph {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// An M4K's read data pins that its output register drives
+    /// (`add_cell` timed them all as unregistered).
+    pub fn add_m4k_output_registers<'a>(&mut self, cell: &str, pins: impl IntoIterator<Item = &'a str>) {
+        for p in pins {
+            if let Some(&n) = self.index.get(&(cell.to_string(), p.to_string())) {
+                self.launch[n as usize] = Some(M4K_OUTREG_TCO);
+            }
         }
     }
 
@@ -615,6 +638,10 @@ mod tests {
         ];
         let t = g.analyse(&nets);
         assert_eq!(t.critical, M4K_TCO + 500.0 + 84.0 + TSU);
+        // Behind its output register the read data launches 2.9 ns earlier.
+        g.add_m4k_output_registers("m", ["DO0"]);
+        let t = g.analyse(&nets);
+        assert_eq!(t.critical, M4K_OUTREG_TCO + 500.0 + 84.0 + TSU);
         assert!(t.criticality(&nets[1]) < 1.0);
     }
 

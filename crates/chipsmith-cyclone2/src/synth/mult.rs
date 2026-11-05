@@ -388,7 +388,8 @@ impl Plan {
     fn build(&self, m: &mut Module, name: &str, cx: Context, out: &mut Vec<Cell>) -> SigSpec {
         let pairs = self.pairs();
         let single = pairs.len() == 1;
-        let mut sum: Option<SigSpec> = None;
+        // Each partial product with the bits it can set, `lo..hi`.
+        let mut parts: Vec<(SigSpec, usize, usize)> = Vec::new();
         for (i, j) in pairs {
             // The wider limb on operand A: quartus_map swaps a mac_mult's
             // operands to have it so (u32, s24: 14 x 18 and 6 x 18 came back
@@ -469,32 +470,71 @@ impl Plan {
                 ),
                 attributes: Default::default(),
             });
-            sum = Some(match sum {
-                None => part,
-                Some(acc) => {
-                    let y = m.new_sig(self.width);
-                    out.push(Cell {
-                        name: format!("{name}.add{i}_{j}"),
-                        kind: CellKind::Binary(Binary {
-                            op: BinaryOp::Add,
-                            a: Operand {
-                                sig: acc,
-                                signed: false,
-                            },
-                            b: Operand {
-                                sig: part,
-                                signed: false,
-                            },
-                            y: y.clone(),
-                        }),
-                        attributes: Default::default(),
-                    });
-                    y
-                }
-            });
+            let hi = if a.signed || b.signed {
+                self.width
+            } else {
+                (shift + dout.len()).min(self.width)
+            };
+            parts.push((part, shift.min(self.width), hi));
         }
-        sum.expect("a planned product has a block")
+        sum_parts(m, name, self.width, parts, out)
     }
+}
+
+/// The partial products' sum. Products whose bits don't overlap are one
+/// operand (each bit from the one that can set it), so a 32 x 32 product's
+/// four are three operands, `p00 | p11`, `p01` and `p10`: two adders deep,
+/// as Quartus builds it, where adding them one by one was three.
+fn sum_parts(
+    m: &mut Module,
+    name: &str,
+    width: usize,
+    parts: Vec<(SigSpec, usize, usize)>,
+    out: &mut Vec<Cell>,
+) -> SigSpec {
+    let mut groups: Vec<(SigSpec, Vec<(usize, usize)>)> = Vec::new();
+    for (part, lo, hi) in parts {
+        let free = |spans: &Vec<(usize, usize)>| spans.iter().all(|&(l, h)| hi <= l || h <= lo);
+        match groups.iter_mut().find(|(_, spans)| free(spans)) {
+            Some((sig, spans)) => {
+                sig[lo..hi].copy_from_slice(&part[lo..hi]);
+                spans.push((lo, hi));
+            }
+            None => groups.push((part, vec![(lo, hi)])),
+        }
+    }
+    let mut level: Vec<SigSpec> = groups.into_iter().map(|(sig, _)| sig).collect();
+    let mut k = 0;
+    while level.len() > 1 {
+        let mut next = Vec::new();
+        for pair in level.chunks(2) {
+            let [a, b] = pair else {
+                next.push(pair[0].clone());
+                continue;
+            };
+            let y = m.new_sig(width);
+            out.push(Cell {
+                name: format!("{name}.add{k}"),
+                kind: CellKind::Binary(Binary {
+                    op: BinaryOp::Add,
+                    a: Operand {
+                        sig: a.clone(),
+                        signed: false,
+                    },
+                    b: Operand {
+                        sig: b.clone(),
+                        signed: false,
+                    },
+                    y: y.clone(),
+                }),
+                attributes: Default::default(),
+            });
+            k += 1;
+            next.push(y);
+        }
+        level = next;
+    }
+    level.pop().expect("a planned product has a block")
 }
 
 trait QBit {
@@ -574,6 +614,44 @@ mod tests {
         assert_eq!(p.blocks(), 1);
         let p = Plan::of(&mul(m, 18, 18, true, 36)).unwrap();
         assert_eq!((p.a[0].signed, p.b[0].signed), (true, true));
+    }
+
+    /// A 32 x 32 -> 64 product's four partial products are three operands
+    /// (`p00 | p11` one), two adders deep: mult-selftest's `a * b` was
+    /// three, 68 MHz against Quartus' 71 (76 with this).
+    #[test]
+    fn partial_products_that_dont_overlap_share_an_operand() {
+        let mut m = Module::new("t");
+        let part = |m: &mut Module, lo: usize, hi: usize| -> (SigSpec, usize, usize) {
+            let bits = m.new_sig(hi - lo);
+            let mut s = vec![SigBit::ZERO; 64];
+            s[lo..hi].copy_from_slice(&bits);
+            (s, lo, hi)
+        };
+        let parts = vec![
+            part(&mut m, 0, 36),
+            part(&mut m, 18, 50),
+            part(&mut m, 18, 50),
+            part(&mut m, 36, 64),
+        ];
+        let p00 = parts[0].0.clone();
+        let p11 = parts[3].0.clone();
+        let mut out = Vec::new();
+        let y = sum_parts(&mut m, "p", 64, parts, &mut out);
+        assert_eq!(out.len(), 2, "two adders");
+        // The first adds the packed operand; the second takes its sum.
+        let CellKind::Binary(first) = &out[0].kind else {
+            panic!()
+        };
+        let packed: Vec<SigBit> = (0..64)
+            .map(|k| if k < 36 { p00[k] } else { p11[k] })
+            .collect();
+        assert_eq!(first.a.sig[..], packed[..]);
+        let CellKind::Binary(last) = &out[1].kind else {
+            panic!()
+        };
+        assert_eq!(last.a.sig, first.y);
+        assert_eq!(last.y, y);
     }
 
     #[test]

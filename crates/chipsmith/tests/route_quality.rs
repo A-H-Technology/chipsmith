@@ -1,10 +1,12 @@
 //! Quality of results doesn't slide back: a fresh build of an example,
 //! through the `chipsmith` binary, routes to at most a bound on its
 //! estimated critical path, or takes at most so many LEs. The bounds sit a
-//! little above what branch `qor3` builds (docs/vs-quartus.md, round 3) and
-//! below what came before, so losing the sums ordered by arrival (sha256,
-//! femtorv32), the shared sums or the synchronous load (picorv32's and
-//! sha256's LEs) fails here, as does losing `qor2`'s routing. On the Zybo
+//! little above what branches `qor3` and `qor4` build (docs/vs-quartus.md,
+//! rounds 3 and 4) and below what came before, so losing the sums ordered
+//! by arrival (sha256), the shared sums or the synchronous load
+//! (picorv32's and sha256's LEs), femtorv32's early register file read or
+//! mult-selftest's packed partial products fails here, as does losing
+//! `qor2`'s routing. On the Zybo
 //! the bounds are on the estimate (fitted to Vivado, ADR-0016) and sit
 //! between branch `xc7-qor`'s and what came before. The build is
 //! deterministic, so a bound only moves when the flow does. Needs
@@ -92,6 +94,12 @@ fn femtorv32() {
 }
 
 #[test]
+fn mult_selftest() {
+    let report = build("mult-selftest");
+    at_most("mult-selftest", "routed critical path, ns", routed_critical("mult-selftest", &report), MULT_SELFTEST);
+}
+
+#[test]
 fn sha256() {
     let report = build("sha256");
     at_most("sha256", "routed critical path, ns", routed_critical("sha256", &report), SHA256);
@@ -123,8 +131,14 @@ fn picorv32_les() {
 }
 
 /// (bound, before), ns: `open` 80351e1's (sums as written; femtorv32
-/// 13.76, sha256 19.27) above, `qor3`'s (12.99, 13.76) below.
-const FEMTORV32: (f64, f64) = (13.6, 13.76);
+/// 13.76, sha256 19.27) above, `qor3`'s (12.99, 13.76) below. femtorv32's
+/// bound is `qor4`'s since: 10.49 with its register file read on the edge
+/// before, the block's output register timed as such (12.98 without the
+/// early read, whose path starts at the block's unregistered output).
+/// mult-selftest: 13.24 with a 32 x 32 product's partial products packed
+/// into three operands (14.70 added one by one).
+const FEMTORV32: (f64, f64) = (11.5, 12.98);
+const MULT_SELFTEST: (f64, f64) = (13.6, 14.70);
 const SHA256: (f64, f64) = (15.0, 19.27);
 /// (bound, before), LEs: `qor3`'s picorv32 875 (971 without shared sums,
 /// 916 without the synchronous load), sha256 3,422 (3,672 without the

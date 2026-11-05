@@ -24,39 +24,43 @@ nextpnr, no prjxray tool, only prjxray-db's data.
 | xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes, with no external tool but GHDL for VHDL (2026-11-01: chipsmith's own Verilog front end, synthesis, packing, placement, routing and FASM; 2026-11-02: frames and `.bit`; "The Zybo flow", below): LUT1-LUT6, CARRY4, FDRE/FDSE/FDCE/FDPE, RAM32M, block RAM (RAMB18E1, since 2026-11-02; "7-series block RAM", below), multipliers (DSP48E1, since 2026-11-02; "7-series multipliers", below), LUT6_2 pairs, LVCMOS33 pins, BUFGs, BSCANs, PLLs and MMCMs (PLLE2_ADV, MMCME2_ADV, since 2026-11-04; ADR-0017) and the PS7 | yes, with the earlier flow (2026-10-24, yosys and nextpnr around chipsmith's placement and routing: zybo-jtag-counter read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga). chipsmith's own flow is checked at the bitstream instead (decoded and co-simulated against the RTL, below), not yet on the board |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
-LEDs, 875 LEs and two M4Ks (its register file); a build takes 43 to 58 s
-on the benchmark machine at load 13 to 26 (docs/vs-quartus.md; Compile
+LEDs, 876 LEs and two M4Ks (its register file); a build takes 20 to 24 s
+on the benchmark machine at load 1.6 to 8 (docs/vs-quartus.md; Compile
 speed, below).
 
 Against Quartus II 13.0sp1 Web Edition on the same Verilog, pins and
 clock, to a bitstream (`bench/vs-quartus.sh`, docs/vs-quartus.md;
-2026-11-03, branch `qor3` at f6d26ff, a shared i7-4770K at load 9 to
-38, median 14). Wall-time medians over 3 interleaved reps; Fmax is
+2026-11-05, branch `qor4` at de70915, an i7-4770K at load 1.3 to 8.2,
+median 1.8). Wall-time medians over 3 interleaved reps; Fmax is
 quartus_sta's for both tools' placements (picorv32x24: chipsmith's own
 estimate):
 
 | design | LEs Quartus / chipsmith | Quartus s | chipsmith s | Fmax MHz Quartus / chipsmith |
 |---|---|---|---|---|
-| blinky-verilog | 26 / 26 | 128 | 14 | 285 / 298 |
-| picorv32 | 839 / 875 | 151 | 50 | 120 / 142 |
-| femtorv32 | 473 / 513 | 152 | 29 | 81 / 75 |
-| sdram-selftest | 567 / 626 | 128 | 33 | 166 / 181 |
-| sha256 | 3,303 / 3,422 | 328 | 200 | 65 / 70 |
-| picorv32x24 | 20,240 / 21,241 | 1,318 | 691 | 105 / 110 |
+| blinky-verilog | 26 / 26 | 51 | 3.8 | 285 / 298 |
+| picorv32 | 839 / 876 | 75 | 20 | 120 / 141 |
+| femtorv32 | 473 / 518 | 66 | 11 | 81 / 93 |
+| mult-selftest | 833 / 956 | 77 | 22 | 71 / 76 |
+| sdram-selftest | 567 / 628 | 64 | 7.3 | 166 / 154 |
+| sha256 | 3,303 / 3,417 | 141 | 78 | 65 / 69 |
+| picorv32x24 | 20,240 / 21,241 | 673 | 311 | 105 / 105 |
 
-chipsmith is 1.6x to 10x faster in wall time at every size and uses 1.5x
-to 8.5x less CPU time: Quartus 13.0 Web Edition is single-threaded, and
-most of its time on small designs is a fixed minute or two. Quartus still
-uses 4% to 16% fewer LEs (chipsmith 13% fewer on crc32). chipsmith's
-placements are faster on picorv32, sha256, sdram-selftest, crc32, blinky
-and (by its estimate) picorv32x24; Quartus' by 4% on mult-selftest and 7%
-on femtorv32. Branch `qor3` built sums of three or more terms by arrival
-(sha256 51.4 -> 69.6 MHz), shared two sums under a multiplexer and put
-multiplexers behind sums on the LAB's synchronous load (picorv32 971 ->
-875 LEs, sha256 3,674 -> 3,422, picorv32x24 23,527 -> 21,241).
-chipsmith's estimate is within -1.4% to +6.1% of quartus_sta on its own
-placements. The earlier runs (2026-11-01, `open` a288925: 12% to 83% more
-LEs than Quartus; 2026-11-02, `qor`; 2026-11-02/03, `qor2`) and what
+chipsmith is 1.8x to 17x faster in wall time at every size and uses 1.4x
+to 7.4x less CPU time: Quartus 13.0 Web Edition is single-threaded, and
+most of its time on small designs is a fixed minute. Quartus still uses
+3% to 15% fewer LEs (chipsmith 13% fewer on crc32). chipsmith's
+placements are faster on femtorv32, mult-selftest, picorv32, sha256,
+crc32 and blinky, and even on picorv32x24 by its estimate. On
+sdram-selftest Quartus' is faster at the default placement seed (166
+against 154 MHz); over seeds 0-6 chipsmith's range from 154 to 176
+MHz. Branch `qor4` read femtorv32's register file on the edge before, as
+Quartus does (75 -> 93 MHz at the default seed), packed partial products
+that don't overlap into one adder operand (mult-selftest 68 -> 76 MHz),
+and measured the timing model's register control arcs and the M4K
+output register's clock-to-output. chipsmith's estimate is within -2.0%
+to +5.4% of quartus_sta on its own placements. The earlier runs
+(2026-11-01, `open` a288925: 12% to 83% more LEs than Quartus;
+2026-11-02, `qor`; 2026-11-02/03, `qor2`; 2026-11-03, `qor3`) and what
 closed the gap since are in docs/vs-quartus.md. Neither tool rebuilds
 incrementally after a logic edit.
 

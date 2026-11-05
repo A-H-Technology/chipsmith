@@ -295,6 +295,38 @@ fn routing_attribute(db: &ChipDb, net: &NetReq, tree: &Tree) -> String {
     s
 }
 
+/// The block port a read data pin `DO<k>` belongs to.
+fn data_side(s: Shape, k: u8) -> Side {
+    let tdp = matches!(s.ports(), Ports::TrueDual { .. });
+    if tdp && k >= 18 {
+        Side::B
+    } else {
+        match s.ports() {
+            Ports::SimpleDual { .. } => Side::B,
+            _ => Side::A,
+        }
+    }
+}
+
+/// Of a packed M4K's ports, the read data pins its output registers
+/// drive.
+pub(crate) fn m4k_registered_outputs<'a>(cell: &Value, ports: &[&'a str]) -> Vec<&'a str> {
+    let Some(s) = m4k_shape(cell) else {
+        return Vec::new();
+    };
+    let registered: Vec<Side> = s
+        .read_ports()
+        .into_iter()
+        .filter(|(_, r)| r.out_reg.is_some())
+        .map(|(side, _)| side)
+        .collect();
+    ports
+        .iter()
+        .copied()
+        .filter(|p| matches!(Pin::parse(p), Some(Pin::Do(k)) if registered.contains(&data_side(s, k))))
+        .collect()
+}
+
 /// A packed M4K's shape, from its parameters (yosys' JSON strings).
 fn m4k_shape(cell: &Value) -> Option<Shape> {
     let p = &cell["parameters"];
@@ -313,17 +345,7 @@ fn m4k_shape(cell: &Value) -> Option<Shape> {
 /// its input clock, the read data on its output register's clock (else
 /// the read port's), a clock enable or clear on its own clock.
 fn m4k_pin_clock(s: Shape, pin: &str) -> Option<Sel> {
-    let side_of_data = |k: u8| -> Side {
-        let tdp = matches!(s.ports(), Ports::TrueDual { .. });
-        if tdp && k >= 18 {
-            Side::B
-        } else {
-            match s.ports() {
-                Ports::SimpleDual { .. } => Side::B,
-                _ => Side::A,
-            }
-        }
-    };
+    let side_of_data = |k: u8| data_side(s, k);
     Some(match Pin::parse(pin)? {
         Pin::Clk0 | Pin::Clk1 => return None,
         Pin::Ena(k) | Pin::Clr(k) => k,
@@ -479,6 +501,9 @@ fn read_design(db: &ChipDb, json: &Value) -> Result<Design> {
             .unwrap_or(0);
         let ty = cell["type"].as_str().unwrap_or("");
         timing.add_cell(name, ty, &connected, le);
+        if ty == "CY2_M4K" {
+            timing.add_m4k_output_registers(name, m4k_registered_outputs(cell, &connected));
+        }
         if ty == "CY2_MULT" {
             let flag = |p: &str| {
                 cell["parameters"][p]

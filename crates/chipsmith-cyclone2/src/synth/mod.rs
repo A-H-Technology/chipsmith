@@ -53,6 +53,9 @@ pub struct Stats {
     /// Carry chains (adders, subtractors, comparisons).
     pub chains: usize,
     pub m4ks: usize,
+    /// Read ports moved onto their address registers' next value, their
+    /// read registers into LEs ([`memory::read_early`]).
+    pub early_reads: usize,
     /// Embedded multipliers.
     pub mults: usize,
 }
@@ -165,6 +168,10 @@ fn run(
     alumacc::alumacc_with(m, alumacc::SumOrder::Arrival);
     opt::opt(m, removable);
     obs.stage("alumacc", m);
+    // Part of the mapping (proven around, co-simulated through): the read
+    // it moves sees writes one edge earlier than the RTL's.
+    let early_reads =
+        memory::read_early(m, |mem| !logic.contains(&mem.memid) && m4k::mappable(mem));
     let m4ks = m4k::map(m);
     obs.stage("m4k", m);
     memory::map_to_logic(m)?;
@@ -202,6 +209,7 @@ fn run(
         latches,
         emulated,
         io_registers,
+        early_reads,
         chains,
         m4ks,
         mults,

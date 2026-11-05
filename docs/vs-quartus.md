@@ -4,47 +4,50 @@ Is chipsmith faster than Quartus, and are its results as good? This note
 times both on the same Verilog, to a bitstream, on the same machine, and
 puts each tool's timing result next to its times. `bench/vs-quartus.sh`
 produces every number here and can reproduce them; the raw rows are in
-`bench-out/vs4/runs.tsv` (not committed; the tables below come from it
+`bench-out/vs5/runs.tsv` (not committed; the tables below come from it
 through `bench/vs-quartus.sh table` and `bench/vs-quartus.py summary`).
-This run (2026-11-03) is branch `qor3` at f6d26ff. The third run
-(2026-11-02/03, `qor2` 16c6b23), the second (2026-11-02, `qor` 7b03ae2)
-and the first (2026-11-01, `open` a288925 and gpu-pnr 61ae9d7) are kept
-below for comparison.
+This run (2026-11-05) is branch `qor4` at de70915. The fourth run
+(2026-11-03, `qor3` f6d26ff), the third (2026-11-02/03, `qor2` 16c6b23),
+the second (2026-11-02, `qor` 7b03ae2) and the first (2026-11-01, `open`
+a288925 and gpu-pnr 61ae9d7) are kept below for comparison.
 
 ## Verdict
 
-**chipsmith is 1.6x to 10x faster than Quartus in wall time, at every
-size, and uses 1.5x to 8.5x less CPU time.** The machine was busier than
-in the third run (load median 14 against 9; other agents' place and
-route and Vivado jobs, and chipsmith's own test suite), which costs
-Quartus' fixed floor most: blinky 128 s against 65 s, and 14 s for
-chipsmith. On the CPU cores (femtorv32, picorv32, mult-selftest,
-sdram-selftest; 500 to 1,000 LEs) chipsmith takes 29 to 57 s to Quartus'
-128 to 154 s, sha256 200 s to 328 s and picorv32x24 691 s to 1,318 s.
-sha256's route takes longer than in the third run: 157 s of its 200
-(125 s CPU against 91 to 112, 20 iterations against 19).
+**chipsmith is 1.8x to 17x faster than Quartus in wall time, at every
+size, and uses 1.4x to 7.4x less CPU time.** The machine was quiet
+this time (load median 1.8, against 14 in the fourth run), which takes
+most off Quartus' fixed floor: blinky took 51 s (128 s before) against
+chipsmith's 3.8 s. On the CPU cores (femtorv32, picorv32, mult-selftest,
+sdram-selftest; 500 to 1,000 LEs) chipsmith takes 7 to 22 s to Quartus'
+64 to 77 s, sha256 78 s to 141 s, and picorv32x24 311 s to 673 s.
 
-**Quartus still wins on LEs, by less:** chipsmith uses 3.6% more on
-sha256 (11% in the third run), 4.3% on picorv32 (16%), 4.9% on
-picorv32x24 (16%), 8.5% on femtorv32, 10% on sdram-selftest (14%), 16%
-on mult-selftest, and 13% fewer on crc32 (Round 3, below).
+**Quartus still wins on LEs:** chipsmith uses 3.4% more on sha256, 4.4%
+on picorv32, 4.9% on picorv32x24, 9.5% on femtorv32 (+5 LEs since the
+fourth run, the early register file read's address holds), 11% on
+sdram-selftest and 15% on mult-selftest (16% before). It uses 13% fewer
+on crc32.
 
 **Fmax, both placements under quartus_sta:**
 
-- **chipsmith ahead:** picorv32 (142 against 120 MHz), sha256 (69.6
-  against 64.8; Quartus was 26% ahead in the third run), sdram-selftest
-  (181 against 166), crc32 (293 against 268), blinky (298 against 285),
-  and picorv32x24 by chipsmith's estimate (110 against Quartus' 105).
-- **Quartus ahead:** by 4% on mult-selftest (71.0 against 68.3 MHz; 11%
-  before) and 7% on femtorv32 (80.9 against 75.3; 14% before).
-- **chipsmith's own estimate** is within -1.4% to +6.1% of what
-  quartus_sta finds for its placement (picorv32's +6.1%: the model's
-  SLOAD setup is a placeholder, Round 3).
+- **chipsmith ahead:** femtorv32 (92.7 against 80.9 MHz; Quartus was 7%
+  ahead in the fourth run), mult-selftest (75.6 against 71.0; Quartus was
+  4% ahead), picorv32 (141 against 120), sha256 (69.5 against 64.8),
+  crc32 (296 against 268) and blinky (298 against 285). picorv32x24 is
+  even by chipsmith's estimate (105.4 against Quartus' 105.3).
+- **Quartus ahead:** sdram-selftest at the default placement seed (165.8
+  against 154.2; chipsmith was ahead with 180.9 in the fourth run). Over
+  placement seeds 0-6, chipsmith's placement ranges from 153.7 to 176.1,
+  mean 164.0 (157.8 to 180.9, mean 170.5, before Round 4's timing model
+  change). The worst path at seed 0 is a register through five LUTs into
+  the DRAM_CAS_N I/O-cell register, which chipsmith's estimate for that
+  clock puts 13% faster than quartus_sta does (Round 4, What's left).
+- **chipsmith's own estimate** is within -2.0% to +5.4% of what
+  quartus_sta finds for its placement (sdram-selftest's +5.4%).
 
 So chipsmith turns a bitstream around faster at every size, and its
-placements are as fast as Quartus' or faster on six of the eight
-designs. Quartus' are 4% to 16% smaller, and faster on femtorv32 (its
-register file's M4K on the critical path) and mult-selftest.
+placements are faster than Quartus' on six of the eight designs, even
+on one, and on sdram-selftest depend on the placement seed. Quartus'
+placements are 3% to 15% smaller.
 
 ## Full builds
 
@@ -56,27 +59,27 @@ Wall time, s:
 
 | design | LEs Quartus / chipsmith | q wall s | cs wall s | speed-up cs |
 |---|---|---|---|---|
-| blinky-verilog | 26 / 26 | 128.0 [86.2-137.4] | 14.1 [5.7-15.2] | 9.1x |
-| crc32 | 105 / 91 | 168.4 [154.8-183.6] | 16.5 [9.9-17.9] | 10.2x |
-| femtorv32 | 473 / 513 | 151.5 [126.3-152.3] | 29.3 [26.3-39.0] | 5.2x |
-| picorv32 | 839 / 875 | 151.3 [145.3-203.1] | 50.2 [43.1-58.0] | 3.0x |
-| mult-selftest | 833 / 970 | 153.8 [153.2-205.9] | 56.9 [52.6-79.7] | 2.7x |
-| sdram-selftest | 567 / 626 | 128.0 [127.9-133.7] | 32.9 [31.6-36.0] | 3.9x |
-| sha256 | 3303 / 3422 | 327.8 [293.1-337.7] | 199.5 [189.3-221.2] | 1.6x |
-| picorv32x24 | 20240 / 21241 | 1318.2 [1288.2-1752.5] | 690.9 [526.9-707.3] | 1.9x |
+| blinky-verilog | 26 / 26 | 50.7 [50.4-56.5] | 3.8 [3.8-4.6] | 13.4x |
+| crc32 | 105 / 91 | 72.0 [71.5-74.4] | 4.2 [4.2-4.5] | 16.9x |
+| femtorv32 | 473 / 518 | 65.5 [65.4-74.2] | 10.6 [10.3-17.9] | 6.2x |
+| picorv32 | 839 / 876 | 75.0 [74.4-98.6] | 20.0 [20.0-23.6] | 3.8x |
+| mult-selftest | 833 / 956 | 76.7 [76.4-81.0] | 21.7 [21.3-24.7] | 3.5x |
+| sdram-selftest | 567 / 628 | 63.8 [63.7-67.1] | 7.3 [7.3-8.9] | 8.8x |
+| sha256 | 3303 / 3417 | 140.9 [140.2-143.4] | 77.9 [77.0-79.4] | 1.8x |
+| picorv32x24 | 20240 / 21241 | 673.1 [664.0-678.0] | 310.7 [308.6-339.3] | 2.2x |
 
 CPU time (user + sys of the run's cgroup), s:
 
 | design | LEs Quartus / chipsmith | q CPU s | cs CPU s | speed-up cs |
 |---|---|---|---|---|
-| blinky-verilog | 26 / 26 | 85.2 [80.0-85.2] | 10.0 [8.8-10.2] | 8.5x |
-| crc32 | 105 / 91 | 121.3 [118.8-122.1] | 15.4 [14.8-15.4] | 7.9x |
-| femtorv32 | 473 / 513 | 109.2 [108.2-112.0] | 33.4 [33.2-33.5] | 3.3x |
-| picorv32 | 839 / 875 | 124.4 [122.3-125.1] | 42.6 [42.0-42.7] | 2.9x |
-| mult-selftest | 833 / 970 | 127.2 [125.6-130.2] | 47.3 [46.8-49.1] | 2.7x |
-| sdram-selftest | 567 / 626 | 106.2 [105.6-107.1] | 35.0 [34.9-35.5] | 3.0x |
-| sha256 | 3303 / 3422 | 237.6 [237.5-243.2] | 163.4 [155.6-163.6] | 1.5x |
-| picorv32x24 | 20240 / 21241 | 1113.0 [1109.1-1149.3] | 604.6 [569.8-609.6] | 1.8x |
+| blinky-verilog | 26 / 26 | 50.2 [49.8-55.8] | 7.0 [6.9-8.4] | 7.2x |
+| crc32 | 105 / 91 | 71.1 [70.5-73.6] | 9.7 [9.5-10.3] | 7.4x |
+| femtorv32 | 473 / 518 | 64.8 [64.7-72.9] | 24.2 [23.9-30.6] | 2.7x |
+| picorv32 | 839 / 876 | 74.2 [73.7-97.0] | 39.1 [38.7-39.3] | 1.9x |
+| mult-selftest | 833 / 956 | 75.8 [75.5-80.0] | 44.0 [43.8-44.5] | 1.7x |
+| sdram-selftest | 567 / 628 | 63.1 [63.0-66.4] | 27.8 [27.4-29.0] | 2.3x |
+| sha256 | 3303 / 3417 | 139.2 [138.5-141.9] | 98.1 [97.4-98.8] | 1.4x |
+| picorv32x24 | 20240 / 21241 | 665.5 [655.4-669.1] | 426.4 [423.5-452.7] | 1.6x |
 
 ## Quality
 
@@ -86,22 +89,24 @@ the routed estimate for chipsmith. "quartus_sta" is chipsmith's
 placement and routing assembled by Quartus and timed by the same
 quartus_sta (rep 1); every one of those assemblies came out byte-identical
 to chipsmith's RBF. chipsmith's placement is deterministic, so its values
-repeat across reps.
+repeat across reps. They are one placement seed, the default; Round 4
+gives each design's spread over seeds.
 
 | design | q own | cs own | cs quartus_sta |
 |---|---|---|---|
 | blinky-verilog | 285.31 | 294.1 | 298.15 |
-| crc32 | 267.95 | 302.1 | 293.0 |
-| femtorv32 | 80.89 | 77.0 | 75.34 |
-| picorv32 | 119.82 | 151.1 | 142.39 |
-| mult-selftest | 70.99 | 68.0 | 68.26 |
-| sdram-selftest | 165.84 | 189.8 | 180.9 |
-| sha256 | 64.8 | 72.7 | 69.6 |
-| picorv32x24 | 105.27 | 109.6 | - |
+| crc32 | 267.95 | 289.9 | 295.95 |
+| femtorv32 | 80.89 | 95.3 | 92.65 |
+| picorv32 | 119.82 | 145.1 | 141.24 |
+| mult-selftest | 70.99 | 75.5 | 75.58 |
+| sdram-selftest | 165.84 | 162.6 | 154.23 |
+| sha256 | 64.8 | 70.9 | 69.49 |
+| picorv32x24 | 105.27 | 105.4 | - |
 
-picorv32x24's chipsmith estimate fell from 113.1 to 109.6 MHz since the
-third run (8.84 -> 9.12 ns), at 2,286 fewer LEs; it isn't cross-checked
-(Method).
+picorv32x24's chipsmith estimate fell from 109.6 to 105.4 MHz since the
+fourth run (9.12 -> 9.49 ns). The model's register enable arc is now
+measured, 660 ps where it was 366 ps (Round 4). picorv32x24 isn't
+cross-checked (Method).
 
 ## Load
 
@@ -109,8 +114,8 @@ The 1-minute load average during each run (8 hardware threads):
 
 | tool | runs | load, median [min-max] |
 |---|---|---|
-| q | 24 | 13.7 [8.9-35.7] |
-| cs | 24 | 14.1 [9.3-37.7] |
+| q | 24 | 1.8 [1.4-8.2] |
+| cs | 24 | 1.8 [1.3-8.2] |
 
 ## Closing the gap (branch `qor`)
 
@@ -499,6 +504,159 @@ help; Quartus' adder tree for it is one chain shallower. It reached
 - **picorv32's SLOAD timing:** measure the SLOAD setup arc against
   quartus_sta (bench/timing-calib.py) instead of SDATA's placeholder.
 
+## Round 4 (branch `qor4`)
+
+Each step is its own commit. Every DE2 example's RBF (33; picorv32x24
+aside) is byte-identical through Quartus after each one
+(`bench/quartus-validate.sh`). quartus_sta's Fmax of chipsmith's own
+placement is measured over several placement seeds
+(`bench/fmax-seeds.sh`), because one seed's routing moves a design by
+up to 10%. `crates/chipsmith/tests/route_quality.rs` now also guards
+mult-selftest, and femtorv32's bound is tighter.
+
+### femtorv32: the register file read on the edge before
+
+Quartus reads femtorv32's `rs1 <= registerFile[mem_rdata[19:15]]` (in
+WAIT_INSTR) on the edge before: the M4K's address register takes
+`mem_rdata`'s next value (`mem_rstrb ? rom : mem_rdata`) on FETCH_INSTR's
+edge, and `rs1` and `rs2` stay registers after the block. chipsmith now
+does the same (`memory::read_early`, Cyclone II only, before the M4K
+mapping). It applies to a read port with its output register merged
+whose address comes from registers on its clock. The block's 3.0 ns
+clock to output then ends at a register instead of starting the ALU
+path.
+
+The early read takes the old data of a write on that edge, where the
+RTL's read one edge later sees the new data. So a port only moves where
+`hazard::never_after` proves that no write comes on the edge before one
+the read register loads on, and that the register doesn't load on the
+first edge after power-up. The proof evaluates both signals over every
+value of the registers and inputs they depend on (at most 24 bits, 64
+assignments at a time), over two frames, with the earlier frame's
+registers free. femtorv32's write-back needs EXECUTE or WAIT_ALU_OR_MEM,
+and WAIT_INSTR is only entered from FETCH_INSTR. The M4K mapping then
+puts `rs1` and `rs2` into the block's output register.
+
+The mapping is proven around (the RTL against the stage before it, the
+stage after it against the result) and co-simulated through: femtorv32
+compares 270,000 output bits, and `cpu_cosim_catches_a_wrong_register`
+still fails a swapped address pin. `m4k_reads_early` co-simulates a
+decode-execute register file where the move is safe (both ports moved)
+and the same with a write in fetch (neither moved).
+
+### mult-selftest: partial products that don't overlap share an operand
+
+`p7 = a * b` is 32 x 32 -> 64 bits: four 18 x 18 blocks (limbs of 18
+and 14 bits), not ten. Round 3 named the wrong count. chipsmith added
+the partial products one by one, `((p00 + p01) + p10) + p11`, three
+carry chains deep. Quartus' lpm_mult is two deep (`add9`, then `op_1`
+on its worst path), because `p00` (bits 0-35) and `p11` (36-63) don't
+overlap. chipsmith now packs the products whose bits can't overlap into
+one operand and adds the operands as a balanced tree
+(`mult::sum_parts`): `(p00 | p11) + p01 + p10`, two adders.
+
+### Timing model: register control arcs and the M4K output register
+
+The register's ENA, SCLR and SLOAD pins counted SDATA's 366 ps arc into
+the register, a placeholder. The arcs were measured from quartus_sta's
+`CYCLONEII_LCELL_FF` element after `|ena`, `|sclr` and `|sload` on
+chipsmith's femtorv32 and picorv32, and every path gave the same value:
+
+| pin | paths | arc, ps | was |
+|---|---|---|---|
+| ENA | 800 | 660 | 366 |
+| SCLR | 451 | 510 | 366 |
+| SLOAD | 43 | 659 | 366 |
+| SDATA (check) | 418 | 366 | 366 (DMF) |
+
+The routing into those pins already matched (`bench/timing-calib.py`:
+quartus_sta's interconnect into them, LAB_CONTROL_MUX included, is 1.02x
+the model's).
+
+Every M4K's read data launched 3,326 ps after the clock, which is the
+block's unregistered read. Behind its output register (`A_OUTREG`,
+`B_OUTREG`), which femtorv32's register file uses since the early read,
+quartus_sta gives 396 ps: the register's 209 ps uTco, 88 ps to
+`portbdataout`, and the 99 ps by which the block's clock 1 arrives after
+an LE register's. Without this, femtorv32's estimate was 9% to 16% below
+quartus_sta, and the router chased a path that wasn't critical.
+
+### Results
+
+LEs (seed 0; chipsmith / Quartus at the end):
+
+| step | femtorv32 | picorv32 | sha256 | mult-selftest | sdram-selftest |
+|---|---|---|---|---|---|
+| `open` ccbd6cc | 513 | 875 | 3,422 | 970 | 626 |
+| early register file read | 518 | 875 | 3,422 | 970 | 626 |
+| partial products packed | 518 | 875 | 3,422 | 957 | 626 |
+| control arcs, M4K output register | 518 | 876 | 3,417 | 956 | 628 |
+| Quartus | 473 | 839 | 3,303 | 833 | 567 |
+
+Of the other 28 examples, only m4k-selftest changed, from 356 to 355
+LEs. Its read moved early too, and its Fmax stays within its seed spread
+(at its 50 MHz clock: 94.3 against 96.0 MHz mean).
+
+quartus_sta's Fmax of chipsmith's placement and routing, MHz, mean over
+seeds [min-max], every RBF byte-identical through Quartus:
+
+| step | femtorv32 (0-4) | mult-selftest (0-4) | picorv32 (0-6) | sha256 (0-2) | sdram-selftest (0-6) |
+|---|---|---|---|---|---|
+| `open` ccbd6cc | 77.7 [75.3-79.6] | 67.2 [65.2-68.9] | - | - | - |
+| early register file read | 87.4 [84.1-92.0] | - | - | - | - |
+| partial products packed | = | 75.9 [75.0-76.7] | 141.4 [135.8-148.3] | 70.3 [69.6-70.9] | 170.5 [157.8-180.9] |
+| control arcs | 86.7 [81.6-91.3] | 74.9 (0-2) | 141.2 [131.8-147.9] | 69.4 [69.1-69.7] | 164.0 [153.7-176.1] |
+| M4K output register | 92.2 [87.8-95.7] | = | = | = | = |
+| Quartus' own | 80.89 | 70.99 | 119.82 | 64.80 | 165.84 |
+
+`=`: the step doesn't change the design's build (no product wider
+than a block; no M4K output register). The first two steps don't change
+picorv32, sha256 or sdram-selftest either, so for those designs the
+"partial products packed" row is also the `open` baseline. The `open`
+mult-selftest row was measured with the early-read binary, which doesn't
+change mult-selftest. mult-selftest's control-arc row is seeds 0-2,
+which were 76.4 the step before.
+
+femtorv32 is now 14% faster than Quartus' own fit, and mult-selftest 7%
+faster. The control arcs make the model more accurate without making
+the designs faster. picorv32's estimate error against quartus_sta fell
+from +5.8% to +1.9% on average over seven seeds, and its Fmax didn't
+move. On the other designs Fmax moved within the seed spread: sha256
+-1.2%, mult-selftest -2% and sdram-selftest -3.8%, where the spread is
+153.7 to 180.9 MHz. Routing convergence is unchanged: all 33 examples x
+5 seeds route on both binaries, in 10.0 iterations on average (10.4
+before).
+
+### Rejected or not done
+
+- **LE gaps (task 4).** femtorv32 is +9.5% and mult-selftest +15%.
+  Neither had a cheap fix. mult-selftest's extra LEs are normal-mode LUTs
+  (679 against Quartus' 554, 487 of them 4-input against 306). Most sit
+  in the 64-bit 9-way `want`/`ra`/`rb` selection by `mode`. femtorv32
+  has 348 normal LUTs against 302, and its five new LUTs are the
+  address holds (`mem_rstrb ? rom : mem_rdata`). Quartus' block has an
+  address stall (`addressstall_b`) that would do this for free, but
+  chipsmith's chip database doesn't model it.
+- **Routing wire delays.** `timing-calib.py` on picorv32, femtorv32 and
+  sha256 shows the model overestimating routes through R4s by about 20%:
+  `LE_BUFFER R4 LOCAL_INTERCONNECT` is 687 ps in quartus_sta and 878 ps
+  in the model. Not changed in this round.
+
+### What's left
+
+- **LEs:** femtorv32 +9.5%, picorv32 +4.4%, sha256 +3.4%, mult-selftest
+  +15%, sdram-selftest +11% against Quartus.
+- **The M4K address stall,** which would make femtorv32's hold LUTs
+  unnecessary (chip database and bitstream support).
+- **R4-heavy routes,** about 20% overestimated by the model.
+- **sdram-selftest at the default seed:** 154.2 MHz against Quartus'
+  165.8, but 153.7 to 176.1 over seeds 0-6. Its worst path at seed 0 runs
+  from a register through five LUTs into the DRAM_CAS_N I/O-cell
+  register on the 100 MHz PLL clock. chipsmith's estimate for that clock
+  is 174.9 MHz (5.72 ns), 13% above quartus_sta's 154.2. The error is in
+  the model's path into the I/O register, not in the control arcs, which
+  that path doesn't use.
+
 ## Method
 
 **Machine.** Intel i7-4770K (4 cores, 8 threads, 3.5 GHz), 31 GB, no swap,
@@ -506,16 +664,18 @@ NVIDIA GTX 1660, NixOS. The machine is shared: other agents ran their own
 builds during the runs. Those included Quartus fits and programming-file
 runs, another device's database builds and chipsmith's own proof suite.
 The `load` column is the 1-minute load average, sampled every 5 s during
-each run and averaged. In this run it ranged from 9 to 38, with a median
-of 14 (Load, above); this branch's own tests/synth.rs ran beside it. A
-quiet machine would give lower wall times for both tools; see Caveats.
+each run and averaged. In this run it ranged from 1.3 to 8.2, with a
+median of 1.8 (Load, above). The end of this branch's own test suite and
+Quartus validation runs overlapped the first rep. The fourth run's
+median was 14, and both tools' wall times are lower on the quieter
+machine (see Caveats).
 
 **Tools.**
 
 | tool | what |
 |---|---|
 | `q` | Quartus II 13.0sp1 Web Edition (13.0.1 build 232): `quartus_map`, `quartus_fit` (Auto Fit), `quartus_asm` (SOF) |
-| `cs` | `chipsmith build`, branch `qor3` at f6d26ff (`open` 80351e1 and the commits of Round 3), on CPU threads, chip database cyclone2-re c2baa4e |
+| `cs` | `chipsmith build`, branch `qor4` at de70915 (`open` ccbd6cc and the commits of Round 4), on CPU threads, chip database cyclone2-re c2baa4e (the fourth run's) |
 
 The first run also had `q-fast` (`FITTER_EFFORT "FAST FIT"`), `q-all`
 (`NUM_PARALLEL_PROCESSORS ALL`, which the Web Edition disables: warning
@@ -565,6 +725,74 @@ Quartus rebuilds in the same project directory, keeping `db/` and
 `incremental_db/`. chipsmith rebuilds in the same `build/`, where it
 skips every step whose inputs haven't changed (ADR-0011).
 
+
+## Fourth run (2026-11-03, `qor3` f6d26ff)
+
+### Full builds
+
+Medians over three interleaved reps with [min-max], from a fresh copy of
+each example. "Speed-up" is Quartus' median divided by chipsmith's. LEs
+are each tool's own count after fitting.
+
+Wall time, s:
+
+| design | LEs Quartus / chipsmith | q wall s | cs wall s | speed-up cs |
+|---|---|---|---|---|
+| blinky-verilog | 26 / 26 | 128.0 [86.2-137.4] | 14.1 [5.7-15.2] | 9.1x |
+| crc32 | 105 / 91 | 168.4 [154.8-183.6] | 16.5 [9.9-17.9] | 10.2x |
+| femtorv32 | 473 / 513 | 151.5 [126.3-152.3] | 29.3 [26.3-39.0] | 5.2x |
+| picorv32 | 839 / 875 | 151.3 [145.3-203.1] | 50.2 [43.1-58.0] | 3.0x |
+| mult-selftest | 833 / 970 | 153.8 [153.2-205.9] | 56.9 [52.6-79.7] | 2.7x |
+| sdram-selftest | 567 / 626 | 128.0 [127.9-133.7] | 32.9 [31.6-36.0] | 3.9x |
+| sha256 | 3303 / 3422 | 327.8 [293.1-337.7] | 199.5 [189.3-221.2] | 1.6x |
+| picorv32x24 | 20240 / 21241 | 1318.2 [1288.2-1752.5] | 690.9 [526.9-707.3] | 1.9x |
+
+CPU time (user + sys of the run's cgroup), s:
+
+| design | LEs Quartus / chipsmith | q CPU s | cs CPU s | speed-up cs |
+|---|---|---|---|---|
+| blinky-verilog | 26 / 26 | 85.2 [80.0-85.2] | 10.0 [8.8-10.2] | 8.5x |
+| crc32 | 105 / 91 | 121.3 [118.8-122.1] | 15.4 [14.8-15.4] | 7.9x |
+| femtorv32 | 473 / 513 | 109.2 [108.2-112.0] | 33.4 [33.2-33.5] | 3.3x |
+| picorv32 | 839 / 875 | 124.4 [122.3-125.1] | 42.6 [42.0-42.7] | 2.9x |
+| mult-selftest | 833 / 970 | 127.2 [125.6-130.2] | 47.3 [46.8-49.1] | 2.7x |
+| sdram-selftest | 567 / 626 | 106.2 [105.6-107.1] | 35.0 [34.9-35.5] | 3.0x |
+| sha256 | 3303 / 3422 | 237.6 [237.5-243.2] | 163.4 [155.6-163.6] | 1.5x |
+| picorv32x24 | 20240 / 21241 | 1113.0 [1109.1-1149.3] | 604.6 [569.8-609.6] | 1.8x |
+
+### Quality
+
+CLOCK_50's (sdram-selftest: the 100 MHz PLL clock's) Fmax, MHz.
+"Own" is each tool's own analysis: quartus_sta (slow model) for Quartus,
+the routed estimate for chipsmith. "quartus_sta" is chipsmith's
+placement and routing assembled by Quartus and timed by the same
+quartus_sta (rep 1); every one of those assemblies came out byte-identical
+to chipsmith's RBF. chipsmith's placement is deterministic, so its values
+repeat across reps.
+
+| design | q own | cs own | cs quartus_sta |
+|---|---|---|---|
+| blinky-verilog | 285.31 | 294.1 | 298.15 |
+| crc32 | 267.95 | 302.1 | 293.0 |
+| femtorv32 | 80.89 | 77.0 | 75.34 |
+| picorv32 | 119.82 | 151.1 | 142.39 |
+| mult-selftest | 70.99 | 68.0 | 68.26 |
+| sdram-selftest | 165.84 | 189.8 | 180.9 |
+| sha256 | 64.8 | 72.7 | 69.6 |
+| picorv32x24 | 105.27 | 109.6 | - |
+
+picorv32x24's chipsmith estimate fell from 113.1 to 109.6 MHz since the
+third run (8.84 -> 9.12 ns), at 2,286 fewer LEs; it isn't cross-checked
+(Method).
+
+### Load
+
+The 1-minute load average during each run (8 hardware threads):
+
+| tool | runs | load, median [min-max] |
+|---|---|---|
+| q | 24 | 13.7 [8.9-35.7] |
+| cs | 24 | 14.1 [9.3-37.7] |
 
 ## Third run (2026-11-02/03, `qor2` 16c6b23)
 
