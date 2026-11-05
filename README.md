@@ -1027,8 +1027,10 @@ regs_arith. On chipsmith's own, 2026-11-01:
 | zybo-picorv32, its loop running | 20,000 cycles | 540,000 |
 | zybo-sha256 | 3,000 cycles | 81,000 |
 | zybo-bram-selftest, two passes | 17,000 cycles | 85,000 |
-| zybo-mult-selftest, three passes | 3,600 cycles | 18,000 |
-| zybo-riscv-bram, two passes of its program | 50,000 cycles (its CPU on half the clock) | 250,000 |
+| zybo-mult-selftest, three passes (its PLL's 75 MHz since branch xc7-mmcm) | 5,800 cycles | 29,000 |
+| zybo-riscv-bram, its program's passes (its CPU on its PLL's 112.5 MHz) | 50,000 cycles | 250,000 |
+| zybo-pll, two PLL clocks | 3,000 cycles | 12,000 |
+| a PLL's five clocks (a phase, x2, a 25% duty cycle sampled on a shifted clock) and an MMCM's fractional /6.625 (`tests/designs/cmt.v`) | 3,000 cycles | 63,000 |
 | every register shape and the carry arithmetic | 3,000 cycles | 161,999 |
 | RAM32Ms of one to three read ports, contents, a falling-edge write | 3,000 cycles | 94,274 |
 
