@@ -1,7 +1,8 @@
 // Two counters on two clocks from one PLL: 125 MHz (CLK0) and 62.5 MHz
 // 4 ns (90 degrees of it) after (CLK1), from the Zybo's 125 MHz. led[1:0]
-// are the 125 MHz counter's top bits, led[3:2] the 62.5 MHz one's: on the
-// board LD0 blinks at twice LD2's rate. LOCKED holds both counters until
+// are the 125 MHz counter's bits 26 and 25, led[3:2] the 62.5 MHz one's bits 25
+// and 24: half the clock one bit lower, so LD2 blinks with LD0 (0.93 Hz) and
+// LD3 with LD1 (1.86 Hz), seen on the board 2026-11-06. LOCKED holds both counters until
 // the PLL has locked.
 module top(input clk, output [3:0] led);
   wire fast, slow, locked;
