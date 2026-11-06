@@ -26,3 +26,4 @@ serde_json.workspace = true
 
 [dev-dependencies]
 chipsmith-verilog.workspace = true
+toml.workspace = true

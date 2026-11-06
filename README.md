@@ -76,6 +76,20 @@ USER1 444532210e8c6078: tag "DE2!", counts 185090128
 counter 0: 50118936 counts in 1.002 s: 50.00 MHz
 ```
 
+Any design's pins can be checked the same way, without a USER1 register:
+`cargo run --release -p chipsmith-cyclone2 --example de2_pins -- examples/sha256`
+reads them with the EP2C35's boundary-scan SAMPLE instruction (Altera's
+BSDL: 1449 cells, input, control and output per ball), which captures every
+pin without taking it from the design, and prints each signal of the
+project's `[pins]`. On the DE2 2026-11-06 (chipsmith main 1400504, loaded
+over JTAG): sha256 folding with LEDG[8] (its core's error flag) 0 in 300
+samples; spi-master's SCLK and MOSI toggling, CS_n high between transfers
+and mirrored on LEDG[2], MISO high (no loopback jumper) so its received
+byte reads 0xff; de2-ioregs' LEDR[3:0] stepping about 3 times a second on
+`tick` through the I/O cells' clock enable; vga-pattern's sync pins over
+3000 samples low 11.4 % (HSYNC, 640x480 expects 96/800 = 12.0 %), 0.37 %
+(VSYNC, 2/525 = 0.38 %) and BLANK 26.3 % (26.9 %), VGA_CLK at 51 %.
+
 Since 2026-10-26 the register is clocked by TCK itself: the JTAG block's
 TCK output goes through the core to a clock control and onto a global
 clock (cyclone2-re README, "Global clocks from the core"), so the reader
@@ -165,6 +179,9 @@ registers holding the first word) was found on the board: a build with
 the extra stage checking latencies 4-7 side by side read 0 errors at 4
 and every word wrong at 5-7. Without the stage the READ reaches the pins
 a clock earlier, so it is 3.
+Rebuilt with chipsmith main 1400504 (GPU placer, qor rounds 1-3, DRAM_CLK
+at -1.5 ns) and run on the DE2 2026-11-06, loaded over JTAG: `"SDR!"`, 0
+errors, the passes rising.
 
 `examples/sram-selftest` runs the DE2's 512 KB asynchronous SRAM
 (IS61LV25616AL-10, 256K x 16): a 100 MHz controller on PLL_1's CLK0,
@@ -185,6 +202,9 @@ spends 5 clocks per word written and read). The checker does catch a
 wrong read: a build reading a clock late (`RD_LAT` 3) counted
 226,208,709 errors in 862 passes, nearly every word. Not to be loaded
 with examples/bidir's SW[4] up: that one drives SRAM_DQ too.
+Rebuilt with chipsmith main 1400504 (GPU placer, qor rounds 1-3) and run
+on the DE2 2026-11-06, loaded over JTAG: `"SRM!"`, 0 errors in 2,200
+passes over 30 s.
 
 `examples/bidir` is cyclone2-re's tri-state test: expansion-header and
 SRAM data pins driven with their output enable from a switch, an
