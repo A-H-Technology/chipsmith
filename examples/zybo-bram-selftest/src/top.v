@@ -13,7 +13,8 @@
 //   t18  256 x 18 true dual port, even words on port A, odd on B
 //   o9   512 x 9 with its output registered again (output register)
 //   r18  256 x 18 ROM read under a read enable (clock enable)
-//   s8   64 x 8 (registers and LUTs: 64 words or fewer don't go to a block)
+//   s8   64 x 8 (a block since synchronous reads of it map there: both
+//        ports x4, a nibble each)
 //   c9   512 x 9 true dual port, both ports writing one word on every
 //        write edge: port B's write lands (it comes last), each port
 //        reads back its own write's data on that edge (the collision,

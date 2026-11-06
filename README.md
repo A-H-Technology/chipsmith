@@ -21,7 +21,7 @@ nextpnr, no prjxray tool, only prjxray-db's data.
 | device | board | build | on hardware |
 |---|---|---|---|
 | EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis): LUT/carry/register logic, M4K RAM blocks and embedded multipliers (below), global clocks from pins and from logic (a register, the JTAG block's TCK; one clock per LAB), PLLs (`CY2_PLL`; both on the board 2026-10-26, examples/de2-jtag-counter on TCK and examples/de2-pll-counter at 100 and 40 MHz from CLOCK_50; 2026-10-30 a PLL clock on its PLL's clock output pin, 2026-10-31 on any pin or into logic as data, the DE2's SDRAM run at 100 MHz with 0 errors by examples/sdram-selftest, its SRAM by examples/sram-selftest); pins input, output, tri-state, bidirectional, open drain, at 3.3-V LVTTL (any current) or LVCMOS or 2.5-V inputs, with pull-up or bus hold and I/O-cell registers (with the cell's clock enables, asynchronous clears and presets and falling-edge clocks as Quartus packs them since 2026-10-31, examples/de2-ioregs; an output or OE register's synchronous reset as logic on its D; Manifest, below) | yes (2026-10-25, chipsmith's own synthesis end to end, checked over JTAG: examples/de2-jtag-counter (its earlier CLOCK_50-sampled version) reads back `"DE2!"` at 50.00 MHz after a JTAG load and after `flash --persist` (loader synthesized by chipsmith too, EPCS written, verified and reloaded from; 2026-10-26 also after a power cycle); picorv32 with the same readback added runs its loop at 3.33 MHz. 2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
-| xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes, with no external tool but GHDL for VHDL (2026-11-01: chipsmith's own Verilog front end, synthesis, packing, placement, routing and FASM; 2026-11-02: frames and `.bit`; "The Zybo flow", below): LUT1-LUT6, CARRY4, FDRE/FDSE/FDCE/FDPE, RAM32M, block RAM (RAMB18E1, since 2026-11-02; "7-series block RAM", below), multipliers (DSP48E1, since 2026-11-02; "7-series multipliers", below), LUT6_2 pairs, LVCMOS33 pins, BUFGs, BSCANs, PLLs and MMCMs (PLLE2_ADV, MMCME2_ADV, since 2026-11-04; ADR-0017) and the PS7 | yes, with the earlier flow (2026-10-24, yosys and nextpnr around chipsmith's placement and routing: zybo-jtag-counter read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga). chipsmith's own flow is checked at the bitstream instead (decoded and co-simulated against the RTL, below), not yet on the board |
+| xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes, with no external tool but GHDL for VHDL (2026-11-01: chipsmith's own Verilog front end, synthesis, packing, placement, routing and FASM; 2026-11-02: frames and `.bit`; "The Zybo flow", below): LUT1-LUT6, CARRY4, FDRE/FDSE/FDCE/FDPE, RAM32M, block RAM (RAMB18E1, since 2026-11-02; "7-series block RAM", below), multipliers (DSP48E1, since 2026-11-02; "7-series multipliers", below), LUT6_2 pairs, LVCMOS33 pins, BUFGs, BSCANs, PLLs and MMCMs (PLLE2_ADV, MMCME2_ADV, since 2026-11-04; ADR-0017) and the PS7 | yes, with the earlier flow (2026-10-24, yosys and nextpnr around chipsmith's placement and routing: zybo-jtag-counter read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga). chipsmith's own flow is checked at the bitstream (decoded and co-simulated against the RTL, below) and, since 2026-11-06, on the board: zybo-jtag-counter (125.01 MHz), zybo-mult-selftest, zybo-riscv-bram and zybo-bram-selftest (every RAMB18E1 mode it has) read back over JTAG with 0 errors |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
 LEDs, 876 LEs and two M4Ks (its register file); a build takes 20 to 24 s
@@ -700,7 +700,10 @@ The Zybo examples:
 - `examples/zybo-bram-selftest`: `examples/m4k-selftest` in block RAM
   (nine RAMB18E1s): memories in most block modes written and read back
   over and over, `"BRAM"`, the passes and the errors in USER1, read as
-  for zybo-jtag-counter. 153.7 MHz estimated at 125 MHz.
+  for zybo-jtag-counter. 153.7 MHz estimated at 125 MHz. On the board
+  (2026-11-06) its errors first saturated: two block RAM bugs the
+  bitstream checks couldn't see (7-series block RAM, below); fixed, 0
+  errors and the passes rising.
 - `examples/zybo-mult-selftest`: `examples/mult-selftest` on DSP48E1s
   (fourteen): nine product shapes against a shift-and-add reference,
   `"MUL!"`, the passes and the errors in USER1. Its test logic runs at
@@ -843,6 +846,19 @@ Checked (ADR-0014):
   `fasm2frames`/`xc7frames2bit` making the same `.bit` of the FASM,
   decoded (`chipsmith_xc7::decode`, a RAMB18E1 per half of a BRAM tile)
   and co-simulated;
+- **on the board** (2026-11-06): zybo-bram-selftest, 0 errors. Its
+  first run found two bugs that encoder and decoder shared, so the
+  co-simulation passed: (1) a route through a BRAM tile's address cascade
+  (`BRAM_CASCOUT_ADDR*`, into the next tile's `CASCIN{TOP,BOT}`) needs the
+  driving tile's `CASCOUT_ARD_ACTIVE`/`CASCOUT_BWR_ACTIVE` bit, which
+  chipsmith never wrote; (2) port B's write enables in true dual port
+  went one per pin (nextpnr's `pack_bram`), where the pins are byte
+  lanes: Vivado puts WE[i] on lanes 2i and 2i+1 (x18) or WE[0] on all
+  four (x9 and narrower), so writes to port B's odd lanes were lost.
+  Found by having Vivado write the same netlist on the same sites and
+  diffing bit2fasm's reading of both. The decoder now drives a cascade
+  only under its bit and refuses lanes that aren't one enable per lane
+  pair (x18) or per port, so `zybo_bram_selftest` fails on either bug;
 - **the decoder on Vivado's bitstreams** of the same RTL: ten of twelve
   co-simulate against the RTL. The other two: Vivado's true dual port,
   both ports WRITE_FIRST, reads x where the other port writes the word on

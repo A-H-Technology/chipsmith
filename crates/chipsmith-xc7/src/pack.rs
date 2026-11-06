@@ -17,9 +17,11 @@
 //! - each pin buffer (IBUF, OBUF, OBUFT, IOBUF) becomes the pin's IOB site,
 //!   from the manifest's pin and prjxray-db's package pins;
 //! - a block RAM (RAMB18E1, RAMB36E1) becomes its site's pins, as openXC7's
-//!   nextpnr maps them (`pack.cc`, `pack_bram`): a RAMB18E1's WEA[i] on
-//!   two pins (WEA2i, WEA2i+1), WEBWE[i] on one (two in SDP), WEBWE4-7
-//!   and the unused WEAs 0, the ADDR*TIEHIGH pins high; a RAMB36E1's
+//!   nextpnr maps them (`pack.cc`, `pack_bram`), but a RAMB18E1's write
+//!   enables as Vivado maps them: WE[i] on two pins (2i, 2i+1) for a port
+//!   18 wide or SDP's 36, WE[0] on all four for a narrower one, WEBWE4-7
+//!   outside SDP's wide write and the unused WEAs 0; the ADDR*TIEHIGH
+//!   pins high; a RAMB36E1's
 //!   controls, addresses and write enables on both halves' pins (`L`,
 //!   `U`), ADDR[15] on `L15` alone. The output register's clock
 //!   (REGCLK) is the port's, where the register is used;
@@ -660,23 +662,33 @@ fn bram_pins(r: &crate::synth::cells::Ramb) -> Vec<(String, SigBit, bool)> {
             out.push((format!("WEBWEU{i}"), b, false));
         }
     } else {
-        for (i, &b) in r.we[0].iter().enumerate() {
-            let b = if c.sdp { SigBit::ZERO } else { b };
-            out.push((format!("WEA{}", 2 * i), b, false));
-            out.push((format!("WEA{}", 2 * i + 1), b, false));
+        // Each physical pin is a byte lane's enable. A port 18 wide (or
+        // SDP's 36) has WE[i] on lanes 2i and 2i+1; a narrower one writes
+        // one lane, picked by its address, so WE[0] goes on all four: as
+        // Vivado's RAMB18E1. WEBWE[i] on lane i alone (nextpnr's
+        // `pack_bram`) never wrote port B's odd lanes in true dual port,
+        // seen on the Zybo (bram-selftest, 2026-11-06).
+        let lanes = |we: &[SigBit], width: Option<crate::bram::Width>, n: usize| -> Vec<SigBit> {
+            use crate::bram::Width;
+            (0..n)
+                .map(|j| match width {
+                    None => SigBit::ZERO,
+                    Some(Width::X18 | Width::X36 | Width::X72) => we[j / 2],
+                    Some(_) => we[0],
+                })
+                .collect()
+        };
+        let wea = if c.sdp { lanes(&r.we[0], None, 4) } else { lanes(&r.we[0], c.ports[0].write, 4) };
+        for (j, b) in wea.into_iter().enumerate() {
+            out.push((format!("WEA{j}"), b, false));
         }
-        if wide_write {
-            for (i, &b) in r.we[1].iter().enumerate() {
-                out.push((format!("WEBWE{}", 2 * i), b, false));
-                out.push((format!("WEBWE{}", 2 * i + 1), b, false));
-            }
-        } else {
-            for (i, &b) in r.we[1].iter().enumerate() {
-                out.push((format!("WEBWE{i}"), b, false));
-            }
-            for i in 4..8 {
-                out.push((format!("WEBWE{i}"), SigBit::ZERO, false));
-            }
+        let webwe = if wide_write { lanes(&r.we[1], Some(crate::bram::Width::X36), 8) } else {
+            let mut v = lanes(&r.we[1], c.ports[1].write, 4);
+            v.extend([SigBit::ZERO; 4]);
+            v
+        };
+        for (j, b) in webwe.into_iter().enumerate() {
+            out.push((format!("WEBWE{j}"), b, false));
         }
     }
     for (k, (di, dip, dout, doutp)) in [("DIADI", "DIPADIP", "DOADO", "DOPADOP"), ("DIBDI", "DIPBDIP", "DOBDO", "DOPBDOP")]

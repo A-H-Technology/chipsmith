@@ -12,7 +12,8 @@
 //! - each pip `<tile>.<dst>.<src>`, a pseudo pip its site's bits instead
 //!   (`crate::xray::pseudo_pip_features`), with nextpnr's renaming in
 //!   single-IOB (`_SING`) I/O tiles;
-//! - the clock tree's buffer enables, from the pips the clocks use;
+//! - the clock tree's buffer enables, from the pips the clocks use, and a
+//!   BRAM tile's address cascade enables ([`cascout_enable`]);
 //! - block RAM ([`bram_lines`]) as Vivado's bitstreams have it read back
 //!   by bit2fasm, which the widths' encoding nextpnr's `write_bram_width`
 //!   agrees with.
@@ -87,6 +88,24 @@ pub(crate) fn pip_lines(db: &ChipDb, e: &Edge) -> Vec<String> {
         return Vec::new();
     }
     vec![format!("{tile}.{dst}.{src}")]
+}
+
+/// The tile bit that drives a BRAM tile's address cascade out of
+/// `wire`, if it is one (`BRAM_CASCOUT_ADDR{ARD,BWR}ADDRU<n>`, fed by
+/// the always-on pip from the tile's own upper address pin): without it
+/// the neighbouring tile's `CASCIN{TOP,BOT}` reads nothing (prjxray's
+/// 060-bram-cascades; nextpnr's `CASCOUT_*_ACTIVE`). One bit per port and
+/// tile, for all its address bits. Missing, the Zybo's bram-selftest read
+/// back wrong words wherever a route took a cascade (2026-11-06).
+pub(crate) fn cascout_enable(wire: &str) -> Option<&'static str> {
+    let port = wire.strip_prefix("BRAM_CASCOUT_ADDR")?;
+    if port.starts_with("ARDADDRU") {
+        Some("CASCOUT_ARD_ACTIVE")
+    } else if port.starts_with("BWRADDRU") {
+        Some("CASCOUT_BWR_ACTIVE")
+    } else {
+        None
+    }
 }
 
 /// The design's FASM; `pips` every routed pip.
@@ -251,6 +270,13 @@ pub(crate) fn write(db: &ChipDb, phys: &Physical, pips: &[Edge]) -> Result<Strin
     for e in pips {
         for l in pip_lines(db, e) {
             line(l);
+        }
+    }
+    for e in pips {
+        let tt = db.tile_type(e.tile);
+        let (_, d) = tt.pips[e.pip as usize];
+        if let Some(f) = cascout_enable(tt.wires.get(d)) {
+            line(format!("{}.{f}", tile_name(db, e.tile)));
         }
     }
 
