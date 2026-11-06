@@ -273,6 +273,14 @@ pub fn decode_routed(
         });
         let list = list.clone();
         for (dst, src) in list {
+            // A BRAM address cascade is driven only under its tile's enable
+            // bit; left undriven here, as the block sees it without.
+            if let Some(f) = crate::fasm::cascout_enable(&dst) {
+                let name = &db.tile_names[tile as usize];
+                if !tiles.get(name).is_some_and(|fs| fs.iter().any(|x| x.name == f)) {
+                    continue;
+                }
+            }
             let undo = |w: &str| w.to_string();
             let (Some(dw), Some(sw)) = (d.wire(tile, &undo(&dst)), d.wire(tile, &undo(&src))) else {
                 continue;
@@ -1035,6 +1043,24 @@ fn bram_half(d: &mut Decoder, tile: u32, h: usize, r: &RamHalf, dout: &[Vec<SigB
         contents: r.contents.clone(),
     };
     config.check().with_context(|| name.clone())?;
+    // The write enables are per byte lane: a port 18 wide (SDP's 36) has
+    // one enable per lane pair, a narrower one a single enable on every
+    // lane, the lane its address picks. Lanes that differ otherwise are
+    // no RAMB18E1 (a narrow port's write lost on half its words, as
+    // chipsmith built true dual port's port B before 2026-11-06).
+    for (k, base, n) in [(0, "WEA", 4), (1, "WEBWE", if r.sdp_write { 8 } else { 4 })] {
+        if k == 0 && sdp {
+            continue;
+        }
+        let lanes = (0..n).map(|j| pin(d, &format!("{base}{j}"))).collect::<Result<Vec<_>>>()?;
+        let paired = matches!(config.ports[k].write, Some(Width::X18 | Width::X36 | Width::X72));
+        let one = (0..n).all(|j| lanes[j] == if paired { lanes[j & !1] } else { lanes[0] });
+        anyhow::ensure!(
+            one,
+            "{name}: {base} lanes {lanes:?} aren't one enable per {}",
+            if paired { "lane pair" } else { "port" }
+        );
+    }
     let mut cell = crate::synth::cells::Ramb::new(config, [dout[0].clone(), dout[1].clone()], [dout[2].clone(), dout[3].clone()]);
     for (k, (clk, en, regce, rstram, rstreg, regclk)) in [
         ("CLKARDCLK", "ENARDEN", "REGCEAREGCE", "RSTRAMARSTRAM", "RSTREGARSTREG", "REGCLKARDRCLK"),
@@ -1071,14 +1097,13 @@ fn bram_half(d: &mut Decoder, tile: u32, h: usize, r: &RamHalf, dout: &[Vec<SigB
             cell.dip[k][i] = pin(d, &format!("{}{i}", ["DIPADIP", "DIPBDIP"][k]))?;
         }
     }
-    // Write enables, nextpnr's mapping backwards: WEA[i] on WEA2i (and
-    // 2i+1), WEBWE[i] on WEBWE i, or 2i in SDP's wide write.
+    // Write enables, `pack`'s (and Vivado's) mapping backwards: WE[i] on
+    // lane 2i (and 2i+1); a port 9 wide or narrower has WE[0] on every lane.
     for i in 0..2 {
         cell.we[0][i] = pin(d, &format!("WEA{}", 2 * i))?;
     }
     for i in 0..4 {
-        let p = if r.sdp_write { 2 * i } else { i };
-        cell.we[1][i] = pin(d, &format!("WEBWE{p}"))?;
+        cell.we[1][i] = pin(d, &format!("WEBWE{}", 2 * i))?;
     }
     let kind = cell.cell();
     d.m.add_cell(name, kind);
