@@ -1823,10 +1823,22 @@ share chipsmith's own netlist IR, not Verilog.
         300,000 random bytes at 0xF00000 in 25 s (11.6 KiB/s), identical.
         A WAIT inside a write batch fails it, since a FIFO write can't be
         repeated.
-     2. Not started: a first-stage loader of our own, built with an open ARM toolchain
+     2. Written 2026-11-07, not yet booted: a first-stage loader of our own, built with an open ARM toolchain
         from nixpkgs: about 40 instructions that start a PCAP DMA from the
         QSPI linear window (0xFC000000 + offset) into the PL and wait for
         DONE. No DDR or PLL setup for a PL-only design.
+        `crates/chipsmith-xc7/src/zynq_loader.S`, 63 instructions (256
+        bytes with its literals), assembled by the devshell's
+        arm-none-eabi binutils and committed (a test checks it's current);
+        `zynq::qspi_boot_image` lays out header, loader and `.bin`. Its
+        register sequence ran first from the host over the DAP
+        (`zynq_pcap`): on the Zybo, examples/zybo-jtag-counter configured
+        from flash 0xFCE00000 (DONE in 784 ms including the host's polls),
+        and again from offset 0x9C0 inside the boot image written at flash
+        offset 0 (2,086,236 bytes in 233 s, read back identical); USER1
+        read "ZYBO" at 125.01 MHz both times. Booting it needs JP5 on QSPI
+        and a power cycle. The factory image's 16 MiB are kept outside the
+        repo (two dumps identical, sha256 fb8ea154...).
      3. Done 2026-11-07 (`chipsmith_xc7::zynq::boot_image`, byte-identical
         to U-Boot's `mkimage -T zynqimage`): the BootROM header (UG585 section 6.3: width word, `XLNX`, loader
         offset, length, checksum), written by chipsmith; bootgen isn't

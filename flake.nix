@@ -114,6 +114,10 @@
             '')
             # Random co-simulation of M4K designs against their RTL (tests).
             pkgs.iverilog
+            # Assembles the Zynq first-stage loader (crates/chipsmith-xc7/src/
+            # zynq_loader.S); its binary is committed, and a test checks it
+            # against this.
+            pkgs.pkgsCross.arm-embedded.buildPackages.binutils
           ]
           ++ flowTools;
           ROCM_PATH = pkgs.rocmPackages.clr;

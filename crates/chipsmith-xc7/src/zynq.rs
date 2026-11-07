@@ -45,6 +45,38 @@ pub fn boot_image(loader: &[u8]) -> Result<Vec<u8>> {
     Ok(image)
 }
 
+/// chipsmith's first-stage loader (`zynq_loader.S`, assembled and
+/// committed so building chipsmith needs no ARM toolchain;
+/// tests/zynq_loader.rs checks it against the source).
+const LOADER: &[u8] = include_bytes!("zynq_loader.bin");
+/// Where the QSPI controller's linear mode maps the flash (UG585 table 4-1).
+const QSPI_LINEAR_BASE: u32 = 0xfc00_0000;
+
+/// A QSPI boot image that configures the PL and nothing else: the BootROM
+/// header, chipsmith's loader, then `bin` (a `.bin` as [`zynq_bin`] makes
+/// it), which the loader DMAs to the PCAP from the flash's linear window.
+/// Written at flash offset 0.
+pub fn qspi_boot_image(bin: &[u8]) -> Result<Vec<u8>> {
+    ensure!(
+        !bin.is_empty() && bin.len().is_multiple_of(4),
+        "the bitstream is {} bytes, not whole words",
+        bin.len()
+    );
+    let bin_at = (BOOT_HEADER_LEN + LOADER.len()) as u32;
+    ensure!(
+        bin_at as usize + bin.len() <= 16 << 20,
+        "the image doesn't fit the 16 MiB linear window"
+    );
+    let mut loader = LOADER.to_vec();
+    let n = loader.len();
+    // Bit 0 of the source address marks the DMA's last transfer.
+    loader[n - 8..n - 4].copy_from_slice(&((QSPI_LINEAR_BASE + bin_at) | 1).to_le_bytes());
+    loader[n - 4..].copy_from_slice(&((bin.len() / 4) as u32).to_le_bytes());
+    let mut image = boot_image(&loader)?;
+    image.extend_from_slice(bin);
+    Ok(image)
+}
+
 fn boot_header(image_len: u32) -> [u8; BOOT_HEADER_LEN] {
     let mut words = [0u32; BOOT_HEADER_LEN / 4];
     // Interrupt vectors: branch-to-self, as bootgen and mkimage write them.
@@ -83,6 +115,23 @@ mod tests {
         let mut ours = boot_header(fixture.len() as u32).to_vec();
         ours.extend_from_slice(&payload);
         assert_eq!(ours, fixture);
+    }
+
+    #[test]
+    fn qspi_boot_image_points_the_loader_at_the_bitstream() {
+        let bin: Vec<u8> = (0..64).collect();
+        let image = qspi_boot_image(&bin).unwrap();
+        let word = |at: usize| u32::from_le_bytes(image[at..at + 4].try_into().unwrap());
+        let loader_end = BOOT_HEADER_LEN + LOADER.len();
+        assert_eq!(word(0x34) as usize, LOADER.len());
+        assert_eq!(word(loader_end - 8), (0xfc00_0000 + loader_end as u32) | 1);
+        assert_eq!(word(loader_end - 4), 16);
+        assert_eq!(&image[loader_end..], &bin[..]);
+        assert_eq!(
+            &image[BOOT_HEADER_LEN..loader_end - 8],
+            &LOADER[..LOADER.len() - 8]
+        );
+        assert!(qspi_boot_image(&[0; 6]).is_err());
     }
 
     #[test]
