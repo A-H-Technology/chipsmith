@@ -188,7 +188,11 @@ fn run(m: &mut Module, options: Options, obs: &mut dyn Observer) -> Result<Stats
     lut_cells(m);
     clean(m);
     obs.stage("luts", m);
-    let replicas = if options.register_copies { replicate::registers(m, replicate::MAX_FANOUT) } else { 0 };
+    let replicas = if options.register_copies {
+        replicate::registers(m, replicate::MAX_FANOUT)
+    } else {
+        0
+    };
     cmt::lower(m)?;
     let bufgs = io::clock_buffers(m);
     clean(m);
@@ -232,7 +236,10 @@ fn lut_cells(m: &mut Module) {
         for &a in &lut.a {
             let fold = match a {
                 SigBit::Const(s) => Some((None, s == State::One)),
-                SigBit::Net(_) => inputs.iter().position(|&k| k == a).map(|k| (Some(k), false)),
+                SigBit::Net(_) => inputs
+                    .iter()
+                    .position(|&k| k == a)
+                    .map(|k| (Some(k), false)),
             };
             match fold {
                 None => {

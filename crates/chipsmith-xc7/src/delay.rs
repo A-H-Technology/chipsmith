@@ -161,7 +161,10 @@ impl BramDelays {
             };
             *slot = slot.max(d);
         }
-        ensure!(b.clock_to_out > 0.0 && b.clock_to_out_reg > 0.0, "BRAM_L.sdf has no clock to DO");
+        ensure!(
+            b.clock_to_out > 0.0 && b.clock_to_out_reg > 0.0,
+            "BRAM_L.sdf has no clock to DO"
+        );
         Ok(b)
     }
 
@@ -359,7 +362,12 @@ impl Delays {
 
 /// The slow-max delay of a prjxray-db `delay` quadruple, in ps.
 fn slow_max(v: &Value) -> Option<Ps> {
-    v.as_array()?.get(3)?.as_str()?.parse::<Ps>().ok().map(|d| d * 1000.0)
+    v.as_array()?
+        .get(3)?
+        .as_str()?
+        .parse::<Ps>()
+        .ok()
+        .map(|d| d * 1000.0)
 }
 
 /// Vivado's routing delay per node class (`node_class`), fitted to its
@@ -376,14 +384,22 @@ const UNFITTED: Ps = 1.2;
 /// as `M:A1` (SLICEM) or `L:A1` (SLICEL); any other wire by its name less
 /// the trailing index and the tile side (`EE4BEG`, `IMUX`, `CLB_OUTS`).
 pub fn node_class(wire: &str) -> String {
-    if let Some(rest) = wire.strip_prefix("CLBLM_").or_else(|| wire.strip_prefix("CLBLL_")) {
-        let pin = ["M_", "LL_", "L_"].iter().find_map(|p| Some((*p, rest.strip_prefix(p)?)));
+    if let Some(rest) = wire
+        .strip_prefix("CLBLM_")
+        .or_else(|| wire.strip_prefix("CLBLL_"))
+    {
+        let pin = ["M_", "LL_", "L_"]
+            .iter()
+            .find_map(|p| Some((*p, rest.strip_prefix(p)?)));
         if let Some((side, pin)) = pin {
             let b = pin.as_bytes();
             let letter = !b.is_empty() && (b'A'..=b'D').contains(&b[0]);
             let site_pin = match pin {
                 "CE" | "SR" | "CLK" | "CIN" | "COUT" | "WE" => true,
-                _ if letter => matches!(&pin[1..], "" | "1" | "2" | "3" | "4" | "5" | "6" | "X" | "I" | "MUX" | "Q" | "5Q"),
+                _ if letter => matches!(
+                    &pin[1..],
+                    "" | "1" | "2" | "3" | "4" | "5" | "6" | "X" | "I" | "MUX" | "Q" | "5Q"
+                ),
                 _ => false,
             };
             if site_pin {
@@ -410,7 +426,10 @@ fn fitted() -> HashMap<&'static str, (Ps, Ps)> {
         .filter(|l| !l.starts_with('#'))
         .filter_map(|l| {
             let mut f = l.split('\t');
-            Some((f.next()?, (f.next()?.parse().ok()?, f.next()?.parse().ok()?)))
+            Some((
+                f.next()?,
+                (f.next()?.parse().ok()?, f.next()?.parse().ok()?),
+            ))
         })
         .collect()
 }
@@ -432,12 +451,20 @@ pub fn node_delays(db: &ChipDb, family: &Path) -> Result<Vec<Ps>> {
             by_type.push(wires);
             continue;
         };
-        let json: Value = serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-        let names: HashMap<&str, u32> = (0..tt.wires.len() as u32).map(|w| (tt.wires.get(w), w)).collect();
+        let json: Value =
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let names: HashMap<&str, u32> = (0..tt.wires.len() as u32)
+            .map(|w| (tt.wires.get(w), w))
+            .collect();
         let mut pins: HashMap<u32, Ps> = HashMap::new();
         for site in json["sites"].as_array().into_iter().flatten() {
-            for pin in site["site_pins"].as_object().into_iter().flat_map(|p| p.values()) {
-                let Some((&w, name)) = pin["wire"].as_str().and_then(|n| Some((names.get(n)?, n))) else {
+            for pin in site["site_pins"]
+                .as_object()
+                .into_iter()
+                .flat_map(|p| p.values())
+            {
+                let Some((&w, name)) = pin["wire"].as_str().and_then(|n| Some((names.get(n)?, n)))
+                else {
                     continue;
                 };
                 let d = fitted
@@ -448,8 +475,15 @@ pub fn node_delays(db: &ChipDb, family: &Path) -> Result<Vec<Ps>> {
                 wires.entry(w).or_default().1 = d;
             }
         }
-        for pip in json["pips"].as_object().into_iter().flat_map(|p| p.values()) {
-            let Some((&w, name)) = pip["dst_wire"].as_str().and_then(|n| Some((names.get(n)?, n))) else {
+        for pip in json["pips"]
+            .as_object()
+            .into_iter()
+            .flat_map(|p| p.values())
+        {
+            let Some((&w, name)) = pip["dst_wire"]
+                .as_str()
+                .and_then(|n| Some((names.get(n)?, n)))
+            else {
                 continue;
             };
             if pins.contains_key(&w) {

@@ -59,12 +59,16 @@ pub struct Config {
 fn int(params: &BTreeMap<String, ParamValue>, name: &str, default: i64) -> Result<i64> {
     Ok(match params.get(name) {
         None => default,
-        Some(ParamValue::Bits(c)) => c
-            .0
-            .iter()
-            .enumerate()
-            .fold(0i64, |v, (i, s)| if *s == State::One { v | 1 << i } else { v }),
-        Some(ParamValue::Str(s)) => s.trim().parse().with_context(|| format!("{name} = {s:?}"))?,
+        Some(ParamValue::Bits(c)) => {
+            c.0.iter().enumerate().fold(
+                0i64,
+                |v, (i, s)| if *s == State::One { v | 1 << i } else { v },
+            )
+        }
+        Some(ParamValue::Str(s)) => s
+            .trim()
+            .parse()
+            .with_context(|| format!("{name} = {s:?}"))?,
     })
 }
 
@@ -76,7 +80,9 @@ fn string<'a>(params: &'a BTreeMap<String, ParamValue>, name: &str, default: &'a
 }
 
 fn bits(v: u64, width: usize) -> ParamValue {
-    ParamValue::Bits(Const((0..width).map(|i| State::from(v >> i & 1 == 1)).collect()))
+    ParamValue::Bits(Const(
+        (0..width).map(|i| State::from(v >> i & 1 == 1)).collect(),
+    ))
 }
 
 impl Config {
@@ -157,7 +163,10 @@ impl Config {
     }
 
     pub fn stage(&self, name: &str) -> bool {
-        STAGES.iter().position(|s| *s == name).is_some_and(|i| self.stages[i])
+        STAGES
+            .iter()
+            .position(|s| *s == name)
+            .is_some_and(|i| self.stages[i])
     }
 }
 
@@ -172,7 +181,9 @@ mod tests {
             breg: 0,
             acascreg: 1,
             bcascreg: 0,
-            stages: [false, true, false, false, false, false, false, false, false, false],
+            stages: [
+                false, true, false, false, false, false, false, false, false, false,
+            ],
             a_cascade: false,
             b_cascade: false,
             use_dport: false,

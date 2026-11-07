@@ -126,7 +126,9 @@ impl Assembler {
                                 .as_object()
                                 .map(|m| {
                                     m.iter()
-                                        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                                        .filter_map(|(k, v)| {
+                                            Some((k.clone(), v.as_str()?.to_string()))
+                                        })
                                         .collect()
                                 })
                                 .unwrap_or_default(),
@@ -158,7 +160,10 @@ impl Assembler {
         }
         let lower = ty.to_lowercase();
         let mut t = TypeBits::default();
-        for (bus, file) in [(0, format!("segbits_{lower}.db")), (1, format!("segbits_{lower}.block_ram.db"))] {
+        for (bus, file) in [
+            (0, format!("segbits_{lower}.db")),
+            (1, format!("segbits_{lower}.block_ram.db")),
+        ] {
             let path = self.family.join(file);
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
@@ -168,7 +173,9 @@ impl Assembler {
             }
             for line in text.lines() {
                 let mut parts = line.split_ascii_whitespace();
-                let Some(feature) = parts.next() else { continue };
+                let Some(feature) = parts.next() else {
+                    continue;
+                };
                 let bits: Vec<SegBit> = parts.map(parse_bit).collect::<Result<_>>()?;
                 if let (Some(s), Some(e)) = (feature.rfind('['), feature.rfind(']')) {
                     let idx: u32 = feature[s + 1..e].parse()?;
@@ -223,7 +230,11 @@ impl Assembler {
                         ..b
                     })
                 });
-                (a.ty.clone(), format!("{}.{}", a.ty, parts.join(".")), shifted)
+                (
+                    a.ty.clone(),
+                    format!("{}.{}", a.ty, parts.join(".")),
+                    shifted,
+                )
             }
         };
         let t = &self.types[&lookup_ty];
@@ -247,11 +258,22 @@ impl Assembler {
             .iter()
             .map(|sb| {
                 let word_bit = b.offset * 32 + sb.bit as i64;
-                ((b.base + sb.frame, (word_bit / 32) as u32, (word_bit % 32) as u32), sb.set)
+                (
+                    (
+                        b.base + sb.frame,
+                        (word_bit / 32) as u32,
+                        (word_bit % 32) as u32,
+                    ),
+                    sb.set,
+                )
             })
             .collect();
         for (k, set) in updates {
-            ensure!(k.1 < FRAME_WORDS as u32, "line {line:?}: word {} out of the frame", k.1);
+            ensure!(
+                k.1 < FRAME_WORDS as u32,
+                "line {line:?}: word {} out of the frame",
+                k.1
+            );
             match self.bits.get(&k) {
                 Some((old, other)) if *old != set => {
                     bail!("line {line:?} and line {other:?} want frame bit {k:?} both ways")
@@ -276,7 +298,9 @@ impl Assembler {
             Some((n, v)) => (n.trim(), Some(v.trim())),
             None => (line, None),
         };
-        let (tile, feature) = name.split_once('.').with_context(|| format!("FASM line {line:?}"))?;
+        let (tile, feature) = name
+            .split_once('.')
+            .with_context(|| format!("FASM line {line:?}"))?;
         let (base, lo) = match feature.strip_suffix(']').and_then(|f| f.rsplit_once('[')) {
             Some((base, range)) => {
                 let lo = range.rsplit(':').next().unwrap_or(range);
@@ -463,7 +487,10 @@ pub fn bit(family: &Path, part: &str, design: &str, frames: &Frames) -> Result<V
     let words = order.len() * FRAME_WORDS;
     w.push(0x5000_0000 | words as u32);
     for a in &order {
-        let mut f = a.and_then(|a| frames.get(&a)).copied().unwrap_or([0; FRAME_WORDS]);
+        let mut f = a
+            .and_then(|a| frames.get(&a))
+            .copied()
+            .unwrap_or([0; FRAME_WORDS]);
         if a.is_some() {
             f[50] = (f[50] & 0xFFFF_E000) | ecc(&f);
         }
@@ -492,7 +519,9 @@ pub fn bit(family: &Path, part: &str, design: &str, frames: &Frames) -> Result<V
     for x in &w {
         payload.extend(x.to_be_bytes());
     }
-    let mut out: Vec<u8> = vec![0x00, 0x09, 0x0F, 0xF0, 0x0F, 0xF0, 0x0F, 0xF0, 0x0F, 0xF0, 0x00, 0x00, 0x01];
+    let mut out: Vec<u8> = vec![
+        0x00, 0x09, 0x0F, 0xF0, 0x0F, 0xF0, 0x0F, 0xF0, 0x0F, 0xF0, 0x00, 0x00, 0x01,
+    ];
     let mut field = |key: u8, text: &str| {
         out.push(key);
         let bytes: Vec<u8> = text.bytes().chain(std::iter::once(0)).collect();

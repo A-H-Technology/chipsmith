@@ -67,7 +67,9 @@ pub fn registers(m: &mut Module, max_fanout: usize) -> usize {
     // Module ports read the original, and are no cell's to move.
     let mut regs: Vec<usize> = readers
         .iter()
-        .filter(|(r, v)| !clocks.contains(r) && v.iter().map(|&(_, k)| k).sum::<usize>() > max_fanout)
+        .filter(|(r, v)| {
+            !clocks.contains(r) && v.iter().map(|&(_, k)| k).sum::<usize>() > max_fanout
+        })
         .map(|(&r, _)| r)
         .collect();
     regs.sort_unstable();
@@ -155,13 +157,25 @@ mod tests {
             "r",
             generic(
                 "FDRE",
-                vec![("C", Dir::In, c), ("CE", Dir::In, SigBit::ONE), ("R", Dir::In, SigBit::ZERO), ("D", Dir::In, d), ("Q", Dir::Out, q)],
+                vec![
+                    ("C", Dir::In, c),
+                    ("CE", Dir::In, SigBit::ONE),
+                    ("R", Dir::In, SigBit::ZERO),
+                    ("D", Dir::In, d),
+                    ("Q", Dir::Out, q),
+                ],
             ),
         );
         for i in 0..100 {
             let o = SigBit::Net(m.new_net());
             let i1 = if i == 40 { q } else { d };
-            m.add_cell(format!("l{i}"), generic("LUT2", vec![("I0", Dir::In, q), ("I1", Dir::In, i1), ("O", Dir::Out, o)]));
+            m.add_cell(
+                format!("l{i}"),
+                generic(
+                    "LUT2",
+                    vec![("I0", Dir::In, q), ("I1", Dir::In, i1), ("O", Dir::Out, o)],
+                ),
+            );
         }
         assert_eq!(registers(&mut m, MAX_FANOUT), 3);
         let regs: Vec<_> = m.cells.iter().filter(|c| is_register(&c.kind)).collect();
@@ -171,13 +185,20 @@ mod tests {
             if let CellKind::Other(g) = &c.kind {
                 if g.ty == "LUT2" {
                     let i0 = g.ports[0].sig[0];
-                    assert_eq!(g.ports[1].sig[0] == i0, c.name == "l40", "{}: both pins on one copy", c.name);
+                    assert_eq!(
+                        g.ports[1].sig[0] == i0,
+                        c.name == "l40",
+                        "{}: both pins on one copy",
+                        c.name
+                    );
                     *loads.entry(i0).or_default() += 1;
                 }
             }
         }
         for r in regs {
-            let CellKind::Other(g) = &r.kind else { unreachable!() };
+            let CellKind::Other(g) = &r.kind else {
+                unreachable!()
+            };
             assert_eq!(g.ports[3].sig[0], d, "the copies share D");
             let n = loads[&g.ports[4].sig[0]];
             assert!((20..=32).contains(&n), "{}: {n} readers", r.name);
@@ -193,7 +214,13 @@ mod tests {
         let fdre = |c: SigBit, d: SigBit, q: SigBit| {
             generic(
                 "FDRE",
-                vec![("C", Dir::In, c), ("CE", Dir::In, SigBit::ONE), ("R", Dir::In, SigBit::ZERO), ("D", Dir::In, d), ("Q", Dir::Out, q)],
+                vec![
+                    ("C", Dir::In, c),
+                    ("CE", Dir::In, SigBit::ONE),
+                    ("R", Dir::In, SigBit::ZERO),
+                    ("D", Dir::In, d),
+                    ("Q", Dir::Out, q),
+                ],
             )
         };
         m.add_cell("half", fdre(c, d, q));

@@ -48,16 +48,26 @@ use crate::place::{build, Cell, CellId, ControlSet, Design, Kind, Net, NetId};
 pub(crate) enum Conf {
     /// A logic LUT on pins A1 to A<k> (its pins in order), `init` a k-input
     /// table (`2^k` bits; k = 0 for a constant).
-    Lut { init: u64 },
+    Lut {
+        init: u64,
+    },
     /// A slice register: its power-up value and the value SR sets it to.
-    Ff { init: bool, srval: bool },
+    Ff {
+        init: bool,
+        srval: bool,
+    },
     /// A CARRY4. `cyinit`: the chain head's constant carry-in (no CYINIT
     /// pin); `None` on later CARRY4s (CIN) and a head fed from a signal
     /// (CYINIT, on AX).
-    Carry { cyinit: Option<bool> },
+    Carry {
+        cyinit: Option<bool>,
+    },
     /// One RAMD32 of a RAM32M: word `w` in bit `w`; written on the falling
     /// edge with `wclk_inv`.
-    RamLut { init: u32, wclk_inv: bool },
+    RamLut {
+        init: u32,
+        wclk_inv: bool,
+    },
     /// A pin's IOB, with its buffer: pins `O` (to the fabric), `I` (to the
     /// pin), `T` (high releases it), as the buffer has them.
     Pad,
@@ -103,19 +113,22 @@ fn drives(kind: &Kind, pin: &str) -> bool {
         Kind::Bscan { .. } => pin != "TDO",
         Kind::Ps7 => false,
         Kind::Bram { .. } => pin.starts_with("DO"),
-        Kind::Dsp { .. } => DSP_OUTPUTS.iter().any(|o| pin.strip_prefix(o).is_some_and(|i| i.chars().all(|c| c.is_ascii_digit()))),
+        Kind::Dsp { .. } => DSP_OUTPUTS.iter().any(|o| {
+            pin.strip_prefix(o)
+                .is_some_and(|i| i.chars().all(|c| c.is_ascii_digit()))
+        }),
         Kind::Gnd | Kind::Vcc => true,
     }
 }
 
 fn param_bits(g: &Generic, name: &str) -> u64 {
     match g.params.get(name) {
-        Some(ParamValue::Bits(c)) => c
-            .0
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| **s == State::One)
-            .fold(0, |v, (i, _)| v | 1 << i),
+        Some(ParamValue::Bits(c)) => {
+            c.0.iter()
+                .enumerate()
+                .filter(|(_, s)| **s == State::One)
+                .fold(0, |v, (i, _)| v | 1 << i)
+        }
         Some(ParamValue::Str(s)) => s.trim().parse().unwrap_or(0),
         _ => 0,
     }
@@ -172,7 +185,11 @@ impl Packer {
 
 /// Packs the synthesized top module; `pins` maps each top-level port bit
 /// (`led[2]`) to its package pin (`G14`).
-pub(crate) fn pack(netlist: &Netlist, pins: &BTreeMap<String, String>, db: &ChipDb) -> Result<Packed> {
+pub(crate) fn pack(
+    netlist: &Netlist,
+    pins: &BTreeMap<String, String>,
+    db: &ChipDb,
+) -> Result<Packed> {
     let m = netlist
         .modules
         .iter()
@@ -225,7 +242,11 @@ pub(crate) fn pack(netlist: &Netlist, pins: &BTreeMap<String, String>, db: &Chip
     let mut carries: Vec<CellId> = Vec::new();
     for c in &m.cells {
         let CellKind::Other(g) = &c.kind else {
-            bail!("cell {} ({}) isn't a 7-series primitive", c.name, c.kind.type_name());
+            bail!(
+                "cell {} ({}) isn't a 7-series primitive",
+                c.name,
+                c.kind.type_name()
+            );
         };
         let name = c.name.clone();
         match g.ty.as_str() {
@@ -233,7 +254,8 @@ pub(crate) fn pack(netlist: &Netlist, pins: &BTreeMap<String, String>, db: &Chip
                 let k = (g.ty.as_bytes()[3] - b'0') as usize;
                 let mut pins = Vec::new();
                 for i in 0..k {
-                    let b = bit(g, &format!("I{i}"), 0).with_context(|| format!("{name}: no I{i}"))?;
+                    let b =
+                        bit(g, &format!("I{i}"), 0).with_context(|| format!("{name}: no I{i}"))?;
                     pins.push((format!("A{}", i + 1), p.sig(b)));
                 }
                 if let Some(SigBit::Net(o)) = bit(g, "O", 0) {
@@ -314,7 +336,14 @@ pub(crate) fn pack(netlist: &Netlist, pins: &BTreeMap<String, String>, db: &Chip
                         }
                     }
                 }
-                let id = p.push(name, Kind::Carry, pins, Conf::Carry { cyinit: conf_cyinit });
+                let id = p.push(
+                    name,
+                    Kind::Carry,
+                    pins,
+                    Conf::Carry {
+                        cyinit: conf_cyinit,
+                    },
+                );
                 carries.push(id);
             }
             "RAM32M" => {
@@ -350,7 +379,8 @@ pub(crate) fn pack(netlist: &Netlist, pins: &BTreeMap<String, String>, db: &Chip
                             let out = if h == 1 { "O6" } else { "O5" };
                             pins.push((out.into(), p.net(o)));
                         }
-                        let bits = (0..32).fold(0u32, |v, w| v | ((init >> (2 * w + h) & 1) as u32) << w);
+                        let bits =
+                            (0..32).fold(0u32, |v, w| v | ((init >> (2 * w + h) & 1) as u32) << w);
                         p.push(
                             format!("{name}/DPR{k}_{h}"),
                             Kind::Lut { dram: true },
@@ -364,7 +394,8 @@ pub(crate) fn pack(netlist: &Netlist, pins: &BTreeMap<String, String>, db: &Chip
                 }
             }
             "RAMB18E1" | "RAMB36E1" => {
-                let r = crate::synth::cells::Ramb::from_generic(g).with_context(|| format!("block RAM {name}"))?;
+                let r = crate::synth::cells::Ramb::from_generic(g)
+                    .with_context(|| format!("block RAM {name}"))?;
                 let pins = bram_pins(&r)
                     .into_iter()
                     .map(|(pin, b, out)| match (out, b) {
@@ -388,17 +419,24 @@ pub(crate) fn pack(netlist: &Netlist, pins: &BTreeMap<String, String>, db: &Chip
                 p.push(name, kind, pins, Conf::Bram(Box::new(r.config)));
             }
             "DSP48E1" => {
-                let config = crate::dsp::Config::from_params(&g.params).with_context(|| format!("DSP {name}"))?;
+                let config = crate::dsp::Config::from_params(&g.params)
+                    .with_context(|| format!("DSP {name}"))?;
                 let mut pins = Vec::new();
                 for gp in &g.ports {
                     let output = gp.dir == Some(chipsmith_netlist::Dir::Out);
                     for (i, &b) in gp.sig.iter().enumerate() {
-                        let pin = if gp.sig.len() > 1 { format!("{}{i}", gp.name) } else { gp.name.clone() };
+                        let pin = if gp.sig.len() > 1 {
+                            format!("{}{i}", gp.name)
+                        } else {
+                            gp.name.clone()
+                        };
                         match (output, b) {
                             (true, SigBit::Net(n)) => pins.push((pin, p.net(n))),
                             (true, _) => {}
                             (false, b) => {
-                                if matches!(b, SigBit::Const(_)) && !dsp_input_matters(&config, g, &gp.name) {
+                                if matches!(b, SigBit::Const(_))
+                                    && !dsp_input_matters(&config, g, &gp.name)
+                                {
                                     continue;
                                 }
                                 pins.push((pin, p.sig(b)));
@@ -458,11 +496,16 @@ pub(crate) fn pack(netlist: &Netlist, pins: &BTreeMap<String, String>, db: &Chip
                     Some(SigBit::Net(n)) => Some(n),
                     _ => None,
                 };
-                let used: Vec<bool> = (0..prim.outputs()).map(|k| net_of(&format!("CLKOUT{k}")).is_some()).collect();
+                let used: Vec<bool> = (0..prim.outputs())
+                    .map(|k| net_of(&format!("CLKOUT{k}")).is_some())
+                    .collect();
                 let config = crate::cmt::Config::from_params(prim, &g.params, &used)
                     .with_context(|| format!("cell {name}"))?;
                 let period_ns: f64 = match g.params.get("CLKIN1_PERIOD") {
-                    Some(ParamValue::Str(s)) => s.trim().parse().with_context(|| format!("{name}: CLKIN1_PERIOD {s:?}"))?,
+                    Some(ParamValue::Str(s)) => s
+                        .trim()
+                        .parse()
+                        .with_context(|| format!("{name}: CLKIN1_PERIOD {s:?}"))?,
                     _ => bail!("{name}: no CLKIN1_PERIOD"),
                 };
                 let mut pins = Vec::new();
@@ -572,7 +615,9 @@ fn feed_throughs(p: &mut Packer, carries: &[CellId]) {
     for &carry in carries {
         for k in 0..4 {
             let pin = format!("S{k}");
-            let s = p.cells[carry as usize].net(&pin).expect("every S is connected");
+            let s = p.cells[carry as usize]
+                .net(&pin)
+                .expect("every S is connected");
             if let Some(&l) = driver.get(&s) {
                 if !claimed[l as usize] {
                     claimed[l as usize] = true;
@@ -612,7 +657,12 @@ fn bram_pins(r: &crate::synth::cells::Ramb) -> Vec<(String, SigBit, bool)> {
             out.push((base.to_string(), b, false));
         }
     };
-    let pairs = [("CLKARDCLK", "CLKBWRCLK"), ("ENARDEN", "ENBWREN"), ("REGCEAREGCE", "REGCEB"), ("RSTREGARSTREG", "RSTREGB")];
+    let pairs = [
+        ("CLKARDCLK", "CLKBWRCLK"),
+        ("ENARDEN", "ENBWREN"),
+        ("REGCEAREGCE", "REGCEB"),
+        ("RSTREGARSTREG", "RSTREGB"),
+    ];
     let sigs = [r.clk, r.en, r.regce, r.rstreg];
     for ((a, b), v) in pairs.into_iter().zip(sigs) {
         both(&mut out, a, "L", "U", v[0]);
@@ -622,7 +672,10 @@ fn bram_pins(r: &crate::synth::cells::Ramb) -> Vec<(String, SigBit, bool)> {
     both(&mut out, "RSTRAMARSTRAM", "LRST", "U", r.rstram[0]);
     both(&mut out, "RSTRAMB", "L", "U", r.rstram[1]);
     // The output registers' clocks.
-    let reg = [c.ports[0].out_reg, c.ports[1].out_reg || (c.sdp && c.ports[0].out_reg)];
+    let reg = [
+        c.ports[0].out_reg,
+        c.ports[1].out_reg || (c.sdp && c.ports[0].out_reg),
+    ];
     if reg[0] {
         both(&mut out, "REGCLKARDRCLK", "L", "U", r.clk[0]);
     }
@@ -644,7 +697,12 @@ fn bram_pins(r: &crate::synth::cells::Ramb) -> Vec<(String, SigBit, bool)> {
         }
     }
     if !full {
-        for pin in ["ADDRATIEHIGH0", "ADDRATIEHIGH1", "ADDRBTIEHIGH0", "ADDRBTIEHIGH1"] {
+        for pin in [
+            "ADDRATIEHIGH0",
+            "ADDRATIEHIGH1",
+            "ADDRBTIEHIGH0",
+            "ADDRBTIEHIGH1",
+        ] {
             out.push((pin.into(), SigBit::ONE, false));
         }
     }
@@ -657,7 +715,11 @@ fn bram_pins(r: &crate::synth::cells::Ramb) -> Vec<(String, SigBit, bool)> {
             out.push((format!("WEAU{i}"), b, false));
         }
         for (i, &b) in r.we[1].iter().enumerate() {
-            let b = if i >= 4 && !wide_write { SigBit::ZERO } else { b };
+            let b = if i >= 4 && !wide_write {
+                SigBit::ZERO
+            } else {
+                b
+            };
             out.push((format!("WEBWEL{i}"), b, false));
             out.push((format!("WEBWEU{i}"), b, false));
         }
@@ -678,11 +740,17 @@ fn bram_pins(r: &crate::synth::cells::Ramb) -> Vec<(String, SigBit, bool)> {
                 })
                 .collect()
         };
-        let wea = if c.sdp { lanes(&r.we[0], None, 4) } else { lanes(&r.we[0], c.ports[0].write, 4) };
+        let wea = if c.sdp {
+            lanes(&r.we[0], None, 4)
+        } else {
+            lanes(&r.we[0], c.ports[0].write, 4)
+        };
         for (j, b) in wea.into_iter().enumerate() {
             out.push((format!("WEA{j}"), b, false));
         }
-        let webwe = if wide_write { lanes(&r.we[1], Some(crate::bram::Width::X36), 8) } else {
+        let webwe = if wide_write {
+            lanes(&r.we[1], Some(crate::bram::Width::X36), 8)
+        } else {
             let mut v = lanes(&r.we[1], c.ports[1].write, 4);
             v.extend([SigBit::ZERO; 4]);
             v
@@ -691,9 +759,12 @@ fn bram_pins(r: &crate::synth::cells::Ramb) -> Vec<(String, SigBit, bool)> {
             out.push((format!("WEBWE{j}"), b, false));
         }
     }
-    for (k, (di, dip, dout, doutp)) in [("DIADI", "DIPADIP", "DOADO", "DOPADOP"), ("DIBDI", "DIPBDIP", "DOBDO", "DOPBDOP")]
-        .into_iter()
-        .enumerate()
+    for (k, (di, dip, dout, doutp)) in [
+        ("DIADI", "DIPADIP", "DOADO", "DOPADOP"),
+        ("DIBDI", "DIPBDIP", "DOBDO", "DOPBDOP"),
+    ]
+    .into_iter()
+    .enumerate()
     {
         // A port that never writes takes no data (SDP's wide write is on
         // both ports' pins).
@@ -742,19 +813,31 @@ fn pair_luts(p: &mut Packer) -> Vec<(CellId, CellId)> {
     for (i, c) in p.cells.iter().enumerate() {
         for (pin, net) in &c.pins {
             if !drives(&c.kind, pin) {
-                users.entry(*net).or_default().push((i as CellId, pin.clone()));
+                users
+                    .entry(*net)
+                    .or_default()
+                    .push((i as CellId, pin.clone()));
             }
         }
     }
     let output = |c: &Cell| c.net("O6");
     let inputs = |c: &Cell| -> Vec<NetId> {
-        c.pins.iter().filter(|(pn, _)| pn.starts_with('A')).map(|&(_, net)| net).collect()
+        c.pins
+            .iter()
+            .filter(|(pn, _)| pn.starts_with('A'))
+            .map(|&(_, net)| net)
+            .collect()
     };
     // The register a LUT's BLE would take (`place::build`): the first one
     // its output drives.
     let ff_of = |l: usize| -> Option<CellId> {
         let o = output(&p.cells[l])?;
-        users.get(&o)?.iter().filter(|(u, pn)| pn == "D" && matches!(p.cells[*u as usize].kind, Kind::Ff(_))).map(|&(u, _)| u).min()
+        users
+            .get(&o)?
+            .iter()
+            .filter(|(u, pn)| pn == "D" && matches!(p.cells[*u as usize].kind, Kind::Ff(_)))
+            .map(|&(u, _)| u)
+            .min()
     };
     let cs = |f: CellId| match p.cells[f as usize].kind {
         Kind::Ff(cs) => Some(cs),
@@ -766,17 +849,25 @@ fn pair_luts(p: &mut Packer) -> Vec<(CellId, CellId)> {
             continue;
         }
         let ins = inputs(c);
-        let feeds_carry = output(c)
-            .and_then(|o| users.get(&o))
-            .is_some_and(|us| us.iter().any(|(u, _)| p.cells[*u as usize].kind == Kind::Carry));
-        candidate[i] = !ins.is_empty() && ins.len() <= 5 && !feeds_carry && !ins.iter().any(|&x| x == p.gnd || x == p.vcc);
+        let feeds_carry = output(c).and_then(|o| users.get(&o)).is_some_and(|us| {
+            us.iter()
+                .any(|(u, _)| p.cells[*u as usize].kind == Kind::Carry)
+        });
+        candidate[i] = !ins.is_empty()
+            && ins.len() <= 5
+            && !feeds_carry
+            && !ins.iter().any(|&x| x == p.gnd || x == p.vcc);
     }
     // Whether LUT l can be the O5 one.
     let o5_ok = |l: usize| -> bool {
-        let Some(o) = output(&p.cells[l]) else { return true };
+        let Some(o) = output(&p.cells[l]) else {
+            return true;
+        };
         match ff_of(l) {
             None => true,
-            Some(f) => users.get(&o).is_some_and(|us| us.len() == 1 && us[0].0 == f),
+            Some(f) => users
+                .get(&o)
+                .is_some_and(|us| us.len() == 1 && us[0].0 == f),
         }
     };
     let mut by_input: HashMap<NetId, Vec<usize>> = HashMap::default();
@@ -816,7 +907,9 @@ fn pair_luts(p: &mut Packer) -> Vec<(CellId, CellId)> {
                 if !o5_ok(a) && !o5_ok(b) {
                     continue;
                 }
-                if best.is_none_or(|(s, c)| (shared, std::cmp::Reverse(b)) > (s, std::cmp::Reverse(c))) {
+                if best
+                    .is_none_or(|(s, c)| (shared, std::cmp::Reverse(b)) > (s, std::cmp::Reverse(c)))
+                {
                     best = Some((shared, b));
                 }
             }
@@ -830,10 +923,17 @@ fn pair_luts(p: &mut Packer) -> Vec<(CellId, CellId)> {
         // Both on the union's pins, in order.
         let mut union = inputs(&p.cells[l6]);
         let i5 = inputs(&p.cells[l5]);
-        union.extend(i5.iter().filter(|y| !union.contains(y)).copied().collect::<Vec<_>>());
+        union.extend(
+            i5.iter()
+                .filter(|y| !union.contains(y))
+                .copied()
+                .collect::<Vec<_>>(),
+        );
         for &l in &[l6, l5] {
             let old = inputs(&p.cells[l]);
-            let Conf::Lut { init } = p.conf[l] else { unreachable!("a logic LUT") };
+            let Conf::Lut { init } = p.conf[l] else {
+                unreachable!("a logic LUT")
+            };
             // Bit idx of the new table: the old one at the old inputs' values.
             let table = (0..1u64 << union.len()).fold(0u64, |t, idx| {
                 let old_idx = old.iter().enumerate().fold(0u64, |a, (k, x)| {
@@ -843,13 +943,25 @@ fn pair_luts(p: &mut Packer) -> Vec<(CellId, CellId)> {
                 t | (init >> old_idx & 1) << idx
             });
             p.conf[l] = Conf::Lut { init: table };
-            let out: Vec<(String, NetId)> = p.cells[l].pins.iter().filter(|(pn, _)| !pn.starts_with('A')).cloned().collect();
-            let mut pins: Vec<(String, NetId)> = union.iter().enumerate().map(|(k, &x)| (format!("A{}", k + 1), x)).collect();
+            let out: Vec<(String, NetId)> = p.cells[l]
+                .pins
+                .iter()
+                .filter(|(pn, _)| !pn.starts_with('A'))
+                .cloned()
+                .collect();
+            let mut pins: Vec<(String, NetId)> = union
+                .iter()
+                .enumerate()
+                .map(|(k, &x)| (format!("A{}", k + 1), x))
+                .collect();
             pins.extend(out);
             p.cells[l].pins = pins;
         }
     }
-    pairs.into_iter().map(|(a, b)| (a as CellId, b as CellId)).collect()
+    pairs
+        .into_iter()
+        .map(|(a, b)| (a as CellId, b as CellId))
+        .collect()
 }
 
 /// A DSP48E1's outputs, by port name.

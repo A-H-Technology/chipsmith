@@ -53,7 +53,9 @@ fn parse(fasm: &str) -> Result<BTreeMap<String, Vec<Feature>>> {
             Some((n, v)) => (n.trim(), Some(v.trim())),
             None => (line, None),
         };
-        let (tile, rest) = name.split_once('.').with_context(|| format!("FASM line {line}"))?;
+        let (tile, rest) = name
+            .split_once('.')
+            .with_context(|| format!("FASM line {line}"))?;
         let (rest, value) = match value {
             Some(v) => {
                 let (base, range) = rest.split_once('[').context("a vector without a range")?;
@@ -65,7 +67,10 @@ fn parse(fasm: &str) -> Result<BTreeMap<String, Vec<Feature>>> {
                     .parse()?;
                 let bits = v.split_once("'b").context("a vector value")?.1;
                 anyhow::ensure!(bits.chars().all(|c| c == '0' || c == '1'), "FASM value {v}");
-                (base.to_string(), Some((lo, bits.chars().rev().map(|c| c == '1').collect())))
+                (
+                    base.to_string(),
+                    Some((lo, bits.chars().rev().map(|c| c == '1').collect())),
+                )
             }
             // A single set bit of a vector: `ALUT.INIT[17]`.
             None => match rest.strip_suffix(']').and_then(|r| r.rsplit_once('[')) {
@@ -75,7 +80,9 @@ fn parse(fasm: &str) -> Result<BTreeMap<String, Vec<Feature>>> {
                 _ => (rest.to_string(), None),
             },
         };
-        out.entry(tile.to_string()).or_default().push(Feature { name: rest, value });
+        out.entry(tile.to_string())
+            .or_default()
+            .push(Feature { name: rest, value });
     }
     Ok(out)
 }
@@ -101,7 +108,11 @@ impl Decoder<'_> {
         let tt = self.db.tile_type(tile);
         self.names
             .entry(ty)
-            .or_insert_with(|| (0..tt.wires.len() as u32).map(|w| (tt.wires.get(w).to_string(), w)).collect())
+            .or_insert_with(|| {
+                (0..tt.wires.len() as u32)
+                    .map(|w| (tt.wires.get(w).to_string(), w))
+                    .collect()
+            })
             .get(name)
             .copied()
     }
@@ -112,7 +123,10 @@ impl Decoder<'_> {
         };
         let (dn, sn) = (self.db.node(tile, d), self.db.node(tile, s));
         self.driver.insert(dn, sn);
-        self.why.insert(dn, format!("{}.{dst}.{src}", self.db.tile_names[tile as usize]));
+        self.why.insert(
+            dn,
+            format!("{}.{dst}.{src}", self.db.tile_names[tile as usize]),
+        );
         true
     }
 
@@ -150,8 +164,11 @@ impl Decoder<'_> {
 
 /// The site of `tile` whose relative name starts with `prefix`.
 fn site_in(db: &ChipDb, tile: u32, prefix: &str) -> Option<String> {
-    let mut sites: Vec<(&String, &chipsmith_route::chipdb::Site)> =
-        db.sites.iter().filter(|(_, s)| s.tile == tile && s.relative.starts_with(prefix)).collect();
+    let mut sites: Vec<(&String, &chipsmith_route::chipdb::Site)> = db
+        .sites
+        .iter()
+        .filter(|(_, s)| s.tile == tile && s.relative.starts_with(prefix))
+        .collect();
     sites.sort_by(|a, b| a.0.cmp(b.0));
     sites.first().map(|(n, _)| n.to_string())
 }
@@ -256,7 +273,11 @@ pub fn decode_routed(
     let mut ppips: HashMap<String, Vec<(String, String)>> = HashMap::new();
     for tile in 0..db.width * db.height {
         let tt = db.tile_type(tile);
-        let base = tt.name.strip_suffix("_SING").unwrap_or(&tt.name).to_string();
+        let base = tt
+            .name
+            .strip_suffix("_SING")
+            .unwrap_or(&tt.name)
+            .to_string();
         let list = ppips.entry(base.clone()).or_insert_with(|| {
             let path = family.join(format!("ppips_{}.db", base.to_lowercase()));
             std::fs::read_to_string(path)
@@ -277,12 +298,16 @@ pub fn decode_routed(
             // bit; left undriven here, as the block sees it without.
             if let Some(f) = crate::fasm::cascout_enable(&dst) {
                 let name = &db.tile_names[tile as usize];
-                if !tiles.get(name).is_some_and(|fs| fs.iter().any(|x| x.name == f)) {
+                if !tiles
+                    .get(name)
+                    .is_some_and(|fs| fs.iter().any(|x| x.name == f))
+                {
                     continue;
                 }
             }
             let undo = |w: &str| w.to_string();
-            let (Some(dw), Some(sw)) = (d.wire(tile, &undo(&dst)), d.wire(tile, &undo(&src))) else {
+            let (Some(dw), Some(sw)) = (d.wire(tile, &undo(&dst)), d.wire(tile, &undo(&src)))
+            else {
                 continue;
             };
             always.push((db.node(tile, dw), db.node(tile, sw)));
@@ -297,7 +322,8 @@ pub fn decode_routed(
     let mut rams: BTreeMap<(u32, usize), RamHalf> = BTreeMap::new();
     let mut dsps: BTreeMap<(u32, usize), DspSite> = BTreeMap::new();
     // PLLs and MMCMs: per tile, the block's kind and set bits.
-    let mut cmts: BTreeMap<u32, (crate::cmt::Prim, std::collections::BTreeSet<String>)> = BTreeMap::new();
+    let mut cmts: BTreeMap<u32, (crate::cmt::Prim, std::collections::BTreeSet<String>)> =
+        BTreeMap::new();
     for (tname, feats) in &tiles {
         let Some(&tile) = tile_of.get(tname.as_str()) else {
             continue;
@@ -317,7 +343,8 @@ pub fn decode_routed(
             let fs = pseudo_pip_features(&ty, &dst, &src).expect("filtered");
             let on = !fs.is_empty()
                 && fs.iter().all(|f| {
-                    names.contains(f.as_str()) || (sing && names.contains(f.replacen("Y0", "Y1", 1).as_str()))
+                    names.contains(f.as_str())
+                        || (sing && names.contains(f.replacen("Y0", "Y1", 1).as_str()))
                 });
             if on {
                 d.pip(tile, &dst, &src);
@@ -330,7 +357,10 @@ pub fn decode_routed(
             }
             if sing && parts.len() == 2 && f.value.is_none() {
                 // nextpnr's renaming in a top single-IOB tile.
-                let (dst, src) = (parts[0].replacen("_1", "_0", 1), parts[1].replacen("_1", "_0", 1));
+                let (dst, src) = (
+                    parts[0].replacen("_1", "_0", 1),
+                    parts[1].replacen("_1", "_0", 1),
+                );
                 let dst = dst.replacen("OLOGIC1", "OLOGIC0", 1);
                 if d.pip(tile, &dst, &src) {
                     continue;
@@ -432,7 +462,10 @@ pub fn decode_routed(
                 }
             } else if let Some(prim) = crate::cmt::Prim::from_cell(half) {
                 let name = parts[1..].join(".");
-                let bits = &mut cmts.entry(tile).or_insert_with(|| (prim, Default::default())).1;
+                let bits = &mut cmts
+                    .entry(tile)
+                    .or_insert_with(|| (prim, Default::default()))
+                    .1;
                 match f.value.as_ref() {
                     Some((lo, v)) => {
                         for (i, &b) in v.iter().enumerate() {
@@ -446,8 +479,13 @@ pub fn decode_routed(
                     }
                 }
             } else if half == "DSP48" && parts.len() >= 3 {
-                let k: usize = parts[1].strip_prefix("DSP_").context("a DSP site")?.parse()?;
-                dsps.entry((tile, k)).or_default().read(&parts[2..], f.value.as_ref());
+                let k: usize = parts[1]
+                    .strip_prefix("DSP_")
+                    .context("a DSP site")?
+                    .parse()?;
+                dsps.entry((tile, k))
+                    .or_default()
+                    .read(&parts[2..], f.value.as_ref());
             } else if let Some(y) = half.strip_prefix("RAMB18_Y") {
                 let h: usize = y.parse()?;
                 let b = rams.entry((tile, h)).or_default();
@@ -516,7 +554,11 @@ pub fn decode_routed(
     for (key, h) in &halves {
         let (tname, half) = key.split_once('.').expect("keyed so");
         let tile = tile_of[tname];
-        let prefix = if half.ends_with("X1") { "SLICE_X1" } else { "SLICE_X0" };
+        let prefix = if half.ends_with("X1") {
+            "SLICE_X1"
+        } else {
+            "SLICE_X0"
+        };
         let site = site_in(db, tile, prefix).with_context(|| format!("{key}: no site"))?;
         let new4 = |d: &mut Decoder| -> [SigBit; 4] { std::array::from_fn(|_| d.net()) };
         let n = Nets {
@@ -558,8 +600,11 @@ pub fn decode_routed(
     }
     let mut port_bits: Vec<(String, Dir, SigBit)> = Vec::new();
     let site_port: HashMap<&str, &str> = {
-        let site_of_pin: HashMap<&str, &str> =
-            db.pads.iter().map(|p| (p.pin.as_str(), p.bel.as_str())).collect();
+        let site_of_pin: HashMap<&str, &str> = db
+            .pads
+            .iter()
+            .map(|p| (p.pin.as_str(), p.bel.as_str()))
+            .collect();
         pins.iter()
             .filter_map(|(port, pin)| Some((*site_of_pin.get(pin.as_str())?, port.as_str())))
             .collect()
@@ -568,7 +613,10 @@ pub fn decode_routed(
     // An input-only pin no port names (Vivado always configures PUDC_B as
     // one) drives nothing the check compares; anything it did drive would
     // read 1 and show.
-    if let Some((site, ..)) = iobs.iter().find(|(s, _, out)| *out && !site_port.contains_key(s.as_str())) {
+    if let Some((site, ..)) = iobs
+        .iter()
+        .find(|(s, _, out)| *out && !site_port.contains_key(s.as_str()))
+    {
         bail!("pin {site} drives out but has no port");
     }
     iobs.retain(|(site, _, _)| site_port.contains_key(site.as_str()));
@@ -604,7 +652,13 @@ pub fn decode_routed(
             .iter()
             .find(|(_, s)| s.tile == tile && s.ty == prim.cell())
             .map(|(n, _)| n.clone())
-            .with_context(|| format!("tile {}: no {} site", db.tile_names[tile as usize], prim.cell()))?;
+            .with_context(|| {
+                format!(
+                    "tile {}: no {} site",
+                    db.tile_names[tile as usize],
+                    prim.cell()
+                )
+            })?;
         let mut outs = Vec::new();
         let mut ports = vec!["CLKFBOUT".to_string(), "LOCKED".to_string()];
         ports.extend(
@@ -636,7 +690,11 @@ pub fn decode_routed(
             let mut n = d.pin(site, pin)?;
             for _ in 0..40 {
                 let src = d.source.get(&n).map(|s| format!("{s:?}"));
-                eprintln!("trace {n}: {} source {src:?} const {:?}", d.why.get(&n).map_or("-", |s| s), d.constant.get(&n));
+                eprintln!(
+                    "trace {n}: {} source {src:?} const {:?}",
+                    d.why.get(&n).map_or("-", |s| s),
+                    d.constant.get(&n)
+                );
                 match d.driver.get(&n) {
                     Some(&x) if src.is_none() => n = x,
                     _ => break,
@@ -651,7 +709,10 @@ pub fn decode_routed(
         let pin = |d: &Decoder, p: String| d.resolve_pin(site, &p);
         let clk = pin(&d, "CLK".into())?;
         if h.ram.iter().any(|&r| r) {
-            anyhow::ensure!(h.ram.iter().all(|&r| r), "{key}: a slice partly in RAM mode");
+            anyhow::ensure!(
+                h.ram.iter().all(|&r| r),
+                "{key}: a slice partly in RAM mode"
+            );
             let mut addr: [Vec<SigBit>; 4] = Default::default();
             for (k, a) in addr.iter_mut().enumerate() {
                 for i in 1..=5 {
@@ -686,7 +747,8 @@ pub fn decode_routed(
                 // the 5LUT (table bits 0-31), 1 the 6LUT (32-63).
                 init: std::array::from_fn(|k| {
                     (0..32).fold(0u64, |v, w| {
-                        v | (h.init[k] >> w & 1) << (2 * w) | (h.init[k] >> (32 + w) & 1) << (2 * w + 1)
+                        v | (h.init[k] >> w & 1) << (2 * w)
+                            | (h.init[k] >> (32 + w) & 1) << (2 * w + 1)
                     })
                 }),
             };
@@ -697,7 +759,10 @@ pub fn decode_routed(
             let ins: Vec<SigBit> = (1..=6)
                 .map(|i| pin(&d, format!("{}{i}", LETTERS[k])))
                 .collect::<Result<_>>()?;
-            d.m.add_cell(format!("{key}.{}6", LETTERS[k]), cells::lut(&ins, h.init[k], n.o6[k]));
+            d.m.add_cell(
+                format!("{key}.{}6", LETTERS[k]),
+                cells::lut(&ins, h.init[k], n.o6[k]),
+            );
             d.m.add_cell(
                 format!("{key}.{}5", LETTERS[k]),
                 cells::lut(&ins[..5], h.init[k] & 0xffff_ffff, n.o5[k]),
@@ -729,8 +794,16 @@ pub fn decode_routed(
             }
             .cell(),
         );
-        let ce = if h.ceused { pin(&d, "CE".into())? } else { SigBit::ONE };
-        let sr = if h.srused { pin(&d, "SR".into())? } else { SigBit::ZERO };
+        let ce = if h.ceused {
+            pin(&d, "CE".into())?
+        } else {
+            SigBit::ONE
+        };
+        let sr = if h.srused {
+            pin(&d, "SR".into())?
+        } else {
+            SigBit::ZERO
+        };
         for k in 0..4 {
             let dsrc = match h.ffmux[k].as_deref() {
                 Some("O6") => n.o6[k],
@@ -781,7 +854,8 @@ pub fn decode_routed(
                     q: n.q5[k],
                 }
                 .cell(),
-            );        }
+            );
+        }
     }
     for (key, s) in &dsps {
         let (site, outs) = &dsp_out[key];
@@ -817,7 +891,11 @@ pub fn decode_routed(
         let r = d.resolve_pin(&ologic, "T1")?;
         let os = &db.sites[&ologic];
         let ioi = db.tile_names[os.tile as usize].as_str();
-        let rel_y: u32 = os.relative.rsplit_once('Y').and_then(|(_, y)| y.parse().ok()).unwrap_or(0);
+        let rel_y: u32 = os
+            .relative
+            .rsplit_once('Y')
+            .and_then(|(_, y)| y.parse().ok())
+            .unwrap_or(0);
         let zinv = tiles.get(ioi).is_some_and(|fs| {
             fs.iter().any(|f| {
                 f.name == format!("OLOGIC_Y{}.ZINV_T1", 1 - rel_y.min(1))
@@ -838,8 +916,12 @@ pub fn decode_routed(
             }
         };
         match t {
-            SigBit::Const(State::Zero) => d.m.add_cell(format!("obuf_{site}"), cells::obuf(data, pad)),
-            t => d.m.add_cell(format!("obuft_{site}"), cells::obuft(data, t, pad)),
+            SigBit::Const(State::Zero) => {
+                d.m.add_cell(format!("obuf_{site}"), cells::obuf(data, pad))
+            }
+            t => {
+                d.m.add_cell(format!("obuft_{site}"), cells::obuft(data, t, pad))
+            }
         };
     }
 
@@ -875,7 +957,10 @@ pub fn decode_routed(
         driver: d.driver,
         source: d.source,
         read: d.read.into_inner(),
-        slice_sites: slice_nets.into_iter().map(|(k, (site, _))| (k, site)).collect(),
+        slice_sites: slice_nets
+            .into_iter()
+            .map(|(k, (site, _))| (k, site))
+            .collect(),
     })
 }
 
@@ -907,13 +992,19 @@ impl RamHalf {
         }
         let port = |s: &str| usize::from(s.ends_with('B'));
         let bits = |v: Option<&(u32, Vec<bool>)>| -> u64 {
-            v.map_or(0, |(lo, b)| b.iter().enumerate().fold(0u64, |a, (i, &x)| a | u64::from(x) << (*lo as usize + i)))
+            v.map_or(0, |(lo, b)| {
+                b.iter()
+                    .enumerate()
+                    .fold(0u64, |a, (i, &x)| a | u64::from(x) << (*lo as usize + i))
+            })
         };
         match parts {
             ["IN_USE"] => self.in_use = true,
             ["SDP_READ_WIDTH_36"] => self.sdp_read = true,
             ["SDP_WRITE_WIDTH_36"] => self.sdp_write = true,
-            [f] if f.starts_with("DO") && f.ends_with("_REG") => self.out_reg[usize::from(f.starts_with("DOB"))] = true,
+            [f] if f.starts_with("DO") && f.ends_with("_REG") => {
+                self.out_reg[usize::from(f.starts_with("DOB"))] = true
+            }
             [f] if f.starts_with("READ_WIDTH_") || f.starts_with("WRITE_WIDTH_") => {
                 let (name, w) = f.rsplit_once('_').expect("matched");
                 let w: u32 = w.parse().unwrap_or(1);
@@ -944,7 +1035,9 @@ impl RamHalf {
             [f] if f.starts_with("ZSRVAL_") => self.zsrval[port(f)] = bits(value),
             [f] if f.starts_with("INIT_") || f.starts_with("INITP_") => {
                 let (pre, i) = f.split_once('_').expect("matched");
-                let Ok(i) = usize::from_str_radix(i, 16) else { return };
+                let Ok(i) = usize::from_str_radix(i, 16) else {
+                    return;
+                };
                 let base = if pre == "INITP" { 16384 } else { 0 } + 256 * i;
                 if let Some((lo, v)) = value {
                     for (k, &b) in v.iter().enumerate() {
@@ -981,7 +1074,10 @@ fn bram_sites(db: &ChipDb, tile: u32, h: usize) -> Result<(String, Option<String
 fn bram_sources(d: &mut Decoder, tile: u32, h: usize) -> Result<[Vec<SigBit>; 4]> {
     let (half, full) = bram_sites(d.db, tile, h)?;
     let mut out: [Vec<SigBit>; 4] = Default::default();
-    for (k, (name, n)) in [("DOADO", 16), ("DOBDO", 16), ("DOPADOP", 2), ("DOPBDOP", 2)].into_iter().enumerate() {
+    for (k, (name, n)) in [("DOADO", 16), ("DOBDO", 16), ("DOPADOP", 2), ("DOPBDOP", 2)]
+        .into_iter()
+        .enumerate()
+    {
         for i in 0..n {
             let net = d.net();
             out[k].push(net);
@@ -999,7 +1095,13 @@ fn bram_sources(d: &mut Decoder, tile: u32, h: usize) -> Result<[Vec<SigBit>; 4]
 
 /// Half `h` of a BRAM tile as a RAMB18E1, its pins traced back like any
 /// site's (`nextpnr`'s mapping of the primitive's pins, read backwards).
-fn bram_half(d: &mut Decoder, tile: u32, h: usize, r: &RamHalf, dout: &[Vec<SigBit>; 4]) -> Result<()> {
+fn bram_half(
+    d: &mut Decoder,
+    tile: u32,
+    h: usize,
+    r: &RamHalf,
+    dout: &[Vec<SigBit>; 4],
+) -> Result<()> {
     use crate::bram::{Config, Inversions, Port, Size, Width};
     let (site, _) = bram_sites(d.db, tile, h)?;
     let name = format!("{}.ramb18_y{h}", d.db.tile_names[tile as usize]);
@@ -1007,7 +1109,8 @@ fn bram_half(d: &mut Decoder, tile: u32, h: usize, r: &RamHalf, dout: &[Vec<SigB
         let sp = crate::phys::bram_pin(d.db, &site, p)?;
         d.resolve_pin(&site, &sp)
     };
-    let width = |w: Option<u32>| Width::from_bits(w.unwrap_or(1) as usize).context("a block RAM width");
+    let width =
+        |w: Option<u32>| Width::from_bits(w.unwrap_or(1) as usize).context("a block RAM width");
     let sdp = r.sdp_read || r.sdp_write;
     let mut ports = [Port::unused(), Port::unused()];
     for k in 0..2 {
@@ -1017,16 +1120,31 @@ fn bram_half(d: &mut Decoder, tile: u32, h: usize, r: &RamHalf, dout: &[Vec<SigB
         ports[k].out_reg = r.out_reg[k];
         ports[k].rstreg_first = !r.rstreg_regce[k];
         // In the read width's layout; SDP's wide read is each port's x18.
-        let w = if r.sdp_read { Width::X18 } else { width(r.read[k])? };
+        let w = if r.sdp_read {
+            Width::X18
+        } else {
+            width(r.read[k])?
+        };
         ports[k].init = crate::bram::from_half_bits(!r.zinit[k] & 0x3ffff, w);
         ports[k].srval = crate::bram::from_half_bits(!r.zsrval[k] & 0x3ffff, w);
     }
     if sdp {
-        ports[0].read = Some(if r.sdp_read { Width::X36 } else { width(r.read[0])? });
-        ports[1].write = Some(if r.sdp_write { Width::X36 } else { width(r.write[1])? });
+        ports[0].read = Some(if r.sdp_read {
+            Width::X36
+        } else {
+            width(r.read[0])?
+        });
+        ports[1].write = Some(if r.sdp_write {
+            Width::X36
+        } else {
+            width(r.write[1])?
+        });
         ports[0].write = None;
         ports[1].read = None;
-        anyhow::ensure!(r.out_reg[0] == r.out_reg[1], "{name}: an SDP block with DOA_REG and DOB_REG apart");
+        anyhow::ensure!(
+            r.out_reg[0] == r.out_reg[1],
+            "{name}: an SDP block with DOA_REG and DOB_REG apart"
+        );
         ports[1].out_reg = false;
     }
     let inv = |p: &str| !r.zinv.contains(p);
@@ -1052,8 +1170,13 @@ fn bram_half(d: &mut Decoder, tile: u32, h: usize, r: &RamHalf, dout: &[Vec<SigB
         if k == 0 && sdp {
             continue;
         }
-        let lanes = (0..n).map(|j| pin(d, &format!("{base}{j}"))).collect::<Result<Vec<_>>>()?;
-        let paired = matches!(config.ports[k].write, Some(Width::X18 | Width::X36 | Width::X72));
+        let lanes = (0..n)
+            .map(|j| pin(d, &format!("{base}{j}")))
+            .collect::<Result<Vec<_>>>()?;
+        let paired = matches!(
+            config.ports[k].write,
+            Some(Width::X18 | Width::X36 | Width::X72)
+        );
         let one = (0..n).all(|j| lanes[j] == if paired { lanes[j & !1] } else { lanes[0] });
         anyhow::ensure!(
             one,
@@ -1061,10 +1184,28 @@ fn bram_half(d: &mut Decoder, tile: u32, h: usize, r: &RamHalf, dout: &[Vec<SigB
             if paired { "lane pair" } else { "port" }
         );
     }
-    let mut cell = crate::synth::cells::Ramb::new(config, [dout[0].clone(), dout[1].clone()], [dout[2].clone(), dout[3].clone()]);
+    let mut cell = crate::synth::cells::Ramb::new(
+        config,
+        [dout[0].clone(), dout[1].clone()],
+        [dout[2].clone(), dout[3].clone()],
+    );
     for (k, (clk, en, regce, rstram, rstreg, regclk)) in [
-        ("CLKARDCLK", "ENARDEN", "REGCEAREGCE", "RSTRAMARSTRAM", "RSTREGARSTREG", "REGCLKARDRCLK"),
-        ("CLKBWRCLK", "ENBWREN", "REGCEB", "RSTRAMB", "RSTREGB", "REGCLKB"),
+        (
+            "CLKARDCLK",
+            "ENARDEN",
+            "REGCEAREGCE",
+            "RSTRAMARSTRAM",
+            "RSTREGARSTREG",
+            "REGCLKARDRCLK",
+        ),
+        (
+            "CLKBWRCLK",
+            "ENBWREN",
+            "REGCEB",
+            "RSTRAMB",
+            "RSTREGB",
+            "REGCLKB",
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -1083,7 +1224,12 @@ fn bram_half(d: &mut Decoder, tile: u32, h: usize, r: &RamHalf, dout: &[Vec<SigB
             let got = pin(d, regclk)?;
             anyhow::ensure!(got == want, "{name}: {regclk} isn't the port's clock");
             anyhow::ensure!(
-                inv(regclk) == if sdp { inv("CLKARDCLK") } else { [inv("CLKARDCLK"), inv("CLKBWRCLK")][k] },
+                inv(regclk)
+                    == if sdp {
+                        inv("CLKARDCLK")
+                    } else {
+                        [inv("CLKARDCLK"), inv("CLKBWRCLK")][k]
+                    },
                 "{name}: {regclk} inverted apart from the clock"
             );
         }
@@ -1120,7 +1266,9 @@ struct DspSite {
 impl DspSite {
     fn read(&mut self, parts: &[&str], value: Option<&(u32, Vec<bool>)>) {
         let v = value.map_or(1, |(lo, b)| {
-            b.iter().enumerate().fold(0u64, |a, (i, &x)| a | u64::from(x) << (*lo as usize + i))
+            b.iter()
+                .enumerate()
+                .fold(0u64, |a, (i, &x)| a | u64::from(x) << (*lo as usize + i))
         });
         let name = parts.join(".");
         let name = name.trim_end_matches("[0]").to_string();
@@ -1159,8 +1307,16 @@ impl DspSite {
             areg,
             breg,
             // ACASCREG follows AREG but where ZAREG_2_ACASCREG_1 is clear.
-            acascreg: if areg == 2 && !has("ZAREG_2_ACASCREG_1") { 1 } else { areg },
-            bcascreg: if breg == 2 && !has("ZBREG_2_BCASCREG_1") { 1 } else { breg },
+            acascreg: if areg == 2 && !has("ZAREG_2_ACASCREG_1") {
+                1
+            } else {
+                areg
+            },
+            bcascreg: if breg == 2 && !has("ZBREG_2_BCASCREG_1") {
+                1
+            } else {
+                breg
+            },
             stages,
             a_cascade: has("A_INPUT"),
             b_cascade: has("B_INPUT"),
@@ -1174,16 +1330,56 @@ impl DspSite {
 
 /// The DSP48E1 ports, inputs then outputs, with widths.
 const DSP_INPUTS: [(&str, usize); 38] = [
-    ("A", 30), ("ACIN", 30), ("ALUMODE", 4), ("B", 18), ("BCIN", 18), ("C", 48), ("CARRYCASCIN", 1),
-    ("CARRYIN", 1), ("CARRYINSEL", 3), ("CEA1", 1), ("CEA2", 1), ("CEAD", 1), ("CEALUMODE", 1),
-    ("CEB1", 1), ("CEB2", 1), ("CEC", 1), ("CECARRYIN", 1), ("CECTRL", 1), ("CED", 1), ("CEINMODE", 1),
-    ("CEM", 1), ("CEP", 1), ("CLK", 1), ("D", 25), ("INMODE", 5), ("MULTSIGNIN", 1), ("OPMODE", 7),
-    ("PCIN", 48), ("RSTA", 1), ("RSTALLCARRYIN", 1), ("RSTALUMODE", 1), ("RSTB", 1), ("RSTC", 1),
-    ("RSTCTRL", 1), ("RSTD", 1), ("RSTINMODE", 1), ("RSTM", 1), ("RSTP", 1),
+    ("A", 30),
+    ("ACIN", 30),
+    ("ALUMODE", 4),
+    ("B", 18),
+    ("BCIN", 18),
+    ("C", 48),
+    ("CARRYCASCIN", 1),
+    ("CARRYIN", 1),
+    ("CARRYINSEL", 3),
+    ("CEA1", 1),
+    ("CEA2", 1),
+    ("CEAD", 1),
+    ("CEALUMODE", 1),
+    ("CEB1", 1),
+    ("CEB2", 1),
+    ("CEC", 1),
+    ("CECARRYIN", 1),
+    ("CECTRL", 1),
+    ("CED", 1),
+    ("CEINMODE", 1),
+    ("CEM", 1),
+    ("CEP", 1),
+    ("CLK", 1),
+    ("D", 25),
+    ("INMODE", 5),
+    ("MULTSIGNIN", 1),
+    ("OPMODE", 7),
+    ("PCIN", 48),
+    ("RSTA", 1),
+    ("RSTALLCARRYIN", 1),
+    ("RSTALUMODE", 1),
+    ("RSTB", 1),
+    ("RSTC", 1),
+    ("RSTCTRL", 1),
+    ("RSTD", 1),
+    ("RSTINMODE", 1),
+    ("RSTM", 1),
+    ("RSTP", 1),
 ];
 const DSP_OUTPUTS: [(&str, usize); 11] = [
-    ("ACOUT", 30), ("BCOUT", 18), ("CARRYCASCOUT", 1), ("CARRYOUT", 4), ("MULTSIGNOUT", 1),
-    ("OVERFLOW", 1), ("P", 48), ("PATTERNBDETECT", 1), ("PATTERNDETECT", 1), ("PCOUT", 48),
+    ("ACOUT", 30),
+    ("BCOUT", 18),
+    ("CARRYCASCOUT", 1),
+    ("CARRYOUT", 4),
+    ("MULTSIGNOUT", 1),
+    ("OVERFLOW", 1),
+    ("P", 48),
+    ("PATTERNBDETECT", 1),
+    ("PATTERNDETECT", 1),
+    ("PCOUT", 48),
     ("UNDERFLOW", 1),
 ];
 
@@ -1230,7 +1426,10 @@ fn dsp_cell(d: &mut Decoder, site: &str, s: &DspSite, outs: &[(String, SigBit)])
     let mut config = s.config();
     let mut ports = Vec::new();
     let inv_of = |name: &str| -> Option<(usize, usize)> {
-        crate::dsp::INVERTIBLE.iter().position(|(p, _)| *p == name).map(|i| (i, crate::dsp::INVERTIBLE[i].1))
+        crate::dsp::INVERTIBLE
+            .iter()
+            .position(|(p, _)| *p == name)
+            .map(|i| (i, crate::dsp::INVERTIBLE[i].1))
     };
     for (name, w) in DSP_INPUTS {
         let mut sig = Vec::new();
@@ -1243,7 +1442,10 @@ fn dsp_cell(d: &mut Decoder, site: &str, s: &DspSite, outs: &[(String, SigBit)])
                         SigBit::Const(State::Zero) => SigBit::ONE,
                         b => {
                             let n = d.net();
-                            d.m.add_cell(format!("{site}.inv_{name}{i}"), cells::lut(&[b], 0b01, n));
+                            d.m.add_cell(
+                                format!("{site}.inv_{name}{i}"),
+                                cells::lut(&[b], 0b01, n),
+                            );
                             n
                         }
                     };
@@ -1262,7 +1464,9 @@ fn dsp_cell(d: &mut Decoder, site: &str, s: &DspSite, outs: &[(String, SigBit)])
         let sig: Vec<SigBit> = (0..w)
             .map(|i| {
                 let pin = dsp_pin(name, w, i);
-                outs.iter().find(|(p, _)| *p == pin).map_or(SigBit::X, |(_, b)| *b)
+                outs.iter()
+                    .find(|(p, _)| *p == pin)
+                    .map_or(SigBit::X, |(_, b)| *b)
             })
             .collect();
         ports.push(GenericPort {
@@ -1296,7 +1500,12 @@ fn cmt_cell(
 ) -> Result<()> {
     use crate::cmt::Compensation;
     use chipsmith_netlist::{CellKind, Dir as PDir, Generic, GenericPort};
-    let out = |p: &str| outs.iter().find(|(n, _)| n == p).map(|(_, b)| *b).expect("every block has CLKFBOUT and LOCKED");
+    let out = |p: &str| {
+        outs.iter()
+            .find(|(n, _)| n == p)
+            .map(|(_, b)| *b)
+            .expect("every block has CLKFBOUT and LOCKED")
+    };
     let fbout = out("CLKFBOUT");
     let fbin = d.resolve_pin(site, "CLKFBIN")?;
     let routed = if fbin == fbout {
@@ -1307,7 +1516,8 @@ fn cmt_cell(
         bail!("{site}: CLKFBIN is {fbin:?}, neither CLKFBOUT nor CLKFBOUT through a BUFG");
     };
     // The bits' compensation must be the routing's (`from_features`).
-    let (config, reset) = crate::cmt::Config::from_features(prim, bits, routed).with_context(|| site.to_string())?;
+    let (config, reset) =
+        crate::cmt::Config::from_features(prim, bits, routed).with_context(|| site.to_string())?;
     let r = d.resolve_pin(site, "RST")?;
     let rst = if reset {
         r

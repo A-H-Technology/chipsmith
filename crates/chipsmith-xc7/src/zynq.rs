@@ -63,7 +63,7 @@ fn boot_header(image_len: u32) -> [u8; BOOT_HEADER_LEN] {
     // Register init list: empty, every pair 0xffffffff.
     words[0xa0 / 4..0x8a0 / 4].fill(0xffff_ffff);
     let mut bytes = [0u8; BOOT_HEADER_LEN];
-    for (b, w) in bytes.chunks_exact_mut(4).zip(words) {
+    for (b, w) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(words) {
         b.copy_from_slice(&w.to_le_bytes());
     }
     bytes

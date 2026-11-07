@@ -172,7 +172,10 @@ impl Output {
             "divide {}: 1, or 2 to 128",
             divide.value()
         );
-        ensure!(phase <= PHASE_MAX, "phase {phase}/8 VCO periods: at most {PHASE_MAX}");
+        ensure!(
+            phase <= PHASE_MAX,
+            "phase {phase}/8 VCO periods: at most {PHASE_MAX}"
+        );
         if !divide.is_whole() {
             // No half-period high time: the counter makes 50% itself.
             ensure!(
@@ -385,23 +388,44 @@ impl Config {
         p.insert("BANDWIDTH".into(), s("OPTIMIZED".into()));
         p.insert("COMPENSATION".into(), s(self.compensation.name().into()));
         if let Some(ps) = clkin_period_ps {
-            p.insert("CLKIN1_PERIOD".into(), s(format!("{:.3}", f64::from(ps) / 1000.0)));
+            p.insert(
+                "CLKIN1_PERIOD".into(),
+                s(format!("{:.3}", f64::from(ps) / 1000.0)),
+            );
         }
         p.insert("DIVCLK_DIVIDE".into(), int_param(u64::from(self.divclk)));
         match self.prim {
-            Prim::Pll => p.insert("CLKFBOUT_MULT".into(), int_param(u64::from(self.mult.int()))),
-            Prim::Mmcm => p.insert("CLKFBOUT_MULT_F".into(), s(format!("{:.3}", self.mult.value()))),
+            Prim::Pll => p.insert(
+                "CLKFBOUT_MULT".into(),
+                int_param(u64::from(self.mult.int())),
+            ),
+            Prim::Mmcm => p.insert(
+                "CLKFBOUT_MULT_F".into(),
+                s(format!("{:.3}", self.mult.value())),
+            ),
         };
         p.insert("CLKFBOUT_PHASE".into(), s("0.000".into()));
         for (k, o) in self.outputs.iter().enumerate() {
             let Some(o) = o else { continue };
             if self.prim == Prim::Mmcm && k == 0 {
-                p.insert("CLKOUT0_DIVIDE_F".into(), s(format!("{:.3}", o.divide.value())));
+                p.insert(
+                    "CLKOUT0_DIVIDE_F".into(),
+                    s(format!("{:.3}", o.divide.value())),
+                );
             } else {
-                p.insert(format!("CLKOUT{k}_DIVIDE"), int_param(u64::from(o.divide.int())));
+                p.insert(
+                    format!("CLKOUT{k}_DIVIDE"),
+                    int_param(u64::from(o.divide.int())),
+                );
             }
-            p.insert(format!("CLKOUT{k}_PHASE"), s(format!("{:.3}", o.phase_degrees())));
-            p.insert(format!("CLKOUT{k}_DUTY_CYCLE"), s(format!("{:.6}", o.duty())));
+            p.insert(
+                format!("CLKOUT{k}_PHASE"),
+                s(format!("{:.3}", o.phase_degrees())),
+            );
+            p.insert(
+                format!("CLKOUT{k}_DUTY_CYCLE"),
+                s(format!("{:.6}", o.duty())),
+            );
         }
         p
     }
@@ -422,12 +446,13 @@ impl Config {
                     .trim_matches('"')
                     .parse()
                     .with_context(|| format!("{name} {k} = {v:?}")),
-                Some(ParamValue::Bits(c)) => Ok(c
-                    .0
-                    .iter()
-                    .enumerate()
-                    .fold(0u64, |v, (i, b)| if *b == State::One { v | 1 << i } else { v })
-                    as f64),
+                Some(ParamValue::Bits(c)) => Ok(c.0.iter().enumerate().fold(0u64, |v, (i, b)| {
+                    if *b == State::One {
+                        v | 1 << i
+                    } else {
+                        v
+                    }
+                }) as f64),
             }
         };
         let compensation = match params.get("COMPENSATION") {
@@ -445,14 +470,21 @@ impl Config {
                 "{name} BANDWIDTH {v}: only OPTIMIZED"
             );
         }
-        let mult_name = if prim == Prim::Pll { "CLKFBOUT_MULT" } else { "CLKFBOUT_MULT_F" };
+        let mult_name = if prim == Prim::Pll {
+            "CLKFBOUT_MULT"
+        } else {
+            "CLKFBOUT_MULT_F"
+        };
         let mult = Eighths::parse(mult_name, num(mult_name, 5.0)?)?;
         ensure!(
             num("CLKFBOUT_PHASE", 0.0)? == 0.0,
             "{name} CLKFBOUT_PHASE: only 0"
         );
         let divclk = num("DIVCLK_DIVIDE", 1.0)?;
-        ensure!(divclk.fract() == 0.0 && divclk >= 1.0 && divclk <= 255.0, "{name} DIVCLK_DIVIDE {divclk}");
+        ensure!(
+            divclk.fract() == 0.0 && divclk >= 1.0 && divclk <= 255.0,
+            "{name} DIVCLK_DIVIDE {divclk}"
+        );
         let mut outputs = Vec::new();
         for k in 0..prim.outputs() {
             if !used.get(k).copied().unwrap_or(false) {
@@ -474,9 +506,14 @@ impl Config {
             );
             let steps = steps.round() as u16 % divide.eighths().max(1);
             let duty = num(&format!("CLKOUT{k}_DUTY_CYCLE"), 0.5)?;
-            let halves = if divide.is_whole() { duty * f64::from(divide.eighths()) / 4.0 } else { 0.0 };
+            let halves = if divide.is_whole() {
+                duty * f64::from(divide.eighths()) / 4.0
+            } else {
+                0.0
+            };
             ensure!(
-                (halves - halves.round()).abs() < 1e-3 && (divide.is_whole() || (duty - 0.5).abs() < 1e-6),
+                (halves - halves.round()).abs() < 1e-3
+                    && (divide.is_whole() || (duty - 0.5).abs() < 1e-6),
                 "{name} CLKOUT{k}_DUTY_CYCLE {duty}: not a multiple of half a VCO period"
             );
             outputs.push(Some(
@@ -509,9 +546,13 @@ impl Config {
         }
         let tables = tables()?;
         let key = (self.prim, self.mult.int());
-        let t = tables
-            .get(&key)
-            .with_context(|| format!("no lock and filter table for {} at CLKFBOUT_MULT {}", self.prim.cell(), self.mult.int()))?;
+        let t = tables.get(&key).with_context(|| {
+            format!(
+                "no lock and filter table for {} at CLKFBOUT_MULT {}",
+                self.prim.cell(),
+                self.mult.int()
+            )
+        })?;
         for (feature, width, value) in t {
             f.vector(feature, *width, *value);
         }
@@ -559,15 +600,27 @@ impl Config {
             let c = Counter::whole(o.divide.int(), o.high_halves, o.phase);
             f.vector(&format!("{name}_CLKOUT1_HIGH_TIME"), 6, u64::from(c.high));
             f.vector(&format!("{name}_CLKOUT1_LOW_TIME"), 6, u64::from(c.low));
-            f.vector(&format!("{name}_CLKOUT1_PHASE_MUX"), 3, u64::from(c.phase_mux));
+            f.vector(
+                &format!("{name}_CLKOUT1_PHASE_MUX"),
+                3,
+                u64::from(c.phase_mux),
+            );
             f.flag(&reg2("EDGE"), c.edge);
             f.flag(&reg2("NO_COUNT"), c.no_count);
             f.vector(&reg2("DELAY_TIME"), 6, u64::from(c.delay));
             // An MMCM's CLKOUT0 and CLKFBOUT copy their phase tap into the
             // fractional counter's falling-edge tap, as Vivado writes them.
             if self.prim == Prim::Mmcm && (name == "CLKOUT0" || name == "CLKFBOUT") {
-                let shared = if name == "CLKOUT0" { "CLKOUT5" } else { "CLKOUT6" };
-                f.vector(&format!("{shared}_CLKOUT2_FRACTIONAL_PHASE_MUX_F"), 3, u64::from(c.phase_mux));
+                let shared = if name == "CLKOUT0" {
+                    "CLKOUT5"
+                } else {
+                    "CLKOUT6"
+                };
+                f.vector(
+                    &format!("{shared}_CLKOUT2_FRACTIONAL_PHASE_MUX_F"),
+                    3,
+                    u64::from(c.phase_mux),
+                );
             }
         } else {
             // XAPP888's fractional counter, at phase 0: the integer part
@@ -589,8 +642,16 @@ impl Config {
             f.flag(&format!("{name}_CLKOUT2_EDGE"), odd == 1);
             f.bit(&format!("{name}_CLKOUT2_FRAC_EN"));
             f.flag(&format!("{name}_CLKOUT2_FRAC_WF_R"), wf_rise);
-            let shared = if name == "CLKOUT0" { "CLKOUT5" } else { "CLKOUT6" };
-            f.vector(&format!("{shared}_CLKOUT2_FRACTIONAL_PHASE_MUX_F"), 3, u64::from(pm_fall));
+            let shared = if name == "CLKOUT0" {
+                "CLKOUT5"
+            } else {
+                "CLKOUT6"
+            };
+            f.vector(
+                &format!("{shared}_CLKOUT2_FRACTIONAL_PHASE_MUX_F"),
+                3,
+                u64::from(pm_fall),
+            );
             f.flag(&format!("{shared}_CLKOUT2_FRACTIONAL_FRAC_WF_F"), wf_fall);
         }
     }
@@ -607,10 +668,16 @@ impl Config {
     ///
     /// `routed`: the compensation the feedback's routing makes. A PLL's
     /// bits say it too, and must agree; an MMCM's are the same for both.
-    pub fn from_features(prim: Prim, bits: &BTreeSet<String>, routed: Compensation) -> Result<(Config, bool)> {
+    pub fn from_features(
+        prim: Prim,
+        bits: &BTreeSet<String>,
+        routed: Compensation,
+    ) -> Result<(Config, bool)> {
         let compensation = routed;
         let field = |name: &str, width: u32| -> u16 {
-            (0..width).filter(|i| bits.contains(&format!("{name}[{i}]"))).fold(0, |v, i| v | 1 << i)
+            (0..width)
+                .filter(|i| bits.contains(&format!("{name}[{i}]")))
+                .fold(0, |v, i| v | 1 << i)
         };
         let flag = |name: &str| bits.contains(&format!("{name}[0]"));
         let reg2 = |c: &str, f: &str| {
@@ -641,7 +708,8 @@ impl Config {
                     .with_context(|| format!("{c}: fractional high {high}, low {low}"))?;
                 return Output::even(Eighths(int * 8 + frac)).with_context(|| c.to_string());
             }
-            let phase = field(&reg2(c, "DELAY_TIME"), 6) * 8 + field(&format!("{c}_CLKOUT1_PHASE_MUX"), 3);
+            let phase =
+                field(&reg2(c, "DELAY_TIME"), 6) * 8 + field(&format!("{c}_CLKOUT1_PHASE_MUX"), 3);
             if flag(&reg2(c, "NO_COUNT")) {
                 return Output::new(Eighths::whole(1), phase, 1).with_context(|| c.to_string());
             }
@@ -658,9 +726,19 @@ impl Config {
         let mut outputs = Vec::new();
         for k in 0..prim.outputs() {
             let c = format!("CLKOUT{k}");
-            outputs.push(if flag(&format!("{c}_CLKOUT1_OUTPUT_ENABLE")) { Some(counter(&c)?) } else { None });
+            outputs.push(if flag(&format!("{c}_CLKOUT1_OUTPUT_ENABLE")) {
+                Some(counter(&c)?)
+            } else {
+                None
+            });
         }
-        let config = Config::new(prim, u8::try_from(divclk).context("DIVCLK")?, mult, outputs, compensation)?;
+        let config = Config::new(
+            prim,
+            u8::try_from(divclk).context("DIVCLK")?,
+            mult,
+            outputs,
+            compensation,
+        )?;
         let reset = !bits.contains("ZINV_RST");
         let want: BTreeSet<String> = config.features(reset)?.into_iter().collect();
         if &want != bits {
@@ -686,7 +764,9 @@ fn compensation_feature(prim: Prim, c: Compensation) -> &'static str {
 }
 
 fn int_param(v: u64) -> ParamValue {
-    ParamValue::Bits(Const((0..32).map(|i| State::from(v >> i & 1 == 1)).collect()))
+    ParamValue::Bits(Const(
+        (0..32).map(|i| State::from(v >> i & 1 == 1)).collect(),
+    ))
 }
 
 /// A whole counter's DRP fields.
@@ -763,7 +843,9 @@ fn constant_features(prim: Prim) -> Vec<&'static str> {
     text.lines()
         .filter_map(|l| {
             let mut w = l.split_whitespace();
-            (w.next() == Some("const") && w.next() == Some(tag)).then(|| w.next()).flatten()
+            (w.next() == Some("const") && w.next() == Some(tag))
+                .then(|| w.next())
+                .flatten()
         })
         .collect()
 }
@@ -791,10 +873,16 @@ fn tables() -> Result<&'static Tables> {
                 _ => return Err(format!("cmt_tables.txt: {l:?}")),
             };
             let parse = || -> Option<(u16, u32, u64)> {
-                Some((mult.parse().ok()?, width.parse().ok()?, u64::from_str_radix(hex, 16).ok()?))
+                Some((
+                    mult.parse().ok()?,
+                    width.parse().ok()?,
+                    u64::from_str_radix(hex, 16).ok()?,
+                ))
             };
             let (mult, width, value) = parse().ok_or_else(|| format!("cmt_tables.txt: {l:?}"))?;
-            t.entry((prim, mult)).or_default().push((feature.to_string(), width, value));
+            t.entry((prim, mult))
+                .or_default()
+                .push((feature.to_string(), width, value));
         }
         Ok(t)
     })
@@ -839,12 +927,16 @@ fn num_param(params: &BTreeMap<String, ParamValue>, k: &str) -> Result<Option<i6
         None => None,
         Some(ParamValue::Bits(c)) => {
             // yosys' integers are 32-bit two's complement.
-            let v = c
-                .0
-                .iter()
-                .enumerate()
-                .fold(0u64, |v, (i, b)| if *b == State::One { v | 1 << i } else { v });
-            Some(if c.0.len() == 32 { v as u32 as i32 as i64 } else { v as i64 })
+            let v =
+                c.0.iter().enumerate().fold(
+                    0u64,
+                    |v, (i, b)| if *b == State::One { v | 1 << i } else { v },
+                );
+            Some(if c.0.len() == 32 {
+                v as u32 as i32 as i64
+            } else {
+                v as i64
+            })
         }
         Some(ParamValue::Str(s)) => Some(
             s.trim()
@@ -858,14 +950,23 @@ fn num_param(params: &BTreeMap<String, ParamValue>, k: &str) -> Result<Option<i6
 impl Request {
     /// From an `XC7_PLL` or `XC7_MMCM` cell: its parameters, and which of
     /// its outputs (`CLK0`, ...) drive something.
-    pub fn from_params(prim: Prim, params: &BTreeMap<String, ParamValue>, used: &[bool]) -> Result<Request> {
+    pub fn from_params(
+        prim: Prim,
+        params: &BTreeMap<String, ParamValue>,
+        used: &[bool],
+    ) -> Result<Request> {
         let name = prim.request_cell();
         let get = |k: &str, default: i64| -> Result<i64> {
-            Ok(num_param(params, k).with_context(|| format!("{name}"))?.unwrap_or(default))
+            Ok(num_param(params, k)
+                .with_context(|| format!("{name}"))?
+                .unwrap_or(default))
         };
         let positive = |k: &str, default: i64| -> Result<u32> {
             let v = get(k, default)?;
-            ensure!(v > 0 && v <= i64::from(u32::MAX), "{name} {k} = {v}: positive");
+            ensure!(
+                v > 0 && v <= i64::from(u32::MAX),
+                "{name} {k} = {v}: positive"
+            );
             Ok(v as u32)
         };
         let mut outputs = Vec::new();
@@ -925,7 +1026,10 @@ impl Request {
             "{name}: {} outputs",
             prim.outputs()
         );
-        ensure!(self.outputs.iter().any(Option::is_some), "{name}: no output is used");
+        ensure!(
+            self.outputs.iter().any(Option::is_some),
+            "{name}: no output is used"
+        );
         let p = u128::from(self.inclk_period_ps);
         const PS: u128 = 1_000_000_000_000;
         let (ilo, ihi) = prim.input_hz();
@@ -956,11 +1060,15 @@ impl Request {
             while m8 <= 512 {
                 let m = u128::from(m8);
                 // VCO = PS m8 / (8 p d).
-                let vco_ok = u128::from(vlo) * 8 * p * d128 <= PS * m && PS * m <= u128::from(vhi) * 8 * p * d128;
+                let vco_ok = u128::from(vlo) * 8 * p * d128 <= PS * m
+                    && PS * m <= u128::from(vhi) * 8 * p * d128;
                 if vco_ok {
                     if let Some(c) = self.candidate(d, m8) {
                         if best.as_ref().is_none_or(|b| c.0 < b.key) {
-                            best = Some(Cand { key: c.0, config: c.1 });
+                            best = Some(Cand {
+                                key: c.0,
+                                config: c.1,
+                            });
                         }
                     }
                 }
@@ -976,7 +1084,8 @@ impl Request {
                     o.map(|o| {
                         format!(
                             "CLK{k} {:.3} MHz",
-                            1e6 / self.inclk_period_ps as f64 * f64::from(o.multiply) / f64::from(o.divide)
+                            1e6 / self.inclk_period_ps as f64 * f64::from(o.multiply)
+                                / f64::from(o.divide)
                         )
                     })
                 })
@@ -992,7 +1101,9 @@ impl Request {
         let config = best.config;
         let fin = 1e12 / f64::from(self.inclk_period_ps);
         let vco_hz = fin * config.vco_ratio();
-        let hz = (0..prim.outputs()).map(|k| config.output_ratio(k).map(|r| r * fin)).collect();
+        let hz = (0..prim.outputs())
+            .map(|k| config.output_ratio(k).map(|r| r * fin))
+            .collect();
         let phase_ps = config
             .outputs
             .iter()
@@ -1052,7 +1163,11 @@ impl Request {
                 if o.duty_percent != 50 {
                     return None;
                 }
-                if o8 == 8 { 1 } else { 0 }
+                if o8 == 8 {
+                    1
+                } else {
+                    0
+                }
             } else {
                 let halves2 = u32::from(o8 / 4) * o.duty_percent;
                 let h = ((halves2 + 50) / 100).clamp(2, u32::from(o8 / 4) - 1) as u16;
@@ -1072,7 +1187,11 @@ impl Request {
         let vco_mhz = (1_000_000_000_000u128 * 1000 * m / (8 * p * d128)) as u64;
         let rank = match prim {
             Prim::Pll => {
-                let even = config.outputs.iter().flatten().any(|o| o.divide.int() % 2 == 0 && o.divide.int() > 1);
+                let even = config
+                    .outputs
+                    .iter()
+                    .flatten()
+                    .any(|o| o.divide.int() % 2 == 0 && o.divide.int() > 1);
                 if vco_mhz == 800_000_000_000 && even {
                     1_200_500_000_000
                 } else {
@@ -1111,7 +1230,12 @@ mod tests {
         (
             s.config.mult.value(),
             s.config.divclk,
-            s.config.outputs.iter().flatten().map(|o| o.divide.value()).collect(),
+            s.config
+                .outputs
+                .iter()
+                .flatten()
+                .map(|o| o.divide.value())
+                .collect(),
         )
     }
 
@@ -1129,14 +1253,24 @@ mod tests {
             (&[(4, 5, 0, 50), (32, 25, 0, 50)], (32.0, 5, &[8.0, 5.0])),
             (&[(16, 25, 0, 50)], (48.0, 5, &[15.0])),
             (&[(1, 1, 0, 25)], (8.0, 1, &[8.0])),
-            (&[(1, 1, 0, 50), (4, 5, 0, 50), (2, 5, 0, 50)], (8.0, 1, &[8.0, 10.0, 20.0])),
+            (
+                &[(1, 1, 0, 50), (4, 5, 0, 50), (2, 5, 0, 50)],
+                (8.0, 1, &[8.0, 10.0, 20.0]),
+            ),
             // 62.5 MHz at 22.5 degrees, 31.25 MHz at -90.
-            (&[(1, 2, 1000, 50), (1, 4, -8000, 50)], (7.0, 1, &[14.0, 28.0])),
+            (
+                &[(1, 2, 1000, 50), (1, 4, -8000, 50)],
+                (7.0, 1, &[14.0, 28.0]),
+            ),
         ];
         for (outs, want) in cases {
             let s = req(Prim::Pll, 8000, outs).solve().unwrap();
             let got = summary(&s);
-            assert_eq!((got.0, got.1, got.2.as_slice()), (want.0, want.1, want.2), "{outs:?}");
+            assert_eq!(
+                (got.0, got.1, got.2.as_slice()),
+                (want.0, want.1, want.2),
+                "{outs:?}"
+            );
         }
     }
 
@@ -1152,21 +1286,32 @@ mod tests {
         for (outs, want) in cases {
             let s = req(Prim::Mmcm, 8000, outs).solve().unwrap();
             let got = summary(&s);
-            assert_eq!((got.0, got.1, got.2.as_slice()), (want.0, want.1, want.2), "{outs:?}");
+            assert_eq!(
+                (got.0, got.1, got.2.as_slice()),
+                (want.0, want.1, want.2),
+                "{outs:?}"
+            );
         }
     }
 
     #[test]
     fn inexact_requests_are_refused() {
         // 148.5 MHz from 125 on a PLL: no whole counters.
-        assert!(req(Prim::Pll, 8000, &[(1188, 1000, 0, 50)]).solve().is_err());
+        assert!(req(Prim::Pll, 8000, &[(1188, 1000, 0, 50)])
+            .solve()
+            .is_err());
     }
 
     #[test]
     fn params_round_trip() {
-        for outs in [&[(1u32, 1u32, 2000i32, 50u32), (1, 4, -3000, 30)][..], &[(6, 5, 0, 50)]] {
+        for outs in [
+            &[(1u32, 1u32, 2000i32, 50u32), (1, 4, -3000, 30)][..],
+            &[(6, 5, 0, 50)],
+        ] {
             for prim in [Prim::Pll, Prim::Mmcm] {
-                let Ok(s) = req(prim, 8000, outs).solve() else { continue };
+                let Ok(s) = req(prim, 8000, outs).solve() else {
+                    continue;
+                };
                 let used: Vec<bool> = s.config.outputs.iter().map(Option::is_some).collect();
                 let back = Config::from_params(prim, &s.config.params(Some(8000)), &used).unwrap();
                 assert_eq!(back, s.config);

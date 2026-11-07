@@ -136,7 +136,11 @@ pub(crate) struct Ble {
 
 impl Ble {
     pub fn cells(&self) -> impl Iterator<Item = CellId> {
-        self.lut.into_iter().chain(self.ff).chain(self.lut5).chain(self.ff5)
+        self.lut
+            .into_iter()
+            .chain(self.ff)
+            .chain(self.lut5)
+            .chain(self.ff5)
     }
 }
 
@@ -180,7 +184,11 @@ pub(crate) struct Design {
 /// Groups the packer's cells into what the placer moves: carry chains
 /// (with the LUTs and registers the packer tied to each bit), RAM32Ms and
 /// BLEs.
-pub(crate) fn build(cells: Vec<Cell>, nets: Vec<Net>, pairs: &[(CellId, CellId)]) -> Result<Design> {
+pub(crate) fn build(
+    cells: Vec<Cell>,
+    nets: Vec<Net>,
+    pairs: &[(CellId, CellId)],
+) -> Result<Design> {
     let mut d = Design {
         cells,
         nets,
@@ -196,7 +204,10 @@ pub(crate) fn build(cells: Vec<Cell>, nets: Vec<Net>, pairs: &[(CellId, CellId)]
     // A DSP whose PCIN its cascade partner's PCOUT drives, by lower DSP.
     let mut upper: HashMap<CellId, CellId> = HashMap::default();
     for (c, cell) in d.cells.iter().enumerate() {
-        let Some(lower) = cell.net("PCIN0").and_then(|n| d.nets[n as usize].driver.as_ref()) else {
+        let Some(lower) = cell
+            .net("PCIN0")
+            .and_then(|n| d.nets[n as usize].driver.as_ref())
+        else {
             continue;
         };
         if Hard::of(&d.cells[lower.0 as usize].kind) == Some(Hard::Dsp) && lower.1 == "PCOUT0" {
@@ -360,7 +371,8 @@ pub(crate) fn build(cells: Vec<Cell>, nets: Vec<Net>, pairs: &[(CellId, CellId)]
     };
     for &(l6, l5) in pairs {
         let ff = first_ff(&d, &taken, l6);
-        let ff5 = first_ff(&d, &taken, l5).filter(|&f5| ff.is_none_or(|f| cs_of(&d, f) == cs_of(&d, f5)));
+        let ff5 =
+            first_ff(&d, &taken, l5).filter(|&f5| ff.is_none_or(|f| cs_of(&d, f) == cs_of(&d, f5)));
         for c in [Some(l6), Some(l5), ff, ff5].into_iter().flatten() {
             taken[c as usize] = true;
             ble_of_lut[c as usize] = true;
@@ -596,14 +608,18 @@ impl Timing {
                 }
                 Kind::Dsp { inreg, mreg, preg } => {
                     let dl = &delays.dsp;
-                    let is_p = |p: &str| p.starts_with('P') && p[1..].chars().all(|c| c.is_ascii_digit());
+                    let is_p =
+                        |p: &str| p.starts_with('P') && p[1..].chars().all(|c| c.is_ascii_digit());
                     let operand = |p: &str| -> Option<usize> {
                         let (name, idx) = p.split_at(1);
                         (idx.chars().all(|c| c.is_ascii_digit()) && !idx.is_empty())
                             .then(|| ["A", "B"].iter().position(|x| *x == name))
                             .flatten()
                     };
-                    let is_pcout = |p: &str| p.strip_prefix("PCOUT").is_some_and(|i| i.chars().all(|c| c.is_ascii_digit()));
+                    let is_pcout = |p: &str| {
+                        p.strip_prefix("PCOUT")
+                            .is_some_and(|i| i.chars().all(|c| c.is_ascii_digit()))
+                    };
                     let outs: Vec<&str> = ports.iter().copied().filter(|p| is_p(p)).collect();
                     let pcouts: Vec<&str> = ports.iter().copied().filter(|p| is_pcout(p)).collect();
                     for &p in &ports {
@@ -702,10 +718,21 @@ pub(crate) fn bram_port(pin: &str, sdp: bool) -> usize {
         return 0;
     }
     const A: [&str; 11] = [
-        "CLKARDCLK", "REGCLKARDRCLK", "ENARDEN", "REGCEAREGCE", "RSTRAMARSTRAM", "RSTREGARSTREG",
-        "ADDRARDADDR", "ADDRATIEHIGH", "WEA", "DIADI", "DIPADIP",
+        "CLKARDCLK",
+        "REGCLKARDRCLK",
+        "ENARDEN",
+        "REGCEAREGCE",
+        "RSTRAMARSTRAM",
+        "RSTREGARSTREG",
+        "ADDRARDADDR",
+        "ADDRATIEHIGH",
+        "WEA",
+        "DIADI",
+        "DIPADIP",
     ];
-    let a = A.iter().any(|p| pin.starts_with(p)) || pin.starts_with("DOADO") || pin.starts_with("DOPADOP");
+    let a = A.iter().any(|p| pin.starts_with(p))
+        || pin.starts_with("DOADO")
+        || pin.starts_with("DOPADOP");
     usize::from(!a)
 }
 
@@ -793,9 +820,11 @@ impl Grid {
                     col: 0,
                 }),
                 "BUFGCTRL" => bufgs.push((name.clone(), xy_of(s.tile))),
-                ty if crate::cmt::Prim::from_cell(ty).is_some() => {
-                    cmts.push((name.clone(), crate::cmt::Prim::from_cell(ty).expect("matched"), xy_of(s.tile)))
-                }
+                ty if crate::cmt::Prim::from_cell(ty).is_some() => cmts.push((
+                    name.clone(),
+                    crate::cmt::Prim::from_cell(ty).expect("matched"),
+                    xy_of(s.tile),
+                )),
                 // Block RAM sites by relative name: RAMB18_X0Y0 (the FIFO18E1
                 // site, lower), RAMB18_X0Y1, RAMB36_X0Y0.
                 "FIFO18E1" | "RAMB18E1" | "RAMBFIFO36E1" => {
@@ -1038,7 +1067,10 @@ impl<'a> State<'a> {
             .collect();
         let analysis = t.graph.analyse(&arcs);
         for (c, a) in t.conns.iter().zip(&arcs) {
-            if !matches!(self.d.cells[c.to_cell as usize].kind, Kind::Lut { dram: false }) {
+            if !matches!(
+                self.d.cells[c.to_cell as usize].kind,
+                Kind::Lut { dram: false }
+            ) {
                 continue;
             }
             let Some((_, port)) = t.graph.name(c.to).rsplit_once('.') else {
@@ -1064,7 +1096,10 @@ impl<'a> State<'a> {
     fn hard_full(&self, h: Hard, b: u32) -> bool {
         matches!(
             self.d.cells[self.d.hard[h as usize][b as usize] as usize].kind,
-            Kind::Bram { size: crate::bram::Size::Full, .. }
+            Kind::Bram {
+                size: crate::bram::Size::Full,
+                ..
+            }
         ) || (h == Hard::Dsp && self.d.cascaded[b as usize].is_some())
     }
 
@@ -1102,7 +1137,9 @@ impl<'a> State<'a> {
                 }
             }
             Obj::Hard(h, b) => {
-                let slots = self.hard_slots(h, b, self.hard_slot[h as usize][b as usize]).expect("placed legally");
+                let slots = self
+                    .hard_slots(h, b, self.hard_slot[h as usize][b as usize])
+                    .expect("placed legally");
                 for k in slots {
                     self.hard_occ[h as usize][k as usize] = None;
                 }
@@ -1377,8 +1414,14 @@ fn initial_empty<'a>(d: &'a Design, g: &'a Grid, timing: Option<&'a Timing>) -> 
         ble_slot: vec![u32::MAX; d.bles.len()],
         carry_root: vec![u32::MAX; d.carries.len()],
         dram_slice: vec![u32::MAX; d.drams.len()],
-        hard_slot: [vec![u32::MAX; d.hard[0].len()], vec![u32::MAX; d.hard[1].len()]],
-        hard_occ: [vec![None; 2 * g.hard[0].len()], vec![None; 2 * g.hard[1].len()]],
+        hard_slot: [
+            vec![u32::MAX; d.hard[0].len()],
+            vec![u32::MAX; d.hard[1].len()],
+        ],
+        hard_occ: [
+            vec![None; 2 * g.hard[0].len()],
+            vec![None; 2 * g.hard[1].len()],
+        ],
         occ: vec![Occ::Free; n_slices * SLOTS],
         slice_macro: vec![None; n_slices],
         slice_cs: vec![None; n_slices],
@@ -1488,7 +1531,11 @@ fn anneal(s: &mut State, rng: &mut Rng, start: Start) -> u64 {
         .map(Obj::Ble)
         .chain((0..d.carries.len() as u32).map(Obj::Carry))
         .chain((0..d.drams.len() as u32).map(Obj::Dram))
-        .chain(Hard::ALL.into_iter().flat_map(|h| (0..d.hard[h as usize].len() as u32).map(move |b| Obj::Hard(h, b))))
+        .chain(
+            Hard::ALL
+                .into_iter()
+                .flat_map(|h| (0..d.hard[h as usize].len() as u32).map(move |b| Obj::Hard(h, b))),
+        )
         .collect();
     if objects.is_empty() {
         return 0;
@@ -1539,7 +1586,10 @@ fn anneal(s: &mut State, rng: &mut Rng, start: Start) -> u64 {
         };
         let pos = match o {
             Obj::Hard(..) => pos,
-            Obj::Ble(_) => *s.g.at.get(&(u32::try_from(col).ok()?, y, even))? * SLOTS as u32 + rng.below(SLOTS) as u32,
+            Obj::Ble(_) => {
+                *s.g.at.get(&(u32::try_from(col).ok()?, y, even))? * SLOTS as u32
+                    + rng.below(SLOTS) as u32
+            }
             _ => *s.g.at.get(&(u32::try_from(col).ok()?, y, even))?,
         };
         let moves = s.moves_to(o, pos)?;
@@ -1648,7 +1698,12 @@ pub(crate) struct Placement {
     pub stats: Stats,
 }
 
-fn sites(d: &Design, g: &Grid, s: &State, fixed: &[(CellId, String, Xy)]) -> Vec<Option<(String, Bel)>> {
+fn sites(
+    d: &Design,
+    g: &Grid,
+    s: &State,
+    fixed: &[(CellId, String, Xy)],
+) -> Vec<Option<(String, Bel)>> {
     let mut out: Vec<Option<(String, Bel)>> = vec![None; d.cells.len()];
     let site = |slice: u32| g.slices[slice as usize].site.clone();
     for (b, ble) in d.bles.iter().enumerate() {
@@ -1698,7 +1753,13 @@ fn sites(d: &Design, g: &Grid, s: &State, fixed: &[(CellId, String, Xy)]) -> Vec
             let slot = s.hard_slot[h as usize][b] as usize;
             let tile = &g.hard[h as usize][slot / 2];
             let site = match (&d.cells[c as usize].kind, &tile.full) {
-                (Kind::Bram { size: crate::bram::Size::Full, .. }, Some(full)) => full.clone(),
+                (
+                    Kind::Bram {
+                        size: crate::bram::Size::Full,
+                        ..
+                    },
+                    Some(full),
+                ) => full.clone(),
                 _ => tile.half[slot % 2].clone(),
             };
             out[c as usize] = Some((site, Bel::Site));
@@ -1729,7 +1790,11 @@ fn place_hard(s: &mut State, target: impl Fn(Hard, u32) -> Xy) -> Result<()> {
                 ((tx - x).abs() / 2 + (ty - y).abs(), k)
             });
             let ok = slots.into_iter().any(|k| s.place(Obj::Hard(h, b), k));
-            ensure!(ok, "no {h:?} site left: the design has {}", s.d.hard[h as usize].len());
+            ensure!(
+                ok,
+                "no {h:?} site left: the design has {}",
+                s.d.hard[h as usize].len()
+            );
         }
     }
     Ok(())
@@ -1739,7 +1804,10 @@ fn place_hard(s: &mut State, target: impl Fn(Hard, u32) -> Xy) -> Result<()> {
 /// the free one nearest its source). Returns (cell, site, position).
 fn fixed_sites(db: &ChipDb, d: &Design, g: &Grid) -> Result<Vec<(CellId, String, Xy)>> {
     let site_xy = |site: &str| -> Result<Xy> {
-        let s = db.sites.get(site).with_context(|| format!("no site {site}"))?;
+        let s = db
+            .sites
+            .get(site)
+            .with_context(|| format!("no site {site}"))?;
         let (x, y) = db.tile_xy(s.tile);
         Ok((x as i32, y as i32))
     };
@@ -1827,7 +1895,10 @@ const COLD_MOVES: f64 = 1.0;
 fn best_of<'a>(start: &State<'a>, seeds: usize, from: Start) -> (State<'a>, u64) {
     // CHIPSMITH_XC7_SEED=<n>: another set of seeds, to tell a change from
     // the anneal's luck (bench/zybo-timing.sh's ZYBO_SEEDS); 0 is the default.
-    let base: u64 = std::env::var("CHIPSMITH_XC7_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let base: u64 = std::env::var("CHIPSMITH_XC7_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let results: Vec<(State, u64)> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..seeds)
             .map(|i| {
@@ -1911,7 +1982,11 @@ impl chipsmith_place::electro::Timing for GlobalTiming<'_> {
                     (Some(a), Some(b)) => t.estimate(a, b),
                     _ => 0.0,
                 };
-                Arc { from: c.from, to: c.to, delay }
+                Arc {
+                    from: c.from,
+                    to: c.to,
+                    delay,
+                }
             })
             .collect();
         let analysis = t.graph.analyse(&arcs);
@@ -1962,8 +2037,14 @@ fn global<'a>(
         let rows = chain.len().min(height) as u32;
         let o = p.add_object(rows, &[(0, (SLOTS * chain.len()) as f32 / full)]);
         for cs in chain {
-            let cells = std::iter::once(cs.carry)
-                .chain(cs.lut6.iter().chain(&cs.lut5).chain(&cs.ff).flatten().copied());
+            let cells = std::iter::once(cs.carry).chain(
+                cs.lut6
+                    .iter()
+                    .chain(&cs.lut5)
+                    .chain(&cs.ff)
+                    .flatten()
+                    .copied(),
+            );
             for c in cells {
                 obj_of[c as usize] = Some(o);
             }
@@ -1993,7 +2074,10 @@ fn global<'a>(
     }
     let mut fixed_of: HashMap<CellId, u32> = HashMap::default();
     for (c, _, xy) in fixed {
-        fixed_of.insert(*c, p.add_fixed(((xy.0 / 2) as f32 + 0.5, xy.1 as f32 + 0.5)));
+        fixed_of.insert(
+            *c,
+            p.add_fixed(((xy.0 / 2) as f32 + 0.5, xy.1 as f32 + 0.5)),
+        );
     }
     // Each design net's net in the problem, for reweighting.
     let mut problem_net: Vec<Option<usize>> = vec![None; d.net_cells.len()];
@@ -2007,7 +2091,11 @@ fn global<'a>(
                 _ => continue,
             };
             if !pins.iter().any(|q| q.of == of) {
-                pins.push(Pin { of, dx: 0.0, dy: 0.0 });
+                pins.push(Pin {
+                    of,
+                    dx: 0.0,
+                    dy: 0.0,
+                });
             }
         }
         if pins.len() >= 2 {
@@ -2018,7 +2106,11 @@ fn global<'a>(
     }
     let opts = electro::Options {
         accel: electro::Accel::from_env().map_err(anyhow::Error::msg)?,
-        timing_every: if timing.is_some() { GLOBAL_TIMING_EVERY } else { 0 },
+        timing_every: if timing.is_some() {
+            GLOBAL_TIMING_EVERY
+        } else {
+            0
+        },
         trace: std::env::var_os("CHIPSMITH_XC7_TRACE").is_some(),
         ..Default::default()
     };
@@ -2051,10 +2143,14 @@ fn global<'a>(
         _ => std::cmp::Reverse(1),
     });
     for o in macros {
-        let ok = near(target(o)).into_iter().any(|sl| s.place(objects[o], sl));
+        let ok = near(target(o))
+            .into_iter()
+            .any(|sl| s.place(objects[o], sl));
         ensure!(ok, "no room for {:?}", objects[o]);
     }
-    place_hard(&mut s, |h, b| target(hard_obj[h as usize][b as usize] as usize))?;
+    place_hard(&mut s, |h, b| {
+        target(hard_obj[h as usize][b as usize] as usize)
+    })?;
     // BLEs: a ring search outward from the target, slot by slot.
     let col_of_x = |x: i32| {
         g.slices
@@ -2102,7 +2198,8 @@ pub(crate) fn place(db: &ChipDb, delays: Option<&Delays>, d: &Design) -> Result<
     let g = Grid::new(db)?;
     let timing = delays.map(|delays| Timing::new(d, delays));
     let fixed = fixed_sites(db, d, &g)?;
-    let objects = d.bles.len() + d.carries.len() + d.drams.len() + d.hard.iter().map(Vec::len).sum::<usize>();
+    let objects =
+        d.bles.len() + d.carries.len() + d.drams.len() + d.hard.iter().map(Vec::len).sum::<usize>();
     let electro = match std::env::var("CHIPSMITH_XC7_PLACER").as_deref() {
         Ok("anneal") => false,
         Ok("electro") => true,

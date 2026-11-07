@@ -146,7 +146,11 @@ pub(crate) fn write(db: &ChipDb, phys: &Physical, pips: &[Edge]) -> Result<Strin
                     line(format!("{p}.{l}LUT.RAM"));
                 }
                 if let Some(m) = s.outmux[k] {
-                    let m = if m == "5Q" { format!("{l}5Q") } else { m.to_string() };
+                    let m = if m == "5Q" {
+                        format!("{l}5Q")
+                    } else {
+                        m.to_string()
+                    };
                     line(format!("{p}.{l}OUTMUX.{m}"));
                 }
                 if let Some(ff) = s.ff5[k] {
@@ -176,7 +180,10 @@ pub(crate) fn write(db: &ChipDb, phys: &Physical, pips: &[Edge]) -> Result<Strin
             if has_ff && s.ffsync {
                 line(format!("{p}.FFSYNC"));
             }
-            line(format!("{p}.{}", if s.clkinv { "CLKINV" } else { "NOCLKINV" }));
+            line(format!(
+                "{p}.{}",
+                if s.clkinv { "CLKINV" } else { "NOCLKINV" }
+            ));
             if has_ff && s.srused {
                 line(format!("{p}.SRUSEDMUX"));
             }
@@ -248,7 +255,11 @@ pub(crate) fn write(db: &ChipDb, phys: &Physical, pips: &[Edge]) -> Result<Strin
     }
 
     for c in &phys.cmts {
-        let p = format!("{}.{}", tile_name(db, c.tile), c.config.prim().site_prefix());
+        let p = format!(
+            "{}.{}",
+            tile_name(db, c.tile),
+            c.config.prim().site_prefix()
+        );
         for f in c.config.features(c.reset)? {
             line(format!("{p}.{f}"));
         }
@@ -263,7 +274,10 @@ pub(crate) fn write(db: &ChipDb, phys: &Physical, pips: &[Edge]) -> Result<Strin
     }
     for (site, chain) in &phys.bscans {
         let s = &db.sites[site];
-        line(format!("{}.BSCAN.JTAG_CHAIN_{chain}", tile_name(db, s.tile)));
+        line(format!(
+            "{}.BSCAN.JTAG_CHAIN_{chain}",
+            tile_name(db, s.tile)
+        ));
     }
 
     // Routing.
@@ -297,7 +311,10 @@ pub(crate) fn write(db: &ChipDb, phys: &Physical, pips: &[Edge]) -> Result<Strin
         let ty = db.tile_type(tile).name.as_str();
         let name = tile_name(db, tile);
         let row = db.tile_xy(tile).1;
-        if matches!(ty, "HCLK_L" | "HCLK_R" | "HCLK_L_BOT_UTURN" | "HCLK_R_BOT_UTURN") {
+        if matches!(
+            ty,
+            "HCLK_L" | "HCLK_R" | "HCLK_L_BOT_UTURN" | "HCLK_R_BOT_UTURN"
+        ) {
             for s in used.iter().filter(|s| s.starts_with("HCLK_CK_")) {
                 if let Some(i) = s.find("BUFHCLK") {
                     line(format!("{name}.ENABLE_BUFFER.{s}"));
@@ -442,7 +459,10 @@ pub(crate) fn bram_lines(db: &ChipDb, b: &crate::phys::BramConf) -> Vec<String> 
         }
         // Contents: a RAMB36E1's are its halves' bits in turn.
         let data = c.size.data_bits();
-        for (prefix, base, words) in [("INIT", 0, data / 256 / c.size.halves()), ("INITP", data, data / 8 / 256 / c.size.halves())] {
+        for (prefix, base, words) in [
+            ("INIT", 0, data / 256 / c.size.halves()),
+            ("INITP", data, data / 8 / 256 / c.size.halves()),
+        ] {
             for i in 0..words {
                 let bit = |k: usize| -> bool {
                     if full {
@@ -452,7 +472,10 @@ pub(crate) fn bram_lines(db: &ChipDb, b: &crate::phys::BramConf) -> Vec<String> 
                     }
                 };
                 if (0..256).any(bit) {
-                    let v: String = (0..256).rev().map(|k| if bit(k) { '1' } else { '0' }).collect();
+                    let v: String = (0..256)
+                        .rev()
+                        .map(|k| if bit(k) { '1' } else { '0' })
+                        .collect();
                     f(format!("{prefix}_{i:02X}[255:0] = 256'b{v}"));
                 }
             }
@@ -467,7 +490,11 @@ pub(crate) fn bram_lines(db: &ChipDb, b: &crate::phys::BramConf) -> Vec<String> 
 /// bit by bit between the halves as its pins are (bit 2i + h to half h's
 /// i; Vivado's bitstreams agree), each half's in the layout of half the
 /// width.
-pub(crate) fn half_values(c: &crate::bram::Config, k: usize, h: usize) -> (u64, u64, crate::bram::Width) {
+pub(crate) fn half_values(
+    c: &crate::bram::Config,
+    k: usize,
+    h: usize,
+) -> (u64, u64, crate::bram::Width) {
     use crate::bram::{Size, Width};
     let p = &c.ports[k];
     // SDP's wide read: each port's pins hold half its word, x18 (x36).
@@ -532,7 +559,12 @@ pub(crate) fn dsp_lines(db: &ChipDb, d: &crate::phys::DspConf) -> Vec<String> {
                 f(format!("ZIS_{pin}_INVERTED"));
             }
         } else {
-            f(format!("ZIS_{pin}_INVERTED[{}:0] = {w}'b{:0w$b}", w - 1, z, w = w));
+            f(format!(
+                "ZIS_{pin}_INVERTED[{}:0] = {w}'b{:0w$b}",
+                w - 1,
+                z,
+                w = w
+            ));
         }
     }
     f(format!("MASK[47:0] = 48'b{:048b}", c.mask));

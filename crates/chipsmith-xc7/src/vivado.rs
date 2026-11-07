@@ -51,7 +51,9 @@ struct Lut {
 /// order.
 fn reduce(init: u64, inputs: &[SigBit]) -> (Lut, Vec<SigBit>) {
     let n = inputs.len();
-    let kept: Vec<usize> = (0..n).filter(|&i| matches!(inputs[i], SigBit::Net(_))).collect();
+    let kept: Vec<usize> = (0..n)
+        .filter(|&i| matches!(inputs[i], SigBit::Net(_)))
+        .collect();
     let fixed: usize = (0..n)
         .filter(|&i| inputs[i] == SigBit::ONE)
         .map(|i| 1 << i)
@@ -73,7 +75,11 @@ fn reduce(init: u64, inputs: &[SigBit]) -> (Lut, Vec<SigBit>) {
 
 fn param_u64(g: &Generic, name: &str) -> u64 {
     match g.params.get(name) {
-        Some(ParamValue::Bits(c)) => c.0.iter().rev().fold(0, |v, s| v << 1 | u64::from(*s == State::One)),
+        Some(ParamValue::Bits(c)) => {
+            c.0.iter()
+                .rev()
+                .fold(0, |v, s| v << 1 | u64::from(*s == State::One))
+        }
         _ => 0,
     }
 }
@@ -86,11 +92,19 @@ fn is_output(g: &Generic, port: &str) -> bool {
 }
 
 /// Where a decoded cell goes: its site and, inside a slice, its bel.
-fn location(db: &ChipDb, slice_sites: &BTreeMap<String, String>, name: &str, ty: &str) -> Option<(String, Option<String>)> {
+fn location(
+    db: &ChipDb,
+    slice_sites: &BTreeMap<String, String>,
+    name: &str,
+    ty: &str,
+) -> Option<(String, Option<String>)> {
     if let Some(site) = name.strip_prefix("bufg_") {
         return Some((site.to_string(), None));
     }
-    if let Some(site) = name.strip_suffix(".dsp").or_else(|| name.strip_suffix(".cmt")) {
+    if let Some(site) = name
+        .strip_suffix(".dsp")
+        .or_else(|| name.strip_suffix(".cmt"))
+    {
         return Some((site.to_string(), None));
     }
     if let Some((tile, h)) = name.split_once(".ramb18_y") {
@@ -129,7 +143,12 @@ fn cell_name(name: &str) -> String {
 
 /// `routed`'s netlist, placement and routing for Vivado; `period_ns` is
 /// the clock constraint on every clock pin.
-pub fn export(db: &ChipDb, routed: &Routed, pins: &BTreeMap<String, String>, period_ns: f64) -> Result<Export> {
+pub fn export(
+    db: &ChipDb,
+    routed: &Routed,
+    pins: &BTreeMap<String, String>,
+    period_ns: f64,
+) -> Result<Export> {
     let m: &Module = routed.design.modules.first().context("an empty design")?;
 
     // Cells as (name, type, params, ports), LUTs reduced.
@@ -150,9 +169,19 @@ pub fn export(db: &ChipDb, routed: &Routed, pins: &BTreeMap<String, String>, per
         if crate::synth::cells::LUTS.contains(&g.ty.as_str()) {
             let n = g.ports.iter().filter(|p| p.name.starts_with('I')).count();
             let inputs: Vec<SigBit> = (0..n)
-                .map(|i| g.ports.iter().find(|p| p.name == format!("I{i}")).map_or(SigBit::ONE, |p| p.sig[0]))
+                .map(|i| {
+                    g.ports
+                        .iter()
+                        .find(|p| p.name == format!("I{i}"))
+                        .map_or(SigBit::ONE, |p| p.sig[0])
+                })
                 .collect();
-            let o = g.ports.iter().find(|p| p.name == "O").context("a LUT without O")?.sig[0];
+            let o = g
+                .ports
+                .iter()
+                .find(|p| p.name == "O")
+                .context("a LUT without O")?
+                .sig[0];
             let (l, ins) = reduce(param_u64(&g, "INIT"), &inputs);
             if ins.is_empty() {
                 constant.insert(o, SigBit::Const(State::from(l.init & 1 == 1)));
@@ -190,13 +219,17 @@ pub fn export(db: &ChipDb, routed: &Routed, pins: &BTreeMap<String, String>, per
     // carry or sign cascade.
     for c in cells.iter_mut().filter(|c| c.g.ty == "DSP48E1") {
         let opmode: Option<u64> = c.g.ports.iter().find(|p| p.name == "OPMODE").and_then(|p| {
-            p.sig.iter().enumerate().try_fold(0u64, |v, (k, b)| match b {
-                SigBit::Const(s) => Some(v | u64::from(*s == State::One) << k),
-                _ => None,
-            })
+            p.sig
+                .iter()
+                .enumerate()
+                .try_fold(0u64, |v, (k, b)| match b {
+                    SigBit::Const(s) => Some(v | u64::from(*s == State::One) << k),
+                    _ => None,
+                })
         });
         let reads_pcin = opmode.is_none_or(|o| matches!(o >> 4 & 7, 1 | 5));
-        let cascade = |name: &str| matches!(c.g.params.get(name), Some(ParamValue::Str(v)) if v == "CASCADE");
+        let cascade =
+            |name: &str| matches!(c.g.params.get(name), Some(ParamValue::Str(v)) if v == "CASCADE");
         let (acin, bcin) = (cascade("A_INPUT"), cascade("B_INPUT"));
         for p in c.g.ports.iter_mut() {
             let unread = match p.name.as_str() {
@@ -246,7 +279,11 @@ pub fn export(db: &ChipDb, routed: &Routed, pins: &BTreeMap<String, String>, per
     let mut net_name: HashMap<SigBit, String> = HashMap::new();
     for w in m.wires.iter().filter(|w| w.port.is_some()) {
         for (i, b) in w.bits.iter().enumerate() {
-            let name = if w.bits.len() == 1 { w.name.clone() } else { format!("{}[{i}]", w.name) };
+            let name = if w.bits.len() == 1 {
+                w.name.clone()
+            } else {
+                format!("{}[{i}]", w.name)
+            };
             net_name.entry(*b).or_insert(name);
         }
     }
@@ -254,16 +291,32 @@ pub fn export(db: &ChipDb, routed: &Routed, pins: &BTreeMap<String, String>, per
         match b {
             SigBit::Const(State::One) => "1'b1".into(),
             SigBit::Const(_) => "1'b0".into(),
-            SigBit::Net(n) => net_name.get(b).cloned().unwrap_or_else(|| format!("n{}", n.index())),
+            SigBit::Net(n) => net_name
+                .get(b)
+                .cloned()
+                .unwrap_or_else(|| format!("n{}", n.index())),
         }
     };
 
     let mut v = String::new();
-    let ports: Vec<String> = m.wires.iter().filter(|w| w.port.is_some()).map(|w| w.name.clone()).collect();
+    let ports: Vec<String> = m
+        .wires
+        .iter()
+        .filter(|w| w.port.is_some())
+        .map(|w| w.name.clone())
+        .collect();
     writeln!(v, "module top({});", ports.join(", "))?;
     for w in m.wires.iter().filter(|w| w.port.is_some()) {
-        let dir = if w.port == Some(Dir::In) { "input" } else { "output" };
-        let range = if w.bits.len() > 1 { format!("[{}:0] ", w.bits.len() - 1) } else { String::new() };
+        let dir = if w.port == Some(Dir::In) {
+            "input"
+        } else {
+            "output"
+        };
+        let range = if w.bits.len() > 1 {
+            format!("[{}:0] ", w.bits.len() - 1)
+        } else {
+            String::new()
+        };
         writeln!(v, "  {dir} wire {range}{};", w.name)?;
     }
     let mut declared: HashSet<String> = ports.iter().cloned().collect();
@@ -281,34 +334,38 @@ pub fn export(db: &ChipDb, routed: &Routed, pins: &BTreeMap<String, String>, per
     for c in &cells {
         // A decoded block's input period isn't in its bits: the clock pins'.
         let period = is_cmt(&c.g.ty).then(|| format!(".CLKIN1_PERIOD({period_ns:.3})"));
-        let params: Vec<String> = c
-            .g
-            .params
-            .iter()
-            .map(|(k, p)| match p {
-                ParamValue::Bits(b) => {
-                    let bits: String = b.0.iter().rev().map(|s| if *s == State::One { '1' } else { '0' }).collect();
-                    format!(".{k}({}'b{bits})", b.0.len())
-                }
-                // A PLL's or MMCM's numbers are reals to Vivado.
-                ParamValue::Str(s) if is_cmt(&c.g.ty) && s.parse::<f64>().is_ok() => format!(".{k}({s})"),
-                ParamValue::Str(s) => format!(".{k}(\"{s}\")"),
-            })
-            .chain(period)
-            .collect();
-        let conns: Vec<String> = c
-            .g
-            .ports
-            .iter()
-            .map(|p| {
-                let bits: Vec<String> = p.sig.iter().rev().map(&name_of).collect();
-                if bits.len() == 1 {
-                    format!(".{}({})", p.name, bits[0])
-                } else {
-                    format!(".{}({{{}}})", p.name, bits.join(", "))
-                }
-            })
-            .collect();
+        let params: Vec<String> =
+            c.g.params
+                .iter()
+                .map(|(k, p)| match p {
+                    ParamValue::Bits(b) => {
+                        let bits: String =
+                            b.0.iter()
+                                .rev()
+                                .map(|s| if *s == State::One { '1' } else { '0' })
+                                .collect();
+                        format!(".{k}({}'b{bits})", b.0.len())
+                    }
+                    // A PLL's or MMCM's numbers are reals to Vivado.
+                    ParamValue::Str(s) if is_cmt(&c.g.ty) && s.parse::<f64>().is_ok() => {
+                        format!(".{k}({s})")
+                    }
+                    ParamValue::Str(s) => format!(".{k}(\"{s}\")"),
+                })
+                .chain(period)
+                .collect();
+        let conns: Vec<String> =
+            c.g.ports
+                .iter()
+                .map(|p| {
+                    let bits: Vec<String> = p.sig.iter().rev().map(&name_of).collect();
+                    if bits.len() == 1 {
+                        format!(".{}({})", p.name, bits[0])
+                    } else {
+                        format!(".{}({{{}}})", p.name, bits.join(", "))
+                    }
+                })
+                .collect();
         writeln!(
             v,
             "  (* DONT_TOUCH = \"yes\" *) {} #({}) {} ({});",
@@ -324,17 +381,33 @@ pub fn export(db: &ChipDb, routed: &Routed, pins: &BTreeMap<String, String>, per
     let mut xdc = String::new();
     let mut listing = String::new();
     for (port, pin) in pins {
-        writeln!(xdc, "set_property -dict {{PACKAGE_PIN {pin} IOSTANDARD LVCMOS33}} [get_ports {{{port}}}]")?;
+        writeln!(
+            xdc,
+            "set_property -dict {{PACKAGE_PIN {pin} IOSTANDARD LVCMOS33}} [get_ports {{{port}}}]"
+        )?;
     }
     for c in &cells {
         let Some((site, bel)) = location(db, &routed.slice_sites, &c.name, &c.g.ty) else {
             continue;
         };
         let name = cell_name(&c.name);
-        writeln!(listing, "{name}\t{site}\t{}", bel.as_deref().unwrap_or("SITE"))?;
+        writeln!(
+            listing,
+            "{name}\t{site}\t{}",
+            bel.as_deref().unwrap_or("SITE")
+        )?;
         if let Some(l) = &c.lut {
-            let locks: Vec<String> = l.pins.iter().enumerate().map(|(i, p)| format!("I{i}:A{p}")).collect();
-            writeln!(xdc, "set_property LOCK_PINS {{{}}} [get_cells {{{name}}}]", locks.join(" "))?;
+            let locks: Vec<String> = l
+                .pins
+                .iter()
+                .enumerate()
+                .map(|(i, p)| format!("I{i}:A{p}"))
+                .collect();
+            writeln!(
+                xdc,
+                "set_property LOCK_PINS {{{}}} [get_cells {{{name}}}]",
+                locks.join(" ")
+            )?;
         }
         if let Some(bel) = bel {
             writeln!(xdc, "set_property BEL {bel} [get_cells {{{name}}}]")?;
@@ -359,7 +432,10 @@ pub fn export(db: &ChipDb, routed: &Routed, pins: &BTreeMap<String, String>, per
         let i = port_of(c, "CLKIN1").context("CLKIN1")?;
         if let Some(port) = driver_port.get(&i) {
             if clocked.insert(port.clone()) {
-                writeln!(xdc, "create_clock -period {period_ns:.3} -name {port} [get_ports {{{port}}}]")?;
+                writeln!(
+                    xdc,
+                    "create_clock -period {period_ns:.3} -name {port} [get_ports {{{port}}}]"
+                )?;
             }
         }
     }
@@ -368,13 +444,19 @@ pub fn export(db: &ChipDb, routed: &Routed, pins: &BTreeMap<String, String>, per
         let i = port_of(c, "I").context("a BUFG without I")?;
         if let Some(port) = driver_port.get(&i) {
             if clocked.insert(port.clone()) {
-                writeln!(xdc, "create_clock -period {period_ns:.3} -name {port} [get_ports {{{port}}}]")?;
+                writeln!(
+                    xdc,
+                    "create_clock -period {period_ns:.3} -name {port} [get_ports {{{port}}}]"
+                )?;
             }
             continue;
         }
         // A register toggling (D its own Q through a LUT1 inverter) makes a
         // clock of half its clock's frequency.
-        let Some(ff) = cells.iter().find(|f| f.g.ty.starts_with("FD") && port_of(f, "Q") == Some(i)) else {
+        let Some(ff) = cells
+            .iter()
+            .find(|f| f.g.ty.starts_with("FD") && port_of(f, "Q") == Some(i))
+        else {
             continue;
         };
         let toggles = cells.iter().any(|l| {
@@ -400,12 +482,19 @@ pub fn export(db: &ChipDb, routed: &Routed, pins: &BTreeMap<String, String>, per
     let driver_pin: HashMap<SigBit, String> = cells
         .iter()
         .flat_map(|c| {
-            c.g.ports.iter().filter(|p| is_output(&c.g, &p.name)).flat_map(move |p| {
-                p.sig.iter().enumerate().map(move |(i, b)| {
-                    let pin = if p.sig.len() == 1 { p.name.clone() } else { format!("{}[{i}]", p.name) };
-                    (*b, format!("{}/{pin}", cell_name(&c.name)))
+            c.g.ports
+                .iter()
+                .filter(|p| is_output(&c.g, &p.name))
+                .flat_map(move |p| {
+                    p.sig.iter().enumerate().map(move |(i, b)| {
+                        let pin = if p.sig.len() == 1 {
+                            p.name.clone()
+                        } else {
+                            format!("{}[{i}]", p.name)
+                        };
+                        (*b, format!("{}/{pin}", cell_name(&c.name)))
+                    })
                 })
-            })
         })
         .collect();
     let mut children: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
@@ -445,13 +534,18 @@ pub fn export(db: &ChipDb, routed: &Routed, pins: &BTreeMap<String, String>, per
         for w in 0..tt.wires.len() as u32 {
             let n = db.node(tile, w);
             if on_route.contains(&n) {
-                wire_of
-                    .entry(n)
-                    .or_insert_with(|| format!("{}/{}", db.tile_names[tile as usize], tt.wires.get(w)));
+                wire_of.entry(n).or_insert_with(|| {
+                    format!("{}/{}", db.tile_names[tile as usize], tt.wires.get(w))
+                });
             }
         }
     }
-    fn tree(n: NodeId, children: &HashMap<NodeId, Vec<NodeId>>, wire_of: &HashMap<NodeId, String>, out: &mut String) {
+    fn tree(
+        n: NodeId,
+        children: &HashMap<NodeId, Vec<NodeId>>,
+        wire_of: &HashMap<NodeId, String>,
+        out: &mut String,
+    ) {
         out.push_str(&wire_of[&n]);
         let Some(cs) = children.get(&n) else {
             return;
@@ -477,10 +571,17 @@ pub fn export(db: &ChipDb, routed: &Routed, pins: &BTreeMap<String, String>, per
         }
     }
     fn reaches(n: NodeId, children: &HashMap<NodeId, Vec<NodeId>>, set: &HashSet<NodeId>) -> bool {
-        set.contains(&n) || children.get(&n).is_some_and(|cs| cs.iter().any(|&c| reaches(c, children, set)))
+        set.contains(&n)
+            || children
+                .get(&n)
+                .is_some_and(|cs| cs.iter().any(|&c| reaches(c, children, set)))
     }
     let mut route = String::new();
-    let mut sources: Vec<(&NodeId, &SigBit)> = routed.source.iter().filter(|(n, _)| children.contains_key(n)).collect();
+    let mut sources: Vec<(&NodeId, &SigBit)> = routed
+        .source
+        .iter()
+        .filter(|(n, _)| children.contains_key(n))
+        .collect();
     sources.sort_unstable_by_key(|(n, _)| **n);
     let mut nets = 0;
     for (&n, b) in sources {

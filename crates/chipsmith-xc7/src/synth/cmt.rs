@@ -16,8 +16,12 @@ pub fn lower(m: &mut Module) -> Result<usize> {
     let conn = Connectivity::new(m);
     let mut jobs = Vec::new();
     for (i, c) in m.cells.iter().enumerate() {
-        let CellKind::Other(g) = &c.kind else { continue };
-        let Some(prim) = Prim::from_request_cell(&g.ty) else { continue };
+        let CellKind::Other(g) = &c.kind else {
+            continue;
+        };
+        let Some(prim) = Prim::from_request_cell(&g.ty) else {
+            continue;
+        };
         let bit = |port: &str| g.port(port).and_then(|p| p.sig.first().copied());
         let used: Vec<bool> = (0..prim.outputs())
             .map(|k| match bit(&format!("CLK{k}")) {
@@ -25,8 +29,11 @@ pub fn lower(m: &mut Module) -> Result<usize> {
                 _ => false,
             })
             .collect();
-        let request = Request::from_params(prim, &g.params, &used).with_context(|| format!("cell {}", c.name))?;
-        let solved = request.solve().with_context(|| format!("cell {}", c.name))?;
+        let request = Request::from_params(prim, &g.params, &used)
+            .with_context(|| format!("cell {}", c.name))?;
+        let solved = request
+            .solve()
+            .with_context(|| format!("cell {}", c.name))?;
         let inclk = bit("INCLK").with_context(|| format!("cell {}: INCLK unconnected", c.name))?;
         ensure!(
             matches!(inclk, SigBit::Net(_)),
@@ -34,7 +41,13 @@ pub fn lower(m: &mut Module) -> Result<usize> {
             c.name
         );
         let outputs: Vec<Option<SigBit>> = (0..prim.outputs())
-            .map(|k| if used[k] { bit(&format!("CLK{k}")) } else { None })
+            .map(|k| {
+                if used[k] {
+                    bit(&format!("CLK{k}"))
+                } else {
+                    None
+                }
+            })
             .collect();
         jobs.push((
             i,

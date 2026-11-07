@@ -78,12 +78,20 @@ fn features_are_vivados() {
         if ours != b.bits {
             let extra: Vec<&String> = ours.difference(&b.bits).collect();
             let missing: Vec<&String> = b.bits.difference(&ours).collect();
-            failures.push(format!("{}: ours only {extra:?}, Vivado's only {missing:?}", b.name));
+            failures.push(format!(
+                "{}: ours only {extra:?}, Vivado's only {missing:?}",
+                b.name
+            ));
         }
     }
     eprintln!("{checked} OPTIMIZED blocks compared");
     assert!(checked > 0);
-    assert!(failures.is_empty(), "{} of {checked} blocks differ:\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} of {checked} blocks differ:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
 
 #[test]
@@ -120,7 +128,11 @@ fn decimal(s: &str) -> (u64, u64) {
 }
 
 fn gcd(a: u64, b: u64) -> u64 {
-    if b == 0 { a } else { gcd(b, a % b) }
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
 }
 
 /// Vivado's clocking wizard's choices (data/clk_wiz.txt) against
@@ -148,13 +160,20 @@ fn the_clocking_wizards_counters() {
         "MMCM {125 100@30}",
     ];
     let (mut agree, mut differ, mut refused) = (0, Vec::new(), 0);
-    for line in include_str!("data/clk_wiz.txt").lines().filter(|l| !l.starts_with('#')) {
+    for line in include_str!("data/clk_wiz.txt")
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+    {
         if line.contains(" ERR ") {
             continue;
         }
         let (req, rest) = line.split_once("} ").unwrap();
         let (prim_s, req) = req.split_once(" {").unwrap();
-        let prim = if prim_s == "PLL" { Prim::Pll } else { Prim::Mmcm };
+        let prim = if prim_s == "PLL" {
+            Prim::Pll
+        } else {
+            Prim::Mmcm
+        };
         let (fin, outs) = req.split_once(' ').unwrap();
         let (fin_n, fin_d) = decimal(fin);
         // 1e6 / f_in MHz in ps, if whole.
@@ -164,8 +183,12 @@ fn the_clocking_wizards_counters() {
         let period = (1_000_000 * fin_d / fin_n) as u32;
         let mut outputs = vec![None; prim.outputs()];
         for (k, o) in outs.split(',').enumerate() {
-            let (o, duty) = o.split_once('%').map_or((o, 50.0), |(o, d)| (o, d.parse().unwrap()));
-            let (f, phase) = o.split_once('@').map_or((o, 0.0), |(f, p)| (f, p.parse::<f64>().unwrap()));
+            let (o, duty) = o
+                .split_once('%')
+                .map_or((o, 50.0), |(o, d)| (o, d.parse().unwrap()));
+            let (f, phase) = o
+                .split_once('@')
+                .map_or((o, 0.0), |(f, p)| (f, p.parse::<f64>().unwrap()));
             let (n, d) = decimal(f);
             // f_out / f_in = (n / d) / (fin_n / fin_d).
             let (mul, div) = (n * fin_d, d * fin_n);
@@ -178,20 +201,44 @@ fn the_clocking_wizards_counters() {
                 duty_percent: duty as u32,
             });
         }
-        let r = Request { prim, inclk_period_ps: period, outputs, compensation: Compensation::Zhold };
-        let field = |k: &str| rest.split_whitespace().find_map(|w| w.strip_prefix(k)).unwrap();
+        let r = Request {
+            prim,
+            inclk_period_ps: period,
+            outputs,
+            compensation: Compensation::Zhold,
+        };
+        let field = |k: &str| {
+            rest.split_whitespace()
+                .find_map(|w| w.strip_prefix(k))
+                .unwrap()
+        };
         let want_m: f64 = field("M=").parse().unwrap();
         let want_d: u8 = field("D=").parse().unwrap();
         let want_o: Vec<f64> = rest
             .split_whitespace()
             .filter(|w| w.starts_with('O'))
-            .map(|w| w.split_once('=').unwrap().1.split('/').next().unwrap().parse().unwrap())
+            .map(|w| {
+                w.split_once('=')
+                    .unwrap()
+                    .1
+                    .split('/')
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap()
+            })
             .collect();
         let Ok(s) = r.solve() else {
             refused += 1;
             continue;
         };
-        let got_o: Vec<f64> = s.config.outputs().iter().flatten().map(|o| o.divide().value()).collect();
+        let got_o: Vec<f64> = s
+            .config
+            .outputs()
+            .iter()
+            .flatten()
+            .map(|o| o.divide().value())
+            .collect();
         let tag = format!("{prim_s} {{{req}}}");
         if s.config.mult().value() == want_m && s.config.divclk() == want_d && got_o == want_o {
             agree += 1;
@@ -199,7 +246,13 @@ fn the_clocking_wizards_counters() {
             differ.push(tag);
         }
     }
-    eprintln!("clocking wizard: {agree} agree, {} differ, {refused} refused", differ.len());
-    assert_eq!(differ, known, "requests where chipsmith's counters aren't the wizard's");
+    eprintln!(
+        "clocking wizard: {agree} agree, {} differ, {refused} refused",
+        differ.len()
+    );
+    assert_eq!(
+        differ, known,
+        "requests where chipsmith's counters aren't the wizard's"
+    );
     assert!(agree >= 100, "{agree}");
 }

@@ -53,7 +53,12 @@ pub fn map(m: &mut Module) -> Result<usize> {
     Ok(count)
 }
 
-fn legalize(g: &mut Gates, init: &FxHashMap<chipsmith_netlist::Net, State>, name: &str, ff: Ff<Bit>) -> Result<Fd> {
+fn legalize(
+    g: &mut Gates,
+    init: &FxHashMap<chipsmith_netlist::Net, State>,
+    name: &str,
+    ff: Ff<Bit>,
+) -> Result<Fd> {
     let SigBit::Net(q) = ff.q else {
         bail!("register {name} drives a constant");
     };

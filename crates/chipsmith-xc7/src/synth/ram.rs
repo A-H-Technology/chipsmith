@@ -31,7 +31,10 @@ fn mappable(mem: &Mem) -> Option<SigBit> {
         && wr.clk.is_some()
         && !wr.wide_continuation
         && wr.en.iter().all(|&e| e == en)
-        && mem.rd.iter().all(|r| r.sync.is_none() && !r.wide_continuation);
+        && mem
+            .rd
+            .iter()
+            .all(|r| r.sync.is_none() && !r.wide_continuation);
     fits.then_some(en)
 }
 
@@ -62,9 +65,8 @@ fn map_one(g: &mut Gates, mem: &Mem, we: SigBit) -> usize {
     let wr = &mem.wr[0];
     let clk = wr.clk.expect("checked");
     let waddr = address(&wr.addr);
-    let init_bit = |word: usize, bit: usize| {
-        mem.init.0.get(word * mem.width + bit) == Some(&State::One)
-    };
+    let init_bit =
+        |word: usize, bit: usize| mem.init.0.get(word * mem.width + bit) == Some(&State::One);
     // (read port, first bit of the column) for every column of every port.
     let columns: Vec<(usize, usize)> = (0..mem.rd.len())
         .flat_map(|r| (0..mem.width).step_by(2).map(move |b| (r, b)))

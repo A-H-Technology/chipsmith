@@ -203,7 +203,15 @@ pub fn run(
     std::fs::write(fasm_out, text).with_context(|| format!("writing {}", fasm_out.display()))?;
 
     if let Some(path) = std::env::var_os("CHIPSMITH_XC7_CONNS") {
-        conns_dump(db, &timing, delays, &ph.nets, &trees, &placement.sites, &path)?;
+        conns_dump(
+            db,
+            &timing,
+            delays,
+            &ph.nets,
+            &trees,
+            &placement.sites,
+            &path,
+        )?;
     }
     let clocks = clock_timing(d, &packed.conf, &timing, &ph.nets, &trees, &placement.sites)?;
     let count = |f: &dyn Fn(&Kind, &Conf) -> bool| {
@@ -221,10 +229,30 @@ pub fn run(
         lut_sites: ph
             .slices
             .values()
-            .map(|s| (0..4).filter(|&k| s.lut_init[k].is_some() || s.lut5_init[k].is_some()).count())
+            .map(|s| {
+                (0..4)
+                    .filter(|&k| s.lut_init[k].is_some() || s.lut5_init[k].is_some())
+                    .count()
+            })
             .sum(),
-        ramb18s: count(&|k, _| matches!(k, Kind::Bram { size: crate::bram::Size::Half, .. })),
-        ramb36s: count(&|k, _| matches!(k, Kind::Bram { size: crate::bram::Size::Full, .. })),
+        ramb18s: count(&|k, _| {
+            matches!(
+                k,
+                Kind::Bram {
+                    size: crate::bram::Size::Half,
+                    ..
+                }
+            )
+        }),
+        ramb36s: count(&|k, _| {
+            matches!(
+                k,
+                Kind::Bram {
+                    size: crate::bram::Size::Full,
+                    ..
+                }
+            )
+        }),
         dsps: count(&|k, _| matches!(k, Kind::Dsp { .. })),
         slices: ph.slices.len(),
         place: placement.stats,
@@ -241,7 +269,9 @@ pub fn run(
             .filter_map(|(c, conf)| match conf {
                 Conf::Cmt(cmt) => Some(CmtInput {
                     cell: c.name.clone(),
-                    clock: c.net("CLKIN1").map_or_else(String::new, |n| clock_name(d, n)),
+                    clock: c
+                        .net("CLKIN1")
+                        .map_or_else(String::new, |n| clock_name(d, n)),
                     period_ps: cmt.clkin_period_ps,
                 }),
                 _ => None,
@@ -313,7 +343,10 @@ fn reach(db: &ChipDb, nets: &[phys::RouteNet], d: &place::Design) -> Result<()> 
                 while at != r.source {
                     let o = owner[at as usize];
                     if o != u32::MAX && o != i as u32 {
-                        eprintln!("      crosses node {at}, an end of {}", nets[o as usize].name);
+                        eprintln!(
+                            "      crosses node {at}, an end of {}",
+                            nets[o as usize].name
+                        );
                     }
                     let Some(&prev) = from.get(&at) else { break };
                     at = prev;
@@ -342,7 +375,11 @@ fn check(db: &ChipDb, nets: &[NetReq], trees: &[Tree]) -> Result<()> {
             reached.insert(*n);
         }
         for s in &net.sinks {
-            anyhow::ensure!(reached.contains(s), "net {}: a sink is not reached", net.name);
+            anyhow::ensure!(
+                reached.contains(s),
+                "net {}: a sink is not reached",
+                net.name
+            );
         }
         for &n in &tree.nodes {
             if let Some(other) = used.insert(n, i) {
@@ -368,7 +405,8 @@ fn conns_dump(
     sites: &[Option<(String, place::Bel)>],
     path: &std::ffi::OsStr,
 ) -> Result<()> {
-    let mut delay: std::collections::HashMap<(NetId, CellId, &str), Ps> = std::collections::HashMap::new();
+    let mut delay: std::collections::HashMap<(NetId, CellId, &str), Ps> =
+        std::collections::HashMap::new();
     for (r, t) in nets.iter().zip(trees) {
         for (ports, &dl) in r.sink_ports.iter().zip(&t.sink_delay) {
             for (c, p) in ports {
@@ -385,7 +423,11 @@ fn conns_dump(
     for c in &timing.conns {
         let port = timing.graph.name(c.to);
         let port = port.rsplit_once('.').map_or(port, |p| p.1);
-        let (Some(dl), Some(a), Some(b)) = (delay.get(&(c.net, c.to_cell, port)), xy(c.from_cell), xy(c.to_cell)) else {
+        let (Some(dl), Some(a), Some(b)) = (
+            delay.get(&(c.net, c.to_cell, port)),
+            xy(c.from_cell),
+            xy(c.to_cell),
+        ) else {
             continue;
         };
         let (dx, dy) = (a.0 - b.0, a.1 - b.1);
@@ -451,9 +493,13 @@ fn clock_timing(
             let Some((site, bel)) = at.get(cell) else {
                 continue;
             };
-            text += &format!("{site}\t{}\t{port}\t{arrival}\t{setup:.0}\n", bel.vivado_name());
+            text += &format!(
+                "{site}\t{}\t{port}\t{arrival}\t{setup:.0}\n",
+                bel.vivado_name()
+            );
         }
-        std::fs::write(&path, text).with_context(|| format!("writing {}", path.to_string_lossy()))?;
+        std::fs::write(&path, text)
+            .with_context(|| format!("writing {}", path.to_string_lossy()))?;
     }
     // CHIPSMITH_XC7_PATH=1: the critical path, node by node, on stderr.
     if std::env::var("CHIPSMITH_XC7_PATH").is_ok_and(|v| v == "1") {
@@ -470,7 +516,9 @@ fn clock_timing(
             }
         }
         let (c, port) = d.nets[net as usize].driver.as_ref()?;
-        let Conf::Cmt(cmt) = &conf[*c as usize] else { return None };
+        let Conf::Cmt(cmt) = &conf[*c as usize] else {
+            return None;
+        };
         let k: usize = port.strip_prefix("CLKOUT")?.parse().ok()?;
         Some(cmt.config.output_ratio(k)? * 1e12 / f64::from(cmt.clkin_period_ps))
     };

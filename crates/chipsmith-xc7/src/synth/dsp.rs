@@ -20,8 +20,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chipsmith_netlist::{
     Binary, BinaryOp, Cell, CellId, CellKind, Connectivity, Ctrl, DffControl, Dir, Endpoint, Ff,
-    FfKind, Generic, GenericPort, Module, Net, Operand, ParamValue, Polarity, SigBit, SigSpec, State,
-    SyncEnable, Word,
+    FfKind, Generic, GenericPort, Module, Net, Operand, ParamValue, Polarity, SigBit, SigSpec,
+    State, SyncEnable, Word,
 };
 use chipsmith_synth::rewrite::{inits, Subst};
 
@@ -140,7 +140,9 @@ impl Registers {
             let positive = |c: &Ctrl| (c.polarity == Polarity::Pos).then_some(c.sig);
             let (en, rst) = match control {
                 DffControl::Plain { en } => (en.map(|e| positive(&e)), None),
-                DffControl::Sync { srst, value, en } if value.0.iter().all(|&s| s == State::Zero) => {
+                DffControl::Sync { srst, value, en }
+                    if value.0.iter().all(|&s| s == State::Zero) =>
+                {
                     let en = match en {
                         SyncEnable::Always => None,
                         SyncEnable::ResetOverEnable(e) => Some(positive(e)),
@@ -170,7 +172,15 @@ impl Registers {
                 if init.get(&q) == Some(&State::One) {
                     continue;
                 }
-                by_q.insert(q, RegBit { cell, bit, controls, d });
+                by_q.insert(
+                    q,
+                    RegBit {
+                        cell,
+                        bit,
+                        controls,
+                        d,
+                    },
+                );
             }
         }
         Registers { by_q }
@@ -359,7 +369,11 @@ impl Plan {
         // The narrower operand on A can take fewer DSPs (26 x 22 signed:
         // two, as Vivado builds it, against four).
         let (wide_on_a, narrow_on_a) = (plan(&fa, &fb), plan(&fb, &fa));
-        let plan = if narrow_on_a.blocks() < wide_on_a.blocks() { narrow_on_a } else { wide_on_a };
+        let plan = if narrow_on_a.blocks() < wide_on_a.blocks() {
+            narrow_on_a
+        } else {
+            wide_on_a
+        };
         Some(plan).filter(|p| p.blocks() > 0)
     }
 
@@ -485,7 +499,8 @@ impl Plan {
         // product and one adder less in the fabric. Only DSPs with the same
         // operand registers and no M or P: one with a stage the other lacks
         // would add its PCIN a cycle off.
-        let cascades = |lo: &((usize, usize), Dsp, [SigSpec; 2], SigSpec), hi: &((usize, usize), Dsp, [SigSpec; 2], SigSpec)| {
+        let cascades = |lo: &((usize, usize), Dsp, [SigSpec; 2], SigSpec),
+                        hi: &((usize, usize), Dsp, [SigSpec; 2], SigSpec)| {
             let ((i, j), (i2, j2)) = (lo.0, hi.0);
             i == i2 && j % 2 == 0 && j2 == j + 1 && lo.1.cascades_with(&hi.1)
         };
@@ -495,20 +510,32 @@ impl Plan {
             let pair = k + 1 < dsps.len() && cascades(&dsps[k], &dsps[k + 1]);
             let ((i, j), _, _, _) = dsps[k];
             let shift = self.shift(i, j);
-            let signed = |d: &((usize, usize), Dsp, [SigSpec; 2], SigSpec)| (self.a[d.0 .0].signed, self.b[d.0 .1].signed);
+            let signed = |d: &((usize, usize), Dsp, [SigSpec; 2], SigSpec)| {
+                (self.a[d.0 .0].signed, self.b[d.0 .1].signed)
+            };
             let part: SigSpec = if pair {
                 let (lo, hi) = (&dsps[k], &dsps[k + 1]);
                 let pcout = m.new_sig(48);
                 let (sa, sb) = signed(lo);
                 out.push(Cell {
                     name: format!("{name}.dsp{i}_{j}"),
-                    kind: lo.1.cell((&lo.2[0], sa), (&lo.2[1], sb), lo.3.clone(), Cascade::Out(pcout.clone())),
+                    kind: lo.1.cell(
+                        (&lo.2[0], sa),
+                        (&lo.2[1], sb),
+                        lo.3.clone(),
+                        Cascade::Out(pcout.clone()),
+                    ),
                     attributes: Default::default(),
                 });
                 let (sa, sb) = signed(hi);
                 out.push(Cell {
                     name: format!("{name}.dsp{i}_{}", j + 1),
-                    kind: hi.1.cell((&hi.2[0], sa), (&hi.2[1], sb), hi.3.clone(), Cascade::In(pcout)),
+                    kind: hi.1.cell(
+                        (&hi.2[0], sa),
+                        (&hi.2[1], sb),
+                        hi.3.clone(),
+                        Cascade::In(pcout),
+                    ),
                     attributes: Default::default(),
                 });
                 // The lower's low 17 bits, then the upper's P (sign
@@ -525,7 +552,9 @@ impl Plan {
                 let (sa, sb) = signed(d);
                 out.push(Cell {
                     name: format!("{name}.dsp{i}_{j}"),
-                    kind: d.1.cell((&d.2[0], sa), (&d.2[1], sb), d.3.clone(), Cascade::None),
+                    kind: d
+                        .1
+                        .cell((&d.2[0], sa), (&d.2[1], sb), d.3.clone(), Cascade::None),
                     attributes: Default::default(),
                 });
                 (0..self.width)
@@ -543,8 +572,14 @@ impl Plan {
                         name: format!("{name}.add{i}_{j}"),
                         kind: CellKind::Binary(Binary {
                             op: BinaryOp::Add,
-                            a: Operand { sig: acc, signed: false },
-                            b: Operand { sig: part, signed: false },
+                            a: Operand {
+                                sig: acc,
+                                signed: false,
+                            },
+                            b: Operand {
+                                sig: part,
+                                signed: false,
+                            },
                             y: y.clone(),
                         }),
                         attributes: Default::default(),
@@ -578,21 +613,35 @@ impl Dsp {
     /// Whether `upper` can add this DSP's P from PCIN in the same cycle:
     /// the same operand registers on the same clock, neither M nor P.
     fn cascades_with(&self, upper: &Dsp) -> bool {
-        self.stage == upper.stage && self.clk == upper.clk && self.stage[2..].iter().all(Option::is_none)
+        self.stage == upper.stage
+            && self.clk == upper.clk
+            && self.stage[2..].iter().all(Option::is_none)
     }
 
     /// A DSP48E1 computing P = A * B (plus PCIN >>> 17 at a cascade's
     /// upper end), A and B extended to its 30 and 18 bits, its registers on
     /// `stage`.
-    fn cell(&self, (a, a_signed): (&SigSpec, bool), (b, b_signed): (&SigSpec, bool), p: SigSpec, cascade: Cascade) -> CellKind {
+    fn cell(
+        &self,
+        (a, a_signed): (&SigSpec, bool),
+        (b, b_signed): (&SigSpec, bool),
+        p: SigSpec,
+        cascade: Cascade,
+    ) -> CellKind {
         let port = |name: &str, dir, sig: SigSpec| GenericPort {
             name: name.into(),
             dir: Some(dir),
             sig,
         };
         let extend = |s: &SigSpec, signed: bool, width: usize| -> SigSpec {
-            let fill = if signed { *s.last().expect("an operand bit") } else { SigBit::ZERO };
-            (0..width).map(|k| s.get(k).copied().unwrap_or(fill)).collect()
+            let fill = if signed {
+                *s.last().expect("an operand bit")
+            } else {
+                SigBit::ZERO
+            };
+            (0..width)
+                .map(|k| s.get(k).copied().unwrap_or(fill))
+                .collect()
         };
         let int = |v: i64| ParamValue::int(v);
         let flag = |s: usize| int(i64::from(self.stage[s].is_some()));
@@ -615,24 +664,49 @@ impl Dsp {
                 )])),
             ),
         ]);
-        for r in ["CREG", "DREG", "ADREG", "INMODEREG", "OPMODEREG", "ALUMODEREG", "CARRYINREG", "CARRYINSELREG"] {
+        for r in [
+            "CREG",
+            "DREG",
+            "ADREG",
+            "INMODEREG",
+            "OPMODEREG",
+            "ALUMODEREG",
+            "CARRYINREG",
+            "CARRYINSELREG",
+        ] {
             params.insert(r.into(), int(0));
         }
         let bit = |b: SigBit| vec![b];
-        let konst = |v: u64, w: usize| -> SigSpec { (0..w).map(|k| SigBit::Const(State::from(v >> k & 1 == 1))).collect() };
-        let ce = |s: usize| bit(self.stage[s].map_or(SigBit::ZERO, |c| c.en.unwrap_or(SigBit::ONE)));
+        let konst = |v: u64, w: usize| -> SigSpec {
+            (0..w)
+                .map(|k| SigBit::Const(State::from(v >> k & 1 == 1)))
+                .collect()
+        };
+        let ce =
+            |s: usize| bit(self.stage[s].map_or(SigBit::ZERO, |c| c.en.unwrap_or(SigBit::ONE)));
         let rst = |s: usize| bit(self.stage[s].and_then(|c| c.rst).unwrap_or(SigBit::ZERO));
         let mut ports = vec![
             port("A", Dir::In, extend(a, a_signed, 30)),
             port("B", Dir::In, extend(b, b_signed, 18)),
             port("C", Dir::In, konst(0, 48)),
             port("D", Dir::In, konst(0, 25)),
-            port("CLK", Dir::In, bit(self.clk.map_or(SigBit::ZERO, |c| c.sig))),
+            port(
+                "CLK",
+                Dir::In,
+                bit(self.clk.map_or(SigBit::ZERO, |c| c.sig)),
+            ),
             // Z: 0, or PCIN >>> 17 (101); X and Y: the product.
             port(
                 "OPMODE",
                 Dir::In,
-                konst(if matches!(cascade, Cascade::In(_)) { 0b101_0101 } else { 0b000_0101 }, 7),
+                konst(
+                    if matches!(cascade, Cascade::In(_)) {
+                        0b101_0101
+                    } else {
+                        0b000_0101
+                    },
+                    7,
+                ),
             ),
             port("ALUMODE", Dir::In, konst(0, 4)),
             port("INMODE", Dir::In, konst(0, 5)),
@@ -649,7 +723,21 @@ impl Dsp {
             port("RSTM", Dir::In, rst(2)),
             port("RSTP", Dir::In, rst(3)),
         ];
-        for z in ["CEC", "CED", "CEAD", "CEALUMODE", "CECTRL", "CECARRYIN", "CEINMODE", "RSTC", "RSTD", "RSTALLCARRYIN", "RSTALUMODE", "RSTCTRL", "RSTINMODE"] {
+        for z in [
+            "CEC",
+            "CED",
+            "CEAD",
+            "CEALUMODE",
+            "CECTRL",
+            "CECARRYIN",
+            "CEINMODE",
+            "RSTC",
+            "RSTD",
+            "RSTALLCARRYIN",
+            "RSTALUMODE",
+            "RSTCTRL",
+            "RSTINMODE",
+        ] {
             ports.push(port(z, Dir::In, bit(SigBit::ZERO)));
         }
         ports.push(port("P", Dir::Out, p));
@@ -701,7 +789,9 @@ mod tests {
         // Signed: the top limb carries the sign.
         let p = Plan::of(&mul(m, 32, 32, true, 64)).unwrap();
         assert_eq!(
-            p.a.iter().map(|f| (f.bits.len(), f.signed)).collect::<Vec<_>>(),
+            p.a.iter()
+                .map(|f| (f.bits.len(), f.signed))
+                .collect::<Vec<_>>(),
             [(24, false), (8, true)]
         );
         // 32 x 32 -> 32: the high x high product starts at bit 41.
@@ -720,7 +810,12 @@ mod tests {
         let b = mul(&mut m, 32, 32, false, 64);
         m.add_cell("p", CellKind::Binary(b));
         assert_eq!(map(&mut m), 4);
-        let port = |g: &Generic, name: &str| g.ports.iter().find(|p| p.name == name).map(|p| p.sig.clone());
+        let port = |g: &Generic, name: &str| {
+            g.ports
+                .iter()
+                .find(|p| p.name == name)
+                .map(|p| p.sig.clone())
+        };
         let dsps: Vec<&Generic> = m
             .cells
             .iter()
@@ -733,10 +828,16 @@ mod tests {
         assert_eq!(uppers.len(), 2);
         for u in uppers {
             let opmode = port(u, "OPMODE").unwrap();
-            let v = opmode.iter().enumerate().fold(0, |v, (k, b)| v | u64::from(*b == SigBit::ONE) << k);
+            let v = opmode
+                .iter()
+                .enumerate()
+                .fold(0, |v, (k, b)| v | u64::from(*b == SigBit::ONE) << k);
             assert_eq!(v, 0b101_0101, "Z = PCIN >>> 17, X = Y = M");
             let pcin = port(u, "PCIN").unwrap();
-            assert!(dsps.iter().any(|l| port(l, "PCOUT") == Some(pcin.clone())), "PCIN is a lower DSP's PCOUT");
+            assert!(
+                dsps.iter().any(|l| port(l, "PCOUT") == Some(pcin.clone())),
+                "PCIN is a lower DSP's PCOUT"
+            );
         }
         let adders = m
             .cells

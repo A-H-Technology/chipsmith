@@ -399,20 +399,57 @@ fn dsp_testbench(seed: u64, n: usize, cycles: usize) -> String {
     for k in 0..n {
         let areg = rng.below(3);
         let breg = rng.below(3);
-        let acasc = if areg == 2 && rng.chance(0.5) { 1 } else { areg };
-        let bcasc = if breg == 2 && rng.chance(0.5) { 1 } else { breg };
+        let acasc = if areg == 2 && rng.chance(0.5) {
+            1
+        } else {
+            areg
+        };
+        let bcasc = if breg == 2 && rng.chance(0.5) {
+            1
+        } else {
+            breg
+        };
         let inverted = rng.chance(0.3);
-        let mut params = format!(".AREG({areg}), .BREG({breg}), .ACASCREG({acasc}), .BCASCREG({bcasc})");
+        let mut params =
+            format!(".AREG({areg}), .BREG({breg}), .ACASCREG({acasc}), .BCASCREG({bcasc})");
         for p in [
-            "MREG", "PREG", "INMODEREG", "OPMODEREG", "ALUMODEREG", "CARRYINREG", "CARRYINSELREG", "CREG",
-            "ADREG", "DREG",
+            "MREG",
+            "PREG",
+            "INMODEREG",
+            "OPMODEREG",
+            "ALUMODEREG",
+            "CARRYINREG",
+            "CARRYINSELREG",
+            "CREG",
+            "ADREG",
+            "DREG",
         ] {
             let _ = write!(params, ", .{p}({})", rng.below(2));
         }
         let opmode = rng.pick(&["7'b0000101", "7'b1010101"]);
         for r in [
-            "a", "b", "c", "d", "pcin", "cea1", "cea2", "ceb1", "ceb2", "cem", "cep", "cectrl", "ceinmode",
-            "cealumode", "cecarryin", "rsta", "rstb", "rstm", "rstp", "rstctrl", "rstinmode", "rstalumode",
+            "a",
+            "b",
+            "c",
+            "d",
+            "pcin",
+            "cea1",
+            "cea2",
+            "ceb1",
+            "ceb2",
+            "cem",
+            "cep",
+            "cectrl",
+            "ceinmode",
+            "cealumode",
+            "cecarryin",
+            "rsta",
+            "rstb",
+            "rstm",
+            "rstp",
+            "rstctrl",
+            "rstinmode",
+            "rstalumode",
             "rstallcarryin",
         ] {
             let w = match r {
@@ -447,8 +484,16 @@ fn dsp_testbench(seed: u64, n: usize, cycles: usize) -> String {
         };
         // yosys' model has no IS_CLK_INVERTED: its clock is inverted
         // instead, as the decoder folds it.
-        let (yosys_clk, vivado_inv) = if inverted { ("!clk", "1") } else { ("clk", "0") };
-        let _ = writeln!(tb, "  CS_DSP48E1 #({params}) yosys{k} ({});", ports("p_c", yosys_clk));
+        let (yosys_clk, vivado_inv) = if inverted {
+            ("!clk", "1")
+        } else {
+            ("clk", "0")
+        };
+        let _ = writeln!(
+            tb,
+            "  CS_DSP48E1 #({params}) yosys{k} ({});",
+            ports("p_c", yosys_clk)
+        );
         let _ = writeln!(
             tb,
             "  DSP48E1 #({params}, .IS_CLK_INVERTED(1'b{vivado_inv})) vivado{k} ({});",
@@ -483,16 +528,24 @@ fn dsp_model_matches_vivados() {
     let unisims = PathBuf::from(unisims);
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("models_dsp");
     std::fs::create_dir_all(&dir).unwrap();
-    let datdir = Command::new("yosys-config").arg("--datdir").output().expect("yosys-config: run in the devshell");
+    let datdir = Command::new("yosys-config")
+        .arg("--datdir")
+        .output()
+        .expect("yosys-config: run in the devshell");
     let sim = std::fs::read_to_string(
         PathBuf::from(String::from_utf8(datdir.stdout).unwrap().trim()).join("xilinx/cells_sim.v"),
     )
     .unwrap();
-    let start = sim.find("module DSP48E1 (").expect("cells_sim.v has a DSP48E1");
+    let start = sim
+        .find("module DSP48E1 (")
+        .expect("cells_sim.v has a DSP48E1");
     let end = start + sim[start..].find("endmodule").unwrap() + "endmodule".len();
     let ours = sim[start..end].replacen("module DSP48E1 (", "module CS_DSP48E1 (", 1);
     std::fs::write(dir.join("ours.v"), ours).unwrap();
-    let seeds: u64 = std::env::var("CHIPSMITH_MODELS_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(40);
+    let seeds: u64 = std::env::var("CHIPSMITH_MODELS_SEEDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(40);
     let mut failures = Vec::new();
     let (mut compared, mut stricter) = (0, 0);
     for seed in 1..=seeds {
@@ -508,7 +561,11 @@ fn dsp_model_matches_vivados() {
             .arg(unisims.join("glbl.v"))
             .output()
             .expect("iverilog: run in the devshell");
-        assert!(out.status.success(), "iverilog: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "iverilog: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let out = Command::new("vvp").arg("-n").arg(&vvp).output().unwrap();
         let text = String::from_utf8_lossy(&out.stdout);
         let done: Option<Vec<u64>> = text

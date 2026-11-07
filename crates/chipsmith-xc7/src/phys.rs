@@ -154,7 +154,10 @@ const LETTERS: [char; 4] = ['A', 'B', 'C', 'D'];
 
 /// A site pin's graph node.
 pub(crate) fn pin_node(db: &ChipDb, site: &str, pin: &str) -> Result<NodeId> {
-    let s = db.sites.get(site).with_context(|| format!("no site {site}"))?;
+    let s = db
+        .sites
+        .get(site)
+        .with_context(|| format!("no site {site}"))?;
     let bel = db
         .tile_type(s.tile)
         .bels
@@ -171,9 +174,15 @@ pub(crate) fn pin_node(db: &ChipDb, site: &str, pin: &str) -> Result<NodeId> {
 /// is: the pin itself, or on the lower RAMB18 site (a FIFO18E1) the pin
 /// whose wire is named for it (`BRAM_FIFO18_<pin>`).
 pub(crate) fn bram_pin(db: &ChipDb, site: &str, pin: &str) -> Result<String> {
-    let s = db.sites.get(site).with_context(|| format!("no site {site}"))?;
+    let s = db
+        .sites
+        .get(site)
+        .with_context(|| format!("no site {site}"))?;
     let tt = db.tile_type(s.tile);
-    let bel = tt.bels.get(&s.relative).with_context(|| format!("site {site}"))?;
+    let bel = tt
+        .bels
+        .get(&s.relative)
+        .with_context(|| format!("site {site}"))?;
     if bel.pins.contains_key(pin) && s.ty != "FIFO18E1" {
         return Ok(pin.to_string());
     }
@@ -182,8 +191,11 @@ pub(crate) fn bram_pin(db: &ChipDb, site: &str, pin: &str) -> Result<String> {
         .iter()
         .find(|(_, &w)| {
             let name = tt.wires.get(w);
-            name.strip_prefix("BRAM_FIFO18").is_some_and(|rest| rest == suffix)
-                || name.strip_prefix("BRAM_RAMB18").is_some_and(|rest| rest == suffix)
+            name.strip_prefix("BRAM_FIFO18")
+                .is_some_and(|rest| rest == suffix)
+                || name
+                    .strip_prefix("BRAM_RAMB18")
+                    .is_some_and(|rest| rest == suffix)
         })
         .map(|(p, _)| p.clone())
         .with_context(|| format!("block RAM site {site} has no pin for {pin}"))
@@ -199,7 +211,10 @@ enum End {
 /// The 64-bit table of a LUT whose input `i` is on pin `pins[i]` (1 to 6).
 fn expand(init: u64, pins: &[usize]) -> u64 {
     (0..64u64).fold(0, |t, j| {
-        let idx = pins.iter().enumerate().fold(0, |a, (i, &p)| a | (j >> (p - 1) & 1) << i);
+        let idx = pins
+            .iter()
+            .enumerate()
+            .fold(0, |a, (i, &p)| a | (j >> (p - 1) & 1) << i);
         t | ((init >> idx) & 1) << j
     })
 }
@@ -209,7 +224,11 @@ fn expand(init: u64, pins: &[usize]) -> u64 {
 /// (0.005 ns). With the 5LUT in use (a pair, or a LUT5 there) A6 is tied
 /// high, so both LUTs take theirs from A5 down.
 fn lut_pin(five_used: bool, r: usize) -> usize {
-    if five_used { 5 - r } else { 6 - r }
+    if five_used {
+        5 - r
+    } else {
+        6 - r
+    }
 }
 
 struct Builder<'a> {
@@ -250,7 +269,11 @@ const PIN_SEARCH_NODES: usize = 3000;
 /// put it. Delays are the routing graph's (each node's, as the router
 /// times them), with no other net in the way; a pin no search reached
 /// counts as far, and ties go to [`lut_pin`]'s order.
-fn route_pins(b: &Builder, placement: &Placement, node_delay: &[Ps]) -> Result<HashMap<(String, usize), Vec<usize>>> {
+fn route_pins(
+    b: &Builder,
+    placement: &Placement,
+    node_delay: &[Ps],
+) -> Result<HashMap<(String, usize), Vec<usize>>> {
     let d = &b.p.design;
     // Per (site, letter): per input, its net and criticality.
     let mut inputs: HashMap<(String, usize), Vec<Option<(NetId, f32)>>> = HashMap::new();
@@ -269,7 +292,11 @@ fn route_pins(b: &Builder, placement: &Placement, node_delay: &[Ps]) -> Result<H
             if v.len() < i {
                 v.resize(i, None);
             }
-            let x = placement.lut_criticality.get(&(c as CellId, port.clone())).copied().unwrap_or(0.0);
+            let x = placement
+                .lut_criticality
+                .get(&(c as CellId, port.clone()))
+                .copied()
+                .unwrap_or(0.0);
             let crit = v[i - 1].map_or(x, |(_, y)| x.max(y));
             v[i - 1] = Some((*net, crit));
         }
@@ -295,7 +322,9 @@ fn route_pins(b: &Builder, placement: &Placement, node_delay: &[Ps]) -> Result<H
     for key in keys {
         let v = &inputs[&key];
         let five = b.five_used.contains(&key);
-        let candidates: Vec<usize> = (0..if five { 5 } else { 6 }).map(|r| lut_pin(five, r)).collect();
+        let candidates: Vec<usize> = (0..if five { 5 } else { 6 })
+            .map(|r| lut_pin(five, r))
+            .collect();
         let nodes: Vec<NodeId> = candidates
             .iter()
             .map(|&p| pin_node(b.db, &key.0, &format!("{}{p}", LETTERS[key.1])))
@@ -323,7 +352,10 @@ fn route_pins(b: &Builder, placement: &Placement, node_delay: &[Ps]) -> Result<H
         // An input nothing drives (none in a mapped LUT) takes what's left.
         for (i, p) in pins.iter_mut().enumerate() {
             if v[i].is_none() {
-                let j = free.iter().position(|&f| f).context("a LUT with more inputs than pins")?;
+                let j = free
+                    .iter()
+                    .position(|&f| f)
+                    .context("a LUT with more inputs than pins")?;
                 free[j] = false;
                 *p = candidates[j];
             }
@@ -386,7 +418,10 @@ impl Builder<'_> {
         let Some((drv, p)) = &self.p.design.nets[net as usize].driver else {
             return false;
         };
-        p == port && self.sites[*drv as usize].as_ref().is_some_and(|(s, b)| s == site && *b == bel)
+        p == port
+            && self.sites[*drv as usize]
+                .as_ref()
+                .is_some_and(|(s, b)| s == site && *b == bel)
     }
 
     /// Where a cell's input `port` (on `net`) comes in.
@@ -396,7 +431,10 @@ impl Builder<'_> {
         let pin = |name: String| Ok(End::Pin(site.to_string(), name));
         match (&cell.kind, bel) {
             (Kind::Lut { dram: false }, Bel::Lut6(k) | Bel::Lut5(k)) => {
-                let i: usize = port.strip_prefix('A').and_then(|i| i.parse().ok()).context("a LUT input")?;
+                let i: usize = port
+                    .strip_prefix('A')
+                    .and_then(|i| i.parse().ok())
+                    .context("a LUT input")?;
                 pin(format!("{}{}", LETTERS[k], self.lut_pin(site, k, i - 1)))
             }
             (Kind::Lut { dram: true }, Bel::Lut6(k) | Bel::Lut5(k)) => {
@@ -466,7 +504,9 @@ impl Builder<'_> {
                 "T" => Ok(End::Pin(site.clone(), "T".into())),
                 _ => bail!("{}: pin buffer port {port}", cell.name),
             },
-            (Kind::Bufg, _) | (Kind::Bscan { .. }, _) | (Kind::Cmt { .. }, _) => pin(port.to_string()),
+            (Kind::Bufg, _) | (Kind::Bscan { .. }, _) | (Kind::Cmt { .. }, _) => {
+                pin(port.to_string())
+            }
             (Kind::Bram { .. }, _) => pin(self.bram_pin(site, port)?),
             (Kind::Dsp { .. }, _) => pin(port.to_string()),
             (kind, bel) => bail!("{}: {kind:?} at {bel:?}", cell.name),
@@ -475,7 +515,11 @@ impl Builder<'_> {
 
     /// Where a cell's output `port` leaves its site, and the output mux it
     /// sets: `(site, pin, (letter, OUTMUX input))`.
-    fn output(&self, c: CellId, port: &str) -> Result<(String, String, Option<(usize, &'static str)>)> {
+    fn output(
+        &self,
+        c: CellId,
+        port: &str,
+    ) -> Result<(String, String, Option<(usize, &'static str)>)> {
         let cell = &self.p.design.cells[c as usize];
         let (site, bel) = self.at(c)?;
         let s = site.to_string();
@@ -493,7 +537,9 @@ impl Builder<'_> {
                 (s, format!("{}MUX", LETTERS[k]), Some((k, mux)))
             }
             (Kind::Pad { site, .. }, _) => (site.clone(), "I".into(), None),
-            (Kind::Bufg, _) | (Kind::Bscan { .. }, _) | (Kind::Cmt { .. }, _) => (s, port.to_string(), None),
+            (Kind::Bufg, _) | (Kind::Bscan { .. }, _) | (Kind::Cmt { .. }, _) => {
+                (s, port.to_string(), None)
+            }
             (Kind::Bram { .. }, _) => (s.clone(), self.bram_pin(&s, port)?, None),
             (Kind::Dsp { .. }, _) => (s, port.to_string(), None),
             (kind, bel) => bail!("{}: output {port} of {kind:?} at {bel:?}", cell.name),
@@ -505,7 +551,8 @@ impl Builder<'_> {
 /// pins with wires in its tile).
 fn ps7_inputs(db: &ChipDb, family: &std::path::Path) -> Result<Vec<String>> {
     let path = family.join("site_type_PS7.json");
-    let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let json: serde_json::Value = serde_json::from_str(&text)?;
     let s = db.sites.get("PS7_X0Y0").context("no PS7 site")?;
     let bel = &db.tile_type(s.tile).bels[&s.relative];
@@ -531,7 +578,12 @@ fn nearest_source(db: &ChipDb, names: &[&str]) -> Vec<NodeId> {
         let ty = db.tile_type_index(tile);
         let wires = by_type
             .entry(ty)
-            .or_insert_with(|| names.iter().filter_map(|n| db.tile_type(tile).wire(n)).collect())
+            .or_insert_with(|| {
+                names
+                    .iter()
+                    .filter_map(|n| db.tile_type(tile).wire(n))
+                    .collect()
+            })
             .clone();
         for w in wires {
             let n = db.node(tile, w);
@@ -582,7 +634,10 @@ pub(crate) fn build(
     let mut slices: BTreeMap<String, SliceConf> = BTreeMap::new();
     let slice = |slices: &mut BTreeMap<String, SliceConf>, site: &str| -> Result<()> {
         if !slices.contains_key(site) {
-            let s = db.sites.get(site).with_context(|| format!("no site {site}"))?;
+            let s = db
+                .sites
+                .get(site)
+                .with_context(|| format!("no site {site}"))?;
             let even = s.relative.starts_with("SLICE_X0");
             let half = match (s.ty.as_str(), even) {
                 ("SLICEM", _) => "SLICEM_X0",
@@ -627,10 +682,12 @@ pub(crate) fn build(
             const_sinks.extend(sinks.into_iter().map(|(node, ports)| (node, n, ports)));
             continue;
         }
-        let (drv, port) = net
-            .driver
-            .as_ref()
-            .with_context(|| format!("a net read by {} has no driver", d.cells[net.users[0].0 as usize].name))?;
+        let (drv, port) = net.driver.as_ref().with_context(|| {
+            format!(
+                "a net read by {} has no driver",
+                d.cells[net.users[0].0 as usize].name
+            )
+        })?;
         let (site, pin, mux) = b.output(*drv, port)?;
         if let Some((k, input)) = mux {
             slice(&mut slices, &site)?;
@@ -644,7 +701,8 @@ pub(crate) fn build(
             );
             s.outmux[k] = Some(input);
         }
-        let source = pin_node(db, &site, &pin).with_context(|| format!("{}.{port}", d.cells[*drv as usize].name))?;
+        let source = pin_node(db, &site, &pin)
+            .with_context(|| format!("{}.{port}", d.cells[*drv as usize].name))?;
         nets.push(RouteNet {
             name: format!("{}.{port}", d.cells[*drv as usize].name),
             source,
@@ -678,7 +736,11 @@ pub(crate) fn build(
                     Bel::Lut6(k) => s.lut_init[k] = Some(expand(*init, &pins)),
                     Bel::Lut5(k) => {
                         s.lut5_init[k] = Some(expand(*init, &pins) & 0xffff_ffff);
-                        const_sinks.push((pin_node(db, site, &format!("{}6", LETTERS[k]))?, p.vcc, Vec::new()));
+                        const_sinks.push((
+                            pin_node(db, site, &format!("{}6", LETTERS[k]))?,
+                            p.vcc,
+                            Vec::new(),
+                        ));
                     }
                     _ => bail!("{}: a logic LUT in {bel:?}", cell.name),
                 }
@@ -697,7 +759,11 @@ pub(crate) fn build(
                 s.lut_ram[k] = true;
                 s.clkinv = *wclk_inv;
                 if shift == 32 {
-                    const_sinks.push((pin_node(db, site, &format!("{}6", LETTERS[k]))?, p.vcc, Vec::new()));
+                    const_sinks.push((
+                        pin_node(db, site, &format!("{}6", LETTERS[k]))?,
+                        p.vcc,
+                        Vec::new(),
+                    ));
                 }
             }
             (Kind::Ff(cs), Conf::Ff { init, srval }) => {
@@ -823,9 +889,10 @@ pub(crate) fn build(
             ensure!(
                 src != NodeId::MAX,
                 "no {wire} reaches {}",
-                ports
-                    .first()
-                    .map_or_else(|| format!("node {node}"), |(c, p)| format!("{}.{p}", d.cells[*c as usize].name))
+                ports.first().map_or_else(
+                    || format!("node {node}"),
+                    |(c, p)| format!("{}.{p}", d.cells[*c as usize].name)
+                )
             );
             let g = groups.entry(src).or_default();
             match g.iter_mut().find(|(n, _)| n == node) {
