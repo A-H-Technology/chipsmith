@@ -427,19 +427,18 @@ small PLL designs with Quartus and reading their post-fit atoms
   construction; no earlier build on this chip database was at hand to
   compare.
 
-## Gaps, ranked
+## Status
 
-1. **Untested DE2 peripherals:** the 4 MB flash, the
-   WM8731 audio codec (I2C plus I2S; its master clock, AUD_XCK, builds
-   now), the
-   ADV7181 TV decoder, the ISP1362 USB, the DM9000A Ethernet, the SD
-   card, PS/2, IrDA and the 16x2 LCD.
-2. **Observation.** Since 2026-11-06 `de2_pins` reads every pin over
-   boundary-scan SAMPLE (EP2C35F672 BSDL), so LED-only examples and
-   VGA sync timing are checked without a camera. The VGA picture itself
-   (the DAC's analogue output) still hasn't been seen on a monitor.
+Done. Every fabric feature the DE2 build uses has run on the board, and
+since 2026-11-06 `de2_pins` reads any design's pins over boundary-scan
+SAMPLE (EP2C35F672 BSDL), so LED-only examples are checked without a
+camera; the VGA picture has been seen on a monitor. The remaining
+peripherals (the 4 MB flash, the WM8731 audio codec, the ADV7181 TV
+decoder, the ISP1362 USB, the DM9000A Ethernet, the SD card, PS/2, IrDA,
+the 16x2 LCD) would test controller RTL rather than chipsmith, so they
+aren't goals.
 
-Done 2026-11-06 (chipsmith main 1400504, loaded over JTAG): de2-ioregs,
-sha256 and spi-master as rebuilt with the LAB's clear inversion, and
-sdram-selftest (DRAM_CLK at -1.5 ns) and sram-selftest with the cells'
-enables, all on the board (README).
+On the board 2026-11-06 (chipsmith main 1400504, loaded over JTAG):
+de2-ioregs, sha256 and spi-master as rebuilt with the LAB's clear
+inversion, and sdram-selftest (DRAM_CLK at -1.5 ns) and sram-selftest
+with the cells' enables (README).

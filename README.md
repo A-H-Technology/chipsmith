@@ -256,9 +256,10 @@ rising halfway through each pixel (since 2026-10-31; before, a register
 on a second PLL clock at 50 MHz made it). USER1 holds `"VGA!"` and counts of the pixel clock
 and the frames: on the DE2 2026-10-30, 25.0000 MHz and 59 frames a
 second (59.52 expected); the build without the extra register stage
-read 25.0000 MHz and 60 (both builds with the register-made VGA_CLK;
-the direct one hasn't been on the board). Quartus byte-identical. No
-monitor has shown the picture yet.
+read 25.0000 MHz and 60 (both builds with the register-made VGA_CLK).
+The direct VGA_CLK ran on the board 2026-11-06 (sync timing over
+boundary scan, above), and a monitor has shown the picture. Quartus
+byte-identical.
 
 Pin settings are checked against Quartus the same way
 (`bench/quartus-validate.sh`, `bench/io-fuzz.py`), 2026-10-26: examples/de2-io
@@ -1820,6 +1821,15 @@ share chipsmith's own netlist IR, not Verilog.
      from flash the way a standalone 7-series in master mode does.
      The SD card is the other path (BOOT.bin on FAT32, same boot image
      and jumper).
+
+The DE2 is done: every step above is chipsmith's, and every fabric
+feature it builds (logic, carry chains, M4Ks, multipliers, PLLs, I/O-cell
+registers, falling-edge clocks, both external RAMs, the EPCS) has run on
+the board. What's left is polish: Quartus still uses 3% to 15% fewer LEs
+(a choice-aware LUT mapper, above), and picorv32x24's Fmax is chipsmith's
+estimate, not quartus_sta's. The board's other peripherals (flash, audio,
+Ethernet, USB, LCD, PS/2, SD) would test controller RTL, not the
+toolchain, so they aren't goals.
 
 Next devices:
 
