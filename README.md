@@ -1798,24 +1798,30 @@ share chipsmith's own netlist IR, not Verilog.
      issue 654). The PS BootROM loads only a first-stage
      loader from QSPI, never a bitstream, so a PL-only design still needs
      a boot image: a BootROM header, a first-stage loader in OCM, the
-     bitstream. It doesn't need Xilinx's FSBL. The honest minimum is three
-     pieces chipsmith doesn't have yet:
-     1. ARM debug access over JTAG: the ADIv5 DAP on the Zybo's chain
+     bitstream. It doesn't need Xilinx's FSBL. Three pieces, two of them
+     done:
+     1. Done 2026-11-07 (`chipsmith_jtag::adiv5`, example `zynq_dap`):
+        ARM debug access over JTAG: the ADIv5 DAP on the Zybo's chain
         (IR 4, beside the xc7z010), DPACC/APACC scans, AHB-AP memory reads
         and writes. With that the host can drive the PS's QSPI controller
         (0xE000D000; MIO and LQSPI clock set up in the SLCR) in I/O mode
         and program the 128 Mbit QSPI flash itself, with no code on the ARM.
-     2. A first-stage loader of our own, built with an open ARM toolchain
+        On the board, with Linux running on the ARM: AP 0's IDR reads
+        0x44770001 (AHB-AP), PSS_IDCODE 0x13722093 (matches the chain's
+        IDCODE) and BOOT_MODE 5 (SD card). The QSPI writer on top isn't
+        written yet.
+     2. Not started: a first-stage loader of our own, built with an open ARM toolchain
         from nixpkgs: about 40 instructions that start a PCAP DMA from the
         QSPI linear window (0xFC000000 + offset) into the PL and wait for
         DONE. No DDR or PLL setup for a PL-only design.
-     3. The BootROM header (UG585 section 6.3: width word, `XLNX`, loader
+     3. Done 2026-11-07 (`chipsmith_xc7::zynq::boot_image`, byte-identical
+        to U-Boot's `mkimage -T zynqimage`): the BootROM header (UG585 section 6.3: width word, `XLNX`, loader
         offset, length, checksum), written by chipsmith; bootgen isn't
         needed for an unencrypted image.
      The board then also has to boot from QSPI: the boot-mode jumper JP5
-     must be on QSPI, which only someone at the board can set (chipsmith
-     can't read it until piece 1 exists: it's SLCR BOOT_MODE,
-     0xF800025C). A PS soft reset over the DAP (SLCR PSS_RST_CTRL) would
+     must be on QSPI, which only someone at the board can set; chipsmith
+     reads it over the DAP (SLCR BOOT_MODE, 0xF800025C; on SD card as of
+     2026-11-07). A PS soft reset over the DAP (SLCR PSS_RST_CTRL) would
      then rerun the BootROM without a power cycle. On the Zybo JPROGRAM
      only clears the PL; the PL is the PS's slave, so it doesn't reload
      from flash the way a standalone 7-series in master mode does.
