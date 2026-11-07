@@ -1827,7 +1827,7 @@ share chipsmith's own netlist IR, not Verilog.
         from nixpkgs: about 40 instructions that start a PCAP DMA from the
         QSPI linear window (0xFC000000 + offset) into the PL and wait for
         DONE. No DDR or PLL setup for a PL-only design.
-        `crates/chipsmith-xc7/src/zynq_loader.S`, 63 instructions (256
+        `crates/chipsmith-xc7/src/zynq_loader.S`, 56 instructions (256
         bytes with its literals), assembled by the devshell's
         arm-none-eabi binutils and committed (a test checks it's current);
         `zynq::qspi_boot_image` lays out header, loader and `.bin`. Its
