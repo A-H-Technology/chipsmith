@@ -1,7 +1,8 @@
 //! Bench: reach the Zynq's processor side through its ARM DAP over the
 //! Digilent FT2232, with no code on the ARM: the AHB-AP's IDR, the PS
 //! IDCODE and the boot mode the board's jumpers select.
-//! Extra arguments are addresses (hex) to read as 32-bit words.
+//! Extra arguments are addresses (hex) to read as 32-bit words, or
+//! `addr=value` to write one.
 //! `cargo run --release -p chipsmith-jtag --example zynq_dap [-- 0xf8000700 ...]`
 use anyhow::Context;
 use chipsmith_jtag::{
@@ -48,10 +49,19 @@ fn main() -> anyhow::Result<()> {
             id[0], id[1], id[2]
         );
     }
+    let hex = |s: &str| {
+        u32::from_str_radix(s.trim_start_matches("0x"), 16)
+            .with_context(|| format!("{s:?} isn't hex"))
+    };
     for arg in args.iter().filter(|a| *a != "--flash-id") {
-        let addr = u32::from_str_radix(arg.trim_start_matches("0x"), 16)
-            .with_context(|| format!("{arg:?} isn't a hex address"))?;
-        println!("{addr:#010x}: {:#010x}", ahb.read32(addr)?);
+        if let Some((addr, value)) = arg.split_once('=') {
+            let (addr, value) = (hex(addr)?, hex(value)?);
+            ahb.write32(addr, value)?;
+            println!("{addr:#010x} <- {value:#010x}");
+        } else {
+            let addr = hex(arg)?;
+            println!("{addr:#010x}: {:#010x}", ahb.read32(addr)?);
+        }
     }
     Ok(())
 }

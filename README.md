@@ -1813,8 +1813,16 @@ share chipsmith's own netlist IR, not Verilog.
         JEDEC ID reads 01 20 18 (Spansion S25FL128S), 3 of 3 runs. Two
         things found on the board: the controller's reserved config bit 17
         must stay 1, and its RX-not-empty flag never sets, so an empty RX
-        FIFO is detected by the bus error a read of it returns. Erase and
-        program aren't written yet.
+        FIFO is detected by the bus error a read of it returns.
+        Example `zynq_flash` (2026-11-07, on the Zybo, Linux running on the
+        ARM): `dump` reads all 16 MiB through the controller's linear
+        window in batched AHB-AP reads, 74-84 KiB/s (3.5 minutes; two dumps
+        identical). `write` erases (4 KiB parameter sectors over the first
+        128 KiB, 64 KiB after: this part reports sector architecture 01),
+        programs 256-byte pages in batched I/O-mode frames and reads back:
+        300,000 random bytes at 0xF00000 in 25 s (11.6 KiB/s), identical.
+        A WAIT inside a write batch fails it, since a FIFO write can't be
+        repeated.
      2. Not started: a first-stage loader of our own, built with an open ARM toolchain
         from nixpkgs: about 40 instructions that start a PCAP DMA from the
         QSPI linear window (0xFC000000 + offset) into the PL and wait for

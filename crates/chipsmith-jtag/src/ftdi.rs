@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, ensure, Context, Result};
 use rusb::{DeviceHandle, GlobalContext};
 
-use super::{bit, Cable};
+use super::{bit, Cable, TapState};
 
 const VID: u16 = 0x0403;
 const PID: u16 = 0x6010;
@@ -288,6 +288,57 @@ impl Cable for Ftdi {
 
     fn flush(&mut self) -> Result<()> {
         self.write_all()
+    }
+
+    fn dr_scans(&mut self, scans: &[Vec<u8>], bits: usize, idle: u32) -> Result<Vec<Vec<u8>>> {
+        ensure!(
+            bits >= 2 && bits / 8 < READ_CHUNK,
+            "dr_scans takes short scans"
+        );
+        let body = bits - 1;
+        let (whole, rest) = (body / 8, (body % 8) as u8);
+        let per_scan = whole + (rest > 0) as usize + 1;
+        let mut out = Vec::with_capacity(scans.len());
+        // Round trips of whole scans, each under the FTDI's receive buffer.
+        for group in scans.chunks((READ_CHUNK / per_scan).max(1)) {
+            let mut reads = Vec::new();
+            for tdi in group {
+                self.tms(&TapState::Idle.path_to(TapState::DrShift))?;
+                if whole > 0 {
+                    let [lo, hi] = ((whole - 1) as u16).to_le_bytes();
+                    self.out.extend_from_slice(&[0x39, lo, hi]);
+                    self.out.extend_from_slice(&tdi[..whole]);
+                    reads.push(Readback::Bytes(whole));
+                }
+                if rest > 0 {
+                    let byte = (0..rest as usize)
+                        .fold(0u8, |acc, i| acc | (bit(tdi, whole * 8 + i) as u8) << i);
+                    self.out.extend_from_slice(&[0x3b, rest - 1, byte]);
+                    reads.push(Readback::Bits(rest));
+                }
+                let last = (bit(tdi, bits - 1) as u8) << 7 | 1;
+                self.out.extend_from_slice(&[0x6b, 0, last]);
+                reads.push(Readback::Bits(1));
+                self.tms(&TapState::DrExit1.path_to(TapState::Idle))?;
+                self.idle(idle)?;
+            }
+            let mut tdo = Vec::with_capacity(group.len() * bits);
+            self.round_trip(&reads, &mut tdo)?;
+            ensure!(
+                tdo.len() == group.len() * bits,
+                "FTDI returned {} TDO bits for {} scans",
+                tdo.len(),
+                group.len()
+            );
+            for scan in tdo.chunks(bits) {
+                let mut packed = vec![0u8; bits.div_ceil(8)];
+                for (i, &b) in scan.iter().enumerate() {
+                    packed[i / 8] |= (b as u8) << (i % 8);
+                }
+                out.push(packed);
+            }
+        }
+        Ok(out)
     }
 }
 

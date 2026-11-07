@@ -188,6 +188,62 @@ impl<'c, C: Cable> Dap<'c, C> {
         self.access(Ir::Dpacc, true, DpReg::RdBuff as u8, 0)
     }
 
+    /// AP accesses in one batch of scans: `(reg, Some(value))` writes,
+    /// `(reg, None)` reads. A read's data comes out of the next scan, the
+    /// last one's out of RDBUFF; reads come back in order. `None` if any
+    /// scan got WAIT: that scan wasn't taken but later ones may have been,
+    /// so only a caller whose accesses can be repeated may retry.
+    fn ap_batch(
+        &mut self,
+        ap: u8,
+        ops: &[(ApReg, Option<u32>)],
+        idle: u32,
+    ) -> Result<Option<Vec<u32>>> {
+        let Some(&(first, _)) = ops.first() else {
+            return Ok(Some(Vec::new()));
+        };
+        ensure!(
+            ops.iter().all(|(r, _)| r.bank() == first.bank()),
+            "a batch of AP accesses across register banks"
+        );
+        self.select(ap, first.bank())?;
+        self.set_ir(Ir::Apacc)?;
+        let len = self.pad_tdo + ACCESS_BITS + self.pad_tdi;
+        let at = self.pad_tdo;
+        let scans: Vec<Vec<u8>> = ops
+            .iter()
+            .map(|&(reg, value)| {
+                let word = value.is_none() as u64
+                    | ((reg.a32() as u64 >> 2) << 1)
+                    | (value.unwrap_or(0) as u64) << 3;
+                bits_of(len, |i| {
+                    (at..at + ACCESS_BITS).contains(&i) && word >> (i - at) & 1 == 1
+                })
+            })
+            .collect();
+        let tdos = self.cable.dr_scans(&scans, len, idle)?;
+        let mut data = Vec::with_capacity(ops.len());
+        for tdo in &tdos {
+            match (0..3).fold(0u8, |acc, k| acc | (bit(tdo, at + k) as u8) << k) {
+                0b010 => {
+                    data.push((0..32).fold(0u32, |acc, k| acc | (bit(tdo, at + 3 + k) as u32) << k))
+                }
+                0b001 => return Ok(None),
+                ack => bail!("DAP answered {ack:#05b} in a batch of AP accesses"),
+            }
+        }
+        let mut reads = Vec::new();
+        for (k, (_, value)) in ops.iter().enumerate() {
+            if value.is_none() {
+                reads.push(match data.get(k + 1) {
+                    Some(&d) => d,
+                    None => self.access(Ir::Dpacc, true, DpReg::RdBuff as u8, 0)?,
+                });
+            }
+        }
+        Ok(Some(reads))
+    }
+
     pub fn ap_write(&mut self, ap: u8, reg: ApReg, value: u32) -> Result<()> {
         self.select(ap, reg.bank())?;
         self.access(Ir::Apacc, false, reg.a32(), value).map(drop)
@@ -223,12 +279,81 @@ const CSW_WORD: u32 = 1 << 31 | 1 << 29 | 1 << 25 | 0b01 << 4 | 0b010;
 pub struct MemAp<'d, 'c, C: Cable> {
     dap: &'d mut Dap<'c, C>,
     ap: u8,
+    /// Whether CSW has TAR step after each DRW access.
+    increment: bool,
+}
+
+/// One word access in a `MemAp::run` batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    Write(u32, u32),
+    Read(u32),
+}
+
+impl Access {
+    fn addr(self) -> u32 {
+        match self {
+            Access::Write(a, _) | Access::Read(a) => a,
+        }
+    }
 }
 
 impl<'d, 'c, C: Cable> MemAp<'d, 'c, C> {
     pub fn new(dap: &'d mut Dap<'c, C>, ap: u8) -> Result<Self> {
         dap.ap_write(ap, ApReg::Csw, CSW_WORD)?;
-        Ok(MemAp { dap, ap })
+        Ok(MemAp {
+            dap,
+            ap,
+            increment: true,
+        })
+    }
+
+    fn set_increment(&mut self, on: bool) -> Result<()> {
+        if self.increment != on {
+            let csw = if on {
+                CSW_WORD
+            } else {
+                CSW_WORD & !(0b11 << 4)
+            };
+            self.dap.ap_write(self.ap, ApReg::Csw, csw)?;
+            self.increment = on;
+        }
+        Ok(())
+    }
+
+    /// Word accesses at fixed addresses in one batch, in order (TAR doesn't
+    /// step, so a FIFO register can take many in a row); returns the reads.
+    /// A WAIT anywhere fails the batch rather than retrying it, since a
+    /// FIFO write that was taken can't be undone: `idle` must give the
+    /// slave time to finish each access.
+    pub fn run(&mut self, accesses: &[Access], idle: u32) -> Result<Vec<u32>> {
+        self.set_increment(false)?;
+        let mut ops = Vec::with_capacity(accesses.len() * 2);
+        let mut tar = None;
+        for &a in accesses {
+            ensure!(
+                a.addr().is_multiple_of(4),
+                "unaligned access at {:#010x}",
+                a.addr()
+            );
+            if tar != Some(a.addr()) {
+                ops.push((ApReg::Tar, Some(a.addr())));
+                tar = Some(a.addr());
+            }
+            ops.push((
+                ApReg::Drw,
+                match a {
+                    Access::Write(_, v) => Some(v),
+                    Access::Read(_) => None,
+                },
+            ));
+        }
+        let reads = self
+            .dap
+            .ap_batch(self.ap, &ops, idle)?
+            .context("the AP answered WAIT inside a batch; some accesses may have been taken")?;
+        self.dap.check().context("a batch of accesses")?;
+        Ok(reads)
     }
 
     pub fn idr(&mut self) -> Result<u32> {
@@ -247,6 +372,42 @@ impl<'d, 'c, C: Cable> MemAp<'d, 'c, C> {
         self.dap.ap_write(self.ap, ApReg::Tar, addr)?;
         let v = self.dap.ap_read(self.ap, ApReg::Drw)?;
         Ok(self.dap.take_fault()?.is_none().then_some(v))
+    }
+
+    /// `words` 32-bit words from `addr` on, batched: TAR is only sure to
+    /// auto-increment within a 1 KiB block (IHI0031 C2.2.2), so each block
+    /// is one TAR write and one batch of DRW reads.
+    pub fn read_block(&mut self, addr: u32, words: usize) -> Result<Vec<u32>> {
+        ensure!(addr.is_multiple_of(4), "unaligned read at {addr:#010x}");
+        let mut out = Vec::with_capacity(words);
+        let mut idle = IDLE_CLOCKS;
+        while out.len() < words {
+            let at = addr + 4 * out.len() as u32;
+            let n = (((at | 0x3ff) + 1 - at) / 4).min((words - out.len()) as u32) as usize;
+            self.set_increment(true)?;
+            self.dap.ap_write(self.ap, ApReg::Tar, at)?;
+            match self
+                .dap
+                .ap_batch(self.ap, &vec![(ApReg::Drw, None); n], idle)?
+            {
+                Some(block) => {
+                    self.dap
+                        .check()
+                        .with_context(|| format!("reading {n} words at {at:#010x}"))?;
+                    out.extend(block);
+                }
+                None => {
+                    // The slave is slower than our scans: give it more time and
+                    // take the block again (TAR is rewritten, so reads restart).
+                    ensure!(
+                        idle < 4096,
+                        "the AP still answers WAIT with {idle} TCKs between reads"
+                    );
+                    idle *= 2;
+                }
+            }
+        }
+        Ok(out)
     }
 
     pub fn write32(&mut self, addr: u32, value: u32) -> Result<()> {
@@ -410,6 +571,11 @@ mod tests {
                 (0xfc, true) => self.last_read = 0x2477_0011, // AHB-AP
                 other => panic!("AP access {other:?}"),
             }
+            // CSW AddrInc single: TAR steps by 4 after a DRW access, wrapping
+            // within its 1 KiB block as the narrowest implementations do.
+            if a32 == 0x0c && bank == 0 && self.csw >> 4 & 3 == 1 {
+                self.tar = (self.tar & !0x3ff) | (self.tar.wrapping_add(4) & 0x3ff);
+            }
         }
     }
 
@@ -465,6 +631,42 @@ mod tests {
             CSYSPWRUPACK | CDBGPWRUPACK
         );
         assert_eq!(m.csw, CSW_WORD);
+    }
+
+    #[test]
+    fn block_reads_cross_1k_boundaries_and_survive_waits() {
+        let mut m = Model::default();
+        for i in 0..600u32 {
+            m.mem.insert(0x3f0 + 4 * i, 0x1000 + i);
+        }
+        let mut dap = Dap::new(&mut m, &ZYBO, 1).unwrap();
+        let mut ahb = MemAp::new(&mut dap, 0).unwrap();
+        ahb.dap.cable.waits = 2;
+        let got = ahb.read_block(0x3f0, 600).unwrap();
+        assert_eq!(got, (0..600).map(|i| 0x1000 + i).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_batch_writes_and_reads_fixed_addresses_in_order() {
+        let mut m = Model::default();
+        let mut dap = Dap::new(&mut m, &ZYBO, 1).unwrap();
+        let mut ahb = MemAp::new(&mut dap, 0).unwrap();
+        let reads = ahb
+            .run(
+                &[
+                    Access::Write(0x40, 1),
+                    Access::Write(0x40, 2),
+                    Access::Read(0x40),
+                    Access::Write(0x44, 3),
+                    Access::Read(0x44),
+                    Access::Read(0x40),
+                ],
+                8,
+            )
+            .unwrap();
+        assert_eq!(reads, [2, 3, 2]);
+        // And back to stepping TAR for blocks.
+        assert_eq!(ahb.read_block(0x40, 2).unwrap(), [2, 3]);
     }
 
     #[test]

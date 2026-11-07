@@ -10,7 +10,7 @@ pub mod usb_blaster;
 pub mod xc7;
 pub mod zynq_qspi;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 /// The 16 TAP controller states (IEEE 1149.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -139,6 +139,20 @@ pub trait Cable {
 
     /// Send whatever is buffered.
     fn flush(&mut self) -> Result<()>;
+
+    /// DR scans from Run-Test/Idle, each followed by `idle` TCKs back in
+    /// Idle, returning every scan's TDO. A cable that can queue captures
+    /// sends the whole batch in one round trip; this default doesn't.
+    fn dr_scans(&mut self, scans: &[Vec<u8>], bits: usize, idle: u32) -> Result<Vec<Vec<u8>>> {
+        let mut out = Vec::with_capacity(scans.len());
+        for tdi in scans {
+            self.tms(&TapState::Idle.path_to(TapState::DrShift))?;
+            out.push(self.shift(tdi, bits, true, true)?.context("no TDO")?);
+            self.tms(&TapState::DrExit1.path_to(TapState::Idle))?;
+            self.idle(idle)?;
+        }
+        Ok(out)
+    }
 }
 
 pub fn bit(bytes: &[u8], i: usize) -> bool {
