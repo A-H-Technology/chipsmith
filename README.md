@@ -160,7 +160,7 @@ pins straight; their enables go into the I/O cells' clock enables and
 their synchronous resets into logic on the I/O registers' D (Manifest,
 below): 777 LEs and Quartus byte-identical since branch de2-ioece (Fmax
 estimate 147.3 MHz since gpu-pnr's placer, 163.3 at de2-ioece's merge),
-not yet on the board. On the DE2 2026-10-30 (loaded
+on the board 2026-11-06 (below). On the DE2 2026-10-30 (loaded
 over JTAG, 810 LEs with the enables as logic too, 65 registers in I/O
 cells, chipsmith de2-ioreg): 5,145
 passes at +8.5 ns, 0 errors, 5.88 passes a second. Earlier the same day,
@@ -172,7 +172,7 @@ latency 4): 6,989 passes at +8.5 ns,
 each: 0 errors from +6 to +10.5 ns, nearly every word wrong at +5.5 and
 +11.5 ns, so +8.5 ns is the window's middle (docs/de2-periph-status.md). Quartus
 assembles chipsmith's placement and routing byte-identically, also at
--1.5 ns (2026-10-31; not yet on the board): m 20, the feedback counter
+-1.5 ns (2026-10-31; on the board 2026-11-06, below): m 20, the feedback counter
 1.5 VCO cycles late, the counters Quartus' own altpll fit picks. The read
 latency (`RD_LAT`, FPGA clocks from the controller's READ to the input
 registers holding the first word) was found on the board: a build with
@@ -244,7 +244,8 @@ KEY[0], active low, written as Terasic writes it (`always @(posedge
 clk or negedge rst_n)`), and it clears the core registers too, the
 24-bit divider's carry chain across two LABs included (it was SW[17],
 active high). Safe to load with nothing on the GPIO_0 header. 40 LEs;
-Quartus byte-identical; not yet on the board.
+Quartus byte-identical; on the board 2026-11-06, LEDR[3:0] stepping on
+`tick`, read over boundary scan (`de2_pins`, above).
 
 `examples/vga-pattern` puts 640x480 at 60 Hz on the VGA DAC: colour
 bars, four ramps, a white border, the DAC's inputs through I/O-cell
@@ -1835,9 +1836,11 @@ Next devices:
   it (`--report`).
   - Synthesis, packer, site routing and FASM (done, 2026-11-01; ADR-0013,
     "7-series synthesis" and "The Zybo flow", above; frames and `.bit` in
-    process since 2026-11-02; block RAM 2026-11-02, ADR-0014). Open: DSPs, MUXF7/F8, LUT6_2 and the 5LUTs; timing with the
-    wires' RC; the electrostatic placer timing-driven and the annealer
-    after it shorter; chipsmith's own flow on the board.
+    process since 2026-11-02; block RAM 2026-11-02, ADR-0014; DSP48E1
+    2026-11-02, ADR-0015; LUT6_2 pairs; timing fitted to Vivado's,
+    ADR-0016; on the board 2026-11-06). No MUXF7/F8, by measurement
+    ("7-series synthesis", above). Open: the electrostatic placer
+    timing-driven and the annealer after it shorter.
   - Router (done, interconnect only). The routing graph comes from
     prjxray-db (`tilegrid.json`, `tile_type_*.json`, `tileconn.json`, and
     `segbits`/`ppips` for which pips a bitstream can express), into the

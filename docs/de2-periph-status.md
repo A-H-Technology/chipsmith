@@ -38,7 +38,7 @@ de2-io) build to the same RBFs on the new chip database.
 
 - Clocks: a 100 MHz controller on PLL_1 CLK0, and DRAM_CLK from CLK2 at
   -1.5 ns since 2026-10-31, the same clock as the +8.5 ns all the board
-  runs below used (not yet on the board).
+  runs below used (on the board 2026-11-06: 0 errors).
 - Pins: every non-constant SDRAM pin goes through its I/O-cell
   registers.
 - Bursts: 8-word bursts with auto precharge, CAS latency 3, a refresh
@@ -47,7 +47,7 @@ de2-io) build to the same RBFs on the new chip database.
   pass number, then reads them back and compares.
 - Size: 777 LEs since branch de2-ioece, the controller's enables the I/O
   cells' own (Fmax estimate 147.3 MHz since gpu-pnr's placer, 163.3 at
-  de2-ioece's merge; not yet on the board); 810 with
+  de2-ioece's merge; on the board 2026-11-06, 0 errors); 810 with
   them as logic on D, the build the board ran (154.2 MHz); 776 with the
   extra register stage it had first. Quartus byte-identical.
 
@@ -93,7 +93,7 @@ SRAM:
 - Test: as sdram-selftest's, all 256K words a pass.
 - Size: 539 LEs since branch de2-ioece (the enables the I/O cells' own;
   Fmax estimate 166.1 MHz since gpu-pnr's placer, 167.9 at de2-ioece's
-  merge; not yet on the board), 606 and 175.2 MHz with
+  merge; on the board 2026-11-06, 0 errors in 2,200 passes), 606 and 175.2 MHz with
   them as logic, the build the board ran. Quartus byte-identical.
 - Simulated first (iverilog, a behavioural SRAM): 0 errors over 2
   passes, and one corrupted word counted once.
@@ -429,17 +429,17 @@ small PLL designs with Quartus and reading their post-fit atoms
 
 ## Gaps, ranked
 
-1. **Observation.** No camera view of the board or a monitor, so VGA
-   output and every LED-only example remain unobserved; JTAG readback is
-   the only check. Boundary-scan SAMPLE would read every pin's state
-   without a camera, but the EP2C35F672 BSDL isn't in the Quartus
-   install, and bsdl.info needs a browser session.
-2. **Untested DE2 peripherals:** the 4 MB flash, the
+1. **Untested DE2 peripherals:** the 4 MB flash, the
    WM8731 audio codec (I2C plus I2S; its master clock, AUD_XCK, builds
    now), the
    ADV7181 TV decoder, the ISP1362 USB, the DM9000A Ethernet, the SD
    card, PS/2, IrDA and the 16x2 LCD.
-3. **Not yet on the board:** examples/de2-ioregs (since branch
-   de2-arstn with KEY[0] as its active-low reset), sha256 and spi-master
-   as rebuilt with the LAB's clear inversion, and sdram-selftest and
-   sram-selftest as rebuilt with the cells' enables (the DE2 is off).
+2. **Observation.** Since 2026-11-06 `de2_pins` reads every pin over
+   boundary-scan SAMPLE (EP2C35F672 BSDL), so LED-only examples and
+   VGA sync timing are checked without a camera. The VGA picture itself
+   (the DAC's analogue output) still hasn't been seen on a monitor.
+
+Done 2026-11-06 (chipsmith main 1400504, loaded over JTAG): de2-ioregs,
+sha256 and spi-master as rebuilt with the LAB's clear inversion, and
+sdram-selftest (DRAM_CLK at -1.5 ns) and sram-selftest with the cells'
+enables, all on the board (README).
