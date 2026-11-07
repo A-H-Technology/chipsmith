@@ -1,12 +1,14 @@
 //! Bench: reach the Zynq's processor side through its ARM DAP over the
 //! Digilent FT2232, with no code on the ARM: the AHB-AP's IDR, the PS
 //! IDCODE and the boot mode the board's jumpers select.
-//! `cargo run --release -p chipsmith-jtag --example zynq_dap`
+//! Extra arguments are addresses (hex) to read as 32-bit words.
+//! `cargo run --release -p chipsmith-jtag --example zynq_dap [-- 0xf8000700 ...]`
 use anyhow::Context;
 use chipsmith_jtag::{
     adiv5::{Dap, MemAp},
     ftdi::Ftdi,
     xc7,
+    zynq_qspi::Qspi,
 };
 
 /// UG585 appendix B, SLCR.
@@ -38,5 +40,18 @@ fn main() -> anyhow::Result<()> {
         _ => "reserved",
     };
     println!("BOOT_MODE {mode:#010x}: {name}");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--flash-id") {
+        let id = Qspi::new(&mut ahb)?.read_id()?;
+        println!(
+            "QSPI flash JEDEC ID {:02x} {:02x} {:02x}",
+            id[0], id[1], id[2]
+        );
+    }
+    for arg in args.iter().filter(|a| *a != "--flash-id") {
+        let addr = u32::from_str_radix(arg.trim_start_matches("0x"), 16)
+            .with_context(|| format!("{arg:?} isn't a hex address"))?;
+        println!("{addr:#010x}: {:#010x}", ahb.read32(addr)?);
+    }
     Ok(())
 }

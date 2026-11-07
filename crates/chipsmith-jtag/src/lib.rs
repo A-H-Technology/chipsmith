@@ -8,6 +8,7 @@ pub mod ftdi;
 pub mod svf;
 pub mod usb_blaster;
 pub mod xc7;
+pub mod zynq_qspi;
 
 use anyhow::Result;
 

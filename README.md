@@ -1808,8 +1808,13 @@ share chipsmith's own netlist IR, not Verilog.
         and program the 128 Mbit QSPI flash itself, with no code on the ARM.
         On the board, with Linux running on the ARM: AP 0's IDR reads
         0x44770001 (AHB-AP), PSS_IDCODE 0x13722093 (matches the chain's
-        IDCODE) and BOOT_MODE 5 (SD card). The QSPI writer on top isn't
-        written yet.
+        IDCODE) and BOOT_MODE 5 (SD card). `chipsmith_jtag::zynq_qspi`
+        drives the QSPI controller in I/O mode from the host: the flash's
+        JEDEC ID reads 01 20 18 (Spansion S25FL128S), 3 of 3 runs. Two
+        things found on the board: the controller's reserved config bit 17
+        must stay 1, and its RX-not-empty flag never sets, so an empty RX
+        FIFO is detected by the bus error a read of it returns. Erase and
+        program aren't written yet.
      2. Not started: a first-stage loader of our own, built with an open ARM toolchain
         from nixpkgs: about 40 instructions that start a PCAP DMA from the
         QSPI linear window (0xFC000000 + offset) into the PL and wait for

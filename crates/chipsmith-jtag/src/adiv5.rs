@@ -196,12 +196,21 @@ impl<'c, C: Cable> Dap<'c, C> {
     /// Fail on a sticky error from any access since the last check, and
     /// clear it so the DAP takes accesses again.
     pub fn check(&mut self) -> Result<()> {
-        let stat = self.dp_read(DpReg::CtrlStat)?;
-        if stat & STICKYERR != 0 {
-            self.dp_write(DpReg::CtrlStat, CSYSPWRUPREQ | CDBGPWRUPREQ | STICKYERR)?;
+        if let Some(stat) = self.take_fault()? {
             bail!("bus fault behind the DAP (CTRL/STAT {stat:#010x})");
         }
         Ok(())
+    }
+
+    /// CTRL/STAT if an access since the last check faulted; the sticky
+    /// error is cleared either way.
+    fn take_fault(&mut self) -> Result<Option<u32>> {
+        let stat = self.dp_read(DpReg::CtrlStat)?;
+        if stat & STICKYERR == 0 {
+            return Ok(None);
+        }
+        self.dp_write(DpReg::CtrlStat, CSYSPWRUPREQ | CDBGPWRUPREQ | STICKYERR)?;
+        Ok(Some(stat))
     }
 }
 
@@ -227,13 +236,17 @@ impl<'d, 'c, C: Cable> MemAp<'d, 'c, C> {
     }
 
     pub fn read32(&mut self, addr: u32) -> Result<u32> {
+        self.try_read32(addr)?
+            .with_context(|| format!("bus fault reading {addr:#010x}"))
+    }
+
+    /// A read the slave may refuse: `None` when it answers with a bus
+    /// error (an empty FIFO, say) instead of failing.
+    pub fn try_read32(&mut self, addr: u32) -> Result<Option<u32>> {
         ensure!(addr.is_multiple_of(4), "unaligned read at {addr:#010x}");
         self.dap.ap_write(self.ap, ApReg::Tar, addr)?;
         let v = self.dap.ap_read(self.ap, ApReg::Drw)?;
-        self.dap
-            .check()
-            .with_context(|| format!("reading {addr:#010x}"))?;
-        Ok(v)
+        Ok(self.dap.take_fault()?.is_none().then_some(v))
     }
 
     pub fn write32(&mut self, addr: u32, value: u32) -> Result<()> {
