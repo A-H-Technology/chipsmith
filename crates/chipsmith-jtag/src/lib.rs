@@ -3,6 +3,7 @@
 //! `bitstream::jtag`), so loading a
 //! device is "play this SVF", whatever the vendor.
 
+pub mod adiv5;
 pub mod ftdi;
 pub mod svf;
 pub mod usb_blaster;
