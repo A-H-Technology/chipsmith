@@ -6,6 +6,7 @@ An open FPGA toolchain: HDL in, programmed chip out, no vendor software.
 nix run github:A-H-Technology/chipsmith/open -- -C examples/blinky-vhdl build
 nix run github:A-H-Technology/chipsmith/open -- -C examples/blinky-vhdl flash
 nix run github:A-H-Technology/chipsmith/open -- -C examples/blinky-vhdl flash --persist  # DE2: into the EPCS
+nix run github:A-H-Technology/chipsmith/open -- -C examples/zybo-jtag-counter flash --persist  # Zybo: into the QSPI
 nix run github:A-H-Technology/chipsmith/open -- -C examples/zybo-jtag-counter flash --ssh venus  # Zybo, through its Linux
 ```
 
@@ -1783,14 +1784,27 @@ share chipsmith's own netlist IR, not Verilog.
      restorable. After a real power cycle (2026-10-26) the board came up
      from the EPCS by itself: examples/de2-jtag-counter read back `"DE2!"`
      counting at 50.00 MHz over JTAG.
-   - Zybo (done, 2026-10-24, through Linux). With NixOS on the board,
+   - Zybo (done, 2026-11-08, without Linux; 2026-10-24 through Linux).
+     `chipsmith flash --persist` on a `.bit` writes a QSPI boot image
+     (BootROM header, chipsmith's 56-instruction loader, the bitstream)
+     through the ARM's debug port, with no code on the ARM, and reads it
+     back. It reads the flash first and leaves it alone if it already
+     holds the image. With the boot-mode jumper (JP5) on QSPI it then
+     resets the PS so the BootROM boots the image as at power-on;
+     otherwise it configures the PL from the flash directly and says to
+     move the jumper. On the board 2026-11-08: zybo-bram-selftest written
+     and verified in 157 s (2,086,236 bytes), booted by the BootROM from
+     QSPI, USER1 "BRAM" with passes rising and 0 errors; the same command
+     again found the flash current in 18 s and rebooted (21 s in all).
+     The flash's clock is set by chipsmith (IO PLL, SCK about 20 MHz):
+     after a QSPI boot the BootROM leaves it at the ARM PLL / 40, at which
+     the batched writes programmed zeros.
+     Through Linux: with NixOS on the board,
      nixos-fpga's `hardware.fpga.bitstream` loads the build's `.bin` at
      every boot ("Loading a Zybo from its own Linux", above), so
      `--persist` with `--ssh` points there instead of writing flash.
-     Without Linux, persistence means writing a boot image to QSPI: done
-     2026-11-07, all three pieces below, on the board. Not yet wired
-     into `chipsmith flash --persist` (the examples `zynq_boot_image`
-     and `zynq_flash write` do it):
+     Without Linux, persistence means writing a boot image to QSPI: done,
+     all three pieces below, and `flash --persist` (above) runs them:
 
      The QSPI flash hangs off the Zynq's processor (PS
      MIO 1-6); the PL can't reach it, so a PL bridge like the DE2's can't

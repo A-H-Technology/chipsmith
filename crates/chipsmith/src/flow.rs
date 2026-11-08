@@ -175,6 +175,10 @@ pub enum Step {
     /// Load a 7-series `.bit` into a Zynq's PL through `/dev/fpga-load` on
     /// `host`, piped over ssh.
     LoadBitSsh { bit: PathBuf, host: String },
+    /// Write a Zynq `.bit` as a QSPI boot image (chipsmith's loader and the
+    /// bitstream) through the PS's DAP over the Digilent FT2232, verify it,
+    /// and start it.
+    ZynqQspi(PathBuf),
     /// Build the DE2's serial flash loader into this project directory.
     BuildLoader(PathBuf),
     /// Configure the serial flash loader (an SVF) into the DE2's FPGA over
@@ -222,6 +226,7 @@ impl Step {
             Step::PlaySvf(_) => "JTAG: program over USB-Blaster",
             Step::LoadBit(_) => "JTAG: program over Digilent FT2232",
             Step::LoadBitSsh { .. } => "ssh: load through the board's fpga-manager",
+            Step::ZynqQspi(_) => "QSPI: write and verify a boot image through the ARM's debug port",
             Step::ZynqBin { .. } => ".bit to .bin for Linux's fpga-manager",
             Step::BuildLoader(_) => "build the serial flash loader",
             Step::Epcs { op, .. } => match op {
@@ -465,6 +470,8 @@ pub enum Flash {
     Volatile(Loadable),
     /// A Cyclone II RBF into the DE2's EPCS16.
     Epcs(PathBuf),
+    /// A 7-series `.bit` into a Zynq's QSPI flash, as a boot image.
+    ZynqQspi(PathBuf),
     /// A 7-series `.bit` into a Zynq's PL from its own Linux.
     Ssh {
         bit: PathBuf,
@@ -494,10 +501,7 @@ impl Flash {
                 "{}: an SVF is a JTAG sequence, not a bitstream; persist the .rbf it came from",
                 svf.display()
             ),
-            (Persistence::Persistent, Loadable::Bit(bit)) => bail!(
-                "{}: persistent flashing of the Zybo isn't supported yet (README, roadmap step 6)",
-                bit.display()
-            ),
+            (Persistence::Persistent, Loadable::Bit(bit)) => Flash::ZynqQspi(bit),
         })
     }
 }
@@ -526,6 +530,13 @@ pub fn plan_flash(flash: &Flash, loader: &Loader, build_dir: &Path) -> Plan {
     let loadable = match flash {
         Flash::Volatile(l) => l,
         Flash::Epcs(rbf) => return plan_epcs(loader, build_dir, EpcsOp::Program(rbf.clone())),
+        Flash::ZynqQspi(bit) => {
+            return Plan {
+                dir: None,
+                files: Vec::new(),
+                steps: vec![Step::ZynqQspi(bit.clone())],
+            }
+        }
         Flash::Ssh { bit, host } => {
             return Plan {
                 dir: None,
@@ -585,8 +596,7 @@ impl Plan {
                     top,
                     netlist,
                     io_registers,
-                } => stamp(step, &[netlist])
-                    .run(|| synth(verilog, top, netlist, io_registers))?,
+                } => stamp(step, &[netlist]).run(|| synth(verilog, top, netlist, io_registers))?,
                 Step::Xc7Synth {
                     verilog,
                     top,
@@ -616,7 +626,11 @@ impl Plan {
                     Ok(vec![packed.clone()])
                 })?,
                 Step::Bitstream { routed, rbf } => stamp(step, &[rbf]).run(|| {
-                    bitstream(Prefetch::take(&mut device_db, bitstream::load_db), routed, rbf)?;
+                    bitstream(
+                        Prefetch::take(&mut device_db, bitstream::load_db),
+                        routed,
+                        rbf,
+                    )?;
                     Ok(vec![routed.clone()])
                 })?,
                 Step::Svf { rbf, svf } => bitstream::svf_file(rbf, svf)?,
@@ -636,6 +650,7 @@ impl Plan {
                 Step::PlaySvf(svf) => play_svf(svf)?,
                 Step::LoadBit(bit) => load_bit(bit)?,
                 Step::LoadBitSsh { bit, host } => load_bit_ssh(bit, host)?,
+                Step::ZynqQspi(bit) => zynq_qspi(bit)?,
                 Step::ZynqBin { bit, bin } => zynq_bin(bit, bin)?,
                 Step::BuildLoader(dir) => build_loader(dir)?,
                 Step::Epcs { loader, op } => persist::run_epcs(loader, op)?,
@@ -743,15 +758,28 @@ fn xc7_synth(verilog: &[PathBuf], top: &str, netlist: &Path) -> Result<Vec<PathB
     );
     for m in &out.design.modules {
         for c in &m.cells {
-            let chipsmith_netlist::CellKind::Other(g) = &c.kind else { continue };
-            let Some(prim) = chipsmith_xc7::cmt::Prim::from_cell(&g.ty) else { continue };
-            let used: Vec<bool> = (0..prim.outputs()).map(|k| g.port(&format!("CLKOUT{k}")).is_some()).collect();
+            let chipsmith_netlist::CellKind::Other(g) = &c.kind else {
+                continue;
+            };
+            let Some(prim) = chipsmith_xc7::cmt::Prim::from_cell(&g.ty) else {
+                continue;
+            };
+            let used: Vec<bool> = (0..prim.outputs())
+                .map(|k| g.port(&format!("CLKOUT{k}")).is_some())
+                .collect();
             let config = chipsmith_xc7::cmt::Config::from_params(prim, &g.params, &used)?;
             let period = match g.params.get("CLKIN1_PERIOD") {
-                Some(chipsmith_netlist::ParamValue::Str(p)) => (p.parse::<f64>().unwrap_or(0.0) * 1000.0).round() as u32,
+                Some(chipsmith_netlist::ParamValue::Str(p)) => {
+                    (p.parse::<f64>().unwrap_or(0.0) * 1000.0).round() as u32
+                }
                 _ => 0,
             };
-            say!("{} {}: {}", prim.cell(), c.name, config.summary(period.max(1)));
+            say!(
+                "{} {}: {}",
+                prim.cell(),
+                c.name,
+                config.summary(period.max(1))
+            );
         }
     }
     let mut json = Vec::new();
@@ -828,8 +856,15 @@ fn xc7_pnr(
     let mut failed = Vec::new();
     for c in &r.clocks {
         let ns = c.critical / 1000.0;
-        let fmax = if ns > 0.0 { 1e3 / ns as f64 } else { f64::INFINITY };
-        let period_ns = clocks.get(&c.name).map(|f| f.period_ns()).or(c.hz.map(|hz| 1e9 / hz));
+        let fmax = if ns > 0.0 {
+            1e3 / ns as f64
+        } else {
+            f64::INFINITY
+        };
+        let period_ns = clocks
+            .get(&c.name)
+            .map(|f| f.period_ns())
+            .or(c.hz.map(|hz| 1e9 / hz));
         match period_ns {
             Some(period) => {
                 let slack = period - ns as f64;
@@ -842,7 +877,10 @@ fn xc7_pnr(
                     failed.push(c.name.clone());
                 }
             }
-            None => say!("clock {}: {ns:.2} ns, Fmax {fmax:.1} MHz (estimate)", c.name),
+            None => say!(
+                "clock {}: {ns:.2} ns, Fmax {fmax:.1} MHz (estimate)",
+                c.name
+            ),
         }
     }
     if !failed.is_empty() {
@@ -855,7 +893,8 @@ fn xc7_bitstream(fasm: &Path, bit: &Path, design: &str) -> Result<()> {
     let started = Instant::now();
     let part = XC7Z010CLG400_1;
     let data = Xc7Data::from_env(part)?;
-    let text = std::fs::read_to_string(fasm).with_context(|| format!("reading {}", fasm.display()))?;
+    let text =
+        std::fs::read_to_string(fasm).with_context(|| format!("reading {}", fasm.display()))?;
     let frames = chipsmith_xc7::frames::Assembler::new(&data.db, part)?.frames(&text)?;
     let bytes = chipsmith_xc7::frames::bit(&data.db, part.part, design, &frames)?;
     std::fs::write(bit, &bytes).with_context(|| format!("writing {}", bit.display()))?;
@@ -1073,6 +1112,75 @@ fn load_bit(path: &Path) -> Result<()> {
         chain[target].idcode,
         started.elapsed().as_secs_f64()
     );
+    Ok(())
+}
+
+/// `flash --persist` on a Zybo. The flash is read first, and left alone
+/// if it already holds the image (a read is about a tenth of a write).
+/// With the boot mode on QSPI the PS is reset, so the BootROM boots the
+/// image as at power-on; otherwise the PL is configured from the flash
+/// directly, so the design runs now either way.
+fn zynq_qspi(path: &Path) -> Result<()> {
+    use chipsmith_jtag::adiv5::{Dap, MemAp};
+    use chipsmith_jtag::zynq_ps::{self, BootMode};
+    use chipsmith_jtag::zynq_qspi::{self, Qspi};
+    use std::time::Duration;
+
+    let file = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let bin = chipsmith_xc7::zynq::zynq_bin(xc7::bit_payload(&file)?)?;
+    let image = chipsmith_xc7::zynq::qspi_boot_image(&bin)?;
+    let bin_at = (image.len() - bin.len()) as u32;
+
+    let mut cable = Ftdi::open()?;
+    let chain = xc7::scan(&mut cable)?;
+    // The Zynq's ARM debug port (IR 4 bits) beside the PL's TAP.
+    let target = chain
+        .iter()
+        .position(|t| t.ir_len == 4)
+        .context("no ARM DAP on the JTAG chain; is this a Zynq?")?;
+    let mut dap = Dap::new(&mut cable, &chain, target)?;
+    let mut ahb = MemAp::new(&mut dap, 0)?;
+    let started = Instant::now();
+    Qspi::new(&mut ahb)?.into_linear()?;
+    let current = zynq_qspi::read_linear(&mut ahb, 0, image.len(), |_| ())?;
+    if current == image {
+        eprintln!(
+            "    the flash already holds this image ({} bytes, checked in {:.1} s)",
+            image.len(),
+            started.elapsed().as_secs_f64()
+        );
+    } else {
+        Qspi::new(&mut ahb)?.write(0, &image, |_| ())?;
+        Qspi::new(&mut ahb)?.into_linear()?;
+        let back = zynq_qspi::read_linear(&mut ahb, 0, image.len(), |_| ())?;
+        if let Some(k) = back.iter().zip(&image).position(|(a, b)| a != b) {
+            bail!(
+                "QSPI read back differs at {k:#x}: {:#04x}, wrote {:#04x}",
+                back[k],
+                image[k]
+            );
+        }
+        eprintln!(
+            "    wrote and verified {} bytes of boot image in {:.1} s",
+            image.len(),
+            started.elapsed().as_secs_f64()
+        );
+    }
+    match zynq_ps::boot_mode(&mut ahb)? {
+        BootMode::Qspi => {
+            zynq_ps::soft_reset(&mut ahb)?;
+            let sts =
+                zynq_ps::wait_configured(&mut cable, &chain, target, Duration::from_secs(15))?;
+            eprintln!("    reset: the BootROM booted it from QSPI (devcfg INT_STS {sts:#010x})");
+        }
+        mode => {
+            zynq_ps::pcap_from_flash(&mut ahb, bin_at, bin.len() as u32)?;
+            eprintln!(
+                "    configured from flash now; the boot mode is {mode:?}, so it boots at \
+                 power-on only with the boot-mode jumper (the Zybo's JP5) on QSPI"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1548,6 +1656,23 @@ mod tests {
     }
 
     #[test]
+    fn a_persistent_bit_becomes_a_qspi_boot_image() {
+        let flash = Flash::new(
+            "/p/build/blinky.bit".into(),
+            Persistence::Persistent,
+            Via::Jtag,
+        )
+        .unwrap();
+        assert_eq!(flash, Flash::ZynqQspi("/p/build/blinky.bit".into()));
+        let plan = plan_flash(
+            &flash,
+            &Loader::Prebuilt("/l.rbf".into()),
+            Path::new("/p/build"),
+        );
+        assert_eq!(plan.steps, [Step::ZynqQspi("/p/build/blinky.bit".into())]);
+    }
+
+    #[test]
     fn ssh_takes_a_volatile_bit_only() {
         let ssh = || Via::Ssh("venus".into());
         assert!(Flash::new("/x.rbf".into(), Persistence::Volatile, ssh()).is_err());
@@ -1609,8 +1734,7 @@ mod tests {
     }
 
     #[test]
-    fn only_an_rbf_can_be_persisted() {
+    fn an_svf_cant_be_persisted() {
         assert!(Flash::new("/x.svf".into(), Persistence::Persistent, Via::Jtag).is_err());
-        assert!(Flash::new("/x.bit".into(), Persistence::Persistent, Via::Jtag).is_err());
     }
 }

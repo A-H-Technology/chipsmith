@@ -2,14 +2,15 @@
 //! the Digilent FT2232, with no code on the ARM.
 //! `cargo run --release -p chipsmith-jtag --example zynq_flash -- dump FILE [BYTES]`
 //! `... -- write FILE [OFFSET]`: erase, program, read back and compare.
+//! `... -- reset`: rerun the BootROM (a PS reset) and report the PL's state.
 use std::time::Instant;
 
 use anyhow::{bail, Context};
 use chipsmith_jtag::{
     adiv5::{Dap, MemAp},
     ftdi::Ftdi,
-    xc7,
-    zynq_qspi::{Qspi, LINEAR_BASE},
+    xc7, zynq_ps,
+    zynq_qspi::{self, Qspi},
 };
 
 fn main() -> anyhow::Result<()> {
@@ -93,7 +94,22 @@ fn main() -> anyhow::Result<()> {
                 ),
             }
         }
-        _ => bail!("usage: zynq_flash dump FILE [BYTES] | write FILE [OFFSET]"),
+        ["reset"] => {
+            println!("boot mode {:?}", zynq_ps::boot_mode(&mut ahb)?);
+            zynq_ps::soft_reset(&mut ahb)?;
+            let start = Instant::now();
+            let sts = zynq_ps::wait_configured(
+                &mut cable,
+                &chain,
+                target,
+                std::time::Duration::from_secs(15),
+            )?;
+            println!(
+                "PL configured {:.1} s after the reset (devcfg INT_STS {sts:#010x})",
+                start.elapsed().as_secs_f64()
+            );
+        }
+        _ => bail!("usage: zynq_flash dump FILE [BYTES] | write FILE [OFFSET] | reset"),
     }
     Ok(())
 }
@@ -104,20 +120,14 @@ fn read_linear(
     bytes: usize,
 ) -> anyhow::Result<Vec<u8>> {
     let start = Instant::now();
-    let mut data = Vec::with_capacity(bytes);
-    const STEP: usize = 256 * 1024;
-    while data.len() < bytes {
-        let n = STEP.min(bytes - data.len());
-        let words = ahb.read_block(LINEAR_BASE + offset + data.len() as u32, n.div_ceil(4))?;
-        data.extend(words.iter().flat_map(|w| w.to_le_bytes()));
-        data.truncate(bytes.min(data.len()));
+    let data = zynq_qspi::read_linear(ahb, offset, bytes, |done| {
         let s = start.elapsed().as_secs_f64();
         eprint!(
             "\rread {} KiB, {:.0} KiB/s",
-            data.len() / 1024,
-            data.len() as f64 / 1024.0 / s
+            done / 1024,
+            done as f64 / 1024.0 / s
         );
-    }
+    })?;
     eprintln!();
     Ok(data)
 }

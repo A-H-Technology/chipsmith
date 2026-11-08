@@ -27,6 +27,18 @@ const APER_CLK_CTRL: u32 = 0xf800_012c;
 const LQSPI_CPU_1XCLKACT: u32 = 1 << 23;
 const LQSPI_CLK_CTRL: u32 = 0xf800_014c;
 const MIO_PIN_01: u32 = 0xf800_0704;
+const LPBK_DLY_ADJ: u32 = BASE + 0x38;
+const SLCR_UNLOCK: u32 = 0xf800_0008;
+const IO_PLL_CTRL: u32 = 0xf800_0108;
+const PLL_STATUS: u32 = 0xf800_010c;
+const IO_PLL_LOCK: u32 = 1 << 2;
+/// QSPI on MIO 1-6 as U-Boot leaves it: LVCMOS33, fast slew, L0_SEL.
+/// The BootROM leaves them slow.
+const MIO_QSPI: u32 = 0x702;
+/// The highest PS_CLK a Zynq board feeds (UG585: 30-60 MHz); the clock is
+/// set for this so it is never too fast, whatever the board's crystal.
+const PS_CLK_MAX_HZ: u64 = 60_000_000;
+const LQSPI_REF_MAX_HZ: u64 = 200_000_000;
 
 /// The RX FIFO's depth: reading this many words empties it, whatever is in it.
 const RX_FIFO_WORDS: usize = 63;
@@ -70,6 +82,7 @@ impl<'a, 'd, 'c, C: Cable> Qspi<'a, 'd, 'c, C> {
         let mut q = Qspi { ahb, idle: 0 };
         q.check_ready()?;
         q.ahb.write32(ENABLE, 0)?;
+        q.set_clock()?;
         // Linear mode would hand the bus to the AXI window; I/O mode is ours.
         q.ahb.write32(LQSPI_CFG, 0)?;
         q.idle = q.ahb.read32(CONFIG)? & !CONFIG_OWNED | CONFIG_IDLE;
@@ -77,6 +90,34 @@ impl<'a, 'd, 'c, C: Cable> Qspi<'a, 'd, 'c, C> {
         q.ahb.write32(ENABLE, 1)?;
         q.drain_rx()?;
         Ok(q)
+    }
+
+    /// The batched frames below assume SCK of 13-25 MHz (`SCAN_IDLE`), but
+    /// what the controller runs at depends on who booted the chip: U-Boot
+    /// leaves the IO PLL / 5 (25 MHz SCK), the BootROM after a QSPI boot
+    /// the ARM PLL / 40 (about 3 MHz), at which RX reads came before their
+    /// words and pages programmed as zeros (seen on the Zybo, 2026-11-08).
+    /// So the reference is set here: the IO PLL, divided to at most
+    /// 200 MHz for any PS_CLK up to 60 MHz; SCK is that / 8. Also loopback
+    /// sampling off (the BootROM turns it on without a feedback pin) and
+    /// the pins at fast slew.
+    fn set_clock(&mut self) -> Result<()> {
+        let status = self.ahb.read32(PLL_STATUS)?;
+        ensure!(
+            status & IO_PLL_LOCK != 0,
+            "the IO PLL isn't locked (PLL_STATUS {status:#010x})"
+        );
+        let fdiv = (self.ahb.read32(IO_PLL_CTRL)? >> 12 & 0x7f) as u64;
+        let div = (PS_CLK_MAX_HZ * fdiv)
+            .div_ceil(LQSPI_REF_MAX_HZ)
+            .clamp(1, 63) as u32;
+        self.ahb.write32(SLCR_UNLOCK, 0xdf0d)?;
+        // SRCSEL 0: the IO PLL; CLKACT.
+        self.ahb.write32(LQSPI_CLK_CTRL, div << 8 | 1)?;
+        for pin in 0..6 {
+            self.ahb.write32(MIO_PIN_01 + 4 * pin, MIO_QSPI)?;
+        }
+        self.ahb.write32(LPBK_DLY_ADJ, 0)
     }
 
     fn check_ready(&mut self) -> Result<()> {
@@ -89,11 +130,6 @@ impl<'a, 'd, 'c, C: Cable> Qspi<'a, 'd, 'c, C> {
         ensure!(
             aper & LQSPI_CPU_1XCLKACT != 0,
             "the QSPI controller's clock is gated (APER_CLK_CTRL {aper:#010x})"
-        );
-        let clk = self.ahb.read32(LQSPI_CLK_CTRL)?;
-        ensure!(
-            clk & 1 != 0,
-            "the QSPI reference clock is off (LQSPI_CLK_CTRL {clk:#010x})"
         );
         for pin in 1..=6 {
             let mio = self.ahb.read32(MIO_PIN_01 + 4 * (pin - 1))?;
@@ -258,4 +294,26 @@ impl<'a, 'd, 'c, C: Cable> Qspi<'a, 'd, 'c, C> {
         }
         Ok(())
     }
+}
+
+/// `bytes` of flash from `offset`, through the linear window (the
+/// controller must be in linear mode: `Qspi::into_linear`), in batched
+/// AHB-AP reads. `progress` gets the bytes read so far.
+pub fn read_linear<C: Cable>(
+    ahb: &mut MemAp<'_, '_, C>,
+    offset: u32,
+    bytes: usize,
+    mut progress: impl FnMut(usize),
+) -> Result<Vec<u8>> {
+    // Big enough to amortize each step's setup, small enough to report.
+    const STEP: usize = 256 * 1024;
+    let mut data = Vec::with_capacity(bytes);
+    while data.len() < bytes {
+        let n = STEP.min(bytes - data.len());
+        let words = ahb.read_block(LINEAR_BASE + offset + data.len() as u32, n.div_ceil(4))?;
+        data.extend(words.iter().flat_map(|w| w.to_le_bytes()));
+        data.truncate(bytes.min(data.len()));
+        progress(data.len());
+    }
+    Ok(data)
 }
