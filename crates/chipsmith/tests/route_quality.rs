@@ -148,6 +148,8 @@ const SHA256_LES: (f64, f64) = (3440.0, 3672.0);
 /// (bound, before), ns, the default seed: `open` df16e49's (sums as
 /// written, every register one, LUT pins by criticality alone: sha256
 /// 18.62, jtag-counter 3.03) above, `xc7-qor`'s (13.76, 2.79) below; sums
-/// by arrival without the register copies read 14.41 on sha256.
-const ZYBO_SHA256: (f64, f64) = (14.0, 18.62);
+/// by arrival without the register copies read 14.41 on sha256. sha256's
+/// since `xc7-qor2`: 9.71, against 13.76 with the router timing only the
+/// connections it routes (its paths broken at every slice's inside).
+const ZYBO_SHA256: (f64, f64) = (10.5, 13.76);
 const ZYBO_JTAG_COUNTER: (f64, f64) = (2.9, 3.03);

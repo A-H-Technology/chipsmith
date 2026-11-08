@@ -1040,7 +1040,11 @@ to the FASM, and since 2026-11-02 to the `.bit` (ADR-0013):
   tile's ILOGIC and OLOGIC, a clock row's BUFHCE). A BUFG's net is
   confined to the clock tree (block RAM and DSP clocks too, since branch
   xc7-timing: they were routed beside the BUFG). Routing is
-  timing-driven with each node's delay as fitted to Vivado's timer.
+  timing-driven with each node's delay as fitted to Vivado's timer, on
+  every connection the timing report times (since branch xc7-qor2: before,
+  the router's timing graph held only the connections it routes, so every
+  path broke inside a slice, at a LUT into its CARRY4 or a sum into its
+  register, and the LUTs in front of an adder were routed as uncritical).
 - **FASM** (`fasm.rs`): what nextpnr writes, feature for feature where
   they configure the same thing (its `fasm.cc`), clock tree buffer enables
   included.
@@ -1092,33 +1096,34 @@ through, which chipsmith's feed-through LUT1s in front of a carry chain
 are: 43 of picorv32's 666, so its logic is about 577 sites to Vivado's 545
 (and Vivado's 28 MUXF7s). Fmax: chipsmith's estimate,
 Vivado's timer on chipsmith's own placement and routing ("Timing against
-Vivado", below; branch xc7-qor, 2026-11-04, the default seed), the
+Vivado", below; branch xc7-qor2, 2026-11-08, the default seed), the
 earlier flow's nextpnr STA of chipsmith's routing, and Vivado's own
 placement and routing. Placement and routing seconds on a shared machine
-at a load of 15 to 30:
+at a load of 10 to 40 (most of it this branch's own benches):
 
 | design | LUTs chipsmith / Vivado | registers | CARRY4 | slices | place + route | Fmax chipsmith (estimate) / Vivado on chipsmith's / earlier flow / Vivado's own |
 |---|---|---|---|---|---|---|
-| zybo-blinky | 28 / 1 | 27 / 27 | 7 / 7 | 7 | 1.5 + 2.4 s | 375.9 / 392.5 / 391.5 / 390.3 MHz |
-| zybo-jtag-counter (clk) | 96 / 51 | 128 / 128 | 8 / 8 | 54 | 2.3 + 2.1 s | 358.3 / 378.1 / 352.5 / 377.8 MHz |
-| zybo-picorv32 | 666 / 589 | 362 / 375 | 58 / 51 | 251 | 10.9 + 31.2 s | 157.5 / 157.9 / 167.9 / 156.9 MHz |
-| zybo-sha256 | 2,326 / 2,012 | 2,035 / 1,934 | 160 / 112 | 1,078 | 182 + 175 s | 72.7 / 71.8 / 61.0 / 82.8 MHz |
+| zybo-blinky | 28 / 1 | 27 / 27 | 7 / 7 | 7 | 1.3 + 0.4 s | 383.4 / 397.1 / 391.5 / 390.3 MHz |
+| zybo-jtag-counter (clk) | 96 / 51 | 128 / 128 | 8 / 8 | 54 | 1.5 + 1.7 s | 367.4 / 378.1 / 352.5 / 377.8 MHz |
+| zybo-picorv32 | 666 / 589 | 362 / 375 | 58 / 51 | 251 | 8.8 + 29.7 s | 168.2 / 170.2 / 167.9 / 156.9 MHz |
+| zybo-sha256 | 2,326 / 2,012 | 2,035 / 1,934 | 160 / 112 | 1,078 | 106 + 251 s | 103.0 / 96.4 / 61.0 / 82.8 MHz |
 
-The self-tests against Vivado the same way (2026-11-04, branch xc7-qor; Vivado's own
+The self-tests against Vivado the same way (2026-11-08, branch xc7-qor2; Vivado's own
 2026-11-02, bram-selftest's on its earlier RTL):
 
 | design | LUTs chipsmith / Vivado | registers | block RAM | DSPs | Fmax chipsmith (estimate) / Vivado on chipsmith's / Vivado's own |
 |---|---|---|---|---|---|
-| zybo-bram-selftest | 259 / 10,646 | 193 / 8,346 | 9 RAMB18 / 3 tiles | | 145.1 / 143.6 / 118.1 MHz |
-| zybo-mult-selftest (its 62.5 MHz test clock) | 639 / 671 | 456 / 446 | | 14 / 10 | 78.9 / 75.0 MHz / not timed |
-| zybo-riscv-bram (its CPU's 62.5 MHz clock) | 941 / 779 | 509 / 528 | 2 RAMB18 / 1 tile | | 120.1 / 121.6 / 143.5 MHz (Vivado's at 125 MHz) |
+| zybo-bram-selftest | 259 / 10,646 | 193 / 8,346 | 9 RAMB18 / 3 tiles | | 159.0 / 156.9 / 118.1 MHz |
+| zybo-mult-selftest (its PLL's 75 MHz test clock) | 639 / 671 | 456 / 446 | | 14 / 10 | 87.0 / 83.1 MHz / not timed |
+| zybo-riscv-bram (its CPU's 112.5 MHz PLL clock) | 941 / 779 | 509 / 528 | 2 RAMB18 / 1 tile | | 138.6 / 134.8 / 143.5 MHz (Vivado's at 125 MHz) |
 
 bram-selftest registers each memory's compare and counts an error a
-cycle later, and riscv-bram's CPU runs at 62.5 MHz from a register
-toggling, since branch xc7-timing: by honest timing both missed their
-125 MHz (Vivado's own build of bram-selftest's earlier RTL made 118.1
-MHz; chipsmith's riscv-bram makes 115 to 129 MHz over five seeds), and a
-clock short of its `[clocks]` fails the build.
+cycle later, since branch xc7-timing, and riscv-bram's CPU runs from a
+PLL's 112.5 MHz (62.5 MHz from a toggling register until branch
+xc7-mmcm): by honest timing both missed 125 MHz (Vivado's own build of
+bram-selftest's earlier RTL made 118.1 MHz; chipsmith's riscv-bram made
+115 to 129 MHz over five seeds), and a clock short of its `[clocks]`
+fails the build.
 
 Vivado builds most of bram-selftest's memories in registers and 1,768
 MUXF7s: it won't put a memory in a block where a register with an initial
@@ -1236,13 +1241,39 @@ not taken, five seeds each: the placer's hop delays as fitted (picorv32
 -2%), LUT pins re-ranked from the routed timing and routed again
 (riscv-bram -3%).
 
-What is left: sha256 at 49.6 MHz in Vivado against Vivado's own 82.8.
-Vivado's own critical path runs through as many adder chains, with
-0.6-0.7 ns between them where chipsmith's has 1-2.3 ns, and a 201-load
-register net of 4.7 ns: placement. The router takes a few connections the
-long way when the LUT pin chosen before routing has no near way in
-(jtag-counter, a slice's DQ into its own D6 over a long line, 1.15 ns);
-Vivado swaps LUT pins as it routes.
+Branch xc7-qor2 (2026-11-08): the router times every connection. Its
+timing graph held only the connections it routes, driver to each sink
+pin's first port, so every path broke inside a slice (a LUT into its
+CARRY4's S, a sum into its register, the second LUT of a pair on a shared
+pin), and the LUTs in front of an adder looked uncritical: on sha256's
+seed 0 the router timed 8.04 ns of what the report (and Vivado) time at
+13.76 ns, and routed a 32-load select's critical sink over 25 wires, west
+and back east, 4.2 ns. Those connections now go to the router at 0 ps, as
+the report takes them (`pnr::router_graph`). Found by having Vivado route
+chipsmith's own seed 0 placement (`tools/import.sh` with an empty
+`route.tcl`): 97.0 MHz against 71.8 on chipsmith's routing of it, so the
+placement wasn't the gap. sha256 by Vivado on chipsmith's routing, five
+seeds, the placements unchanged (chipsmith's estimate in brackets):
+
+| seed | main 6c2d740 | xc7-qor2 |
+|---|---|---|
+| 0 | 71.8 (72.7) MHz | 96.4 (103.0) MHz |
+| 1 | 76.3 (82.1) | 96.4 (103.2) |
+| 2 | 80.8 (83.2) | 95.5 (102.1) |
+| 3 | 75.9 (78.2) | 98.7 (104.7) |
+| 4 | 74.0 (79.4) | 98.5 (105.1) |
+| range, mean | 71.8-80.8, 75.8 | 95.5-98.7, 97.1 |
+
+Vivado's own build of sha256 makes 82.8 MHz. The estimate reads 7%
+optimistic on these routings (endpoints: 4.8% and 5.2% median |error| on
+seeds 0 and 4, against 6.5% before). Vivado routing the same seed 0
+placement with the LUT pins free to swap made 98.4 MHz, 1.5% over the
+pins locked: swapping LUT pins as it routes is worth little here. Tried
+and dropped, by chipsmith's estimate after the fix, three seeds each: a
+per-connection timing cost in the anneal beside the weighted wirelength
+(VPR's; weight 5: 102.7, 105.5 and 101.3 MHz against 103.0, 103.2 and
+102.1; weight 20: 100.6 on seed 0), and critical-path repair of nets
+wider than 32 sinks (the same estimate on seeds 0 and 1).
 
 ### Loading a Zybo from its own Linux
 
@@ -1900,8 +1931,10 @@ Next devices:
     process since 2026-11-02; block RAM 2026-11-02, ADR-0014; DSP48E1
     2026-11-02, ADR-0015; LUT6_2 pairs; timing fitted to Vivado's,
     ADR-0016; on the board 2026-11-06). No MUXF7/F8, by measurement
-    ("7-series synthesis", above). Open: the electrostatic placer
-    timing-driven and the annealer after it shorter.
+    ("7-series synthesis", above). The electrostatic placer is
+    timing-driven since branch xc7-timing (nets reweighted by criticality
+    every 25 iterations). Open: the annealer after it shorter (sha256's
+    cold anneal is still about 13 million moves).
   - Router (done, interconnect only). The routing graph comes from
     prjxray-db (`tilegrid.json`, `tile_type_*.json`, `tileconn.json`, and
     `segbits`/`ppips` for which pips a bitstream can express), into the
@@ -1968,11 +2001,14 @@ Next devices:
     LOC/BEL constraints and `FIXED_ROUTE` per net), so this compares
     tools, not routings.
 
-    Open: timing-driven routing (prjxray-db's pip and wire delays into
-    `timing.rs`), which picorv32's Fmax gap calls for; the site graph,
-    so chipsmith can choose site pins and LUT pin permutations itself and
-    no longer needs nextpnr's routing to start from; and FASM from
-    chipsmith's own writer.
+    Since done: the site pins and LUT pin permutations are chipsmith's
+    (`phys.rs`) and so is the FASM writer (`fasm.rs`), both since
+    2026-11-01; routing is timing-driven on each node's delay as fitted to
+    Vivado's timer (ADR-0016), and since branch xc7-qor2 on every
+    connection the placer times ("Timing against Vivado", above). Open:
+    LUT pins swapped while routing, as Vivado's router does (on sha256's
+    seed 0 placement, Vivado's routing with the pins free made 98.4 MHz
+    against 97.0 with chipsmith's pins locked).
   - Placer (done). chipsmith places nextpnr's packed netlist (the cells
     its packer writes with `--pack-only`: SLICE_LUTX, SLICE_FFX, CARRY4,
     RAMD32, PAD, IOB33 buffers, BUFGCTRL, BSCAN) and hands every cell's
@@ -2060,9 +2096,9 @@ Next devices:
     Wirelength alone gives the shortest picorv32 (5,484.5, 27% under
     nextpnr's) and the slowest; its critical path is the reset counter
     into the high-fanout enable of most registers, which only the timing
-    weight pulls together. Open: the 5LUTs and 5FFs, a delay model with
-    the wires' RC, and chipsmith's own packer, so nextpnr's `--pack-only`
-    run goes.
+    weight pulls together. Since done: chipsmith's own packer (`pack.rs`,
+    2026-11-01), the 5LUTs and 5FFs in LUT6_2 pairs. Open: a delay model
+    with the wires' RC.
 - **DE25-Nano** (Agilex 5): no public reverse engineering exists. First
   check whether the Secure Device Manager accepts a bitstream we write.
 

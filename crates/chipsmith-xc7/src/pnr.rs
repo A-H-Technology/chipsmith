@@ -169,7 +169,7 @@ pub fn run(
     let design = Design {
         nets: reqs,
         fixed_inputs: Default::default(),
-        timing: timing.graph.clone(),
+        timing: router_graph(d, &timing, &ph.nets),
     };
     let started = Instant::now();
     let mut router = Router::new(db, &design);
@@ -278,6 +278,51 @@ pub fn run(
             })
             .collect(),
     })
+}
+
+/// The timing graph the router times its routing by: the placer's, plus
+/// what the routed nets' arcs (driver to each sink's first port) leave out,
+/// at 0 ps as [`clock_timing`] takes them. Without these the router's paths
+/// broke at every connection inside a slice (a LUT into its CARRY4's S, a
+/// sum into its register) and at the second LUT of a pair on a shared
+/// input pin: sha256's LUTs in front of its adders looked uncritical and
+/// were routed for congestion, the router timing 8.0 ns of a 13.8 ns path.
+fn router_graph(
+    d: &place::Design,
+    timing: &place::Timing,
+    nets: &[phys::RouteNet],
+) -> chipsmith_route::timing::Graph {
+    let mut g = timing.graph.clone();
+    let mut routed: std::collections::HashSet<(NetId, CellId, &str)> =
+        std::collections::HashSet::new();
+    for r in nets {
+        for ports in &r.sink_ports {
+            for (c, p) in ports {
+                routed.insert((r.net, *c, p.as_str()));
+            }
+        }
+    }
+    for c in &timing.conns {
+        let port = timing.graph.name(c.to);
+        let port = port.rsplit_once('.').map_or(port, |p| p.1);
+        if !routed.contains(&(c.net, c.to_cell, port)) {
+            g.add_arc(c.from, c.to, 0.0);
+        }
+    }
+    let d_name = |c: CellId| d.cells[c as usize].name.as_str();
+    for r in nets {
+        for ports in &r.sink_ports {
+            let Some(((c0, p0), rest)) = ports.split_first() else {
+                continue;
+            };
+            let first = g.node(d_name(*c0), p0);
+            for (c, p) in rest {
+                let other = g.node(d_name(*c), p);
+                g.add_arc(first, other, 0.0);
+            }
+        }
+    }
+    g
 }
 
 /// A clock's name: a port's (`clk`) or a cell output's (`pll.CLKOUT0`),
