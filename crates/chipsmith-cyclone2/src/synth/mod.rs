@@ -194,7 +194,15 @@ fn run(
         latches,
         emulated,
     } = ff::map(m)?;
-    let lutmap = lutmap::map_module(m)?;
+    obs.stage("premap", m);
+    let lutmap = lutmap::map_module_with(
+        m,
+        lutmap::LutSize::FOUR,
+        lutmap::MapOptions {
+            restructure: true,
+            ..lutmap::MapOptions::DEFAULT
+        },
+    )?;
     io::luts(m);
     clean(m);
     obs.stage("luts", m);

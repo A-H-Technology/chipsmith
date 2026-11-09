@@ -32,7 +32,7 @@
 # averaged. On rep 1, each chipsmith placement is also assembled by Quartus
 # (cyclone2-re's `cram quartus-export` and oracle, as bench/quartus-timing.sh)
 # and timed by the same quartus_sta, untimed itself; XCHECK=0 skips that
-# (picorv32x24's assembly hasn't finished in 3 h).
+# (picorv32x24's takes about 15 min; on 2026-10-31's routing it didn't finish in 3 h).
 #
 # `incr` times edit-and-rebuild: a cold build, then $REPS rebuilds, each
 # after toggling one line of logic (EDIT below) on or off, so every

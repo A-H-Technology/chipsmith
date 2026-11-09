@@ -6,7 +6,9 @@ puts each tool's timing result next to its times. `bench/vs-quartus.sh`
 produces every number here and can reproduce them; the raw rows are in
 `bench-out/vs5/runs.tsv` (not committed; the tables below come from it
 through `bench/vs-quartus.sh table` and `bench/vs-quartus.py summary`).
-This run (2026-11-05) is branch `qor4` at de70915. The fourth run
+This run (2026-11-05) is branch `qor4` at de70915; Round 5 (branch
+`qor5`, 2026-11-07, below) moved the LE counts and quartus_sta's Fmax of
+the CPUs, mult-selftest, sha256 and picorv32x24 since. The fourth run
 (2026-11-03, `qor3` f6d26ff), the third (2026-11-02/03, `qor2` 16c6b23),
 the second (2026-11-02, `qor` 7b03ae2) and the first (2026-11-01, `open`
 a288925 and gpu-pnr 61ae9d7) are kept below for comparison.
@@ -105,8 +107,9 @@ gives each design's spread over seeds.
 
 picorv32x24's chipsmith estimate fell from 109.6 to 105.4 MHz since the
 fourth run (9.12 -> 9.49 ns). The model's register enable arc is now
-measured, 660 ps where it was 366 ps (Round 4). picorv32x24 isn't
-cross-checked (Method).
+measured, 660 ps where it was 366 ps (Round 4). picorv32x24 wasn't
+cross-checked in this run (Method); Round 5 has quartus_sta's number for
+it, 99.78 MHz on `main` 9cdc00f, 110.14 on `qor5`.
 
 ## Load
 
@@ -657,6 +660,185 @@ before).
   the model's path into the I/O register, not in the control arcs, which
   that path doesn't use.
 
+## Round 5 (branch `qor5`)
+
+The two polish items the DE2 had left: the LE gap, and picorv32x24's
+Fmax under quartus_sta. Every LE count below is `bench/qor.sh` at
+placement seed 0 on the i7-4770K at load 8 to 16 (other agents' builds),
+2026-11-07. The `main` 9cdc00f baseline reproduced the README's LE
+counts and estimates exactly.
+
+### Where the LEs went
+
+`bench/qor-stats.py` on the fourth run's packed netlists against Quartus'
+fit reports (chipsmith / Quartus):
+
+| design | normal-mode LUTs | arithmetic LUTs | 4-input LUTs |
+|---|---|---|---|
+| femtorv32 | 348 / 302 | 170 / 163 | 176 / 127 |
+| picorv32 | 659 / 620 | 191 / 180 | 508 / 338 |
+| mult-selftest | 679 / 554 | 259 / 231 | 487 / 306 |
+| sdram-selftest | 447 / 441 | 141 / 116 | 288 / 207 |
+| sha256 | 2,393 / 2,153 | 629 / 598 | 1,783 / 1,253 |
+| picorv32x24 | 16,204 / 15,142 | 4,504 / 4,332 | 12,549 / 7,714 |
+
+The gap is normal-mode LUTs. Register-only LEs after placement matter on
+sdram-selftest alone (40 against Quartus' 10; sha256 has 395 against 552).
+
+### Hypotheses, measured
+
+The build was given a hook (not merged) that writes the gates just
+before the LUT mapper and reads a netlist back in their place, so other
+mappings of the same gates go through chipsmith's packer, placer and
+router. LEs and chipsmith's estimate, MHz, seed 0:
+
+**H1: abc's logic optimisation around its mapper** (yosys' `abc` with the
+script shown, mapping the gates itself):
+
+| script | femtorv32 | picorv32 | mult-selftest | sdram-selftest | sha256 |
+|---|---|---|---|---|---|
+| chipsmith | 518 / 95.4 | 876 / 145.1 | 956 / 75.5 | 628 / 174.9 | 3,417 / 70.9 |
+| `if -K 4` | 679 / 81.0 | 865 / 147.3 | 984 / 73.5 | doesn't fit | 3,388 / 65.7 |
+| `dch -f; if -K 4` | 446 / 98.1 | 816 / 144.5 | 876 / 75.7 | 627 / 170.9 | 3,528 / 62.0 |
+| `dch -f; if -K 4 -a` | 442 / 100.3 | 807 / 138.7 | 836 / 78.4 | 609 / 154.2 | 3,258 / 61.6 |
+| `if -K 4; mfs2; lutpack -S 1` | 427 / 102.9 | 829 / 152.7 | 925 / 74.6 | doesn't fit | 3,381 / 69.9 |
+| `dch -f; if; mfs2; lutpack -S 1` | 426 / 108.7 | 807 / 153.8 | 851 / 80.7 | 618 / 158.5 | 3,425 / 63.1 |
+| Quartus | 473 | 839 | 833 | 567 | 3,303 |
+
+Confirmed: choices and don't-care resynthesis each take 3% to 18% off
+the CPUs and mult-selftest, and together reach or pass Quartus there.
+sha256 gains only with area-only mapping (`-a`), at 13% of its Fmax.
+
+**H2: restructuring the AIG, then chipsmith's own mapper** (abc's script
+on the gates, mapped back to gates, `abc -g AND`):
+
+| script | femtorv32 | picorv32 | mult-selftest | sdram-selftest | sha256 |
+|---|---|---|---|---|---|
+| `strash; map` (control) | 517 / 94.6 | | | | |
+| `fraig` | 502 / 99.1 | 852 / 147.1 | 949 / 76.0 | 620 / 179.3 | 3,543 / 69.3 |
+| `balance` | 527 / 93.7 | 892 / 149.9 | 944 / 76.4 | 625 / 176.5 | 3,505 / 63.4 |
+| `refactor` | 508 / 95.4 | 826 / 140.8 | 890 / 75.1 | 624 / 175.1 | 3,445 / 68.7 |
+| `rewrite` | 503 / 98.5 | 836 / 155.2 | 891 / 74.4 | 600 / 173.8 | 3,401 / 65.7 |
+| `dc2` | 499 / 102.2 | 828 / 151.0 | 876 / 73.2 | 619 / 173.7 | 3,420 / 67.0 |
+| `fraig; refactor; fraig` | 505 / 96.3 | 817 / 150.1 | 879 / 75.1 | 623 / 178.1 | 3,400 / 69.8 |
+
+Merging functionally equivalent nodes (`fraig`) helps four of five
+without costing Fmax; lowering builds one function several ways (a
+`$pmux` leg, a decoder, a comparison per use) and structural hashing
+only merges identical structure. Refactoring helps the CPUs and
+mult-selftest. Balancing alone loses.
+
+**H3: wide multiplexers.** sha256's schedule read (`w_tmp`, 17 words of
+32 bits) is 400 LUTs, 12.5 a bit, against Quartus' about 11: at most 50
+LUTs of sha256's 240. The README's "20 LUTs a bit" predates later rounds.
+
+**Not the lever:** the depth bound and cut count of the mapper (Round 1),
+register-only LEs outside sdram-selftest.
+
+### What landed: restructuring as mapping candidates
+
+`chipsmith_synth::lutmap` (`MapOptions::restructure`, Cyclone II only)
+maps three networks of the same gates and keeps the one with the fewest
+LUTs that is no deeper than the plain mapping:
+
+- **as built** (what the mapper had before);
+- **swept**: nodes that compute the same function as an earlier node, or
+  its complement, merged into it. Candidates come from 1,024 random
+  patterns; a pair merges only when both are the same function of a
+  common cut of at most 12 nodes, checked over every assignment, so a
+  merge holds for any input. Both nodes must also read every node of
+  that cut: a node that reads a signal its function ignores (`c & !c`
+  deep inside) is equal, but the proofs model x, and an x on that signal
+  comes out where the original was defined (serv's `o_wdata0` failed
+  `equiv_induct` before this rule). Without it, picorv32x24 also stopped
+  routing at seeds 0 and 2 (60 iterations; the `main` binary routes seeds
+  0-2 in 31 or fewer).
+- **swept, refactored, swept again**: every node's function over a
+  reconvergence-driven cut of at most 10 leaves, as a factored
+  irredundant sum of products (Minato-Morreale ISOP of it or its
+  complement, the most shared literal taken out first), replaces the ANDs
+  only that node uses when it needs at least two fewer and is no deeper.
+  Saving one AND moved LUTs around without fewer of them (femtorv32 481
+  LEs against 468 asking two, mult-selftest 883 against 866; asking three:
+  477 and 867).
+
+No design gets more LEs. Which network wins: picorv32 swept, femtorv32
+and mult-selftest refactored. Synthesis takes 0.2 to
+2.8 s longer (sha256 9.2 -> 12.0 s, under load 12).
+
+Of the other 27 DE2 examples, i2c-master (180 -> 173 LEs), m4k-selftest
+(356 -> 350), serv (297 -> 295), spi-master (113 -> 110), sram-selftest
+(533 -> 531) and uart (110 -> 108) changed, the rest not. All 11 changed
+examples are byte-identical through Quartus (`bench/quartus-validate.sh`).
+
+### Results
+
+LEs, seed 0 (`main` 9cdc00f -> `qor5`, Quartus):
+
+| design | `main` | `qor5` | Quartus |
+|---|---|---|---|
+| femtorv32 | 518 | 470 | 473 |
+| picorv32 | 876 | 852 | 839 |
+| mult-selftest | 956 | 858 | 833 |
+| sdram-selftest | 628 | 621 | 567 |
+| sha256 | 3,417 | 3,395 | 3,303 |
+| picorv32x24 | 21,241 | 20,832 | 20,240 |
+
+quartus_sta's Fmax of chipsmith's placement and routing, MHz, mean over
+seeds [min-max] (`bench/fmax-seeds.sh`), every RBF byte-identical through
+Quartus:
+
+| design | seeds | `main` | `qor5` | Quartus' own |
+|---|---|---|---|---|
+| femtorv32 | 0-2 | 94.1 [92.7-95.7] | 104.2 [101.5-107.8] | 80.89 |
+| picorv32 | 0-6 | 141.2 [131.8-147.9] | 144.4 [135.7-150.2] | 119.82 |
+| mult-selftest | 0-2 | 74.9 [74.0-75.6] | 75.6 [75.1-76.1] | 70.99 |
+| sdram-selftest | 0-2 | 167.0 [154.2-176.1] | 163.3 [154.9-167.7] | 165.84 |
+| sha256 | 0-2 | 69.4 [69.1-69.7] | 70.4 [70.0-70.6] | 64.80 |
+| picorv32x24 | 0 | 99.78 | 110.14 | 105.27 |
+
+No design moves below its seed spread. picorv32 at seed 0 is 135.7
+against 141.2, and at seeds 1 and 2 139.5 and 140.1 against 141.1 and
+147.9, but 144.4 against 141.2 on average over seven seeds. Its mapping
+is the swept network's (664 LUTs against 695, both 5 deep), and the worst
+path at seed 0 is the same on both binaries: a register through five
+LUTs into a register enable that fans out to 31, the first LUT fanning
+out to 36 (`main`: 41). Only its routing differs (7.47 against 7.14 ns
+of data delay).
+picorv32x24's `qor5` placement routes in 41 iterations (31 on `main`).
+
+### picorv32x24 under quartus_sta
+
+picorv32x24 was left out of the cross-check (`XCHECK=0`) because
+Quartus' assembly of chipsmith's placement hadn't finished in 3 hours in
+the first run (2026-10-31): the fit placed and routed it in minutes and
+then sat in post-fit delay annotation. Today's placement assembles in 14
+minutes (8 of them `quartus_fit`, about 2 in delay annotation), RBF
+byte-identical; the 2026-10-31 export, rerun the same day, was still in
+delay annotation after 10 minutes when the host restarted. So it was that
+routing, the one Round 2 found with 19-wire detours, not the design's
+size; nothing needed working around. quartus_sta on chipsmith's
+placement, seed 0:
+
+| binary | LEs | estimate | quartus_sta | Quartus' own |
+|---|---|---|---|---|
+| `main` 9cdc00f | 21,241 | 105.3 | 99.78 | 105.27 |
+| `qor5` | 20,832 | 114.4 | 110.14 | 105.27 |
+
+The estimate is 5.5% and 3.9% above quartus_sta, as on the smaller
+designs (Round 4: -2.0% to +5.4%).
+
+### What's left
+
+- **LEs:** femtorv32 -0.6%, picorv32 +1.5%, mult-selftest +3.0%,
+  sdram-selftest +9.5%, sha256 +2.8%, picorv32x24 +2.9% against Quartus.
+- **Choices and don't-care resynthesis** (H1): abc's `dch` and
+  `mfs2`/`lutpack` still find 5% to 10% more on picorv32 and
+  mult-selftest than what landed. A mapper over structural choices needs
+  rewriting with a structure library or a SAT sweep; `mfs2` needs care
+  sets from windowed simulation.
+- **sdram-selftest's register-only LEs** (40 against 10).
+
 ## Method
 
 **Machine.** Intel i7-4770K (4 cores, 8 threads, 3.5 GHz), 31 GB, no swap,
@@ -715,8 +897,9 @@ assembled by Quartus with the routing fixed, and timed by the same
 quartus_sta, untimed itself. That puts both tools' placements under one
 timing model. chipsmith's placer is deterministic for a binary and
 design, so its critical paths repeat exactly across reps. picorv32x24
-isn't cross-checked: Quartus' assembly of chipsmith's placement of it
-hadn't finished after 3 hours in the first run (`XCHECK=0`).
+wasn't cross-checked in this run (`XCHECK=0`): Quartus' assembly of
+chipsmith's placement of it hadn't finished after 3 hours in the first
+run. It has finished in 14 minutes since (Round 5).
 
 **Edit and rebuild.** `bench/vs-quartus.sh incr` builds a design cold,
 then rebuilds it three times, each after toggling one line of logic

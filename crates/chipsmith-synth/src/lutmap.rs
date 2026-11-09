@@ -86,12 +86,17 @@ pub struct MapOptions {
     /// required depth: the mapping comes out deeper than the depth pass's
     /// (sha256 at K = 6: 8 levels instead of 7). ABC keeps it.
     pub keep_best_cut: bool,
+    /// Also map the network with equivalent nodes merged
+    /// ([`Network::swept`]) and refactored ([`Network::refactored`]), and
+    /// keep whichever mapping takes the fewest LUTs at no more depth.
+    pub restructure: bool,
 }
 
 impl MapOptions {
     pub const DEFAULT: MapOptions = MapOptions {
         cost: LutCost::UNIFORM,
         keep_best_cut: false,
+        restructure: false,
     };
 }
 
@@ -846,6 +851,621 @@ fn node_of(l: Lit) -> usize {
     node(l) as usize
 }
 
+/// Most leaves of the cut [`Network::refactored`] collapses a node over.
+const REFACTOR_LEAVES: usize = 10;
+/// Words of a [`REFACTOR_LEAVES`]-input truth table.
+const TT_WORDS: usize = 1 << (REFACTOR_LEAVES - 6);
+
+type Table = [u64; TT_WORDS];
+
+/// Variable `i`'s table over [`REFACTOR_LEAVES`] inputs.
+fn var_table(i: usize) -> Table {
+    std::array::from_fn(|w| {
+        if i < 6 {
+            VAR[i]
+        } else if (w >> (i - 6)) & 1 == 1 {
+            u64::MAX
+        } else {
+            0
+        }
+    })
+}
+
+fn tt_and(a: &Table, b: &Table) -> Table {
+    std::array::from_fn(|w| a[w] & b[w])
+}
+
+fn tt_or(a: &Table, b: &Table) -> Table {
+    std::array::from_fn(|w| a[w] | b[w])
+}
+
+fn tt_not(a: &Table) -> Table {
+    a.map(|w| !w)
+}
+
+fn tt_zero(a: &Table) -> bool {
+    a.iter().all(|&w| w == 0)
+}
+
+/// `t` with variable `i` set to `v`, as a table that no longer depends on it.
+fn cofactor(t: &Table, i: usize, v: bool) -> Table {
+    if i < 6 {
+        let s = 1 << i;
+        let m = VAR[i];
+        t.map(|w| {
+            if v {
+                (w & m) | ((w & m) >> s)
+            } else {
+                (w & !m) | ((w & !m) << s)
+            }
+        })
+    } else {
+        let s = 1 << (i - 6);
+        std::array::from_fn(|w| t[if v { w | s } else { w & !s }])
+    }
+}
+
+/// A product term: bit `i` of `care` says variable `i` appears, bit `i` of
+/// `pos` whether as itself.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Cube {
+    care: u16,
+    pos: u16,
+}
+
+/// An irredundant sum of products of some function between `lo` and `hi`
+/// (Minato-Morreale), over variables below `n`; returns it and its table.
+fn isop(lo: &Table, hi: &Table, n: usize, out: &mut Vec<Cube>) -> Table {
+    if tt_zero(lo) {
+        return [0; TT_WORDS];
+    }
+    if hi.iter().all(|&w| w == u64::MAX) {
+        out.push(Cube { care: 0, pos: 0 });
+        return [u64::MAX; TT_WORDS];
+    }
+    let mut i = n;
+    let x = loop {
+        assert!(i > 0, "a non-constant interval depends on some variable");
+        i -= 1;
+        if cofactor(lo, i, false) != cofactor(lo, i, true)
+            || cofactor(hi, i, false) != cofactor(hi, i, true)
+        {
+            break i;
+        }
+    };
+    let (l0, l1) = (cofactor(lo, x, false), cofactor(lo, x, true));
+    let (h0, h1) = (cofactor(hi, x, false), cofactor(hi, x, true));
+    let start = out.len();
+    let r0 = isop(&tt_and(&l0, &tt_not(&h1)), &h0, x, out);
+    for c in &mut out[start..] {
+        c.care |= 1 << x;
+    }
+    let mid = out.len();
+    let r1 = isop(&tt_and(&l1, &tt_not(&h0)), &h1, x, out);
+    for c in &mut out[mid..] {
+        c.care |= 1 << x;
+        c.pos |= 1 << x;
+    }
+    let rest_lo = tt_or(&tt_and(&l0, &tt_not(&r0)), &tt_and(&l1, &tt_not(&r1)));
+    let rs = isop(&rest_lo, &tt_and(&h0, &h1), x, out);
+    let vx = var_table(x);
+    tt_or(&tt_or(&tt_and(&r0, &tt_not(&vx)), &tt_and(&r1, &vx)), &rs)
+}
+
+/// Builds a sum of products, factored: the literal most cubes share is
+/// taken out (`l & (q) | r`), recursively. ANDs and ORs of several terms
+/// pair the two earliest-arriving first.
+fn build_factored(aig: &mut Aig, level: &mut Vec<u32>, leaves: &[Lit], cubes: &[Cube]) -> Lit {
+    if cubes.is_empty() {
+        return FALSE;
+    }
+    if cubes.iter().any(|c| c.care == 0) {
+        return TRUE;
+    }
+    let mut count = [0u32; 2 * REFACTOR_LEAVES];
+    for c in cubes {
+        for i in 0..leaves.len() {
+            if c.care >> i & 1 == 1 {
+                count[2 * i + (c.pos >> i & 1) as usize] += 1;
+            }
+        }
+    }
+    let (best, &n) = count
+        .iter()
+        .enumerate()
+        .max_by_key(|&(i, &n)| (n, std::cmp::Reverse(i)))
+        .expect("literals");
+    let lit_of = |j: usize| leaves[j / 2] ^ j.is_multiple_of(2) as Lit;
+    if n <= 1 || cubes.len() == 1 {
+        // No literal shared: an OR of products.
+        let terms: Vec<Lit> = cubes
+            .iter()
+            .map(|c| {
+                let lits: Vec<Lit> = (0..leaves.len())
+                    .filter(|&i| c.care >> i & 1 == 1)
+                    .map(|i| lit_of(2 * i + (c.pos >> i & 1) as usize))
+                    .collect();
+                and_balanced(aig, level, &lits)
+            })
+            .collect();
+        let inv: Vec<Lit> = terms.iter().map(|&t| t ^ 1).collect();
+        return and_balanced(aig, level, &inv) ^ 1;
+    }
+    let (var, positive) = (best / 2, best % 2 == 1);
+    let bit = 1u16 << var;
+    let (with, without): (Vec<Cube>, Vec<Cube>) = cubes
+        .iter()
+        .partition(|c| c.care & bit != 0 && ((c.pos & bit != 0) == positive));
+    let quotient: Vec<Cube> = with
+        .iter()
+        .map(|c| Cube {
+            care: c.care & !bit,
+            pos: c.pos & !bit,
+        })
+        .collect();
+    let q = build_factored(aig, level, leaves, &quotient);
+    let t = and_balanced(aig, level, &[lit_of(best), q]);
+    if without.is_empty() {
+        return t;
+    }
+    let r = build_factored(aig, level, leaves, &without);
+    and_balanced(aig, level, &[t ^ 1, r ^ 1]) ^ 1
+}
+
+fn level_of(aig: &Aig, level: &[u32], l: Lit) -> u32 {
+    match aig.nodes[node_of(l)] {
+        Node::And(..) => level[node_of(l)],
+        _ => 0,
+    }
+}
+
+/// The AND of `lits`, the two lowest-level operands paired first.
+fn and_balanced(aig: &mut Aig, level: &mut Vec<u32>, lits: &[Lit]) -> Lit {
+    let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<(u32, Lit)>> = lits
+        .iter()
+        .map(|&l| std::cmp::Reverse((level_of(aig, level, l), l)))
+        .collect();
+    if heap.is_empty() {
+        return TRUE;
+    }
+    while heap.len() > 1 {
+        let std::cmp::Reverse((la, a)) = heap.pop().expect("two");
+        let std::cmp::Reverse((lb, b)) = heap.pop().expect("two");
+        let z = aig.and(a, b);
+        let zi = node_of(z);
+        if zi >= level.len() {
+            level.resize(zi + 1, 0);
+            level[zi] = 1 + la.max(lb);
+        }
+        heap.push(std::cmp::Reverse((level_of(aig, level, z), z)));
+    }
+    heap.pop().expect("one").0 .1
+}
+
+/// A reconvergence-driven cut of AND node `v` (ABC's): starting from its
+/// fanins, the leaf whose expansion adds the fewest new leaves is replaced
+/// by its fanins while the cut stays within [`REFACTOR_LEAVES`].
+fn reconvergent_cut(aig: &Aig, v: u32) -> Vec<u32> {
+    let Node::And(a, b) = aig.nodes[v as usize] else {
+        unreachable!("an AND")
+    };
+    let mut cut: Vec<u32> = vec![node(a), node(b)];
+    cut.dedup();
+    cut.retain(|&x| !matches!(aig.nodes[x as usize], Node::Const));
+    loop {
+        let mut best: Option<(usize, u32)> = None;
+        for &x in &cut {
+            let Node::And(p, q) = aig.nodes[x as usize] else {
+                continue;
+            };
+            let added = [node(p), node(q)]
+                .iter()
+                .filter(|&&f| !cut.contains(&f) && !matches!(aig.nodes[f as usize], Node::Const))
+                .count();
+            if cut.len() - 1 + added > REFACTOR_LEAVES {
+                continue;
+            }
+            if best.is_none_or(|(c, y)| (added, std::cmp::Reverse(x)) < (c, std::cmp::Reverse(y))) {
+                best = Some((added, x));
+            }
+        }
+        let Some((_, x)) = best else {
+            return cut;
+        };
+        let Node::And(p, q) = aig.nodes[x as usize] else {
+            unreachable!("an AND")
+        };
+        cut.retain(|&y| y != x);
+        for f in [node(p), node(q)] {
+            if !cut.contains(&f) && !matches!(aig.nodes[f as usize], Node::Const) {
+                cut.push(f);
+            }
+        }
+    }
+}
+
+impl Network {
+    /// The same network with nodes rebuilt from their function where that
+    /// takes fewer ANDs (ABC's `refactor`): each node's function over a
+    /// cut of at most [`REFACTOR_LEAVES`] leaves, as a factored irredundant
+    /// sum of products of itself or its complement, replaces the ANDs only
+    /// it uses (its MFFC) when it needs fewer and is no deeper.
+    fn refactored(&self) -> Network {
+        let old = &self.aig;
+        let n = old.nodes.len();
+        let mut refs = vec![0u32; n];
+        for v in 0..n {
+            if let Node::And(a, b) = old.nodes[v] {
+                refs[node_of(a)] += 1;
+                refs[node_of(b)] += 1;
+            }
+        }
+        for &(_, l) in &self.outputs {
+            refs[node_of(l)] += 1;
+        }
+        let mut out = Aig::new();
+        let mut level: Vec<u32> = vec![0];
+        let mut new_lit: Vec<Lit> = vec![FALSE; n];
+        let map = |new_lit: &[Lit], l: Lit| new_lit[node_of(l)] ^ (l & 1);
+        for v in 0..n {
+            let (a, b) = match old.nodes[v] {
+                Node::Const => continue,
+                Node::Leaf(bit) => {
+                    new_lit[v] = out.leaf(bit);
+                    continue;
+                }
+                Node::And(a, b) => (a, b),
+            };
+            let (x, y) = (map(&new_lit, a), map(&new_lit, b));
+            let plain = out.and(x, y);
+            if node_of(plain) >= level.len() {
+                level.resize(node_of(plain) + 1, 0);
+                level[node_of(plain)] =
+                    1 + level_of(&out, &level, x).max(level_of(&out, &level, y));
+            }
+            new_lit[v] = plain;
+            let cut = reconvergent_cut(old, v as u32);
+            if cut.len() < 3 {
+                continue;
+            }
+            // The node's function over the cut, and its MFFC inside it.
+            let mut tables: HashMap<u32, Table> = HashMap::new();
+            for (i, &c) in cut.iter().enumerate() {
+                tables.insert(c, var_table(i));
+            }
+            let mut cone: Vec<u32> = Vec::new();
+            let f = cone_table(old, v as u32, &mut tables, &mut cone);
+            let mut left = refs.clone();
+            let mffc = mffc_size(old, v as u32, &cut, &mut left);
+            if mffc < 2 {
+                continue;
+            }
+            // Tables span all REFACTOR_LEAVES variables; the function
+            // ignores those past the cut, so no mask is needed.
+            let width = cut.len();
+            let nf = tt_not(&f);
+            let mut on = Vec::new();
+            isop(&f, &f, width, &mut on);
+            let mut off = Vec::new();
+            isop(&nf, &nf, width, &mut off);
+            let literals = |cs: &[Cube]| cs.iter().map(|c| c.care.count_ones()).sum::<u32>();
+            let (cubes, complement) = if literals(&off) < literals(&on) {
+                (off, true)
+            } else {
+                (on, false)
+            };
+            let leaves: Vec<Lit> = cut.iter().map(|&c| new_lit[c as usize]).collect();
+            let before = out.nodes.len();
+            let built = build_factored(&mut out, &mut level, &leaves, &cubes) ^ complement as Lit;
+            let added = out.nodes.len() - before;
+            // A saving of one AND moved LUTs around without fewer of them
+            // (femtorv32 481 LEs against 468 asking for two, mult-selftest
+            // 883 against 866).
+            if added + 2 <= mffc && level_of(&out, &level, built) <= level_of(&out, &level, plain) {
+                new_lit[v] = built;
+            }
+        }
+        // Keep only what the outputs read: rejected candidates and the
+        // structures they replaced would otherwise count in the mapper's
+        // fanout estimates.
+        let outputs: Vec<(u64, Lit)> = self
+            .outputs
+            .iter()
+            .map(|&(b, l)| (b, map(&new_lit, l)))
+            .collect();
+        let (aig, outputs) = compacted(&out, &outputs);
+        Network {
+            outputs,
+            aig,
+            gate_cells: self.gate_cells.clone(),
+            max_bit: self.max_bit,
+        }
+    }
+}
+
+/// `v`'s table over the cut whose tables `tables` starts with; every AND
+/// evaluated is pushed on `cone`.
+fn cone_table(aig: &Aig, v: u32, tables: &mut HashMap<u32, Table>, cone: &mut Vec<u32>) -> Table {
+    if let Some(t) = tables.get(&v) {
+        return *t;
+    }
+    let t = match aig.nodes[v as usize] {
+        Node::Const => [0; TT_WORDS],
+        Node::Leaf(_) => unreachable!("the cut separates every leaf"),
+        Node::And(a, b) => {
+            let ta = cone_table(aig, node(a), tables, cone);
+            let tb = cone_table(aig, node(b), tables, cone);
+            let (ia, ib) = (inverted(a) as u64 * u64::MAX, inverted(b) as u64 * u64::MAX);
+            std::array::from_fn(|w| (ta[w] ^ ia) & (tb[w] ^ ib))
+        }
+    };
+    cone.push(v);
+    tables.insert(v, t);
+    t
+}
+
+/// ANDs above the cut that only `v` uses, `v` included.
+fn mffc_size(aig: &Aig, v: u32, cut: &[u32], refs: &mut [u32]) -> usize {
+    let mut size = 1;
+    let Node::And(a, b) = aig.nodes[v as usize] else {
+        return 0;
+    };
+    for f in [node(a), node(b)] {
+        if cut.contains(&f) || !aig.is_and(f) {
+            continue;
+        }
+        refs[f as usize] -= 1;
+        if refs[f as usize] == 0 {
+            size += mffc_size(aig, f, cut, refs);
+        }
+    }
+    size
+}
+
+/// The part of `aig` that `outputs` read, renumbered.
+fn compacted(aig: &Aig, outputs: &[(u64, Lit)]) -> (Aig, Vec<(u64, Lit)>) {
+    let n = aig.nodes.len();
+    let mut live = vec![false; n];
+    let mut stack: Vec<u32> = outputs.iter().map(|&(_, l)| node(l)).collect();
+    while let Some(v) = stack.pop() {
+        if std::mem::replace(&mut live[v as usize], true) {
+            continue;
+        }
+        if let Node::And(a, b) = aig.nodes[v as usize] {
+            stack.extend([node(a), node(b)]);
+        }
+    }
+    let mut out = Aig::new();
+    let mut new_lit = vec![FALSE; n];
+    for v in 0..n {
+        if !live[v] {
+            continue;
+        }
+        new_lit[v] = match aig.nodes[v] {
+            Node::Const => FALSE,
+            Node::Leaf(bit) => out.leaf(bit),
+            Node::And(a, b) => {
+                let x = new_lit[node_of(a)] ^ (a & 1);
+                let y = new_lit[node_of(b)] ^ (b & 1);
+                out.and(x, y)
+            }
+        };
+    }
+    let outputs = outputs
+        .iter()
+        .map(|&(b, l)| (b, new_lit[node_of(l)] ^ (l & 1)))
+        .collect();
+    (out, outputs)
+}
+
+/// Random simulation words per node when looking for equivalent nodes.
+const SWEEP_WORDS: usize = 16;
+/// Most leaves of the cut over which two candidates are compared
+/// exhaustively (2^12 assignments).
+const SWEEP_CUT: usize = 12;
+/// Expansion steps tried per candidate pair.
+const SWEEP_STEPS: usize = 48;
+
+impl Network {
+    /// The same network with nodes that compute the same function as an
+    /// earlier node (or its complement) replaced by it: a light form of
+    /// ABC's `fraig`. Lowering builds one function many ways (a `$pmux`
+    /// leg, a decoder, a comparison per use), and structural hashing only
+    /// merges identical structure. Candidates come from random simulation;
+    /// a pair merges only when both are the same function of a common cut
+    /// of at most [`SWEEP_CUT`] nodes, checked over every assignment, so a
+    /// merge never changes what an output computes.
+    fn swept(&self) -> Network {
+        let aig = &self.aig;
+        let n = aig.nodes.len();
+        // Simulation: a fixed pseudo-random pattern per leaf, from its bit
+        // number, so the result doesn't depend on node order.
+        let mut sim: Vec<[u64; SWEEP_WORDS]> = vec![[0; SWEEP_WORDS]; n];
+        let lit_sim = |sim: &[[u64; SWEEP_WORDS]], l: Lit, w: usize| {
+            sim[node_of(l)][w] ^ if inverted(l) { u64::MAX } else { 0 }
+        };
+        for v in 0..n {
+            match aig.nodes[v] {
+                Node::Const => {}
+                Node::Leaf(bit) => {
+                    let mut x = bit.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0xd1b5_4a32_d192_ed03;
+                    for word in sim[v].iter_mut() {
+                        // splitmix64
+                        x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                        let mut z = x;
+                        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                        *word = z ^ (z >> 31);
+                    }
+                }
+                Node::And(a, b) => {
+                    for w in 0..SWEEP_WORDS {
+                        sim[v][w] = lit_sim(&sim, a, w) & lit_sim(&sim, b, w);
+                    }
+                }
+            }
+        }
+        // Classes by signature, complemented so pattern 0 reads 0: a node
+        // and its complement land together.
+        let mut classes: HashMap<[u64; SWEEP_WORDS], Vec<u32>> = HashMap::new();
+        let mut repl: Vec<Option<Lit>> = vec![None; n];
+        for v in 0..n as u32 {
+            let s = sim[v as usize];
+            let flip = s[0] & 1 == 1;
+            let key = if flip { s.map(|w| !w) } else { s };
+            let members = classes.entry(key).or_default();
+            if aig.is_and(v) {
+                for &u in members.iter().take(2) {
+                    let su = sim[u as usize];
+                    let phase = (su[0] & 1 == 1) != flip;
+                    if same_function(aig, u, v, phase) {
+                        repl[v as usize] = Some((u << 1) | phase as Lit);
+                        break;
+                    }
+                }
+            }
+            if repl[v as usize].is_none() {
+                members.push(v);
+            }
+        }
+        // Rebuild with the replacements, hashing again.
+        let mut out = Aig::new();
+        let mut new_lit: Vec<Lit> = vec![FALSE; n];
+        let map = |new_lit: &[Lit], l: Lit| new_lit[node_of(l)] ^ (l & 1);
+        for v in 0..n {
+            new_lit[v] = match (aig.nodes[v], repl[v]) {
+                (_, Some(r)) => map(&new_lit, r),
+                (Node::Const, None) => FALSE,
+                (Node::Leaf(bit), None) => out.leaf(bit),
+                (Node::And(a, b), None) => {
+                    let (x, y) = (map(&new_lit, a), map(&new_lit, b));
+                    out.and(x, y)
+                }
+            };
+        }
+        Network {
+            outputs: self
+                .outputs
+                .iter()
+                .map(|&(b, l)| (b, map(&new_lit, l)))
+                .collect(),
+            aig: out,
+            gate_cells: self.gate_cells.clone(),
+            max_bit: self.max_bit,
+        }
+    }
+}
+
+/// Whether AND node `v` computes node `u` (complemented if `phase`) for
+/// every input: true only if some cut of both, of at most [`SWEEP_CUT`]
+/// nodes, makes them the same function. `u` precedes `v` in the AIG.
+fn same_function(aig: &Aig, u: u32, v: u32, phase: bool) -> bool {
+    let mut cut: Vec<u32> = vec![u, v];
+    cut.retain(|&x| !matches!(aig.nodes[x as usize], Node::Const));
+    for _ in 0..SWEEP_STEPS {
+        // Expand the latest AND of the cut into its fanins: every set so
+        // reached still separates both nodes from the leaves.
+        let Some(&latest) = cut.iter().filter(|&&x| aig.is_and(x)).max() else {
+            return same_support(aig, &cut, u, v) && equal_over(aig, &cut, u, v, phase);
+        };
+        cut.retain(|&x| x != latest);
+        let Node::And(a, b) = aig.nodes[latest as usize] else {
+            unreachable!("latest is an AND")
+        };
+        for f in [node(a), node(b)] {
+            if !matches!(aig.nodes[f as usize], Node::Const) && !cut.contains(&f) {
+                cut.push(f);
+            }
+        }
+        if cut.len() <= SWEEP_CUT
+            && equal_over(aig, &cut, u, v, phase)
+            && same_support(aig, &cut, u, v)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether both nodes read every node of `cut`. A node that reads a signal
+/// its function ignores (`c & !c` deep inside) is still equal, but the
+/// proof models x: an x on that signal comes out of the replacement where
+/// the original was defined (serv's `o_wdata0` failed `equiv_induct` so).
+fn same_support(aig: &Aig, cut: &[u32], u: u32, v: u32) -> bool {
+    let reached = |root: u32| -> HashSet<u32> {
+        let mut seen = HashSet::new();
+        let mut found = HashSet::new();
+        let mut stack = vec![root];
+        while let Some(x) = stack.pop() {
+            if !seen.insert(x) {
+                continue;
+            }
+            if cut.contains(&x) {
+                found.insert(x);
+                continue;
+            }
+            if let Node::And(a, b) = aig.nodes[x as usize] {
+                stack.extend([node(a), node(b)]);
+            }
+        }
+        found
+    };
+    let (ru, rv) = (reached(u), reached(v));
+    ru.len() == cut.len() && rv.len() == cut.len()
+}
+
+/// Both nodes as functions of `cut`, compared over all 2^|cut| values.
+fn equal_over(aig: &Aig, cut: &[u32], u: u32, v: u32, phase: bool) -> bool {
+    if cut.len() > SWEEP_CUT {
+        return false;
+    }
+    let words = (1usize << cut.len()).div_ceil(64);
+    let mut val: HashMap<u32, Vec<u64>> = HashMap::new();
+    for (i, &c) in cut.iter().enumerate() {
+        let t: Vec<u64> = (0..words)
+            .map(|w| {
+                if i < 6 {
+                    VAR[i]
+                } else if (w >> (i - 6)) & 1 == 1 {
+                    u64::MAX
+                } else {
+                    0
+                }
+            })
+            .collect();
+        val.insert(c, t);
+    }
+    val.insert(0, vec![0; words]);
+    fn eval(aig: &Aig, val: &mut HashMap<u32, Vec<u64>>, x: u32) -> Option<Vec<u64>> {
+        if let Some(t) = val.get(&x) {
+            return Some(t.clone());
+        }
+        let Node::And(a, b) = aig.nodes[x as usize] else {
+            // A leaf outside the cut: the cut doesn't separate it.
+            return None;
+        };
+        let ta = eval(aig, val, node(a))?;
+        let tb = eval(aig, val, node(b))?;
+        let (ia, ib) = (inverted(a) as u64 * u64::MAX, inverted(b) as u64 * u64::MAX);
+        let t: Vec<u64> = ta.iter().zip(&tb).map(|(x, y)| (x ^ ia) & (y ^ ib)).collect();
+        val.insert(x, t.clone());
+        Some(t)
+    }
+    let (Some(tu), Some(tv)) = (eval(aig, &mut val, u), eval(aig, &mut val, v)) else {
+        return false;
+    };
+    let used = 1usize << cut.len();
+    let mask = |w: usize| {
+        if used >= 64 * (w + 1) {
+            u64::MAX
+        } else {
+            (1u64 << (used - 64 * w)) - 1
+        }
+    };
+    let inv = if phase { u64::MAX } else { 0 };
+    (0..words).all(|w| (tu[w] ^ inv ^ tv[w]) & mask(w) == 0)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stats {
     pub gates: usize,
@@ -929,6 +1549,33 @@ struct Mapping {
 }
 
 fn compute(net: &Network, k: LutSize, opts: MapOptions) -> Mapping {
+    let plain = compute_on(net, k, opts);
+    if !opts.restructure {
+        return plain;
+    }
+    // Restructuring wins on some designs and loses on others: a merged
+    // node feeds more places and a cut can no longer absorb its own copy,
+    // and a refactored sum of products can take more LUTs than the
+    // structure it replaced (picorv32: 736 LUTs against 664). Mapping is
+    // cheap next to the rest of the build, so each network is mapped and
+    // the one with the fewest LUTs kept, never one deeper than the plain
+    // mapping.
+    let swept = net.swept();
+    let refactored = swept.refactored().swept();
+    let depth = plain.stats.depth;
+    let mut best = plain;
+    for candidate in [&swept, &refactored] {
+        let m = compute_on(candidate, k, opts);
+        if m.stats.depth <= depth
+            && (m.stats.luts, m.stats.depth) < (best.stats.luts, best.stats.depth)
+        {
+            best = m;
+        }
+    }
+    best
+}
+
+fn compute_on(net: &Network, k: LutSize, opts: MapOptions) -> Mapping {
     let mut m = Mapper::new(net, k, opts);
     let mask = k.mask();
     m.pass(None);
@@ -1376,6 +2023,87 @@ mod tests {
                 "y, inputs {m:05b}"
             );
             assert_eq!(simulate(&j, &ins, 14), !(a & b), "z, inputs {m:05b}");
+        }
+    }
+
+    #[test]
+    fn sweeping_merges_one_function_built_two_ways() {
+        // y = a & (b & c) and z = !(!(a & b) | !c): one function, two
+        // structures that hashing keeps apart.
+        let j = module(
+            json!({
+                "g1": gate("$_AND_", json!({"A": [2], "B": [3], "Y": [10]})),
+                "g2": gate("$_AND_", json!({"A": [1], "B": [10], "Y": [11]})),
+                "g3": gate("$_NAND_", json!({"A": [1], "B": [2], "Y": [12]})),
+                "g4": gate("$_NOT_", json!({"A": [3], "Y": [13]})),
+                "g5": gate("$_NOR_", json!({"A": [12], "B": [13], "Y": [14]})),
+            }),
+            &[11, 14],
+        );
+        let net = Network::read(&j["modules"]["top"]).unwrap();
+        let opts = |restructure| MapOptions {
+            restructure,
+            ..MapOptions::DEFAULT
+        };
+        assert_eq!(compute(&net, LutSize::FOUR, opts(false)).stats.luts, 2);
+        let swept = compute(&net, LutSize::FOUR, opts(true));
+        assert_eq!(swept.stats.luts, 1);
+        assert_eq!(swept.aliases.len(), 1);
+    }
+
+    #[test]
+    fn sweeping_keeps_functions_that_differ() {
+        // a & b & c against a & b & !c: different, whatever simulation says.
+        let j = module(
+            json!({
+                "g1": gate("$_AND_", json!({"A": [1], "B": [2], "Y": [10]})),
+                "g2": gate("$_AND_", json!({"A": [10], "B": [3], "Y": [11]})),
+                "g3": gate("$_ANDNOT_", json!({"A": [10], "B": [3], "Y": [12]})),
+            }),
+            &[11, 12],
+        );
+        let net = Network::read(&j["modules"]["top"]).unwrap();
+        let swept = net.swept();
+        let lits: Vec<Lit> = swept.outputs.iter().map(|&(_, l)| l).collect();
+        assert_ne!(lits[0], lits[1]);
+        assert_ne!(lits[0], lits[1] ^ 1);
+    }
+
+    #[test]
+    fn refactoring_factors_out_a_shared_literal_and_keeps_the_function() {
+        // y = (a & b) | (a & c) | (a & d): five ANDs (with the ORs), and
+        // a & (b | c | d) takes three.
+        let j = module(
+            json!({
+                "g1": gate("$_AND_", json!({"A": [1], "B": [2], "Y": [10]})),
+                "g2": gate("$_AND_", json!({"A": [1], "B": [3], "Y": [11]})),
+                "g3": gate("$_AND_", json!({"A": [1], "B": [4], "Y": [12]})),
+                "g4": gate("$_OR_", json!({"A": [10], "B": [11], "Y": [13]})),
+                "g5": gate("$_OR_", json!({"A": [13], "B": [12], "Y": [14]})),
+            }),
+            &[14],
+        );
+        let net = Network::read(&j["modules"]["top"]).unwrap();
+        let ands = |n: &Network| n.aig.nodes.iter().filter(|x| matches!(x, Node::And(..))).count();
+        let r = net.refactored();
+        assert_eq!(ands(&net), 5);
+        assert_eq!(ands(&r), 3);
+        let eval = |n: &Network, m: u32| -> bool {
+            let mut val = vec![false; n.aig.nodes.len()];
+            for (v, node) in n.aig.nodes.iter().enumerate() {
+                val[v] = match *node {
+                    Node::Const => false,
+                    Node::Leaf(bit) => m >> (bit - 1) & 1 == 1,
+                    Node::And(a, b) => {
+                        (val[node_of(a)] ^ inverted(a)) && (val[node_of(b)] ^ inverted(b))
+                    }
+                };
+            }
+            let l = n.outputs[0].1;
+            val[node_of(l)] ^ inverted(l)
+        };
+        for m in 0..16 {
+            assert_eq!(eval(&net, m), eval(&r, m), "inputs {m:04b}");
         }
     }
 

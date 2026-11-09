@@ -25,45 +25,48 @@ nextpnr, no prjxray tool, only prjxray-db's data.
 | xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes, with no external tool but GHDL for VHDL (2026-11-01: chipsmith's own Verilog front end, synthesis, packing, placement, routing and FASM; 2026-11-02: frames and `.bit`; "The Zybo flow", below): LUT1-LUT6, CARRY4, FDRE/FDSE/FDCE/FDPE, RAM32M, block RAM (RAMB18E1, since 2026-11-02; "7-series block RAM", below), multipliers (DSP48E1, since 2026-11-02; "7-series multipliers", below), LUT6_2 pairs, LVCMOS33 pins, BUFGs, BSCANs, PLLs and MMCMs (PLLE2_ADV, MMCME2_ADV, since 2026-11-04; ADR-0017) and the PS7 | yes, with the earlier flow (2026-10-24, yosys and nextpnr around chipsmith's placement and routing: zybo-jtag-counter read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga). chipsmith's own flow is checked at the bitstream (decoded and co-simulated against the RTL, below) and, since 2026-11-06, on the board: zybo-jtag-counter (125.01 MHz), zybo-mult-selftest, zybo-riscv-bram and zybo-bram-selftest (every RAMB18E1 mode it has) read back over JTAG with 0 errors (riscv-bram's register file is 11 RAM32Ms, so their write-data pins as xc7-timing fixed them run on silicon), and through a webcam zybo-blinky's LD0 at 0.93 Hz (125 MHz / 2^27) and zybo-pll's four LEDs, two bits of a counter on each PLL output (125 and 62.5 MHz), at 0.96/1.83 Hz each (expected 0.93/1.86) |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
-LEDs, 876 LEs and two M4Ks (its register file); a build takes 20 to 24 s
+LEDs, 852 LEs and two M4Ks (its register file); a build takes 20 to 24 s
 on the benchmark machine at load 1.6 to 8 (docs/vs-quartus.md; Compile
 speed, below).
 
 Against Quartus II 13.0sp1 Web Edition on the same Verilog, pins and
-clock, to a bitstream (`bench/vs-quartus.sh`, docs/vs-quartus.md;
-2026-11-05, branch `qor4` at de70915, an i7-4770K at load 1.3 to 8.2,
-median 1.8). Wall-time medians over 3 interleaved reps; Fmax is
-quartus_sta's for both tools' placements (picorv32x24: chipsmith's own
-estimate):
+clock, to a bitstream (`bench/vs-quartus.sh`, docs/vs-quartus.md). Times
+are from 2026-11-05, branch `qor4` at de70915, an i7-4770K at load 1.3
+to 8.2, median 1.8: wall-time medians over 3 interleaved reps. LEs and
+Fmax are branch `qor5` (2026-11-07, `bench/qor.sh`, load 8 to 16): Fmax
+is quartus_sta's for both tools' placements, chipsmith's at the default
+placement seed:
 
 | design | LEs Quartus / chipsmith | Quartus s | chipsmith s | Fmax MHz Quartus / chipsmith |
 |---|---|---|---|---|
 | blinky-verilog | 26 / 26 | 51 | 3.8 | 285 / 298 |
-| picorv32 | 839 / 876 | 75 | 20 | 120 / 141 |
-| femtorv32 | 473 / 518 | 66 | 11 | 81 / 93 |
-| mult-selftest | 833 / 956 | 77 | 22 | 71 / 76 |
-| sdram-selftest | 567 / 628 | 64 | 7.3 | 166 / 154 |
-| sha256 | 3,303 / 3,417 | 141 | 78 | 65 / 69 |
-| picorv32x24 | 20,240 / 21,241 | 673 | 311 | 105 / 105 |
+| picorv32 | 839 / 852 | 75 | 20 | 120 / 136 |
+| femtorv32 | 473 / 470 | 66 | 11 | 81 / 102 |
+| mult-selftest | 833 / 858 | 77 | 22 | 71 / 76 |
+| sdram-selftest | 567 / 621 | 64 | 7.3 | 166 / 168 |
+| sha256 | 3,303 / 3,395 | 141 | 78 | 65 / 70 |
+| picorv32x24 | 20,240 / 20,832 | 673 | 311 | 105 / 110 |
 
 chipsmith is 1.8x to 17x faster in wall time at every size and uses 1.4x
 to 7.4x less CPU time: Quartus 13.0 Web Edition is single-threaded, and
-most of its time on small designs is a fixed minute. Quartus still uses
-3% to 15% fewer LEs (chipsmith 13% fewer on crc32). chipsmith's
-placements are faster on femtorv32, mult-selftest, picorv32, sha256,
-crc32 and blinky, and even on picorv32x24 by its estimate. On
-sdram-selftest Quartus' is faster at the default placement seed (166
-against 154 MHz); over seeds 0-6 chipsmith's range from 154 to 176
-MHz. Branch `qor4` read femtorv32's register file on the edge before, as
-Quartus does (75 -> 93 MHz at the default seed), packed partial products
-that don't overlap into one adder operand (mult-selftest 68 -> 76 MHz),
-and measured the timing model's register control arcs and the M4K
-output register's clock-to-output. chipsmith's estimate is within -2.0%
-to +5.4% of quartus_sta on its own placements. The earlier runs
-(2026-11-01, `open` a288925: 12% to 83% more LEs than Quartus;
-2026-11-02, `qor`; 2026-11-02/03, `qor2`; 2026-11-03, `qor3`) and what
-closed the gap since are in docs/vs-quartus.md. Neither tool rebuilds
-incrementally after a logic edit.
+most of its time on small designs is a fixed minute (`qor5`'s synthesis
+adds 0.2 to 2.8 s). Quartus uses up to 9.5% fewer LEs (sdram-selftest;
+1.5% to 3.0% on picorv32, mult-selftest, sha256 and picorv32x24);
+chipsmith uses 3 fewer on femtorv32 and 13% fewer on crc32. chipsmith's
+placements are faster than Quartus' on every design here at the default
+seed (sdram-selftest 155 to 168 MHz over seeds 0-2, Quartus 166),
+picorv32x24 included (quartus_sta on chipsmith's placement, 110 against
+105 MHz; before `qor5` the table had chipsmith's estimate for it). Branch `qor5` maps each design's
+gates as built, with functionally equivalent nodes merged, and also
+refactored, and keeps the mapping with the fewest LUTs (femtorv32 518 ->
+470 LEs, mult-selftest 956 -> 858, picorv32 876 -> 852, picorv32x24
+21,241 -> 20,832). chipsmith's estimate is +1.0% to +10.8% above
+quartus_sta on its own placements (sdram-selftest's +10.8%). The earlier
+runs (2026-11-01, `open` a288925: 12% to 83% more LEs than Quartus;
+2026-11-02, `qor`; 2026-11-02/03, `qor2`; 2026-11-03, `qor3`;
+2026-11-05, `qor4`) and what closed the gap since are in
+docs/vs-quartus.md. Neither tool rebuilds incrementally after a logic
+edit.
 
 `examples/de2-jtag-counter` answers over the JTAG cable, so a load can be
 checked without watching the board: the Cyclone II's JTAG block makes it a
@@ -1583,10 +1586,20 @@ share chipsmith's own netlist IR, not Verilog.
      (`strash; if -K 4`) gives 847 LUTs and chipsmith's 842, so the
      mapping itself is on par. The 9% gap comes from abc's logic
      optimisation around its mapper: choice nodes (`dch -f`, 810 LUTs)
-     and don't-care resynthesis (`mfs2`, `lutpack`, 788). A choice-aware
-     mapper is the next gain. More cuts per node (16, 32), more recovery
-     passes, or relaxing depth by a level didn't help (844 to 847). An earlier comparison (842 vs 847) had
+     and don't-care resynthesis (`mfs2`, `lutpack`, 788). More cuts per
+     node (16, 32), more recovery passes, or relaxing depth by a level
+     didn't help (844 to 847). An earlier comparison (842 vs 847) had
      counted abc's 75 one-input buffer LUTs, which `opt -fast` removes.
+     Since 2026-11-07 (branch `qor5`, docs/vs-quartus.md Round 5) the
+     Cyclone II mapper also maps the gates swept (functionally equivalent
+     nodes merged, each merge checked exhaustively over a common cut of at
+     most 12 nodes) and swept and refactored (each node's function over a
+     cut of at most 10 leaves as a factored irredundant sum of products),
+     and keeps the mapping with the fewest LUTs at no more depth:
+     femtorv32 518 -> 470 LEs, picorv32 876 -> 852, mult-selftest 956 ->
+     858, picorv32x24 21,241 -> 20,832. abc's choices and `mfs2`/`lutpack`
+     still find more on picorv32 and mult-selftest (807 and 851 LEs
+     through chipsmith's back end).
    - Synthesis (done, 2026-10-25, the DE2 build's since then):
      `chipsmith_cyclone2::synth::synthesize` takes the front end's netlist
      (or yosys' `proc; flatten`) to the cells `cyclone2.ys` makes, in place
@@ -1745,7 +1758,8 @@ share chipsmith's own netlist IR, not Verilog.
      serv's has been an M4K since the M4K work, 345 LEs against Quartus'
      336) and wide multiplexers: sha256's 16-word schedule read maps
      to about 20 LUTs a bit, against Quartus' 11 (the mapper, not the
-     netlist: the same read as a `$bmux` tree maps no better). Still
+     netlist: the same read as a `$bmux` tree maps no better; on 2026-11-07
+     it was 400 LUTs for 32 bits, 12.5 a bit). Still
      rejected: `$pow` with a non-constant base, the yosys flow's own
      limits above.
    - Gaps closed (2026-11-01):
@@ -1907,9 +1921,11 @@ share chipsmith's own netlist IR, not Verilog.
 The DE2 is done: every step above is chipsmith's, and every fabric
 feature it builds (logic, carry chains, M4Ks, multipliers, PLLs, I/O-cell
 registers, falling-edge clocks, both external RAMs, the EPCS) has run on
-the board. What's left is polish: Quartus still uses 3% to 15% fewer LEs
-(a choice-aware LUT mapper, above), and picorv32x24's Fmax is chipsmith's
-estimate, not quartus_sta's. The board's other peripherals (flash, audio,
+the board. The polish left after it (2026-11-07, branch `qor5`): Quartus
+uses up to 9.5% fewer LEs (sdram-selftest; femtorv32 now takes 3 fewer
+than Quartus), with abc's choices and don't-care resynthesis as the next
+gain (LUT mapping, above); picorv32x24 is timed by quartus_sta like the
+rest (110 MHz, Quartus' own fit 105). The board's other peripherals (flash, audio,
 Ethernet, USB, LCD, PS/2, SD) would test controller RTL, not the
 toolchain, so they aren't goals.
 

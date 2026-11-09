@@ -96,6 +96,7 @@ fn cost_and_kept_cut_at_six() {
     let alm = MapOptions {
         cost: LutCost::by_inputs([3, 3, 3, 3, 3, 4, 6]).unwrap(),
         keep_best_cut: true,
+        ..MapOptions::DEFAULT
     };
     let (costed, n2) = map(Some(alm));
     let area = |n: [usize; 7]| 3 * n[..5].iter().sum::<usize>() + 4 * n[5] + 6 * n[6];
