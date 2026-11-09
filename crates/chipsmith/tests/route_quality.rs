@@ -35,12 +35,16 @@ fn copy_dir(from: &Path, to: &Path) {
 
 /// A fresh build of `examples/<example>`'s report.
 fn build(example: &str) -> String {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+    // A root of its own per test: tests run in parallel, and zybo-sha256
+    // copies its sibling sha256 next to itself, which in a shared root is
+    // the sha256 test's own directory, removed and rebuilt under it.
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("route-quality")
         .join(example);
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).unwrap();
+    if root.exists() {
+        std::fs::remove_dir_all(&root).unwrap();
     }
+    let dir = root.join(example);
     let examples = Path::new(ROOT).join("examples");
     copy_dir(&examples.join(example), &dir);
     // The examples its manifest takes sources from ("../sha256/src/*.v").

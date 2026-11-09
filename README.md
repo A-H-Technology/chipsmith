@@ -1364,11 +1364,10 @@ source:
 
 ```
 swim build                        # build/spade.sv
-chipsmith build && chipsmith flash
+chipsmith flash                   # builds first, then loads
 ```
 
-`flash` loads what `build` last made; run `swim build` and `chipsmith
-build` after each edit. `examples/spade-jtag-counter` is
+`examples/spade-jtag-counter` is
 examples/de2-jtag-counter in Spade, its JTAG block an `extern entity` of
 chipsmith's `CY2_JTAG` cell. On the DE2 2026-11-09 (loaded over JTAG)
 `de2_user1` read `"SPD!"` and CLOCK_50 at 50.00 MHz, 8 reads of 8. The

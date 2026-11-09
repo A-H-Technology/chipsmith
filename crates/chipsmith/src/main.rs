@@ -28,7 +28,9 @@ enum Cmd {
     /// cycle), or with --persist write it into the board's configuration
     /// flash.
     Flash {
-        /// An .rbf, .svf or .bit; defaults to what `chipsmith build` produced.
+        /// An .rbf, .svf or .bit, loaded as it is. Without one, the
+        /// project is built first (`chipsmith build`) and its bitstream
+        /// loaded.
         bitstream: Option<PathBuf>,
         /// Write the configuration flash (DE2: the EPCS16), so the design
         /// loads at power-up. The DE2's RUN/PROG switch stays in RUN.
@@ -62,6 +64,15 @@ enum Cmd {
     /// Map a yosys netlist's simple gates to 4-input LUTs (in place of abc).
     #[command(hide = true)]
     Lutmap { netlist: PathBuf, mapped: PathBuf },
+}
+
+fn build(manifest: &Manifest, layout: &Layout) -> Result<()> {
+    eprintln!(
+        "building {} for {}",
+        manifest.name,
+        manifest.target.device()
+    );
+    flow::plan_build(manifest, layout)?.run()
 }
 
 fn main() -> Result<()> {
@@ -98,12 +109,7 @@ fn main() -> Result<()> {
     let layout = Layout::new(&project_dir, &manifest);
     match cli.command {
         Cmd::Build => {
-            eprintln!(
-                "building {} for {}",
-                manifest.name,
-                manifest.target.device()
-            );
-            flow::plan_build(&manifest, &layout)?.run()?;
+            build(&manifest, &layout)?;
             println!("{}", layout.bitstream().display());
         }
         Cmd::RoutingGraph { .. }
@@ -138,14 +144,12 @@ fn main() -> Result<()> {
         } => {
             let path = match bitstream {
                 Some(path) => path,
+                // Built first, so what's loaded is what the sources say
+                // now: an edit flashed without a build would load the
+                // last one. Unchanged steps are skipped (ADR-0011).
                 None => {
-                    let built = layout.bitstream();
-                    anyhow::ensure!(
-                        built.exists(),
-                        "{} doesn't exist yet; run `chipsmith build` first",
-                        built.display()
-                    );
-                    built
+                    build(&manifest, &layout)?;
+                    layout.bitstream()
                 }
             };
             let persistence = if persist {
