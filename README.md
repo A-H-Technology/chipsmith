@@ -21,7 +21,7 @@ nextpnr, no prjxray tool, only prjxray-db's data.
 
 | device | board | build | on hardware |
 |---|---|---|---|
-| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis): LUT/carry/register logic, M4K RAM blocks and embedded multipliers (below), global clocks from pins and from logic (a register, the JTAG block's TCK; one clock per LAB), PLLs (`CY2_PLL`; both on the board 2026-10-26, examples/de2-jtag-counter on TCK and examples/de2-pll-counter at 100 and 40 MHz from CLOCK_50; 2026-10-30 a PLL clock on its PLL's clock output pin, 2026-10-31 on any pin or into logic as data, the DE2's SDRAM run at 100 MHz with 0 errors by examples/sdram-selftest, its SRAM by examples/sram-selftest); pins input, output, tri-state, bidirectional, open drain, at 3.3-V LVTTL (any current) or LVCMOS or 2.5-V inputs, with pull-up or bus hold and I/O-cell registers (with the cell's clock enables, asynchronous clears and presets and falling-edge clocks as Quartus packs them since 2026-10-31, examples/de2-ioregs; an output or OE register's synchronous reset as logic on its D; Manifest, below) | yes (2026-10-25, chipsmith's own synthesis end to end, checked over JTAG: examples/de2-jtag-counter (its earlier CLOCK_50-sampled version) reads back `"DE2!"` at 50.00 MHz after a JTAG load and after `flash --persist` (loader synthesized by chipsmith too, EPCS written, verified and reloaded from; 2026-10-26 also after a power cycle); picorv32 with the same readback added runs its loop at 3.33 MHz. 2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
+| EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis): LUT/carry/register logic, M4K RAM blocks and embedded multipliers (below), global clocks from pins and from logic (a register, the JTAG block's TCK; one clock per LAB), PLLs (`CY2_PLL`; both on the board 2026-10-26, examples/de2-jtag-counter on TCK and examples/de2-pll-counter at 100 and 40 MHz from CLOCK_50; 2026-10-30 a PLL clock on its PLL's clock output pin, 2026-10-31 on any pin or into logic as data, the DE2's SDRAM run at 100 MHz with 0 errors by examples/sdram-selftest, its SRAM by examples/sram-selftest); pins input, output, tri-state, bidirectional, open drain, at 3.3-V LVTTL (any current) or LVCMOS or 2.5-V inputs, with pull-up or bus hold and I/O-cell registers (with the cell's clock enables, asynchronous clears and presets and falling-edge clocks as Quartus packs them since 2026-10-31, examples/de2-ioregs; an output or OE register's synchronous reset as logic on its D; Manifest, below) | yes (2026-10-25, chipsmith's own synthesis end to end, checked over JTAG: examples/de2-jtag-counter (its earlier CLOCK_50-sampled version) reads back `"DE2!"` at 50.00 MHz after a JTAG load and after `flash --persist` (loader synthesized by chipsmith too, EPCS written, verified and reloaded from; 2026-10-26 also after a power cycle); picorv32 with the same readback added runs its loop at 3.33 MHz; 2026-11-09 examples/spade-jtag-counter, the same design in Spade, at 50.00 MHz ("Spade", below). 2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
 | xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes, with no external tool but GHDL for VHDL (2026-11-01: chipsmith's own Verilog front end, synthesis, packing, placement, routing and FASM; 2026-11-02: frames and `.bit`; "The Zybo flow", below): LUT1-LUT6, CARRY4, FDRE/FDSE/FDCE/FDPE, RAM32M, block RAM (RAMB18E1, since 2026-11-02; "7-series block RAM", below), multipliers (DSP48E1, since 2026-11-02; "7-series multipliers", below), LUT6_2 pairs, LVCMOS33 pins, BUFGs, BSCANs, PLLs and MMCMs (PLLE2_ADV, MMCME2_ADV, since 2026-11-04; ADR-0017) and the PS7 | yes, with the earlier flow (2026-10-24, yosys and nextpnr around chipsmith's placement and routing: zybo-jtag-counter read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga). chipsmith's own flow is checked at the bitstream (decoded and co-simulated against the RTL, below) and, since 2026-11-06, on the board: zybo-jtag-counter (125.01 MHz), zybo-mult-selftest, zybo-riscv-bram and zybo-bram-selftest (every RAMB18E1 mode it has) read back over JTAG with 0 errors (riscv-bram's register file is 11 RAM32Ms, so their write-data pins as xc7-timing fixed them run on silicon), and through a webcam zybo-blinky's LD0 at 0.93 Hz (125 MHz / 2^27) and zybo-pll's four LEDs, two bits of a counter on each PLL output (125 and 62.5 MHz), at 0.96/1.83 Hz each (expected 0.93/1.86) |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
@@ -1309,7 +1309,7 @@ Cyclone II (EP2C35F672C6):
 | stage | today | |
 |---|---|---|
 | VHDL → Verilog | GHDL `--synth --out=verilog` | stays a translator in front of the flow |
-| Verilog front end | chipsmith: preprocessor, parser, elaboration to yosys' `proc` level, with the Cyclone II cell library (`crates/chipsmith-verilog`, `crates/chipsmith-cyclone2/src/synth/cells.v`) | ours |
+| Verilog front end | chipsmith: preprocessor, parser, elaboration to yosys' `proc` level, `.sv` files as SystemVerilog (Spade, below), with the Cyclone II cell library (`crates/chipsmith-verilog`, `crates/chipsmith-cyclone2/src/synth/cells.v`) | ours |
 | synthesis | chipsmith: what cyclone2-re's `cyclone2.ys` does, on chipsmith's netlist IR (`crates/chipsmith-synth`, `crates/chipsmith-cyclone2/src/synth`) | ours |
 | LUT mapping | chipsmith: AIG plus priority cuts, in place of `abc -lut 4` (`crates/chipsmith-synth/src/lutmap.rs`) | ours |
 | packing | chipsmith: cyclone2-re's nextpnr packer, ported (`crates/chipsmith-cyclone2/src/pack`) | ours |
@@ -1350,6 +1350,33 @@ package pins every tool. The devshell pins them too.
 Verilog is the input language. Anything else, VHDL today and later Chisel,
 Amaranth and the like, gets translated into it. Internally, the stages will
 share chipsmith's own netlist IR, not Verilog.
+
+### Spade
+
+[Spade](https://spade-lang.org)'s compiler writes SystemVerilog, and
+chipsmith reads a `.sv` file as SystemVerilog: IEEE 1800-2017's keywords
+reserved, `logic`, `always_comb`/`always_ff`/`always_latch` and
+`unique`/`unique0`/`priority` on `if` and `case`, as much as synthesis
+needs (`crates/chipsmith-verilog/src/lex.rs`, `Dialect`). A `.v` file stays
+Verilog-2005, where `logic` is still a name. So a swim project builds with a
+`chipsmith.toml` beside its `swim.toml` that takes swim's output as its
+source:
+
+```
+swim build                        # build/spade.sv
+chipsmith build && chipsmith flash
+```
+
+`flash` loads what `build` last made; run `swim build` and `chipsmith
+build` after each edit. `examples/spade-jtag-counter` is
+examples/de2-jtag-counter in Spade, its JTAG block an `extern entity` of
+chipsmith's `CY2_JTAG` cell. On the DE2 2026-11-09 (loaded over JTAG)
+`de2_user1` read `"SPD!"` and CLOCK_50 at 50.00 MHz, 8 reads of 8. The
+compiler is pinned in its `swim.lock` (Spade 2a6beb42 from codeberg).
+yosys proves chipsmith's reading of Spade's output equivalent to its own
+`read_verilog -sv` for that example and for a design with an enum state
+machine, a pipeline, the stdlib's FIFO and a multiplier
+(`crates/chipsmith-verilog/tests/yosys.rs`, `spade`).
 
 ## Roadmap
 
@@ -2124,7 +2151,7 @@ Next devices:
 [project]
 name = "blinky"            # build/blinky.rbf
 top = "blinky"             # module or entity whose ports are pins
-sources = ["src/*.vhd"]    # .v or .vhd/.vhdl, one language per design
+sources = ["src/*.vhd"]    # .v and .sv, or .vhd/.vhdl: one language per design
 
 [target]
 device = "EP2C35F672C6"

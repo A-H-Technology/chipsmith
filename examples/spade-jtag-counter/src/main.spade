@@ -1,0 +1,66 @@
+// examples/de2-jtag-counter in Spade: the Cyclone II's JTAG block makes a
+// TCK-clocked register the USER1 data register, loaded with "SPD!" and a
+// Gray-coded CLOCK_50 counter outside Shift-DR and shifted out LSB first in
+// it. `cargo run --release -p chipsmith-cyclone2 --example de2_user1`
+// reads it twice, a second apart, and prints CLOCK_50's frequency.
+//
+// The counter is Gray-coded so that sampling it on TCK, asynchronous to
+// CLOCK_50, is off by at most one count.
+
+mod cells {
+    // chipsmith's Cyclone II JTAG block (crates/chipsmith-cyclone2/src/synth/cells.v).
+    #[no_mangle(all)]
+    pub extern entity CY2_JTAG(
+        TDOUSER: bool,
+        TMSUTAP: inv bool,
+        TCKUTAP: inv bool,
+        TDIUTAP: inv bool,
+        SHIFTUSER: inv bool,
+        CLKDRUSER: inv bool,
+        UPDATEUSER: inv bool,
+        RUNIDLEUSER: inv bool,
+        USR1USER: inv bool,
+    );
+}
+
+#[no_mangle(all)]
+entity top(CLOCK_50: clock, LEDR: inv [bool; 4]) {
+    reg(CLOCK_50) count: uint<32> initial(0) = trunc(count + 1);
+    // The bits as they are: `Gray::to_uint` decodes back to binary.
+    reg(CLOCK_50) gray: uint<32> initial(0) = count.to_gray().as_bits().as_uint();
+    let top: uint<4> = trunc(count >> 23);
+    set LEDR = top.to_bits();
+
+    let (tms, tms_inv) = port();
+    let (tck, tck_inv) = port();
+    let (tdi, tdi_inv) = port();
+    let (shift, shift_inv) = port();
+    let (clkdr, clkdr_inv) = port();
+    let (update, update_inv) = port();
+    let (runidle, runidle_inv) = port();
+    let (usr1, usr1_inv) = port();
+    let _ = (tms, clkdr, update, runidle);
+
+    decl dr;
+    let tdo: uint<1> = trunc(dr);
+    let _ = inst cells::CY2_JTAG(
+        tdo == 1,
+        tms_inv,
+        tck_inv,
+        tdi_inv,
+        shift_inv,
+        clkdr_inv,
+        update_inv,
+        runidle_inv,
+        usr1_inv,
+    );
+
+    let tck_clk = unsafe { tck.as_clock() };
+    reg(tck_clk) dr: uint<64> initial(0) = if shift && usr1 {
+        let rest: uint<63> = trunc(dr >> 1);
+        (if tdi { 1u1 } else { 0u1 }).concat(rest)
+    } else {
+        // "SPD!", its first character in the top byte as the reader prints a tag.
+        0x5350_4421u32.concat(gray)
+    };
+}

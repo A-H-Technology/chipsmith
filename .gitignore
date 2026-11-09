@@ -3,3 +3,4 @@
 build/
 /.claude/
 /experiments/*/target
+/examples/*/.surfer/

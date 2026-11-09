@@ -58,6 +58,7 @@ mod tests;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+pub use lex::Dialect;
 pub use source::{Error, Location};
 
 use ast::Role;
@@ -88,7 +89,8 @@ impl Frontend {
         self.include_dirs.push(dir.into());
     }
 
-    /// A design source file. Macros it defines stay defined for the files
+    /// A design source file, SystemVerilog if it ends in `.sv`
+    /// ([`Dialect::of_path`]). Macros it defines stay defined for the files
     /// read after it, as in yosys.
     pub fn read_file(&mut self, path: &Path) -> Result<(), Error> {
         self.read_path(path, Role::Design)
@@ -101,7 +103,7 @@ impl Frontend {
     }
 
     /// Design source from memory; `name` is the path errors and `src`
-    /// attributes show.
+    /// attributes show, and its extension picks the dialect.
     pub fn read_source(&mut self, name: &str, text: &str) -> Result<(), Error> {
         self.read(name, text, Role::Design)
     }
@@ -128,6 +130,7 @@ impl Frontend {
             &mut self.defines,
             &self.include_dirs,
             file,
+            Dialect::of_path(Path::new(name)),
         )
         .and_then(|toks| parse::parse(&toks, role));
         match result {

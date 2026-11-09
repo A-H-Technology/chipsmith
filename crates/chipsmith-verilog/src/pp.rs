@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 use rustc_hash::FxHashMap;
 
-use crate::lex::{Lexer, Tok, Token};
+use crate::lex::{Dialect, Lexer, Tok, Token};
 use crate::source::{bail, sibling, Diag, Result, SourceMap, Span};
 
 #[derive(Debug, Clone)]
@@ -74,6 +74,8 @@ pub struct Preprocessor<'a> {
     sources: &'a mut SourceMap,
     defines: &'a mut Defines,
     include_dirs: &'a [PathBuf],
+    /// The read file's; its `` `include ``s and macros are read in it too.
+    dialect: Dialect,
     lexers: Vec<Lexer>,
     conds: Vec<(Cond, Span)>,
     out: Tokens,
@@ -87,6 +89,7 @@ impl<'a> Preprocessor<'a> {
         defines: &'a mut Defines,
         include_dirs: &'a [PathBuf],
         file: crate::source::FileId,
+        dialect: Dialect,
     ) -> Result<Tokens> {
         let text = sources.file(file).text.clone();
         let len = text.len();
@@ -94,7 +97,8 @@ impl<'a> Preprocessor<'a> {
             sources,
             defines,
             include_dirs,
-            lexers: vec![Lexer::new(file, text)],
+            dialect,
+            lexers: vec![Lexer::new(file, text, dialect)],
             conds: Vec::new(),
             out: Tokens {
                 tokens: Vec::with_capacity(len / 6),
@@ -301,7 +305,7 @@ impl<'a> Preprocessor<'a> {
         let file = self
             .sources
             .add_file(path.display().to_string(), text.clone());
-        self.lexers.push(Lexer::new(file, text));
+        self.lexers.push(Lexer::new(file, text, self.dialect));
         Ok(())
     }
 
@@ -346,7 +350,7 @@ impl<'a> Preprocessor<'a> {
         };
         let text: Rc<str> = text.into();
         let file = self.sources.add_expansion(name, text.clone(), span);
-        self.lexers.push(Lexer::new(file, text));
+        self.lexers.push(Lexer::new(file, text, self.dialect));
         Ok(())
     }
 }
@@ -417,7 +421,7 @@ mod tests {
         let mut sm = SourceMap::default();
         let f = sm.add_file("t.v".into(), text.into());
         let mut defs = Defines::default();
-        let toks = Preprocessor::run(&mut sm, &mut defs, &[], f)?;
+        let toks = Preprocessor::run(&mut sm, &mut defs, &[], f, Dialect::Verilog2005)?;
         Ok(toks.tokens.into_iter().map(|t| t.tok).collect())
     }
 

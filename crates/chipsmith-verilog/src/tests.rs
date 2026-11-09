@@ -256,3 +256,29 @@ fn constant_values_as_integers() {
     let max = format!("0{}", "1".repeat(63));
     assert_eq!(c(&max, true).as_i64(), Some(i64::MAX));
 }
+
+/// `.v` is Verilog-2005: SystemVerilog's keywords are names there.
+#[test]
+fn systemverilog_keywords_are_names_in_a_v_file() {
+    let d = elaborate(
+        "module top(input logic, output bit);
+           assign bit = ~logic;
+         endmodule",
+    )
+    .unwrap();
+    assert!(d.top().unwrap().wire("logic").is_some());
+}
+
+#[test]
+fn always_ff_needs_an_edge() {
+    let mut fe = Frontend::new();
+    let e = fe
+        .read_source(
+            "t.sv",
+            "module top(input logic a, output logic y);
+               always_ff @(a) y <= a;
+             endmodule",
+        )
+        .unwrap_err();
+    assert!(e.to_string().contains("always_ff"), "{e}");
+}

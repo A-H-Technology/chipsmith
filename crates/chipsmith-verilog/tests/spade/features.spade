@@ -1,0 +1,51 @@
+use std::mem::fifo;
+
+enum State {
+    Idle,
+    Run { step: uint<4> },
+    Done,
+}
+
+struct Pair { a: uint<8>, b: uint<8> }
+
+pipeline(2) mac(clk: clock, p: Pair, acc: uint<16>) -> uint<16> {
+        let prod = p.a * p.b;
+    reg;
+        let s = trunc(prod + acc);
+    reg;
+        s
+}
+
+entity fsm(clk: clock, rst: bool, go: bool) -> State {
+    reg(clk) s reset(rst: State::Idle) = match s {
+        State::Idle => if go { State::Run(0) } else { State::Idle },
+        State::Run(step) => if step == 15 { State::Done } else { State::Run(trunc(step + 1)) },
+        State::Done => State::Idle,
+    };
+    s
+}
+
+#[no_mangle(all)]
+entity main(
+    CLOCK_50: clock,
+    KEY: [bool; 4],
+    SW: uint<8>,
+    LEDR: inv uint<18>,
+    LEDG: inv [bool; 9],
+) {
+    let rst = !KEY[0];
+    reg(CLOCK_50) count: uint<27> reset(rst: 0) = trunc(count + 1);
+    let st = inst fsm(CLOCK_50, rst, !KEY[1]);
+    let busy = match st { State::Run(_) => true, _ => false };
+
+    let (w, r) = inst fifo::<4, uint<8>, 16>(CLOCK_50, rst, CLOCK_50, rst);
+    set w.write = if !KEY[2] { Some(SW) } else { None };
+    set r.ack = !KEY[3];
+    let head = match r.read { Some(v) => v, None => 0 };
+
+    reg(CLOCK_50) acc: uint<16> reset(rst: 0) = inst(2) mac(CLOCK_50, Pair { a: SW, b: head }, acc);
+
+    set LEDR = zext(acc);
+    let top = (count >> 23).to_bits();
+    set LEDG = [top[0], top[1], top[2], top[3], busy, w.full, false, false, false];
+}

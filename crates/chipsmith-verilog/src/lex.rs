@@ -27,31 +27,68 @@ impl Base {
     }
 }
 
+/// Which language a source file is in. SystemVerilog's keywords are a
+/// superset of Verilog's; a `.v` file may still use `logic` as a name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Dialect {
+    /// IEEE 1364-2005.
+    Verilog2005,
+    /// IEEE 1800-2017: what synthesis needs of it (`logic`,
+    /// `always_comb`/`always_ff`/`always_latch`, `unique`/`priority`),
+    /// the rest of its keywords reserved.
+    SystemVerilog2017,
+}
+
+impl Dialect {
+    /// By extension, as Quartus and Vivado decide: `.sv` is
+    /// SystemVerilog, anything else Verilog.
+    pub fn of_path(path: &std::path::Path) -> Dialect {
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("sv") => Dialect::SystemVerilog2017,
+            _ => Dialect::Verilog2005,
+        }
+    }
+}
+
 macro_rules! keywords {
-    ($($kw:ident = $s:literal),* $(,)?) => {
+    (
+        verilog { $($kw:ident = $s:literal),* $(,)? }
+        systemverilog { $($skw:ident = $ss:literal),* $(,)? }
+    ) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        pub enum Kw { $($kw),* }
+        pub enum Kw { $($kw,)* $($skw),* }
         impl Kw {
-            pub fn parse(s: &str) -> Option<Kw> {
+            /// `s` as a keyword of `dialect`, if it is one.
+            pub fn parse(s: &str, dialect: Dialect) -> Option<Kw> {
                 // A match on the string compares against every keyword in
                 // turn; identifiers are most of the tokens.
                 static TABLE: std::sync::OnceLock<rustc_hash::FxHashMap<&'static str, Kw>> =
                     std::sync::OnceLock::new();
                 TABLE
-                    .get_or_init(|| [$(($s, Kw::$kw)),*].into_iter().collect())
+                    .get_or_init(|| [$(($s, Kw::$kw),)* $(($ss, Kw::$skw)),*].into_iter().collect())
                     .get(s)
                     .copied()
+                    .filter(|k| k.dialect() <= dialect)
             }
             pub fn name(self) -> &'static str {
-                match self { $(Kw::$kw => $s),* }
+                match self { $(Kw::$kw => $s,)* $(Kw::$skw => $ss),* }
+            }
+            /// The first dialect that reserves it.
+            fn dialect(self) -> Dialect {
+                match self {
+                    $(Kw::$kw => Dialect::Verilog2005,)*
+                    $(Kw::$skw => Dialect::SystemVerilog2017),*
+                }
             }
         }
     };
 }
 
-// IEEE 1364-2005 Annex B, all of them: a design can't use one as a name
-// even where chipsmith doesn't support the construct.
+// IEEE 1364-2005 Annex B and IEEE 1800-2017 Annex B, all of them: a
+// design can't use one as a name even where chipsmith doesn't support the
+// construct.
 keywords! {
+    verilog {
     Always = "always", And = "and", Assign = "assign", Automatic = "automatic",
     Begin = "begin", Buf = "buf", Bufif0 = "bufif0", Bufif1 = "bufif1",
     Case = "case", Casex = "casex", Casez = "casez", Cell = "cell", Cmos = "cmos",
@@ -88,6 +125,48 @@ keywords! {
     Unsigned = "unsigned", Use = "use", Uwire = "uwire", Vectored = "vectored",
     Wait = "wait", Wand = "wand", Weak0 = "weak0", Weak1 = "weak1",
     While = "while", Wire = "wire", Wor = "wor", Xnor = "xnor", Xor = "xor",
+    }
+    systemverilog {
+    AcceptOn = "accept_on", Alias = "alias", AlwaysComb = "always_comb",
+    AlwaysFf = "always_ff", AlwaysLatch = "always_latch", Assert = "assert",
+    Assume = "assume", Before = "before", Bind = "bind", Bins = "bins",
+    Binsof = "binsof", Bit = "bit", Break = "break", Byte = "byte",
+    Chandle = "chandle", Checker = "checker", Class = "class",
+    Clocking = "clocking", Const = "const", Constraint = "constraint",
+    Context = "context", Continue = "continue", Cover = "cover",
+    Covergroup = "covergroup", Coverpoint = "coverpoint", Cross = "cross",
+    Dist = "dist", Do = "do", Endchecker = "endchecker", Endclass = "endclass",
+    Endclocking = "endclocking", Endgroup = "endgroup",
+    Endinterface = "endinterface", Endpackage = "endpackage",
+    Endprogram = "endprogram", Endproperty = "endproperty",
+    Endsequence = "endsequence", Enum = "enum", Eventually = "eventually",
+    Expect = "expect", Export = "export", Extends = "extends", Extern = "extern",
+    Final = "final", FirstMatch = "first_match", Foreach = "foreach",
+    Forkjoin = "forkjoin", Global = "global", Iff = "iff",
+    IgnoreBins = "ignore_bins", IllegalBins = "illegal_bins",
+    Implements = "implements", Implies = "implies", Import = "import",
+    Inside = "inside", Int = "int", Interconnect = "interconnect",
+    Interface = "interface", Intersect = "intersect", JoinAny = "join_any",
+    JoinNone = "join_none", Let = "let", Local = "local", Logic = "logic",
+    Longint = "longint", Matches = "matches", Modport = "modport",
+    Nettype = "nettype", New = "new", Nexttime = "nexttime", Null = "null",
+    Package = "package", Packed = "packed", Priority = "priority",
+    Program = "program", Property = "property", Protected = "protected",
+    Pure = "pure", Rand = "rand", Randc = "randc", Randcase = "randcase",
+    Randsequence = "randsequence", Ref = "ref", RejectOn = "reject_on",
+    Restrict = "restrict", Return = "return", SAlways = "s_always",
+    SEventually = "s_eventually", SNexttime = "s_nexttime", SUntil = "s_until",
+    SUntilWith = "s_until_with", Sequence = "sequence", Shortint = "shortint",
+    Shortreal = "shortreal", Soft = "soft", Solve = "solve", Static = "static",
+    String = "string", Strong = "strong", Struct = "struct", Super = "super",
+    SyncAcceptOn = "sync_accept_on", SyncRejectOn = "sync_reject_on",
+    Tagged = "tagged", This = "this", Throughout = "throughout",
+    Timeprecision = "timeprecision", Timeunit = "timeunit", Type = "type",
+    Typedef = "typedef", Union = "union", Unique = "unique", Unique0 = "unique0",
+    Until = "until", UntilWith = "until_with", Untyped = "untyped", Var = "var",
+    Virtual = "virtual", Void = "void", WaitOrder = "wait_order", Weak = "weak",
+    Wildcard = "wildcard", With = "with", Within = "within",
+    }
 }
 
 macro_rules! puncts {
@@ -185,6 +264,7 @@ pub struct Token {
 pub struct Lexer {
     pub file: FileId,
     text: Rc<str>,
+    dialect: Dialect,
     pos: usize,
     /// Inside `(* ... *)`: only there is `*)` one token.
     attr_depth: u32,
@@ -199,10 +279,11 @@ fn is_ident_char(c: u8) -> bool {
 }
 
 impl Lexer {
-    pub fn new(file: FileId, text: Rc<str>) -> Lexer {
+    pub fn new(file: FileId, text: Rc<str>, dialect: Dialect) -> Lexer {
         Lexer {
             file,
             text,
+            dialect,
             pos: 0,
             attr_depth: 0,
         }
@@ -266,8 +347,9 @@ impl Lexer {
             });
         }
         let tok = if is_ident_start(c) {
+            let dialect = self.dialect;
             let s = self.ident_text();
-            match Kw::parse(s) {
+            match Kw::parse(s, dialect) {
                 Some(k) => Tok::Kw(k),
                 None => Tok::Ident(s.into()),
             }
@@ -574,9 +656,14 @@ impl Lexer {
 /// Lexes a whole text, for tests.
 #[cfg(test)]
 pub fn lex_all(text: &str) -> Result<Vec<Tok>> {
+    lex_dialect(text, Dialect::Verilog2005)
+}
+
+#[cfg(test)]
+pub fn lex_dialect(text: &str, dialect: Dialect) -> Result<Vec<Tok>> {
     let mut sm = crate::source::SourceMap::default();
     let f = sm.add_file("t.v".into(), text.into());
-    let mut l = Lexer::new(f, text.into());
+    let mut l = Lexer::new(f, text.into(), dialect);
     let mut out = Vec::new();
     loop {
         let t = l.next_token()?;
@@ -628,6 +715,24 @@ mod tests {
         assert_eq!(toks[12], Tok::P(P::AttrClose));
         assert_eq!(toks[13], Tok::Directive("foo".into()));
         assert_eq!(toks[14], Tok::Ident("esc[0]".into()));
+    }
+
+    #[test]
+    fn systemverilog_keywords_are_names_in_verilog() {
+        let v = lex_dialect("logic always_comb", Dialect::Verilog2005).unwrap();
+        assert_eq!(
+            v,
+            [Tok::Ident("logic".into()), Tok::Ident("always_comb".into())]
+        );
+        let sv = lex_dialect("logic always_comb wire", Dialect::SystemVerilog2017).unwrap();
+        assert_eq!(
+            sv,
+            [
+                Tok::Kw(Kw::Logic),
+                Tok::Kw(Kw::AlwaysComb),
+                Tok::Kw(Kw::Wire)
+            ]
+        );
     }
 
     #[test]

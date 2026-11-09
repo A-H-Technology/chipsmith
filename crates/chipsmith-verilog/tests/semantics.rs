@@ -11,8 +11,17 @@ use common::{check, scratch, Case, Lib};
 
 /// Proves `src` (with top module `top`) equivalent under both front ends.
 fn equiv(name: &str, src: &str) {
+    equiv_as(name, "v", src)
+}
+
+/// As [`equiv`], read as SystemVerilog (`.sv`; yosys' `read_verilog -sv`).
+fn equiv_sv(name: &str, src: &str) {
+    equiv_as(name, "sv", src)
+}
+
+fn equiv_as(name: &str, extension: &str, src: &str) {
     let dir = scratch(&format!("sem-{name}"));
-    let file = dir.join(format!("{name}.v"));
+    let file = dir.join(format!("{name}.{extension}"));
     std::fs::write(&file, src).unwrap();
     let case = Case {
         name: format!("sem-{name}"),
@@ -729,6 +738,51 @@ module top(input [7:0] a, input [2:0] k, output [7:0] y, output [15:0] z, output
     end
   endfunction
   assign w = grid(a) ^ {5'b0, k};
+endmodule
+"#,
+    );
+}
+
+/// IEEE 1800-2017 §6.11.2, §9.2.2, §12.4.2, §12.5.3: what synthesis needs
+/// of SystemVerilog. `logic` is a variable that procedures and (once) a
+/// continuous assignment may drive, `always_comb`/`always_latch` are
+/// `always @*`, `always_ff` is `always` with its edges, and
+/// `unique`/`unique0`/`priority` leave an `if` or `case` as written.
+#[test]
+fn systemverilog_for_synthesis() {
+    equiv_sv(
+        "sv",
+        r#"
+module top(input logic clk, input logic rst, input logic [1:0] sel, input logic [7:0] a, b,
+           input logic en, output logic [7:0] y, q, l, output logic [3:0] p);
+  logic [7:0] sum;
+  assign sum = a + b;                    // a variable continuously assigned
+  logic [7:0] parts;
+  assign parts[3:0] = a[3:0];            // and bit by bit, as Spade does
+  assign parts[7:4] = b[7:4];
+  always_comb begin
+    unique case (sel)
+      2'd0: y = sum;
+      2'd1: y = a - b;
+      2'd2: y = parts;
+      default: y = 8'd0;
+    endcase
+  end
+  always_ff @(posedge clk or posedge rst)
+    if (rst) q <= 8'd0;
+    else begin
+      priority if (en) q <= y;
+      else if (sel == 2'd3) q <= ~q;
+    end
+  always_latch
+    if (en) l = a;
+  always_comb
+    priority casez ({sel, en})
+      3'b1??: p = 4'd1;
+      3'b01?: p = 4'd2;
+      3'b001: p = 4'd3;
+      3'b?: p = 4'dx;                     // Spade's no-match arm: x-filled
+    endcase
 endmodule
 "#,
     );

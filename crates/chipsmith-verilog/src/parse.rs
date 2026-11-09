@@ -342,7 +342,11 @@ impl<'a> Parser<'a> {
         let kind = match self.tok() {
             Tok::Kw(Kw::Wire) | Tok::Kw(Kw::Uwire) => Some(NetKind::Wire),
             Tok::Kw(Kw::Tri) => Some(NetKind::Tri),
-            Tok::Kw(Kw::Reg) => Some(NetKind::Reg),
+            // SystemVerilog's `logic` is `reg` renamed (IEEE 1800-2017
+            // §6.11.2): a 4-state variable, which unlike Verilog's may also
+            // be driven by one continuous assignment. chipsmith's `reg`
+            // already may.
+            Tok::Kw(Kw::Reg | Kw::Logic) => Some(NetKind::Reg),
             Tok::Kw(Kw::Integer) => Some(NetKind::Integer),
             Tok::Kw(Kw::Time) => Some(NetKind::Time),
             Tok::Kw(Kw::Supply0) => Some(NetKind::Supply0),
@@ -523,6 +527,7 @@ impl<'a> Parser<'a> {
                 | Kw::Uwire
                 | Kw::Tri
                 | Kw::Reg
+                | Kw::Logic
                 | Kw::Integer
                 | Kw::Time
                 | Kw::Supply0
@@ -605,6 +610,45 @@ impl<'a> Parser<'a> {
             Tok::Kw(Kw::Always) => {
                 self.bump();
                 let body = self.stmt()?;
+                items.push(Item::Always {
+                    body,
+                    span: lo.to(self.prev_span()),
+                });
+            }
+            // IEEE 1800-2017 §9.2.2. For synthesis `always_comb` and
+            // `always_latch` are `always @*`; their extra simulation
+            // semantics (running once at time zero, the checks that the
+            // logic is what the keyword says) change nothing built.
+            Tok::Kw(Kw::AlwaysComb | Kw::AlwaysLatch) => {
+                self.bump();
+                let inner = self.stmt()?;
+                let span = lo.to(self.prev_span());
+                items.push(Item::Always {
+                    body: Stmt {
+                        span: inner.span,
+                        attrs: Vec::new(),
+                        kind: StmtKind::Event {
+                            event: Event::Star,
+                            body: Box::new(inner),
+                        },
+                    },
+                    span,
+                });
+            }
+            Tok::Kw(Kw::AlwaysFf) => {
+                self.bump();
+                let body = self.stmt()?;
+                let clocked = matches!(
+                    &body.kind,
+                    StmtKind::Event { event: Event::List(l), .. }
+                        if l.iter().all(|i| i.edge.is_some())
+                );
+                if !clocked {
+                    bail!(
+                        lo,
+                        "`always_ff` must start with an edge event control, `@(posedge clk ...)`"
+                    );
+                }
                 items.push(Item::Always {
                     body,
                     span: lo.to(self.prev_span()),
@@ -1051,6 +1095,18 @@ impl<'a> Parser<'a> {
     fn stmt(&mut self) -> Result<Stmt> {
         let attrs = self.attrs()?;
         let lo = self.span();
+        // IEEE 1800-2017 §12.4.2, §12.5.3: `unique`, `unique0` and
+        // `priority` on an `if` or `case` only add simulation-time checks
+        // (and let a tool assume they hold). Building the statement as
+        // written is a correct implementation of all three.
+        if matches!(self.tok(), Tok::Kw(Kw::Unique | Kw::Unique0 | Kw::Priority))
+            && matches!(
+                self.peek_tok(1),
+                Tok::Kw(Kw::If | Kw::Case | Kw::Casez | Kw::Casex)
+            )
+        {
+            self.bump();
+        }
         let kind = match self.tok() {
             Tok::P(P::Semi) => {
                 self.bump();
@@ -1076,9 +1132,9 @@ impl<'a> Parser<'a> {
                     let save = self.pos;
                     let a = self.attrs()?;
                     match self.tok() {
-                        Tok::Kw(Kw::Reg | Kw::Integer | Kw::Time | Kw::Real | Kw::Realtime) => {
-                            decls.push(self.net_decl(a, None)?)
-                        }
+                        Tok::Kw(
+                            Kw::Reg | Kw::Logic | Kw::Integer | Kw::Time | Kw::Real | Kw::Realtime,
+                        ) => decls.push(self.net_decl(a, None)?),
                         Tok::Kw(Kw::Parameter | Kw::Localparam) => params.push(self.param_decl(a)?),
                         _ => {
                             self.pos = save;
@@ -1802,13 +1858,20 @@ pub fn decimal_bits(digits: &str) -> Vec<State> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lex::Dialect;
     use crate::pp::{Defines, Preprocessor};
     use crate::source::SourceMap;
 
     fn parse_text(text: &str) -> Result<Vec<Module>> {
         let mut sm = SourceMap::default();
         let f = sm.add_file("t.v".into(), text.into());
-        let toks = Preprocessor::run(&mut sm, &mut Defines::default(), &[], f)?;
+        let toks = Preprocessor::run(
+            &mut sm,
+            &mut Defines::default(),
+            &[],
+            f,
+            Dialect::Verilog2005,
+        )?;
         parse(&toks, Role::Design)
     }
 

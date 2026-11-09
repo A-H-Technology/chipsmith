@@ -100,7 +100,8 @@ impl fmt::Display for Frequency {
 
 /// The design's HDL, already expanded from globs to existing files. One
 /// language per design: VHDL goes through GHDL into Verilog, and the two
-/// can't be elaborated together yet.
+/// can't be elaborated together yet. `Verilog` holds `.v` and `.sv` files
+/// alike; the front end reads each in its own dialect.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Sources {
     Verilog(Vec<PathBuf>),
@@ -189,7 +190,7 @@ pub enum ManifestError {
     NoMatch(String),
     #[error("[project] sources is empty")]
     NoSources,
-    #[error("{0}: not a Verilog (.v) or VHDL (.vhd, .vhdl) file")]
+    #[error("{0}: not a Verilog (.v), SystemVerilog (.sv) or VHDL (.vhd, .vhdl) file")]
     UnknownLanguage(PathBuf),
     #[error("sources mix Verilog ({verilog}) and VHDL ({vhdl}); use one language per design")]
     MixedLanguages { verilog: PathBuf, vhdl: PathBuf },
@@ -500,7 +501,7 @@ fn expand_sources(project_dir: &Path, patterns: &[String]) -> Result<Sources, Ma
     let (mut verilog, mut vhdl) = (Vec::new(), Vec::new());
     for file in files {
         match file.extension().and_then(|e| e.to_str()) {
-            Some("v") => verilog.push(file),
+            Some("v" | "sv") => verilog.push(file),
             Some("vhd" | "vhdl") => vhdl.push(file),
             _ => return Err(ManifestError::UnknownLanguage(file)),
         }
@@ -665,6 +666,18 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    /// A Spade design is swim's `build/spade.sv`, alongside any Verilog
+    /// of its own.
+    #[test]
+    fn systemverilog_is_verilog_read_in_its_own_dialect() {
+        let dir = scratch("sv", &["src/spade.sv", "src/extern.v"]);
+        let m = Manifest::parse(DE2, &dir).unwrap();
+        let Sources::Verilog(files) = &m.sources else {
+            panic!("{:?} is not Verilog", m.sources);
+        };
+        assert_eq!(files.len(), 2);
     }
 
     #[test]

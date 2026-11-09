@@ -1,0 +1,4 @@
+name = "spade_jtag_counter"
+
+[compiler]
+git = "https://codeberg.org/spade-lang/spade.git"

@@ -1,0 +1,17 @@
+# Spade in: `swim build` writes build/spade.sv, chipsmith builds and loads
+# it (README, "Spade").
+[project]
+name = "spade-jtag-counter"
+top = "top"
+sources = ["build/spade.sv"]
+
+[target]
+device = "EP2C35F672C6"
+
+# Terasic DE2 user manual, tables 4.3 and 4.6
+[pins]
+CLOCK_50 = "PIN_N2"
+LEDR = ["PIN_AE23", "PIN_AF23", "PIN_AB21", "PIN_AC22"]
+
+[clocks]
+CLOCK_50 = "50 MHz"

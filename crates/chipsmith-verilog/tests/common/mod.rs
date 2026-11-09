@@ -112,7 +112,14 @@ pub fn check(case: &Case) -> Result<(), String> {
         script += &format!("read_verilog -lib {}\n", quoted(l));
     }
     for f in &case.files {
-        script += &format!("read_verilog {}\n", quoted(f));
+        // chipsmith reads a `.sv` file as SystemVerilog by its extension
+        // (`Dialect::of_path`); yosys has to be told.
+        let sv = if f.extension().is_some_and(|e| e == "sv") {
+            "-sv "
+        } else {
+            ""
+        };
+        script += &format!("read_verilog {sv}{}\n", quoted(f));
     }
     script += &format!(
         "hierarchy -check -top {}\nproc\nflatten\nopt_clean\nwrite_json {}\n",

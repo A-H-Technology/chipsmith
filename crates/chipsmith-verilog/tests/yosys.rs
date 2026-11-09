@@ -352,3 +352,23 @@ fn cyclone2_cell_counts_match_yosys_front_end() {
     }
     assert!(report.is_empty(), "{}", report.join("\n"));
 }
+
+/// Spade's compiler output (a subset of SystemVerilog: `logic`,
+/// `always_comb`, `priority casez`, escaped names like
+/// `\std::mem::fifo[1562] `, unpacked memories). `jtag_counter.sv` is
+/// examples/spade-jtag-counter's, `features.sv` is `features.spade`'s
+/// (enums and `match`, a pipeline, the stdlib's FIFO, a multiplier).
+/// Regenerate with `swim build` in a project pinned to the example's
+/// swim.lock and copy `build/spade.sv` here.
+#[test]
+fn spade() {
+    let dir = Path::new(MANIFEST).join("tests/spade");
+    for (file, top) in [("jtag_counter.sv", "top"), ("features.sv", "main")] {
+        run(Case {
+            name: format!("spade-{file}"),
+            files: vec![dir.join(file)],
+            top: top.into(),
+            lib: Lib::Cyclone2,
+        });
+    }
+}
