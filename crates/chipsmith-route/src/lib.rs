@@ -7,6 +7,7 @@ pub mod bucket;
 pub mod chipdb;
 #[cfg(feature = "gpu")]
 pub mod gpu;
+pub mod lookahead;
 pub mod timing;
 
 use std::cmp::Ordering;
@@ -242,6 +243,9 @@ pub struct Router<'a> {
     /// `ChipDb::tile_distance`, or `CHIPSMITH_TILE_DISTANCE=<x>,<y>` for
     /// tuning it.
     tile_distance: [f32; 2],
+    /// The measured A* estimate and its weight (`CHIPSMITH_ROUTE_LOOKAHEAD=<weight>`),
+    /// built when `route` starts, once the node delays are in.
+    lookahead: Option<(lookahead::Lookahead, f32)>,
     /// Nodes only one net may use (by index), e.g. the ends of routes
     /// another tool has fixed. Empty when nothing is reserved.
     owner: Vec<u32>,
@@ -433,6 +437,7 @@ impl<'a> Router<'a> {
                     Some([x.parse().ok()?, y.parse().ok()?])
                 })
                 .unwrap_or(db.tile_distance),
+            lookahead: None,
         }
     }
 
@@ -651,6 +656,22 @@ impl<'a> Router<'a> {
         (1.0 + n.hist) * (1.0 + self.present_factor * n.occ as f32)
     }
 
+    /// A*'s estimate from `n` to `sink`, in the search's cost units.
+    fn estimate(&self, n: NodeId, sink: NodeId, crit: f32, per_hop: f32) -> f32 {
+        let Some((la, w)) = &self.lookahead else {
+            return self.astar * per_hop * self.distance(n, sink);
+        };
+        if n == sink {
+            return 0.0;
+        }
+        let Some((hops, delay, bx, by)) = la.get(n, self.node[sink as usize].bbox) else {
+            return self.astar * per_hop * self.distance(n, sink);
+        };
+        let [kx, ky] = self.tile_distance;
+        let beyond = bx as f32 * kx + by as f32 * ky;
+        w * ((1.0 - crit) * hops + crit * delay / DELAY_UNIT) + self.astar * per_hop * beyond
+    }
+
     fn distance(&self, a: NodeId, b: NodeId) -> f32 {
         let (dx, dy) = self.node[a as usize].bbox.gap(self.node[b as usize].bbox);
         let [kx, ky] = self.tile_distance;
@@ -860,6 +881,23 @@ impl<'a> Router<'a> {
             }
             _ => None,
         };
+        if let Some(w) = std::env::var("CHIPSMITH_ROUTE_LOOKAHEAD").ok().and_then(|v| v.parse::<f32>().ok()) {
+            let t = std::time::Instant::now();
+            let delays: Vec<Ps> = self.node.iter().map(|n| n.delay).collect();
+            self.lookahead = Some((lookahead::Lookahead::build(self.db, &delays), w));
+            if std::env::var_os("CHIPSMITH_LA_DIAG").is_some() {
+                let leaves = (0..self.db.nodes() as NodeId).filter(|&v| self.db.downhill(v).is_empty()).count();
+                let sinks: Vec<NodeId> = nets.iter().flat_map(|n| n.sinks.iter().copied()).collect();
+                let leaf_sinks = sinks.iter().filter(|&&v| self.db.downhill(v).is_empty()).count();
+                eprintln!("diag: {} types, {} nodes, {} leaves, {}/{} sinks are leaves", self.db.wire_types.len(), self.db.nodes(), leaves, leaf_sinks, sinks.len());
+                let mut types: std::collections::BTreeMap<String, usize> = Default::default();
+                for &v in &sinks { *types.entry(self.db.wire_types[self.db.node_type[v as usize] as usize].clone()).or_default() += 1; }
+                eprintln!("diag: sink types {:?}", types);
+            }
+            if std::env::var_os("CHIPSMITH_ROUTE_TRACE").is_some() {
+                eprintln!("route: lookahead {:.2} s, {} classes", t.elapsed().as_secs_f64(), self.lookahead.as_ref().map_or(0, |l| l.0.classes));
+            }
+        }
         if std::env::var_os("CHIPSMITH_ROUTE_TRACE").is_some() {
             eprintln!("route: setup {:.2} s", t_setup.elapsed().as_secs_f64());
         }
@@ -1694,13 +1732,18 @@ impl<'a> Router<'a> {
                 via: None,
             };
             heap.push(Queued {
-                f: g + self.astar * per_hop * self.distance(n, sink),
+                f: g + self.estimate(n, sink, crit, per_hop),
                 g,
                 node: n,
             });
         }
         while let Some(Queued { g, node, .. }) = heap.pop() {
             if node == sink {
+                if std::env::var_os("CHIPSMITH_LA_DIAG").is_some() && crit == 0.0 && s.work[2] % 97 == 0 {
+                    let (n0, h0) = seeds.nodes.iter().map(|&n| (n, self.estimate(n, sink, 0.0, per_hop))).fold((0, f32::INFINITY), |a, b| if b.1 < a.1 { b } else { a });
+                    let d = self.lookahead.as_ref().and_then(|l| l.0.get(n0, self.node[sink as usize].bbox));
+                    eprintln!("diag: est {h0:.2} actual {g:.2} seed type {} gap {d:?} seeds {}", self.db.wire_types[self.db.node_type[n0 as usize] as usize], seeds.nodes.len());
+                }
                 return Ok(());
             }
             if g > s.visit[node as usize].cost {
@@ -1739,7 +1782,7 @@ impl<'a> Router<'a> {
                 };
                 s.work[1] += 1;
                 heap.push(Queued {
-                    f: g2 + self.astar * per_hop * self.distance(e.dst, sink),
+                    f: g2 + self.estimate(e.dst, sink, crit, per_hop),
                     g: g2,
                     node: e.dst,
                 });
