@@ -95,6 +95,8 @@
             pkgs.rustc
             pkgs.clippy
             pkgs.rustfmt
+            # CI runs the tests with nextest (.github/workflows/ci.yml).
+            pkgs.cargo-nextest
             pkgs.just
             pkgs.pkg-config
             pkgs.libusb1
