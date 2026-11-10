@@ -72,6 +72,29 @@ time, time on wide nets, search work (seeded, pushed, expanded) and
 overused nodes. `CHIPSMITH_ROUTE_{INCREMENTAL,BBOX_MARGIN,ASTAR}` are
 the knobs.
 
+### 7-series routing (2026-11-10)
+
+On the Zybo, routing was most of a build: zybo-picorv32 placed in 4 s
+and routed in 24 s, zybo-sha256 in 52 s and 118 s (quiet machine, load
+2 to 3). The xc7 graph searches harder per sink than the Cyclone II's:
+about 1,500 nodes expanded for a path of 2 to 7 nodes, since an INT
+tile's nodes fan out to 20 to 30 pips and a sink's search is seeded
+from the whole tree (35 seeds per sink on average). Full builds, three
+placer seeds (`CHIPSMITH_XC7_SEED` 0-2), chipsmith's Fmax estimate:
+
+| hypothesis | kept? | measured |
+|---|---|---|
+| First 4 iterations in batches of 8 nets, side by side (`batch_first(8, 4)`) | yes | picorv32 24.0/23.9/24.3 to 12.3/14.6/14.0 s, Fmax 168.2/165.3/172.4 to 168.0/165.3/172.4 MHz; sha256 118/120/113 to 65/82/68 s, 103.0/103.2/102.1 to 101.3/103.4/102.1 MHz (with repair off). Byte-identical on 1 and 8 threads (tests/determinism.rs) |
+| Every iteration batched | no | picorv32 didn't converge in 60 iterations (21 nets oscillating); sha256 98.5 MHz in 17 iterations |
+| Batches by region (`CHIPSMITH_ROUTE_BATCH=regions`) | no | picorv32 27.0 s against 24.0 |
+| No `repair_critical` pass (`without_repair`) | yes | picorv32 5.95 to 5.94 ns for 4.8 s of 24; sha256 9.72 to 9.72 ns |
+| Measured A* lookahead (VPR's map lookahead), per wire type | no | xc7 has 14 wire types (`OTHER` is every single, double, hex and long wire): 2.5x the expansions, 157.5 MHz |
+| The same per class (type, span, the tile the pips leave from; 1,967 classes) | no | 107 s to build the table, 34 s of searches, 141.4 MHz. The estimates it replaced were already within 2 to 3 of the actual cost; the floods come from the seeds. Branch `xc7-lookahead` |
+
+Left: the seeds. Seeding a sink's search from tree nodes near it only
+cost picorv32 4 to 6% on the Cyclone II (Routing, above); the xc7's
+seed counts are higher and may weigh differently.
+
 ### Flow (`crates/chipsmith/src/flow.rs`, `cache.rs`)
 
 - The routing graph and the bitstream's device database load on

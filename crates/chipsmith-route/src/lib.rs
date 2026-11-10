@@ -605,6 +605,27 @@ impl<'a> Router<'a> {
         }
     }
 
+    /// A device's own default for the first iterations: nets in fixed
+    /// groups of `size`, side by side, for `iterations` iterations, one at
+    /// a time after that (batching every iteration doesn't converge). The
+    /// `CHIPSMITH_ROUTE_BATCH*` variables still override it.
+    pub fn batch_first(&mut self, size: usize, iterations: usize) {
+        if std::env::var_os("CHIPSMITH_ROUTE_BATCH").is_none() {
+            self.batching = Batching::Fixed(size);
+        }
+        if std::env::var_os("CHIPSMITH_ROUTE_BATCH_ITERATIONS").is_none() {
+            self.batch_iterations = iterations;
+        }
+    }
+
+    /// A device's own default: no `repair_critical` pass, unless
+    /// `CHIPSMITH_ROUTE_REPAIR` asks for it.
+    pub fn without_repair(&mut self) {
+        if std::env::var_os("CHIPSMITH_ROUTE_REPAIR").is_none() {
+            self.repair = false;
+        }
+    }
+
     /// Route net `net` (an index into the nets `route` takes) on the given
     /// wire types alone, apart from its own sinks, anywhere on the chip: a
     /// clock on the clock tree, which its bounding box may not reach.

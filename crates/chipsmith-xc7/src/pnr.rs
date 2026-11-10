@@ -174,6 +174,12 @@ pub fn run(
     let started = Instant::now();
     let mut router = Router::new(db, &design);
     router.set_node_delays(&node_delays);
+    // Measured over three placer seeds of zybo-picorv32 and zybo-sha256
+    // (docs/fast-pnr-status.md, "7-series routing"): routing 38-43% faster,
+    // Fmax the same within the seeds' spread. The repair pass moved neither
+    // design's critical path by more than 0.01 ns.
+    router.batch_first(8, 4);
+    router.without_repair();
     for (i, r) in ph.nets.iter().enumerate() {
         // A BUFG's net stays on the clock tree: its bounding box rarely
         // holds the clock rows it passes through, and inside the box the

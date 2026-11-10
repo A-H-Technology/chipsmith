@@ -1111,6 +1111,14 @@ at a load of 10 to 40 (most of it this branch's own benches):
 | zybo-picorv32 | 666 / 589 | 362 / 375 | 58 / 51 | 251 | 8.8 + 29.7 s | 168.2 / 170.2 / 167.9 / 156.9 MHz |
 | zybo-sha256 | 2,326 / 2,012 | 2,035 / 1,934 | 160 / 112 | 1,078 | 106 + 251 s | 103.0 / 96.4 / 61.0 / 82.8 MHz |
 
+On a quiet machine (load 2 to 3, 2026-11-10) the same placements route
+faster: the router batches its first four iterations, 8 nets side by
+side, and skips the critical-path repair, which moved neither design's
+critical path by more than 0.01 ns. zybo-picorv32 places in 4 s and
+routes in 12 to 15 s (24 s before), zybo-sha256 in 52 s and 65 to 82 s
+(113 to 120 s before), at the same Fmax estimate over three placer seeds
+(docs/fast-pnr-status.md, "7-series routing").
+
 The self-tests against Vivado the same way (2026-11-08, branch xc7-qor2; Vivado's own
 2026-11-02, bram-selftest's on its earlier RTL):
 
