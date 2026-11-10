@@ -1,9 +1,8 @@
 //! Quality of results doesn't slide back: a fresh build of an example,
 //! through the `chipsmith` binary, routes to at most a bound on its
 //! estimated critical path, or takes at most so many LEs. The bounds sit a
-//! little above what branches `qor3` and `qor4` build (docs/vs-quartus.md,
-//! rounds 3 and 4) and below what came before, so losing the sums ordered
-//! by arrival (sha256), the shared sums or the synchronous load
+//! little above what branches `qor3` and `qor4` build and below what came
+//! before, so losing the sums ordered by arrival (sha256), the shared sums or the synchronous load
 //! (picorv32's and sha256's LEs), femtorv32's early register file read or
 //! mult-selftest's packed partial products fails here, as does losing
 //! `qor2`'s routing. On the Zybo

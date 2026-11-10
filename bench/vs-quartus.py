@@ -16,8 +16,9 @@ processor count), `all` (NUM_PARALLEL_PROCESSORS ALL), `fast` (Fast Fit).
 
 `quartus-row` and `chipsmith-row` print key=value pairs (LEs, critical path
 and Fmax by each tool's own timing analysis, processors Quartus used);
-`table` turns runs.tsv into the full Markdown table of docs/vs-quartus.md,
-`summary` into its compact wall, CPU and Fmax tables.
+`table` turns runs.tsv into a full Markdown table, `summary` into compact
+wall, CPU and Fmax tables. They're for local use: Altera's license forbids
+publishing benchmarks of Quartus, so don't commit their output.
 """
 import glob
 import os
@@ -289,7 +290,7 @@ def table(path, kinds="fresh"):
 
 
 def summary(path, kinds="fresh"):
-    """The compact tables of docs/vs-quartus.md: wall and CPU per design
+    """Compact tables: wall and CPU per design
     and tool (median [min-max]), chipsmith's speed-up over `q` (ratio of
     medians), and each tool's Fmax by its own analysis and by quartus_sta."""
     rows = [r for r in load_rows(path) if r["kind"].startswith(kinds) and r["status"] == "ok"]

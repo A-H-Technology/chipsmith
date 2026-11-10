@@ -4,3 +4,4 @@ build/
 /.claude/
 /experiments/*/target
 /examples/*/.surfer/
+__pycache__/

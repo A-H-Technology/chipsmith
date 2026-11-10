@@ -26,47 +26,18 @@ nextpnr, no prjxray tool, only prjxray-db's data.
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
 LEDs, 852 LEs and two M4Ks (its register file); a build takes 20 to 24 s
-on the benchmark machine at load 1.6 to 8 (docs/vs-quartus.md; Compile
-speed, below).
+on the benchmark machine at load 1.6 to 8 (Compile speed, below).
 
-Against Quartus II 13.0sp1 Web Edition on the same Verilog, pins and
-clock, to a bitstream (`bench/vs-quartus.sh`, docs/vs-quartus.md). Times
-are from 2026-11-05, branch `qor4` at de70915, an i7-4770K at load 1.3
-to 8.2, median 1.8: wall-time medians over 3 interleaved reps. LEs and
-Fmax are branch `qor5` (2026-11-07, `bench/qor.sh`, load 8 to 16): Fmax
-is quartus_sta's for both tools' placements, chipsmith's at the default
-placement seed:
-
-| design | LEs Quartus / chipsmith | Quartus s | chipsmith s | Fmax MHz Quartus / chipsmith |
-|---|---|---|---|---|
-| blinky-verilog | 26 / 26 | 51 | 3.8 | 285 / 298 |
-| picorv32 | 839 / 852 | 75 | 20 | 120 / 136 |
-| femtorv32 | 473 / 470 | 66 | 11 | 81 / 102 |
-| mult-selftest | 833 / 858 | 77 | 22 | 71 / 76 |
-| sdram-selftest | 567 / 621 | 64 | 7.3 | 166 / 168 |
-| sha256 | 3,303 / 3,395 | 141 | 78 | 65 / 70 |
-| picorv32x24 | 20,240 / 20,832 | 673 | 311 | 105 / 110 |
-
-chipsmith is 1.8x to 17x faster in wall time at every size and uses 1.4x
-to 7.4x less CPU time: Quartus 13.0 Web Edition is single-threaded, and
-most of its time on small designs is a fixed minute (`qor5`'s synthesis
-adds 0.2 to 2.8 s). Quartus uses up to 9.5% fewer LEs (sdram-selftest;
-1.5% to 3.0% on picorv32, mult-selftest, sha256 and picorv32x24);
-chipsmith uses 3 fewer on femtorv32 and 13% fewer on crc32. chipsmith's
-placements are faster than Quartus' on every design here at the default
-seed (sdram-selftest 155 to 168 MHz over seeds 0-2, Quartus 166),
-picorv32x24 included (quartus_sta on chipsmith's placement, 110 against
-105 MHz; before `qor5` the table had chipsmith's estimate for it). Branch `qor5` maps each design's
-gates as built, with functionally equivalent nodes merged, and also
-refactored, and keeps the mapping with the fewest LUTs (femtorv32 518 ->
-470 LEs, mult-selftest 956 -> 858, picorv32 876 -> 852, picorv32x24
-21,241 -> 20,832). chipsmith's estimate is +1.0% to +10.8% above
-quartus_sta on its own placements (sdram-selftest's +10.8%). The earlier
-runs (2026-11-01, `open` a288925: 12% to 83% more LEs than Quartus;
-2026-11-02, `qor`; 2026-11-02/03, `qor2`; 2026-11-03, `qor3`;
-2026-11-05, `qor4`) and what closed the gap since are in
-docs/vs-quartus.md. Neither tool rebuilds incrementally after a logic
-edit.
+chipsmith builds much faster than Quartus II 13.0sp1 Web Edition, at
+every design size we've tried. Altera's license forbids publishing
+benchmarks of Quartus, so there are no numbers here; `bench/vs-quartus.sh`
+runs the comparison against your own Quartus install. Since branch
+`qor5` (2026-11-07) chipsmith maps each design's gates as built, with
+functionally equivalent nodes merged, and also refactored, and keeps the
+mapping with the fewest LUTs (femtorv32 518 -> 470 LEs, mult-selftest
+956 -> 858, picorv32 876 -> 852, picorv32x24 21,241 -> 20,832).
+chipsmith's timing estimate is +1.0% to +10.8% above quartus_sta on its
+own placements.
 
 `examples/de2-jtag-counter` answers over the JTAG cable, so a load can be
 checked without watching the board: the Cyclone II's JTAG block makes it a
@@ -649,8 +620,7 @@ Quartus' netlist doesn't have, so the fitter ignored it and left the
 chain off. With the assignment on the wirecell (cyclone2-re 3cd8278,
 2026-11-01), 33 of the 34 DE2 examples re-validated byte-identical, uart
 and i2c-master included; picorv32x24 (28,449 LEs) isn't validated:
-Quartus' fit placed and routed it in minutes, then spent 7.5 hours in
-post-fit delay annotation without finishing, and was stopped.
+Quartus' fit of it didn't finish.
 picorv32 has no M4K; its slack moved because cyclone2-re's synthesis
 script gained `memory_libmap`, which renames yosys' cells and nets. Same
 logic, same 1,175 LEs, but other net ids and so another placement. The
@@ -1624,7 +1594,7 @@ machine, a pipeline, the stdlib's FIFO and a multiplier
      node (16, 32), more recovery passes, or relaxing depth by a level
      didn't help (844 to 847). An earlier comparison (842 vs 847) had
      counted abc's 75 one-input buffer LUTs, which `opt -fast` removes.
-     Since 2026-11-07 (branch `qor5`, docs/vs-quartus.md Round 5) the
+     Since 2026-11-07 (branch `qor5`) the
      Cyclone II mapper also maps the gates swept (functionally equivalent
      nodes merged, each merge checked exhaustively over a common cut of at
      most 12 nodes) and swept and refactored (each node's function over a
@@ -1762,21 +1732,20 @@ machine, a pipeline, the stdlib's FIFO and a multiplier
      equivalent to yosys' RTL. LEs and Fmax, chipsmith's synthesis against
      the yosys flow (`de2_synth --yosys`; both through chipsmith's back
      end, Fmax its estimate, which runs up to 9% optimistic, see the
-     timing table above) and Quartus 13.0sp1's own synthesis
-     and fit (its STA, 50 MHz constraint). chipsmith and the yosys flow
+     timing table above). chipsmith and the yosys flow
      re-measured 2026-11-01, on gpu-pnr's placer (`bench/speed.sh`,
      `de2_synth --yosys`):
 
-     | design | chipsmith | yosys flow | Quartus |
-     |---|---|---|---|
-     | uart (Forencich) | 164 LEs, 180.8 MHz | 225 LEs, 144.8 MHz | |
-     | spi-master (nandland) | 130 LEs, 293.3 MHz | can't build: an asynchronous reset to 1 that powers up 0 | |
-     | i2c-master (Forencich) | 214 LEs, 144.5 MHz | 245 LEs, 141.8 MHz | |
-     | femtorv32 quark | 788 LEs, 71.8 MHz | 832 LEs, 91.1 MHz | 473 LEs + 1 M4K, 83.7 MHz |
-     | serv | 345 LEs + 1 M4K, 96.3 MHz | 3,111 LEs, 79.2 MHz | 336 LEs + 1 M4K, 108.6 MHz |
-     | sha256 (secworks) | 4,242 LEs, 49.2 MHz | can't build (as spi-master) | 3,303 LEs, 63.7 MHz |
-     | picorv32 | 1,171 LEs, 119.2 MHz | 1,175 LEs, 126.5 MHz | |
-     | crc32 (Forencich's lfsr.v) | 118 LEs, 298.5 MHz | not run: yosys' front end takes over 20 minutes on it | |
+     | design | chipsmith | yosys flow |
+     |---|---|---|
+     | uart (Forencich) | 164 LEs, 180.8 MHz | 225 LEs, 144.8 MHz |
+     | spi-master (nandland) | 130 LEs, 293.3 MHz | can't build: an asynchronous reset to 1 that powers up 0 |
+     | i2c-master (Forencich) | 214 LEs, 144.5 MHz | 245 LEs, 141.8 MHz |
+     | femtorv32 quark | 788 LEs, 71.8 MHz | 832 LEs, 91.1 MHz |
+     | serv | 345 LEs + 1 M4K, 96.3 MHz | 3,111 LEs, 79.2 MHz |
+     | sha256 (secworks) | 4,242 LEs, 49.2 MHz | can't build (as spi-master) |
+     | picorv32 | 1,171 LEs, 119.2 MHz | 1,175 LEs, 126.5 MHz |
+     | crc32 (Forencich's lfsr.v) | 118 LEs, 298.5 MHz | not run: yosys' front end takes over 20 minutes on it |
 
      chipsmith's uart, spi-master, i2c-master and sha256 are as of
      2026-10-29: a carry chain's low cells whose carry out is forced now
@@ -1787,14 +1756,11 @@ machine, a pipeline, the stdlib's FIFO and a multiplier
      LEs off them (173 LEs at 232.2 MHz and 6,046 at 47.9 MHz on branch
      open the same day, Fmax the build's estimate).
 
-     Where Quartus is ahead, it is femtorv32's register file (Quartus puts
-     it in an M4K; chipsmith's M4K mapping doesn't take its shape yet;
-     serv's has been an M4K since the M4K work, 345 LEs against Quartus'
-     336) and wide multiplexers: sha256's 16-word schedule read maps
-     to about 20 LUTs a bit, against Quartus' 11 (the mapper, not the
+     Still short: femtorv32's register file (chipsmith's M4K mapping
+     doesn't take its shape yet) and wide multiplexers: sha256's 16-word
+     schedule read maps to about 20 LUTs a bit (the mapper, not the
      netlist: the same read as a `$bmux` tree maps no better; on 2026-11-07
-     it was 400 LUTs for 32 bits, 12.5 a bit). Still
-     rejected: `$pow` with a non-constant base, the yosys flow's own
+     it was 400 LUTs for 32 bits, 12.5 a bit). Still rejected: `$pow` with a non-constant base, the yosys flow's own
      limits above.
    - Gaps closed (2026-11-01):
      - An active-low asynchronous reset, `always @(posedge clk or negedge
@@ -1955,11 +1921,9 @@ machine, a pipeline, the stdlib's FIFO and a multiplier
 The DE2 is done: every step above is chipsmith's, and every fabric
 feature it builds (logic, carry chains, M4Ks, multipliers, PLLs, I/O-cell
 registers, falling-edge clocks, both external RAMs, the EPCS) has run on
-the board. The polish left after it (2026-11-07, branch `qor5`): Quartus
-uses up to 9.5% fewer LEs (sdram-selftest; femtorv32 now takes 3 fewer
-than Quartus), with abc's choices and don't-care resynthesis as the next
-gain (LUT mapping, above); picorv32x24 is timed by quartus_sta like the
-rest (110 MHz, Quartus' own fit 105). The board's other peripherals (flash, audio,
+the board. The polish left after it (2026-11-07, branch `qor5`): fewer LEs, with
+abc's choices and don't-care resynthesis as the next gain (LUT mapping,
+above). The board's other peripherals (flash, audio,
 Ethernet, USB, LCD, PS/2, SD) would test controller RTL, not the
 toolchain, so they aren't goals.
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # chipsmith against Quartus II 13.0sp1: full compiles of the same Verilog to
 # a bitstream, timed per stage, with each tool's own critical path and
-# quartus_sta's Fmax of both placements (docs/vs-quartus.md).
+# quartus_sta's Fmax of both placements. Local use only: Altera's
+# license forbids publishing Quartus benchmarks.
 #
 #   bench/vs-quartus.sh full <out dir> [design ...]
 #   bench/vs-quartus.sh incr <out dir> [design ...]

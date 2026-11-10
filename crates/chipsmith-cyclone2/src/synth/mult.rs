@@ -618,7 +618,7 @@ mod tests {
 
     /// A 32 x 32 -> 64 product's four partial products are three operands
     /// (`p00 | p11` one), two adders deep: mult-selftest's `a * b` was
-    /// three, 68 MHz against Quartus' 71 (76 with this).
+    /// three, 68 MHz (76 with this).
     #[test]
     fn partial_products_that_dont_overlap_share_an_operand() {
         let mut m = Module::new("t");
