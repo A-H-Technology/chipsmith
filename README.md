@@ -2282,4 +2282,5 @@ working on it in [CLAUDE.md](crates/vendor-cli/CLAUDE.md).
 
 ## License
 
-MIT
+MIT. Where chipsmith touches vendor software and data, and why we think
+that's allowed: docs/legal.md.
