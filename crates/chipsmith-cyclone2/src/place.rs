@@ -241,6 +241,8 @@ struct Cell {
     sload_inv: bool,
     /// A multiplier's A_REG, B_REG, P_REG.
     mult_regs: [bool; 3],
+    /// A multiplier whose operands fit a nine-bit row (`mult::nine_bit_params`).
+    mult_nine: bool,
     /// An M4K's read data pins behind its output registers.
     m4k_outreg: Vec<String>,
     /// Pin buffers: the top-level port they serve (`LEDR[0]`).
@@ -624,6 +626,7 @@ fn read_design(json: &Value) -> Result<Design> {
             aclr_inv: flag("ACLR_INV"),
             sload_inv: flag("SLOAD_INV"),
             mult_regs: mult::Regs::PARAMS.map(flag),
+            mult_nine: mult::nine_bit_params(&c["parameters"]),
             m4k_outreg: if c["type"] == "CY2_M4K" {
                 let ports: Vec<&str> = c["connections"]
                     .as_object()
@@ -829,7 +832,7 @@ fn read_design(json: &Value) -> Result<Design> {
         }
         if c.kind == Kind::Block(Block::Mult) {
             let [a, b, p] = c.mult_regs;
-            timing.add_mult_registers(&c.name, a, b, p);
+            timing.add_mult_registers(&c.name, a, b, p, c.mult_nine);
         }
     }
     let mut conns = Vec::new();

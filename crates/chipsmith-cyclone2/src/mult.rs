@@ -24,6 +24,19 @@ pub const MAX_WIDTH: usize = 18;
 /// Operand width of one nine-bit row.
 pub const NINE: usize = 9;
 
+/// Whether a packed `CY2_MULT` cell's operands (`A_WIDTH`, `B_WIDTH`, as
+/// yosys writes integers: binary strings) both fit a nine-bit row, which
+/// times faster than a full block (timing.rs, `MULT9_COMB`).
+pub fn nine_bit_params(params: &serde_json::Value) -> bool {
+    ["A_WIDTH", "B_WIDTH"].iter().all(|p| {
+        params[p]
+            .as_str()
+            .and_then(|v| usize::from_str_radix(v.trim(), 2).ok())
+            .or_else(|| params[p].as_u64().map(|v| v as usize))
+            .is_some_and(|w| w <= NINE)
+    })
+}
+
 /// One operand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Operand {

@@ -1,10 +1,13 @@
 //! Static timing for one clock domain, slow corner (speed grade 6).
 //!
-//! The numbers are Quartus' own, from cyclone2-re's docs/timing-model.md:
-//! cell delays are the decoded DMF values (`ddb_magellan4-6.dmf.ddb`), which
-//! match quartus_sta exactly; routing delays are quartus_sta's median per
-//! element type, because the per-wire RC model that Quartus uses isn't
-//! decoded yet (those medians are within about 30% of the real spread).
+//! Cell delays are chipsmith's own (docs/timing-silicon.md): measured on
+//! the DE2's EP2C35 with ring oscillators chipsmith places and routes
+//! (bench/ring), scaled to the slow corner by one factor per class of cell,
+//! and the register, M4K and I/O-cell constants, which a ring can't isolate,
+//! fitted to quartus_sta's path totals on chipsmith's own placements, in
+//! aggregate. Routing delays are quartus_sta's median per element type
+//! (cyclone2-re docs/timing-model.md), because a per-wire model isn't there
+//! yet (those medians are within about 30% of the real spread).
 //!
 //! Paths run register to register, which is what Quartus reports for a
 //! design with only a clock constraint: pins are unconstrained, so they
@@ -47,119 +50,118 @@ pub fn wire_delay(wire_type: &str) -> Ps {
     }
 }
 
-/// LUT input to output through each physical input A to D (DMF
-/// `LE_COMB/P2P/InOut`, worst transition).
-const LUT_PIN: [Ps; 4] = [438.0, 420.0, 275.0, 150.0];
+// The cell delays: bench/ring/emit.py writes this block from the ring
+// oscillator fits (bench/ring/fit.py, derive.py) and the path fit
+// (path_fit.py). README "Timing model" says where each comes from.
+// BEGIN bench/ring/emit.py
+// Silicon: ring oscillators on the DE2's EP2C35 at room temperature
+// (bench/ring/measure.sh, fit.py, derive.py), scaled to the slow corner by
+// one factor per class: LUT 1.946, carry chain 1.516, multiplier
+// 1.526, with the model's own LOCAL_LINE (229 ps) taken off a LUT arc.
+// Fitted: the factors and the register constants, least squares over
+// quartus_sta's path totals on chipsmith's placements (path_fit.py;
+// aggregate, against the model's own routing).
+// Guardband: 0 ps on every path start (emit.py).
+/// LUT input to COMBOUT through each physical input A to D, the LE input's
+/// interconnect included. Silicon.
+const LUT_PIN: [Ps; 4] = [517.0, 497.0, 343.0, 233.0];
+/// A carry chain's head: input A or B to COUT. Silicon (the head and the
+/// tail always come together on a path; the tail is taken as input C's
+/// arc, which is where CIN enters the LUT).
+const CARRY_HEAD: [Ps; 2] = [579.0, 548.0];
+/// CIN to COMBOUT (a chain's sum out). Input C's arc, see CARRY_HEAD.
+const CIN_COMBOUT: Ps = 343.0;
+/// CIN to COUT inside a LAB half. Silicon.
+const CIN_COUT: Ps = 72.0;
+/// What a carry costs on top where it crosses the LAB's half-way buffer
+/// (LE 7 to 8) and where it leaves the LAB (LE 15 to the next LAB's 0).
+/// Silicon.
+const CARRY_LCB: Ps = 78.0;
+const CARRY_LAB: Ps = 66.0;
+/// An unregistered multiplier, data in to product out: a full 18 x 18
+/// block and one whose operands fit a nine-bit row, each the slowest
+/// product bit measured. Silicon.
+const MULT_COMB: Ps = 3024.0;
+const MULT9_COMB: Ps = 2018.0;
+/// LE register clock to REGOUT. Fitted, plus the guardband.
+const TCO: Ps = 287.0;
+/// What each register input needs before the capturing clock edge, its
+/// interconnect included (SDATA's physical input C's too). Fitted; DATAIN
+/// is held (only TCO + TSU is identifiable) and the others are relative
+/// to it.
+const TSU_DATAIN: Ps = 0.0;
+const TSU_SDATA: Ps = 434.0;
+const TSU_ENA: Ps = 471.0;
+const TSU_SCLR: Ps = 308.0;
+const TSU_SLOAD: Ps = 618.0;
+/// M4K read clock to data out without and with the output register, and
+/// its input registers' setup. Fitted (the launch ones plus the
+/// guardband); they take up the block's clock arriving later than an LE
+/// register's.
+const M4K_TCO: Ps = 3085.0;
+const M4K_OUTREG_TCO: Ps = 184.0;
+const M4K_TSU: Ps = 187.0;
+/// Cyclone II I/O-cell registers, for a register-to-register path that
+/// starts or ends in a pin's I/O cell. Fitted (the launch plus the
+/// guardband).
+const IOE_TCO: Ps = 391.0;
+const IOE_TSU: Ps = 424.0;
+// END bench/ring/emit.py
+
+/// The multiplier's own registers: the LE register's (they're in the same
+/// rows as the LEs', on the same row clocks; no chipsmith design's paths
+/// start or end in one often enough to fit them).
+const MULT_TSU: Ps = TSU_DATAIN;
+const MULT_TCO: Ps = TCO;
 
 /// What a LUT input costs over input D, the fastest: carried by the LE
 /// input's routing node (`LE<k>.A` to `.D`), since the router picks which
 /// physical input a LUT input takes (the LUT mask is permuted to match).
 /// The LUT arcs below are input D's for every input, so a connection pays
-/// for the pin it ends on. Timed by the logical input instead, a LUT input
-/// the router put on A was 288 ps slower in quartus_sta than modelled; on
-/// the 443 LUT inputs of quartus_sta's 300 worst paths of five designs,
-/// 53 ps a LUT on average.
+/// for the pin it ends on.
 pub fn lut_pin_extra(pin: usize) -> Ps {
     LUT_PIN[pin] - LUT_PIN[3]
 }
 
 /// What a connection into a LUT's data input pays for its pin when the
 /// pin isn't known yet (placement): the mean over the four.
-pub const LUT_PIN_EXPECTED: Ps = (438.0 + 420.0 + 275.0 - 3.0 * 150.0) / 4.0;
-
-/// quartus_sta's interconnect element into a LUT's input (`|datab`, after
-/// the LAB line or local line): the mean over 9,000 of them on the 300
-/// worst paths of five designs, 27 ps (datac) to 39 ps (dataa) by input.
-/// Not in the DMF arcs; without it the routed estimate ran 2 to 3% above
-/// quartus_sta once LUT inputs were timed by their pins.
-const LUT_INPUT_IC: Ps = 32.0;
+pub const LUT_PIN_EXPECTED: Ps =
+    (LUT_PIN[0] + LUT_PIN[1] + LUT_PIN[2] - 3.0 * LUT_PIN[3]) / 4.0;
 
 /// LUT input to output for the LE at index `le` of its LAB, less the
-/// physical input's [`lut_pin_extra`], plus [`LUT_INPUT_IC`]. The carry out is slower where the
-/// chain crosses the LAB's half-way buffer (LE 7 to 8, `CHAIN_THROUGH_LCB`)
-/// and where it leaves the LAB (LE 15, `CHAIN_ACROSS_LAB`). Carry LEs
-/// keep their inputs where they are (A and B).
+/// physical input's [`lut_pin_extra`]. The carry out is slower where the
+/// chain crosses the LAB's half-way buffer (LE 7 to 8) and where it leaves
+/// the LAB (LE 15). Carry LEs keep their inputs where they are (A and B).
 fn lut_arc(input: &str, output: &str, le: u8) -> Option<Ps> {
-    let crossing = le == 7 || le == 15;
+    let crossing = match le {
+        7 => CARRY_LCB,
+        15 => CARRY_LAB,
+        _ => 0.0,
+    };
     Some(match (input, output) {
-        ("DATAA" | "DATAB" | "DATAC" | "DATAD", "COMBOUT") => LUT_PIN[3] + LUT_INPUT_IC,
-        ("CIN", "COMBOUT") => 410.0,
-        // CHAIN_BASE; the crossing variants of DATAA aren't identified.
-        ("DATAA", "COUT") => 414.0 - lut_pin_extra(0) + LUT_INPUT_IC,
-        ("DATAB", "COUT") if crossing => 485.0 - lut_pin_extra(1) + LUT_INPUT_IC,
-        ("DATAB", "COUT") => 393.0 - lut_pin_extra(1) + LUT_INPUT_IC,
-        // The stored cin->cout less its inverted-carry correction:
-        // 230 - 71 through the LCB, 219 - 73 across LABs, 129 - 58 otherwise.
-        ("CIN", "COUT") if le == 7 => 159.0,
-        ("CIN", "COUT") if le == 15 => 146.0,
-        ("CIN", "COUT") => 71.0,
+        ("DATAA" | "DATAB" | "DATAC" | "DATAD", "COMBOUT") => LUT_PIN[3],
+        ("CIN", "COMBOUT") => CIN_COMBOUT,
+        ("DATAA", "COUT") => CARRY_HEAD[0] + crossing - lut_pin_extra(0),
+        ("DATAB", "COUT") => CARRY_HEAD[1] + crossing - lut_pin_extra(1),
+        ("CIN", "COUT") => CIN_COUT + crossing,
         _ => return None,
     })
 }
 
-/// Register clock-to-output (DMF `LE_FF` TCO) plus the register's output
-/// stage, which quartus_sta reports as a 0.088 ns `CYCLONEII_LCELL_FF` element.
-const TCO: Ps = 250.0 + 88.0;
-/// Register setup (DMF `TSU`, −36 ps), counted where the data enters.
-const TSU: Ps = -36.0;
-
-/// What a register input needs before the capturing clock edge.
+/// What a register input needs before the capturing clock edge. LAB-wide
+/// enable, sync clear and sync load reach the register through the LAB
+/// control lines (routed as such); SDATA is the LE's input C, whose node
+/// carries part of it (`lut_pin_extra`).
 fn register_setup(port: &str) -> Option<Ps> {
     Some(match port {
-        // DMF `I:DATAIN B:FF` 84, `I:SDATA B:FF` 366. SDATA is the LE's
-        // input C, whose node carries part of that (`lut_pin_extra`).
-        "DATAIN" => 84.0 + TSU,
-        "SDATA" => 366.0 - lut_pin_extra(2) + TSU,
-        // LAB-wide enable, sync clear and sync load reach the register
-        // through the LAB control lines (routed as such: quartus_sta's
-        // interconnect into them, LAB_CONTROL_MUX included, came to 1.02x
-        // the model's). Their arcs into the register, quartus_sta's
-        // `CYCLONEII_LCELL_FF` cell element after `|ena`, `|sclr` and
-        // `|sload` on chipsmith's femtorv32 and picorv32 (`qor4`), the
-        // same on every path: 660 ps (800 paths), 510 (451), 659 (43).
-        // SDATA's measured the same way gave the DMF's 366.
-        "ENA" => 660.0 + TSU,
-        "SCLR" => 510.0 + TSU,
-        "SLOAD" => 659.0 + TSU,
+        "DATAIN" => TSU_DATAIN,
+        "SDATA" => TSU_SDATA - lut_pin_extra(2),
+        "ENA" => TSU_ENA,
+        "SCLR" => TSU_SCLR,
+        "SLOAD" => TSU_SLOAD,
         _ => return None,
     })
 }
-
-/// M4K read clock to data out, with no output register (the address is
-/// registered, the read data isn't). quartus_sta on an M4K feeding a LUT and
-/// register: address register uTco 209 ps plus 2,993 ps to `portadataout`,
-/// plus the 124 ps the block's clock arrives after an LE register's (cell
-/// delay 0.661 vs 0.537 ns; skew isn't otherwise modelled).
-const M4K_TCO: Ps = 209.0 + 2993.0 + 124.0;
-/// M4K read clock to data out through the block's output register:
-/// quartus_sta on femtorv32's register file (`qor4`, B_OUTREG on clock 1)
-/// gives the register's 209 ps uTco and 88 ps to `portbdataout`, plus
-/// the 99 ps the block's clock 1 arrives after an LE register's (cell
-/// delay 0.636 vs 0.537 ns).
-const M4K_OUTREG_TCO: Ps = 209.0 + 88.0 + 99.0;
-/// M4K input register setup: quartus_sta's 142 ps cell delay into the
-/// address register and its -35 ps uTsu, less the same 124 ps of later
-/// clock.
-const M4K_TSU: Ps = 142.0 - 35.0 - 124.0;
-
-/// An embedded multiplier, data in to product out, unregistered:
-/// quartus_sta on an 18 x 18 product (2026-10-29): 2,679 ps through the
-/// mac_mult and 224 ps through the mac_out it leaves by.
-const MULT_COMB: Ps = 2679.0 + 224.0;
-/// Its input registers' setup and its output register's clock-to-output,
-/// the LE register's until measured (the block's registers are in the
-/// same rows as the LEs', on the same row clocks).
-const MULT_TSU: Ps = TSU;
-const MULT_TCO: Ps = TCO;
-/// Cyclone II I/O-cell registers, for a register-to-register path that
-/// starts or ends in a pin's I/O cell. quartus_sta on examples/de2-io
-/// (2026-10-26): an input register's uTco 143 ps plus 390 ps out through
-/// `regout`; an output or OE register's 269-279 ps cell delay from
-/// `datain` (column 279, row 269) and its −78 ps uTsu. The I/O register's
-/// clock reached it within 3 ps of an LE register's there (more wire,
-/// faster cell), so no skew is modelled.
-const IOE_TCO: Ps = 143.0 + 390.0;
-const IOE_TSU: Ps = 279.0 - 78.0;
 
 /// A delay from one timing node to another.
 #[derive(Debug, Clone, Copy)]
@@ -287,14 +289,23 @@ impl Graph {
     /// combinational arcs): an operand register captures its data pins,
     /// the product register launches the product pins; a registered
     /// operand's path to an unregistered product starts at the register,
-    /// an unregistered operand's to a registered product ends at it.
-    pub fn add_mult_registers(&mut self, cell: &str, a: bool, b: bool, p: bool) {
+    /// an unregistered operand's to a registered product ends at it. A
+    /// multiplier whose operands fit a nine-bit row (`nine`) is faster
+    /// through than a full block.
+    pub fn add_mult_registers(&mut self, cell: &str, a: bool, b: bool, p: bool, nine: bool) {
         let nodes: Vec<(String, u32)> = self
             .index
             .iter()
             .filter(|((c, _), _)| c == cell)
             .map(|((_, port), &n)| (port.clone(), n))
             .collect();
+        let comb = if nine { MULT9_COMB } else { MULT_COMB };
+        let own: std::collections::HashSet<u32> = nodes.iter().map(|(_, n)| *n).collect();
+        for arc in &mut self.cell_arcs {
+            if own.contains(&arc.from) && own.contains(&arc.to) {
+                arc.delay = comb;
+            }
+        }
         let registered_in =
             |port: &str| (a && port.starts_with("MULTA")) || (b && port.starts_with("MULTB"));
         for (port, n) in &nodes {
@@ -303,7 +314,7 @@ impl Graph {
                 if p {
                     self.launch[n] = Some(MULT_TCO);
                 } else if a || b {
-                    self.launch[n] = Some(MULT_TCO + MULT_COMB);
+                    self.launch[n] = Some(MULT_TCO + comb);
                 }
             } else if registered_in(port) {
                 self.setup[n] = Some(MULT_TSU);
@@ -311,7 +322,7 @@ impl Graph {
                 && !port.starts_with("SIGN")
                 && !matches!(port.as_str(), "CLK" | "ENA" | "ACLR")
             {
-                self.setup[n] = Some(MULT_TSU + MULT_COMB);
+                self.setup[n] = Some(MULT_TSU + comb);
             }
         }
         // Arcs through a register are no longer combinational.
@@ -641,11 +652,11 @@ mod tests {
             },
         ];
         let t = g.analyse(&nets);
-        assert_eq!(t.critical, M4K_TCO + 500.0 + 84.0 + TSU);
+        assert_eq!(t.critical, M4K_TCO + 500.0 + TSU_DATAIN);
         // Behind its output register the read data launches 2.9 ns earlier.
         g.add_m4k_output_registers("m", ["DO0"]);
         let t = g.analyse(&nets);
-        assert_eq!(t.critical, M4K_OUTREG_TCO + 500.0 + 84.0 + TSU);
+        assert_eq!(t.critical, M4K_OUTREG_TCO + 500.0 + TSU_DATAIN);
         assert!(t.criticality(&nets[1]) < 1.0);
     }
 
@@ -683,12 +694,12 @@ mod tests {
                 ClockPair {
                     from: 1,
                     to: 1,
-                    critical: TCO + 100.0 + 84.0 + TSU
+                    critical: TCO + 100.0 + TSU_DATAIN
                 },
                 ClockPair {
                     from: 1,
                     to: 2,
-                    critical: TCO + 900.0 + 84.0 + TSU
+                    critical: TCO + 900.0 + TSU_DATAIN
                 },
             ]
         );
@@ -717,7 +728,7 @@ mod tests {
         // The LUT arc is input D's; the routing carries the rest of A's.
         assert_eq!(
             t.critical,
-            TCO + 100.0 + 150.0 + LUT_INPUT_IC + 100.0 + 84.0 + TSU
+            TCO + 100.0 + LUT_PIN[3] + 100.0 + TSU_DATAIN
         );
     }
 
@@ -782,8 +793,8 @@ mod tests {
             },
         ];
         let t = g.analyse(&nets);
-        let lut = 150.0 + LUT_INPUT_IC;
-        assert_eq!(t.critical, TCO + 600.0 + lut + 84.0 + TSU);
+        let lut = LUT_PIN[3];
+        assert_eq!(t.critical, TCO + 600.0 + lut + TSU_DATAIN);
         assert_eq!(t.criticality(&nets[0]), 1.0);
         // The short path has (600 + the LUT) - 300 of slack.
         let slack = 600.0 + lut - 300.0;
@@ -792,24 +803,22 @@ mod tests {
         assert_eq!(t.path.last().map(|p| p.0), Some(bd));
     }
 
-    /// Through each physical input a LUT takes its DMF delay: input D's
-    /// arc plus what the input's routing node adds.
+    /// Through each physical input a LUT takes that input's delay: input
+    /// D's arc plus what the input's routing node adds.
     #[test]
     fn a_lut_input_costs_its_physical_pin() {
-        for (pin, dmf) in [438.0, 420.0, 275.0, 150.0].into_iter().enumerate() {
-            assert_eq!(
-                lut_arc("DATAA", "COMBOUT", 0).unwrap() + lut_pin_extra(pin),
-                dmf + LUT_INPUT_IC
-            );
+        for (pin, arc) in LUT_PIN.into_iter().enumerate() {
+            assert_eq!(lut_arc("DATAA", "COMBOUT", 0).unwrap() + lut_pin_extra(pin), arc);
         }
-        // Carry LEs keep their pins: A and B's carry arcs with the pin.
+        // Carry LEs keep their pins: A and B's carry arcs with the pin,
+        // and B's at the LAB's half-way buffer.
         let a = lut_arc("DATAA", "COUT", 0).unwrap() + lut_pin_extra(0);
-        assert_eq!(a, 414.0 + LUT_INPUT_IC);
-        let b = lut_arc("DATAB", "COUT", 3).unwrap() + lut_pin_extra(1);
-        assert_eq!(b, 393.0 + LUT_INPUT_IC);
+        assert_eq!(a, CARRY_HEAD[0]);
+        let b = lut_arc("DATAB", "COUT", 7).unwrap() + lut_pin_extra(1);
+        assert_eq!(b, CARRY_HEAD[1] + CARRY_LCB);
         assert_eq!(
             register_setup("SDATA").unwrap() + lut_pin_extra(2),
-            366.0 + TSU
+            TSU_SDATA
         );
     }
 }

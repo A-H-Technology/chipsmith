@@ -14,7 +14,7 @@ GitHub hosts the repository.
 | Bitstream formats themselves | Facts, not copyrightable | Nothing to do |
 | Cyclone II chip database extracted from Quartus' devinfo | The one real question: EU database right | Open, see below |
 | Disassembly of Quartus' libraries | Allowed for interoperability; the EULA wants notice to Altera first | Notice not sent |
-| Quartus' DMF cell delays in `timing.rs` | Trivial: a few dozen facts | Nothing to do |
+| Cell delays in `timing.rs` | Measured on the DE2 since 2026-11-10; the DMF values are gone | Done |
 | Publishing benchmarks of Quartus | Forbidden by the EULA | Removed, 7ae43ff |
 | Fetching the Quartus 13.0sp1 ISO from archive.org | Low risk | Unchanged |
 | Third-party HDL in `examples/` | Licenses kept | Nothing to do |
@@ -103,10 +103,29 @@ requirement (above) is the remaining contract question.
 
 ## Timing values
 
-`crates/chipsmith-route/src/timing.rs` hardcodes a few dozen cell delays
-decoded from Quartus' DMF files, each also checked against
-`quartus_sta`'s reports. Individual numbers are facts, and this is far
-from a substantial part of any database.
+`crates/chipsmith-route/src/timing.rs` used to hardcode a few dozen cell
+delays decoded from Quartus' DMF files. Decoding a vendor database file
+and copying its values is the kind of extraction the EU database right is
+about, however few the values, and quartus_sta reports the DMF values
+verbatim, so reading them off its reports would only copy the same data
+by another path.
+
+Since 2026-11-10 (docs/timing-silicon.md) no value in the timing model
+comes from the DMF files:
+
+- **Measured.** The LUT, carry-chain and multiplier delays come from
+  ring oscillators on our own DE2.
+- **Scaled.** The slow-corner scale per class of cell, and the register,
+  M4K and I/O-cell constants, are least-squares fits to quartus_sta's
+  path totals on placements chipsmith made. That's observation of a
+  program's output (Software Directive Art. 5(3); CJEU *SAS Institute v
+  World Programming*, C-406/10), in aggregate, against chipsmith's own
+  routing model. No per-cell number is read off a report.
+
+The routing delays are quartus_sta's median per element type over
+chipsmith's designs, which is the same kind of observation.
+
+The old values are still in the git history.
 
 ## Benchmarks
 

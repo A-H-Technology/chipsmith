@@ -510,7 +510,13 @@ fn read_design(db: &ChipDb, json: &Value) -> Result<Design> {
                     .as_str()
                     .is_some_and(|v| v.trim_end().contains('1'))
             };
-            timing.add_mult_registers(name, flag("A_REG"), flag("B_REG"), flag("P_REG"));
+            timing.add_mult_registers(
+                name,
+                flag("A_REG"),
+                flag("B_REG"),
+                flag("P_REG"),
+                crate::mult::nine_bit_params(&cell["parameters"]),
+            );
         }
         if matches!(ty, "CY2_IBUF" | "CY2_OBUF" | "CY2_IOBUF") {
             let reg = |p: &str| cell["parameters"][p].is_string();
@@ -592,6 +598,11 @@ fn read_design(db: &ChipDb, json: &Value) -> Result<Design> {
                 .with_context(|| format!("{name}: LUT on bel {bel_name}"))?;
             let net_of = |p: &str| conns.get(p).and_then(|b| b.as_array()?.first()?.as_u64());
             carry_luts.push((tile, k, net_of("COUT"), net_of("CIN").is_some()));
+            // bench/ring measures each physical LUT input on silicon, so
+            // its LUTs must keep the inputs they were wired to.
+            if cell["attributes"]["CHIPSMITH_FIXED_INPUTS"].is_string() {
+                fixed_inputs.insert((tile, k));
+            }
         }
     }
     // Carry LEs can't permute their inputs: C is the carry in and D picks

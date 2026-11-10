@@ -36,8 +36,10 @@ runs the comparison against your own Quartus install. Since branch
 functionally equivalent nodes merged, and also refactored, and keeps the
 mapping with the fewest LUTs (femtorv32 518 -> 470 LEs, mult-selftest
 956 -> 858, picorv32 876 -> 852, picorv32x24 21,241 -> 20,832).
-chipsmith's timing estimate is +1.0% to +10.8% above quartus_sta on its
-own placements.
+chipsmith's Fmax estimate is −0.7% to +4.7% off quartus_sta's on its own
+placements (femtorv32, picorv32, sha256, mult-selftest, sdram-selftest).
+Before the cell delays were measured on silicon (docs/timing-silicon.md)
+it was +1.0% to +10.8% above.
 
 `examples/de2-jtag-counter` answers over the JTAG cable, so a load can be
 checked without watching the board: the Cyclone II's JTAG block makes it a
@@ -639,9 +641,12 @@ of their own (an output or OE register's synchronous reset is logic on
 its D; an input register with one can't go into an I/O cell, nor can one
 with an asynchronous load or both an asynchronous set and clear), 3.3-V
 LVCMOS at its default current only.
-The timing model covers LE and register delays exactly and routing by
-per-element-type averages. M4K clock-to-output (3.33 ns) and setup are
-from one quartus_sta path each, and so is the M4K buffer's routing delay.
+The timing model's cell delays are chipsmith's own (docs/timing-silicon.md):
+LUT, carry-chain and multiplier delays measured on the DE2 with ring
+oscillators, scaled to the slow corner; register, M4K and I/O-cell
+constants fitted to quartus_sta's path totals on chipsmith's placements.
+Routing is per-element-type averages from quartus_sta; the M4K buffer's
+routing delay is from one quartus_sta path.
 
 The Zybo examples:
 
@@ -1404,8 +1409,10 @@ machine, a pipeline, the stdlib's FIFO and a multiplier
      less slack (8.84 ns): wirelength is not timing, so the next gain is a
      timing model, not more annealing.
    - Timing model (`crates/chipsmith-route/src/timing.rs`) and timing-driven routing. Cell delays
-     are Quartus' DMF values (cyclone2-re docs/timing-model.md), routing
-     delays quartus_sta's median per element type; register-to-register
+     were Quartus' DMF values (cyclone2-re docs/timing-model.md) until
+     2026-11-10; since then they are chipsmith's own, from silicon and an
+     aggregate fit (docs/timing-silicon.md). Routing
+     delays are quartus_sta's median per element type; register-to-register
      paths only, like Quartus with just a clock constraint. After each
      PathFinder iteration the router runs STA and costs each connection
      `(1 - crit) * congestion + crit * delay`. `bench/quartus-timing.sh`
