@@ -645,15 +645,18 @@ mod tests {
                 to: g.node("b", "DATAIN"),
                 delay: 500.0,
             },
+            // Short enough that the read path stays the critical one
+            // behind the output register too.
             Arc {
                 from: g.node("a", "REGOUT"),
                 to: g.node("m", "WA0"),
-                delay: 500.0,
+                delay: 100.0,
             },
         ];
+        assert!(TCO + 100.0 + M4K_TSU < M4K_OUTREG_TCO + 500.0 + TSU_DATAIN);
         let t = g.analyse(&nets);
         assert_eq!(t.critical, M4K_TCO + 500.0 + TSU_DATAIN);
-        // Behind its output register the read data launches 2.9 ns earlier.
+        // Behind its output register the read data launches earlier.
         g.add_m4k_output_registers("m", ["DO0"]);
         let t = g.analyse(&nets);
         assert_eq!(t.critical, M4K_OUTREG_TCO + 500.0 + TSU_DATAIN);

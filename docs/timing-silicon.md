@@ -211,6 +211,20 @@ estimate against quartus_sta's (positive: chipsmith optimistic):
 | mult-selftest | +1.0% | +1.6% |
 | sdram-selftest | +10.8% | +4.7% |
 
+The model also steers placement and routing, so it moves what Quartus
+times. Over placement seeds 1 to 3 (`bench/fmax-seeds.sh`, quartus_sta's
+Fmax in MHz):
+
+| Design | Before, seeds 1/2/3 | After, seeds 1/2/3 | Mean |
+|---|---|---|---|
+| sha256 | 70.6 / 70.5 / 70.2 | 69.0 / 68.0 / 68.4 | −2.8% |
+| femtorv32 | 107.8 / 103.3 / 100.5 | 103.0 / 105.2 / 100.9 | −0.9%, within the seeds' spread |
+
+On those seeds the estimate is within 1% of quartus_sta after, and was
+0.5 to 3.7% optimistic before. sha256's placements are slower in Quartus
+under the new model. That's a regression this branch doesn't recover, and
+`route_quality`'s sha256 bound moved from 15.0 to 15.5 ns for it.
+
 ## On the board
 
 `bench/de2-at-fmax.sh` runs a self-test from a PLL. On 2026-11-10:
