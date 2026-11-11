@@ -1447,7 +1447,11 @@ fn equal_over(aig: &Aig, cut: &[u32], u: u32, v: u32, phase: bool) -> bool {
         let ta = eval(aig, val, node(a))?;
         let tb = eval(aig, val, node(b))?;
         let (ia, ib) = (inverted(a) as u64 * u64::MAX, inverted(b) as u64 * u64::MAX);
-        let t: Vec<u64> = ta.iter().zip(&tb).map(|(x, y)| (x ^ ia) & (y ^ ib)).collect();
+        let t: Vec<u64> = ta
+            .iter()
+            .zip(&tb)
+            .map(|(x, y)| (x ^ ia) & (y ^ ib))
+            .collect();
         val.insert(x, t.clone());
         Some(t)
     }
@@ -2084,7 +2088,13 @@ mod tests {
             &[14],
         );
         let net = Network::read(&j["modules"]["top"]).unwrap();
-        let ands = |n: &Network| n.aig.nodes.iter().filter(|x| matches!(x, Node::And(..))).count();
+        let ands = |n: &Network| {
+            n.aig
+                .nodes
+                .iter()
+                .filter(|x| matches!(x, Node::And(..)))
+                .count()
+        };
         let r = net.refactored();
         assert_eq!(ands(&net), 5);
         assert_eq!(ands(&r), 3);

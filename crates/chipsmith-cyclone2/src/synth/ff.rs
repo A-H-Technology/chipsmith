@@ -90,7 +90,9 @@ impl SyncLoads {
             }
         }
         let one = |n: Net| readers.get(&n) == Some(&1);
-        let net = |gc: &chipsmith_netlist::Generic, p: &str| gc.port(p).and_then(|p| p.sig.first()?.net());
+        let net = |gc: &chipsmith_netlist::Generic, p: &str| {
+            gc.port(p).and_then(|p| p.sig.first()?.net())
+        };
         let mut mux = FxHashMap::default();
         // Arithmetic LEs: COMBOUT -> (DATAA, DATAB, CIN, COUT).
         let mut arith: FxHashMap<Net, [Option<Net>; 4]> = FxHashMap::default();
@@ -115,7 +117,15 @@ impl SyncLoads {
                     }
                 }
                 CellKind::FfGate(ff) => {
-                    if let (FfKind::Dff { d: SigBit::Net(d), control, .. }, SigBit::Net(q)) = (&ff.kind, ff.q) {
+                    if let (
+                        FfKind::Dff {
+                            d: SigBit::Net(d),
+                            control,
+                            ..
+                        },
+                        SigBit::Net(q),
+                    ) = (&ff.kind, ff.q)
+                    {
                         q_of.insert(*d, q);
                         if let DffControl::Sync { value, .. } = control {
                             reset_of.insert(*d, (q, *value));
@@ -132,7 +142,10 @@ impl SyncLoads {
                 // an OR, `s ? x : 1` an ORNOT. Which input is the sum
                 // decides `take`; (A, B, S) here takes either.
                 CellKind::Gate(g)
-                    if matches!(g.op(), GateOp::And | GateOp::AndNot | GateOp::Or | GateOp::OrNot) =>
+                    if matches!(
+                        g.op(),
+                        GateOp::And | GateOp::AndNot | GateOp::Or | GateOp::OrNot
+                    ) =>
                 {
                     if let SigBit::Net(y) = g.y {
                         if one(y) {
@@ -194,19 +207,22 @@ impl SyncLoads {
         let mut resets_taken = rustc_hash::FxHashSet::default();
         for head in heads {
             let mut chain = vec![head];
-            while let Some(&y) = arith[chain.last().expect("a head")][3].and_then(|c| by_cin.get(&c)) {
+            while let Some(&y) =
+                arith[chain.last().expect("a head")][3].and_then(|c| by_cin.get(&c))
+            {
                 chain.push(y);
             }
             for lab in chain.chunks(16) {
                 // Resets a sum feeds straight in, if one of them is to 1.
                 let reset = |y: &Net| reset_of.get(y).filter(|_| one(*y));
-                let resets: Vec<(Net, Net, bool)> = if lab.iter().any(|y| reset(y).is_some_and(|r| r.1)) {
-                    lab.iter()
-                        .filter_map(|y| reset(y).map(|&(q, v)| (*y, q, v)))
-                        .collect()
-                } else {
-                    Vec::new()
-                };
+                let resets: Vec<(Net, Net, bool)> =
+                    if lab.iter().any(|y| reset(y).is_some_and(|r| r.1)) {
+                        lab.iter()
+                            .filter_map(|y| reset(y).map(|&(q, v)| (*y, q, v)))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                 let own: Vec<Net> = lab
                     .iter()
                     .filter_map(|y| Some(taken.get(y)?.0))
@@ -341,7 +357,15 @@ pub fn map(m: &mut Module) -> Result<Counts> {
     let mut counts = Counts::default();
     let mut inverted = Vec::new();
     for (name, ff) in regs {
-        match legalize(&mut g, &mut subst, &mut init, &mut inverted, &loads, &name, ff)? {
+        match legalize(
+            &mut g,
+            &mut subst,
+            &mut init,
+            &mut inverted,
+            &loads,
+            &name,
+            ff,
+        )? {
             Mapped::Register => counts.registers += 1,
             Mapped::Latch => counts.latches += 1,
             Mapped::Emulated => {
@@ -373,7 +397,10 @@ fn name_inverted(m: &mut Module, inverted: &[(Net, Net)]) {
     for w in &m.wires {
         for (i, b) in w.bits.iter().enumerate() {
             if let Some(&r) = b.net().and_then(|q| inner.get(&q)) {
-                named.push(Wire::new(format!("{}[{i}]~inv", w.name), vec![SigBit::Net(r)]));
+                named.push(Wire::new(
+                    format!("{}[{i}]~inv", w.name),
+                    vec![SigBit::Net(r)],
+                ));
             }
         }
     }

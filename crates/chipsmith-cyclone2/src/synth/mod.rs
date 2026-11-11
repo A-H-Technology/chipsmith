@@ -20,8 +20,8 @@ use anyhow::{bail, Context, Result};
 use chipsmith_netlist::{attr, is_set, CellKind, Design, Module};
 use chipsmith_synth::rewrite::define_inits;
 use chipsmith_synth::{
-    alumacc, clean, divmod, fsm, lutmap, memory, opt, restructure, rom, share, techmap, tribuf, undef,
-    wreduce,
+    alumacc, clean, divmod, fsm, lutmap, memory, opt, restructure, rom, share, techmap, tribuf,
+    undef, wreduce,
 };
 
 use crate::pin::IoRegisters;

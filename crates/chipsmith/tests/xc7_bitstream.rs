@@ -24,7 +24,10 @@ use chipsmith::manifest::{Manifest, Target};
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
 fn setup() {
-    let out = Command::new("yosys-config").arg("--datdir").output().unwrap();
+    let out = Command::new("yosys-config")
+        .arg("--datdir")
+        .output()
+        .unwrap();
     let share = PathBuf::from(String::from_utf8(out.stdout).unwrap().trim());
     support::use_lib(support::Lib {
         name: chipsmith_xc7::synth::cells::LIBRARY_NAME,
@@ -80,7 +83,10 @@ fn example_at(src: &Path) -> Example {
         dir: src,
         top: m.top.clone(),
         files: files.clone(),
-        pins: pins.iter().map(|a| (a.port.to_string(), a.pin.to_string())).collect(),
+        pins: pins
+            .iter()
+            .map(|a| (a.port.to_string(), a.pin.to_string()))
+            .collect(),
     }
 }
 
@@ -96,8 +102,15 @@ fn build(name: &str, scratch: &Path) -> PathBuf {
     let dir = examples.join(name);
     copy_dir(&src, &dir);
     let manifest = std::fs::read_to_string(src.join("chipsmith.toml")).unwrap();
-    for sibling in manifest.split("\"../").skip(1).filter_map(|s| s.split('/').next()) {
-        copy_dir(&Path::new(ROOT).join("examples").join(sibling), &examples.join(sibling));
+    for sibling in manifest
+        .split("\"../")
+        .skip(1)
+        .filter_map(|s| s.split('/').next())
+    {
+        copy_dir(
+            &Path::new(ROOT).join("examples").join(sibling),
+            &examples.join(sibling),
+        );
     }
     let out = Command::new(env!("CARGO_BIN_EXE_chipsmith"))
         .arg("-C")
@@ -124,7 +137,11 @@ fn prjxray_agrees(bit: &Path, scratch: &Path) {
     let theirs = scratch.join("prjxray.bit");
     let run = |cmd: &mut Command| {
         let out = cmd.output().unwrap();
-        assert!(out.status.success(), "{cmd:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{cmd:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     };
     run(Command::new("fasm2frames")
         .args(["--part", "xc7z010clg400-1", "--db-root"])
@@ -139,7 +156,10 @@ fn prjxray_agrees(bit: &Path, scratch: &Path) {
         .arg("--output_file")
         .arg(&theirs));
     let payload = |b: &[u8]| -> Vec<u8> {
-        let sync = b.windows(4).position(|w| w == [0xaa, 0x99, 0x55, 0x66]).unwrap();
+        let sync = b
+            .windows(4)
+            .position(|w| w == [0xaa, 0x99, 0x55, 0x66])
+            .unwrap();
         b[sync - 48..].to_vec()
     };
     assert!(
@@ -159,7 +179,11 @@ fn check(name: &str, ex: &Example, bit: &Path, scratch: &Path, cycles: usize) {
         .arg(bit)
         .output()
         .unwrap();
-    assert!(fasm.status.success(), "bit2fasm: {}", String::from_utf8_lossy(&fasm.stderr));
+    assert!(
+        fasm.status.success(),
+        "bit2fasm: {}",
+        String::from_utf8_lossy(&fasm.stderr)
+    );
     let fasm = String::from_utf8(fasm.stdout).unwrap();
     std::fs::write(scratch.join("decoded.fasm"), &fasm).unwrap();
     let db = chipsmith_xc7::xray::load(chipsmith_xc7::part::XC7Z010CLG400_1).unwrap();
@@ -184,7 +208,10 @@ fn check(name: &str, ex: &Example, bit: &Path, scratch: &Path, cycles: usize) {
     }
     let r = support::cosim(scratch, &rtl, &decoded, &decoded, cycles, 1)
         .unwrap_or_else(|e| panic!("{name}: co-simulation: {e}"));
-    eprintln!("{name}: {} output bits compared over {cycles} cycles", r.compared);
+    eprintln!(
+        "{name}: {} output bits compared over {cycles} cycles",
+        r.compared
+    );
     assert!(r.compared > 0, "{name}: nothing compared");
 }
 
@@ -237,7 +264,10 @@ fn cut_bscan(dir: &Path, rtl: &Path) -> PathBuf {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    support::scratch(Path::new(env!("CARGO_TARGET_TMPDIR")), &format!("xc7_bit_{name}"))
+    support::scratch(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        &format!("xc7_bit_{name}"),
+    )
 }
 
 fn built(name: &str, cycles: usize) {
@@ -302,12 +332,20 @@ fn zybo_picorv32_running() {
         "  wire [3:0] KEY = 4'b1111;\n  wire clk = CLOCK_50;",
         1,
     );
-    assert!(top.contains("4'b1111"), "examples/picorv32/src/top.v changed shape");
+    assert!(
+        top.contains("4'b1111"),
+        "examples/picorv32/src/top.v changed shape"
+    );
     std::fs::write(project.join("src/top.v"), top).unwrap();
-    let manifest = std::fs::read_to_string(Path::new(ROOT).join("examples/zybo-picorv32/chipsmith.toml"))
-        .unwrap()
-        .replace("../picorv32/src/*.v", "src/*.v");
-    let manifest: String = manifest.lines().filter(|l| !l.starts_with("KEY")).map(|l| format!("{l}\n")).collect();
+    let manifest =
+        std::fs::read_to_string(Path::new(ROOT).join("examples/zybo-picorv32/chipsmith.toml"))
+            .unwrap()
+            .replace("../picorv32/src/*.v", "src/*.v");
+    let manifest: String = manifest
+        .lines()
+        .filter(|l| !l.starts_with("KEY"))
+        .map(|l| format!("{l}\n"))
+        .collect();
     std::fs::write(project.join("chipsmith.toml"), manifest).unwrap();
     let dir = s.join("project");
     if dir.exists() {
@@ -321,7 +359,11 @@ fn zybo_picorv32_running() {
         .env("CHIPSMITH_CACHE", "0")
         .output()
         .unwrap();
-    assert!(out.status.success(), "build failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "build failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     eprintln!("{}", String::from_utf8_lossy(&out.stderr));
     let bit = PathBuf::from(String::from_utf8(out.stdout).unwrap().trim());
     prjxray_agrees(&bit, &s);
@@ -337,7 +379,9 @@ const BALLS: &str = "A20 B19 B20 C20 D18 D19 D20 E17 E18 E19 F16 F17 F19 F20 G14
 /// ball of its own (the clock on L16, the Zybo's clock pin).
 fn design_project(file: &str, top: &str, dir: &Path) {
     setup();
-    let src = Path::new(ROOT).join("crates/chipsmith-xc7/tests/designs").join(file);
+    let src = Path::new(ROOT)
+        .join("crates/chipsmith-xc7/tests/designs")
+        .join(file);
     let file = Path::new(file).file_name().unwrap();
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::copy(&src, dir.join("src").join(file)).unwrap();
@@ -384,7 +428,11 @@ fn design_built(file: &str, top: &str) {
         .env("CHIPSMITH_CACHE", "0")
         .output()
         .unwrap();
-    assert!(out.status.success(), "{top}: build failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{top}: build failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let bit = PathBuf::from(String::from_utf8(out.stdout).unwrap().trim());
     prjxray_agrees(&bit, &s);
     check(top, &example_at(&dir), &bit, &s, 3000);
@@ -422,8 +470,18 @@ fn distributed_ram() {
 fn block_ram() {
     let mut failures = Vec::new();
     for top in [
-        "bytes", "deep", "dualclock", "mixed", "outreg", "rom", "sdp", "sp_no_change", "sp_read_first",
-        "sp_write_first", "srst", "tdp",
+        "bytes",
+        "deep",
+        "dualclock",
+        "mixed",
+        "outreg",
+        "rom",
+        "sdp",
+        "sp_no_change",
+        "sp_read_first",
+        "sp_write_first",
+        "srst",
+        "tdp",
     ] {
         if std::env::var("CHIPSMITH_BRAM_SHAPE").is_ok_and(|s| s != top) {
             continue;
@@ -458,7 +516,10 @@ fn dsp() {
 /// given bitstream of that example (nextpnr's, to check the decoder).
 #[test]
 fn decoder_reads_a_given_bitstream() {
-    let (Ok(bit), Ok(name)) = (std::env::var("CHIPSMITH_XC7_BIT"), std::env::var("CHIPSMITH_XC7_EXAMPLE")) else {
+    let (Ok(bit), Ok(name)) = (
+        std::env::var("CHIPSMITH_XC7_BIT"),
+        std::env::var("CHIPSMITH_XC7_EXAMPLE"),
+    ) else {
         eprintln!("CHIPSMITH_XC7_BIT and CHIPSMITH_XC7_EXAMPLE unset: nothing to decode");
         return;
     };
@@ -468,6 +529,9 @@ fn decoder_reads_a_given_bitstream() {
     } else {
         example(&name)
     };
-    let cycles = std::env::var("CHIPSMITH_XC7_CYCLES").ok().and_then(|c| c.parse().ok()).unwrap_or(3000);
+    let cycles = std::env::var("CHIPSMITH_XC7_CYCLES")
+        .ok()
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(3000);
     check(&name, &ex, Path::new(&bit), &s, cycles);
 }

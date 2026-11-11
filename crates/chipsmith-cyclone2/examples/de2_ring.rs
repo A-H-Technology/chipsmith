@@ -42,7 +42,11 @@ fn main() -> anyhow::Result<()> {
         // reads in a row can't.
         let a = read_dr(&mut cable, words)?;
         let b = read_dr(&mut cable, words)?;
-        anyhow::ensure!(a[words - 1] == TAG, "tag {:08x}, not \"RING\"", a[words - 1]);
+        anyhow::ensure!(
+            a[words - 1] == TAG,
+            "tag {:08x}, not \"RING\"",
+            a[words - 1]
+        );
         if a != b {
             continue;
         }

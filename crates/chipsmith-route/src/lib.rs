@@ -447,7 +447,11 @@ impl<'a> Router<'a> {
     /// legal: a net breaking it is barred from the classes it broke it with
     /// and rerouted, and negotiation goes on (A*, one net at a time).
     /// Nothing changes for a routing that keeps to it.
-    pub fn exclusive(&mut self, classes: Vec<Option<Vec<i8>>>, capacity: std::collections::HashMap<u32, u8>) {
+    pub fn exclusive(
+        &mut self,
+        classes: Vec<Option<Vec<i8>>>,
+        capacity: std::collections::HashMap<u32, u8>,
+    ) {
         self.exclusive = classes;
         self.exclusive_capacity = capacity;
     }
@@ -455,7 +459,10 @@ impl<'a> Router<'a> {
     /// An edge's exclusive group: its tile and class (`group >> 1` is the
     /// bank's).
     fn group_of(&self, e: &Edge) -> Option<u64> {
-        let classes = self.exclusive.get(self.db.tile_type_index(e.tile) as usize)?.as_ref()?;
+        let classes = self
+            .exclusive
+            .get(self.db.tile_type_index(e.tile) as usize)?
+            .as_ref()?;
         let c = classes[e.pip as usize];
         (c >= 0).then(|| e.tile as u64 * 128 + c as u64)
     }
@@ -491,7 +498,10 @@ impl<'a> Router<'a> {
     /// order. A bank's first use (by net, then class) stays and the others
     /// leave it; then, past a tile's capacity, a net with more than one use
     /// keeps its first.
-    fn exclusive_breaks(&self, users: &std::collections::BTreeMap<u64, Vec<usize>>) -> Vec<(usize, u64)> {
+    fn exclusive_breaks(
+        &self,
+        users: &std::collections::BTreeMap<u64, Vec<usize>>,
+    ) -> Vec<(usize, u64)> {
         let mut out = Vec::new();
         // Per tile (`group >> 7`), its uses as (net, group), in order.
         let mut tile: Vec<(usize, u64)> = Vec::new();
@@ -511,7 +521,10 @@ impl<'a> Router<'a> {
                     kept.push((n, g));
                 }
             }
-            let cap = self.exclusive_capacity.get(&((g0 >> 7) as u32)).map_or(usize::MAX, |&c| c as usize);
+            let cap = self
+                .exclusive_capacity
+                .get(&((g0 >> 7) as u32))
+                .map_or(usize::MAX, |&c| c as usize);
             let mut over = kept.len().saturating_sub(cap);
             let mut seen: Vec<usize> = Vec::new();
             for &(n, g) in &kept {
@@ -583,7 +596,10 @@ impl<'a> Router<'a> {
             self.place_tree(&trees[j]);
         }
         if trace && !redo.is_empty() {
-            eprintln!("route: {} nets broke an exclusive group, rerouted without it", redo.len());
+            eprintln!(
+                "route: {} nets broke an exclusive group, rerouted without it",
+                redo.len()
+            );
         }
         Ok(!redo.is_empty())
     }
@@ -1259,7 +1275,9 @@ impl<'a> Router<'a> {
             if let (true, Some(g)) = (trace, &searcher) {
                 eprintln!("route: GPU batches so far {:.2} s, {} launches ({:.2} s uploading, {:.2} s in kernels, {:.2} s reading trees), {} slots given up", g.busy_s, g.batches, g.phase_s[0], g.phase_s[1], g.phase_s[2], g.gave_up);
             }
-            if overused.is_empty() && !self.bar_conflicts(&mut scratch, nets, &mut trees, &crit, trace)? {
+            if overused.is_empty()
+                && !self.bar_conflicts(&mut scratch, nets, &mut trees, &crit, trace)?
+            {
                 let analysis = if self.repair {
                     self.repair_critical(&mut scratch, nets, &mut trees, &crit, analysis, trace)?
                 } else {
@@ -1329,9 +1347,16 @@ impl<'a> Router<'a> {
             let mut improved = false;
             for (_, i, critical) in todo.into_iter().take(REPAIR_NETS) {
                 tried += 1;
-                if let Some(a) =
-                    self.repair_net(s, nets, trees, crit, i, &critical, analysis.critical, &users)?
-                {
+                if let Some(a) = self.repair_net(
+                    s,
+                    nets,
+                    trees,
+                    crit,
+                    i,
+                    &critical,
+                    analysis.critical,
+                    &users,
+                )? {
                     analysis = a;
                     improved = true;
                     kept += 1;
@@ -1888,7 +1913,9 @@ mod tests {
         let u = users(&[(0, &[1]), (1, &[1])]);
         assert_eq!(router.exclusive_breaks(&u), vec![(1, 1)]);
         // One net on two banks: fine in tile 0, past tile 1's capacity.
-        assert!(router.exclusive_breaks(&users(&[(0, &[1]), (2, &[1])])).is_empty());
+        assert!(router
+            .exclusive_breaks(&users(&[(0, &[1]), (2, &[1])]))
+            .is_empty());
         let u = users(&[(128, &[1]), (130, &[1])]);
         assert_eq!(router.exclusive_breaks(&u), vec![(1, 130)]);
     }

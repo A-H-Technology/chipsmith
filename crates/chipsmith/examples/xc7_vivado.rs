@@ -20,7 +20,10 @@ fn main() -> Result<()> {
     let Target::Xc7z010clg400_1 { pins, .. } = &manifest.target else {
         bail!("{project} isn't a Zybo project");
     };
-    let pins = pins.iter().map(|a| (a.port.to_string(), a.pin.to_string())).collect();
+    let pins = pins
+        .iter()
+        .map(|a| (a.port.to_string(), a.pin.to_string()))
+        .collect();
     let db = chipsmith_xc7::xray::load(chipsmith_xc7::part::XC7Z010CLG400_1)?;
     let family = PathBuf::from(std::env::var(chipsmith_xc7::xray::PRJXRAY_DB_VAR)?).join("zynq7");
     let fasm = std::fs::read_to_string(fasm).with_context(|| format!("reading {fasm}"))?;

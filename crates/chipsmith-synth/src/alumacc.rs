@@ -125,7 +125,12 @@ fn arrivals(m: &Module) -> HashMap<Net, u32> {
         _ => 1,
     };
     let mut driver: HashMap<Net, usize> = HashMap::new();
-    for (i, c) in m.cells.iter().enumerate().filter(|(_, c)| combinational(&c.kind)) {
+    for (i, c) in m
+        .cells
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| combinational(&c.kind))
+    {
         c.kind.for_each_port(|p| {
             if p.dir == Some(chipsmith_netlist::Dir::Out) {
                 for n in p.bits.iter().filter_map(|b| b.net()) {
@@ -138,7 +143,12 @@ fn arrivals(m: &Module) -> HashMap<Net, u32> {
         let mut v = Vec::new();
         m.cells[i].kind.for_each_port(|p| {
             if p.dir != Some(chipsmith_netlist::Dir::Out) {
-                v.extend(p.bits.iter().filter_map(|b| b.net()).filter_map(|n| driver.get(&n).copied()));
+                v.extend(
+                    p.bits
+                        .iter()
+                        .filter_map(|b| b.net())
+                        .filter_map(|n| driver.get(&n).copied()),
+                );
             }
         });
         v
@@ -163,7 +173,11 @@ fn arrivals(m: &Module) -> HashMap<Net, u32> {
                 stack.extend(ins.iter().filter(|&&j| level[j].is_none() && !open[j]));
                 continue;
             }
-            let ready = ins.iter().map(|&j| level[j].unwrap_or(0)).max().unwrap_or(0);
+            let ready = ins
+                .iter()
+                .map(|&j| level[j].unwrap_or(0))
+                .max()
+                .unwrap_or(0);
             level[i] = Some(ready + cost(&m.cells[i].kind));
             stack.pop();
         }
@@ -289,9 +303,13 @@ fn balance_sums(m: &mut Module, order: SumOrder) {
             // Earliest first; a sum joins after the terms as ready as it.
             let mut pending: Vec<(u32, Term)> = level.into_iter().map(|t| (ready(&t), t)).collect();
             while pending.len() > 1 {
-                let first = (0..pending.len()).min_by_key(|&i| (pending[i].0, i)).expect("terms");
+                let first = (0..pending.len())
+                    .min_by_key(|&i| (pending[i].0, i))
+                    .expect("terms");
                 let (ra, a) = pending.remove(first);
-                let second = (0..pending.len()).min_by_key(|&i| (pending[i].0, i)).expect("terms");
+                let second = (0..pending.len())
+                    .min_by_key(|&i| (pending[i].0, i))
+                    .expect("terms");
                 let (rb, b) = pending.remove(second);
                 let out = if pending.is_empty() && !(a.negative && b.negative) {
                     y.clone()
@@ -571,7 +589,13 @@ mod tests {
     fn a_late_term_goes_into_the_last_adder() {
         let build = |order: SumOrder| {
             let mut m = Module::new("top");
-            let (h, w, sum0, maj, d) = (m.new_sig(8), m.new_sig(8), m.new_sig(8), m.new_sig(8), m.new_sig(8));
+            let (h, w, sum0, maj, d) = (
+                m.new_sig(8),
+                m.new_sig(8),
+                m.new_sig(8),
+                m.new_sig(8),
+                m.new_sig(8),
+            );
             let t1 = binary(&mut m, BinaryOp::Add, &h, &w);
             let e = binary(&mut m, BinaryOp::Add, &d, &t1);
             let t2 = binary(&mut m, BinaryOp::Add, &sum0, &maj);

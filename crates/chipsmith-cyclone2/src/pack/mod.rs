@@ -994,7 +994,9 @@ fn pack_lut1(nl: &mut Netlist, stats: &mut Stats) {
                         );
                     }
                 }
-                (Kind::Ff(_), _) if matches!(p, Port::Ena | Port::Sclr | Port::Aclr | Port::Sload) => {
+                (Kind::Ff(_), _)
+                    if matches!(p, Port::Ena | Port::Sclr | Port::Aclr | Port::Sload) =>
+                {
                     nl.reconnect(u, p, input);
                     if let Kind::Ff(cfg) = &mut nl.cell_mut(u).kind {
                         match p {

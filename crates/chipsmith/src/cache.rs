@@ -194,7 +194,10 @@ mod tests {
         std::fs::write(&input, "a").unwrap();
         assert!(copy(&input, &output, 1));
         assert!(!copy(&input, &output, 1), "nothing changed");
-        assert_eq!(Stamp::new(1, &[&output]).check(), Some(vec!["copied".to_string()]));
+        assert_eq!(
+            Stamp::new(1, &[&output]).check(),
+            Some(vec!["copied".to_string()])
+        );
         // Same contents, written again: still up to date.
         std::fs::write(&input, "a").unwrap();
         assert!(!copy(&input, &output, 1));

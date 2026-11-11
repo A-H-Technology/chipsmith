@@ -47,7 +47,11 @@ fn build(example: &str, run: &str, threads: usize, env: &[(&str, &str)]) -> Vec<
     copy_dir(&src, &dir);
     // Beside the examples its sources point into (`../picorv32/src/*.v`).
     let manifest = std::fs::read_to_string(src.join("chipsmith.toml")).unwrap();
-    for sibling in manifest.split("\"../").skip(1).filter_map(|s| s.split('/').next()) {
+    for sibling in manifest
+        .split("\"../")
+        .skip(1)
+        .filter_map(|s| s.split('/').next())
+    {
         let to = dir.parent().unwrap().join(sibling);
         if !to.exists() {
             copy_dir(&Path::new(ROOT).join("examples").join(sibling), &to);
@@ -80,8 +84,7 @@ fn build(example: &str, run: &str, threads: usize, env: &[(&str, &str)]) -> Vec<
     } else {
         build_dir.join(format!("{name}.bit"))
     };
-    std::fs::read(&bitstream)
-        .unwrap_or_else(|e| panic!("{example} ({run}): no bitstream: {e}"))
+    std::fs::read(&bitstream).unwrap_or_else(|e| panic!("{example} ({run}): no bitstream: {e}"))
 }
 
 fn deterministic(example: &str) {

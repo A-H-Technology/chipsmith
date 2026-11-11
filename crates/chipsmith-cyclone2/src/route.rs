@@ -107,7 +107,10 @@ pub struct ClockPair {
 /// room for, two less those without one (a clock net and edge).
 fn enable_capacity(db: &ChipDb, json: &Value) -> Result<HashMap<u32, u8>> {
     let mut plain: HashMap<u32, HashSet<(u64, bool)>> = HashMap::new();
-    for (name, cell) in json["modules"]["top"]["cells"].as_object().context("no cells")? {
+    for (name, cell) in json["modules"]["top"]["cells"]
+        .as_object()
+        .context("no cells")?
+    {
         if cell["type"].as_str() != Some("LCELL_FF") {
             continue;
         }
@@ -142,7 +145,11 @@ fn enable_pairs(db: &ChipDb) -> Vec<Option<Vec<i8>>> {
                 .pips
                 .iter()
                 .map(|&(src, dst)| {
-                    let line = tt.wires.get(src).strip_prefix("CTRL").and_then(|k| k.parse::<u8>().ok());
+                    let line = tt
+                        .wires
+                        .get(src)
+                        .strip_prefix("CTRL")
+                        .and_then(|k| k.parse::<u8>().ok());
                     let ena = tt
                         .wires
                         .get(dst)
@@ -323,7 +330,9 @@ pub(crate) fn m4k_registered_outputs<'a>(cell: &Value, ports: &[&'a str]) -> Vec
     ports
         .iter()
         .copied()
-        .filter(|p| matches!(Pin::parse(p), Some(Pin::Do(k)) if registered.contains(&data_side(s, k))))
+        .filter(
+            |p| matches!(Pin::parse(p), Some(Pin::Do(k)) if registered.contains(&data_side(s, k))),
+        )
         .collect()
 }
 

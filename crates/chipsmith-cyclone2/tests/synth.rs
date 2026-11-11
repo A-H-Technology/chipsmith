@@ -871,8 +871,10 @@ fn sync_load() {
     let loads = gate.modules[0]
         .cells
         .iter()
-        .filter(|c| matches!(&c.kind, CellKind::Other(g) if g.ty == "LCELL_FF"
-            && g.port("SLOAD").is_some_and(|p| p.sig[0].net().is_some())))
+        .filter(|c| {
+            matches!(&c.kind, CellKind::Other(g) if g.ty == "LCELL_FF"
+            && g.port("SLOAD").is_some_and(|p| p.sig[0].net().is_some()))
+        })
         .count();
     assert_eq!(loads, 30, "registers on the sync load");
     let packed = pack(&s.dir, "sync_load", &s.netlist);

@@ -3,7 +3,9 @@
 
 use std::collections::BTreeMap;
 
-use chipsmith_netlist::{CellKind, Const, Ctrl, Dir, Generic, GenericPort, ParamValue, Polarity, SigBit, State};
+use chipsmith_netlist::{
+    CellKind, Const, Ctrl, Dir, Generic, GenericPort, ParamValue, Polarity, SigBit, State,
+};
 
 use crate::pin::{control_param, register_param, IoRegMode, PowerUp};
 
@@ -118,7 +120,10 @@ impl Reg {
             ]
             .into_iter()
             .chain(match self.sload {
-                Some((sload, sdata)) => vec![port("SLOAD", Dir::In, vec![sload]), port("SDATA", Dir::In, vec![sdata])],
+                Some((sload, sdata)) => vec![
+                    port("SLOAD", Dir::In, vec![sload]),
+                    port("SDATA", Dir::In, vec![sdata]),
+                ],
                 None => vec![port("SLOAD", Dir::In, vec![SigBit::ZERO])],
             })
             .collect(),

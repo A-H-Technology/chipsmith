@@ -131,8 +131,7 @@ pub fn lut_pin_extra(pin: usize) -> Ps {
 
 /// What a connection into a LUT's data input pays for its pin when the
 /// pin isn't known yet (placement): the mean over the four.
-pub const LUT_PIN_EXPECTED: Ps =
-    (LUT_PIN[0] + LUT_PIN[1] + LUT_PIN[2] - 3.0 * LUT_PIN[3]) / 4.0;
+pub const LUT_PIN_EXPECTED: Ps = (LUT_PIN[0] + LUT_PIN[1] + LUT_PIN[2] - 3.0 * LUT_PIN[3]) / 4.0;
 
 /// LUT input to output for the LE at index `le` of its LAB, less the
 /// physical input's [`lut_pin_extra`]. The carry out is slower where the
@@ -316,7 +315,11 @@ impl Graph {
 
     /// An M4K's read data pins that its output register drives
     /// (`add_cell` timed them all as unregistered).
-    pub fn add_m4k_output_registers<'a>(&mut self, cell: &str, pins: impl IntoIterator<Item = &'a str>) {
+    pub fn add_m4k_output_registers<'a>(
+        &mut self,
+        cell: &str,
+        pins: impl IntoIterator<Item = &'a str>,
+    ) {
         for p in pins {
             if let Some(&n) = self.index.get(&(cell.to_string(), p.to_string())) {
                 self.launch[n as usize] = Some(M4K_OUTREG_TCO);
@@ -768,10 +771,7 @@ mod tests {
         };
         let t = g.analyse(&[arc(aq, xa), arc(xo, xc), arc(xo, bd)]);
         // The LUT arc is input D's; the routing carries the rest of A's.
-        assert_eq!(
-            t.critical,
-            TCO + 100.0 + LUT_PIN[3] + 100.0 + TSU_DATAIN
-        );
+        assert_eq!(t.critical, TCO + 100.0 + LUT_PIN[3] + 100.0 + TSU_DATAIN);
     }
 
     /// reg a -> x -> y -> x (a loop of two cells) -> reg b: untimed unless
@@ -793,7 +793,11 @@ mod tests {
         g.add_arc(xi, xo, 10.0);
         g.add_arc(xl, xo, 10.0);
         g.add_arc(yi, yo, 10.0);
-        let arc = |from, to| Arc { from, to, delay: 100.0 };
+        let arc = |from, to| Arc {
+            from,
+            to,
+            delay: 100.0,
+        };
         let nets = [arc(aq, xi), arc(xo, yi), arc(yo, xl), arc(xo, bd)];
         assert_eq!(g.analyse(&nets).critical, 0.0);
         g.cut_loops();
@@ -850,7 +854,10 @@ mod tests {
     #[test]
     fn a_lut_input_costs_its_physical_pin() {
         for (pin, arc) in LUT_PIN.into_iter().enumerate() {
-            assert_eq!(lut_arc("DATAA", "COMBOUT", 0).unwrap() + lut_pin_extra(pin), arc);
+            assert_eq!(
+                lut_arc("DATAA", "COMBOUT", 0).unwrap() + lut_pin_extra(pin),
+                arc
+            );
         }
         // Carry LEs keep their pins: A and B's carry arcs with the pin,
         // and B's at the LAB's half-way buffer.

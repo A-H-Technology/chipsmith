@@ -33,7 +33,12 @@ pub fn share_sums(m: &mut Module) -> usize {
     for (i, c) in m.cells.iter().enumerate() {
         let sum = matches!(&c.kind, CellKind::Binary(b) if b.op == BinaryOp::Add);
         c.kind.for_each_port(|p| {
-            for (k, n) in p.bits.iter().enumerate().filter_map(|(k, b)| Some((k, b.net()?))) {
+            for (k, n) in p
+                .bits
+                .iter()
+                .enumerate()
+                .filter_map(|(k, b)| Some((k, b.net()?)))
+            {
                 if p.dir == Some(Dir::Out) {
                     if sum {
                         sum_bit.insert(n, (i, k));
@@ -185,7 +190,9 @@ mod tests {
         let mut m = Module::new("top");
         let pc = m.new_sig(32);
         let imm = m.new_sig(32);
-        let four: Vec<SigBit> = (0..32).map(|i| SigBit::Const(State::from(i == 2))).collect();
+        let four: Vec<SigBit> = (0..32)
+            .map(|i| SigBit::Const(State::from(i == 2)))
+            .collect();
         let s = m.new_sig(1)[0];
         let inc = add(&mut m, &pc, &four);
         let jump = add(&mut m, &pc, &imm);

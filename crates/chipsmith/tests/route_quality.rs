@@ -48,8 +48,15 @@ fn build(example: &str) -> String {
     copy_dir(&examples.join(example), &dir);
     // The examples its manifest takes sources from ("../sha256/src/*.v").
     let manifest = std::fs::read_to_string(dir.join("chipsmith.toml")).unwrap();
-    for sibling in manifest.split("\"../").skip(1).filter_map(|s| s.split('/').next()) {
-        copy_dir(&examples.join(sibling), &dir.parent().unwrap().join(sibling));
+    for sibling in manifest
+        .split("\"../")
+        .skip(1)
+        .filter_map(|s| s.split('/').next())
+    {
+        copy_dir(
+            &examples.join(sibling),
+            &dir.parent().unwrap().join(sibling),
+        );
     }
     let out = Command::new(env!("CARGO_BIN_EXE_chipsmith"))
         .arg("-C")
@@ -58,7 +65,8 @@ fn build(example: &str) -> String {
         .env("CHIPSMITH_CACHE", "0")
         .output()
         .unwrap();
-    let report = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    let report =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{example}: build failed:\n{report}");
     report
 }
@@ -87,44 +95,77 @@ fn les(example: &str, report: &str) -> f64 {
 
 fn at_most(example: &str, what: &str, value: f64, (bound, before): (f64, f64)) {
     eprintln!("{example}: {what} {value:.2} (bound {bound}, before {before})");
-    assert!(value <= bound, "{example}: {what} {value:.2}, over {bound} (before: {before})");
+    assert!(
+        value <= bound,
+        "{example}: {what} {value:.2}, over {bound} (before: {before})"
+    );
 }
 
 #[test]
 fn femtorv32() {
     let report = build("femtorv32");
-    at_most("femtorv32", "routed critical path, ns", routed_critical("femtorv32", &report), FEMTORV32);
+    at_most(
+        "femtorv32",
+        "routed critical path, ns",
+        routed_critical("femtorv32", &report),
+        FEMTORV32,
+    );
 }
 
 #[test]
 fn mult_selftest() {
     let report = build("mult-selftest");
-    at_most("mult-selftest", "routed critical path, ns", routed_critical("mult-selftest", &report), MULT_SELFTEST);
+    at_most(
+        "mult-selftest",
+        "routed critical path, ns",
+        routed_critical("mult-selftest", &report),
+        MULT_SELFTEST,
+    );
 }
 
 #[test]
 fn sha256() {
     let report = build("sha256");
-    at_most("sha256", "routed critical path, ns", routed_critical("sha256", &report), SHA256);
+    at_most(
+        "sha256",
+        "routed critical path, ns",
+        routed_critical("sha256", &report),
+        SHA256,
+    );
     at_most("sha256", "LEs", les("sha256", &report), SHA256_LES);
 }
 
 /// A Zybo build's critical path for `clock`, ns, from "clock <name>: <ns>
 /// ns, Fmax ...".
 fn clock_ns(example: &str, report: &str, clock: &str) -> f64 {
-    number(example, report, &format!("clock {clock}:"), &format!("clock {clock}: "))
+    number(
+        example,
+        report,
+        &format!("clock {clock}:"),
+        &format!("clock {clock}: "),
+    )
 }
 
 #[test]
 fn zybo_sha256() {
     let report = build("zybo-sha256");
-    at_most("zybo-sha256", "critical path, ns", clock_ns("zybo-sha256", &report, "CLOCK_50"), ZYBO_SHA256);
+    at_most(
+        "zybo-sha256",
+        "critical path, ns",
+        clock_ns("zybo-sha256", &report, "CLOCK_50"),
+        ZYBO_SHA256,
+    );
 }
 
 #[test]
 fn zybo_jtag_counter() {
     let report = build("zybo-jtag-counter");
-    at_most("zybo-jtag-counter", "critical path, ns", clock_ns("zybo-jtag-counter", &report, "clk"), ZYBO_JTAG_COUNTER);
+    at_most(
+        "zybo-jtag-counter",
+        "critical path, ns",
+        clock_ns("zybo-jtag-counter", &report, "clk"),
+        ZYBO_JTAG_COUNTER,
+    );
 }
 
 #[test]
