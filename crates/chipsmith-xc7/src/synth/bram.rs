@@ -801,7 +801,7 @@ fn per_read_port(mem: &Mem) -> Option<Vec<Mem>> {
 /// into one RAMB18E1 (x18 per port) rather than a RAMB36E1. The halves
 /// never touch one word, so they never collide.
 fn split(mem: &Mem) -> Option<Mem> {
-    if mem.width % 2 != 0 || mem.wr.len() > 1 || mem.rd.len() != 1 {
+    if !mem.width.is_multiple_of(2) || mem.wr.len() > 1 || mem.rd.len() != 1 {
         return None;
     }
     let h = mem.width / 2;

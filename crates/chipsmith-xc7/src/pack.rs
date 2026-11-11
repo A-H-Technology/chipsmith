@@ -398,12 +398,11 @@ pub(crate) fn pack(
                     .with_context(|| format!("block RAM {name}"))?;
                 let pins = bram_pins(&r)
                     .into_iter()
-                    .map(|(pin, b, out)| match (out, b) {
+                    .filter_map(|(pin, b, out)| match (out, b) {
                         (true, SigBit::Net(n)) => Some((pin, p.net(n))),
                         (true, _) => None,
                         (false, b) => Some((pin, p.sig(b))),
                     })
-                    .flatten()
                     .collect();
                 let c = &r.config;
                 let reg = if c.sdp {

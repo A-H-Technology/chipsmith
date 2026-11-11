@@ -437,6 +437,7 @@ mod tests {
     /// Negative shifts (q1, q2, r4, r7, r8, r11-r13, s7, s9, t17, t19,
     /// t20) delay the feedback counter; every shift picks the VCO that hits
     /// it best; t16-t20 fill the presets.
+    #[allow(clippy::type_complexity)]
     const QUARTUS_SHIFTS: &[([Out; 3], (u8, u32, u32, u8, u8), [Option<(u32, u8, u8)>; 3])] = &[
         // q1
         (

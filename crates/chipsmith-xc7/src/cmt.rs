@@ -129,7 +129,7 @@ impl Eighths {
     }
 
     pub fn is_whole(self) -> bool {
-        self.0 % 8 == 0
+        self.0.is_multiple_of(8)
     }
 
     pub fn value(self) -> f64 {
@@ -482,7 +482,7 @@ impl Config {
         );
         let divclk = num("DIVCLK_DIVIDE", 1.0)?;
         ensure!(
-            divclk.fract() == 0.0 && divclk >= 1.0 && divclk <= 255.0,
+            divclk.fract() == 0.0 && (1.0..=255.0).contains(&divclk),
             "{name} DIVCLK_DIVIDE {divclk}"
         );
         let mut outputs = Vec::new();
@@ -958,7 +958,7 @@ impl Request {
         let name = prim.request_cell();
         let get = |k: &str, default: i64| -> Result<i64> {
             Ok(num_param(params, k)
-                .with_context(|| format!("{name}"))?
+                .with_context(|| name.to_string())?
                 .unwrap_or(default))
         };
         let positive = |k: &str, default: i64| -> Result<u32> {
@@ -1159,7 +1159,7 @@ impl Request {
             }
             let divide = Eighths(o8);
             // Duty in half VCO periods of the output's o8 / 4.
-            let high_halves = if o8 == 8 || o8 % 8 != 0 {
+            let high_halves = if o8 == 8 || !o8.is_multiple_of(8) {
                 if o.duty_percent != 50 {
                     return None;
                 }
@@ -1172,12 +1172,12 @@ impl Request {
                 let halves2 = u32::from(o8 / 4) * o.duty_percent;
                 let h = ((halves2 + 50) / 100).clamp(2, u32::from(o8 / 4) - 1) as u16;
                 // |h / (o8/4) - duty/100| in parts per million.
-                let e = (i64::from(h) * 100 - i64::from(halves2) / 1).abs() as u64 * 1_000_000
+                let e = (i64::from(h) * 100 - i64::from(halves2)).unsigned_abs() * 1_000_000
                     / (u64::from(o8 / 4) * 100);
                 duty_err += e;
                 h
             };
-            if (steps != 0) && o8 % 8 != 0 {
+            if (steps != 0) && !o8.is_multiple_of(8) {
                 return None;
             }
             outputs.push(Some(Output::new(divide, steps as u16, high_halves).ok()?));

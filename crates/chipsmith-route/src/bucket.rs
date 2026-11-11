@@ -281,6 +281,7 @@ impl Router<'_> {
     }
 
     /// `route_net` with the integer search.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn route_net_bucketed(
         &self,
         fx: &Fixed,

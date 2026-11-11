@@ -1109,7 +1109,7 @@ impl<'a> State<'a> {
             return None;
         }
         if self.hard_full(h, b) {
-            (slot % 2 == 0).then(|| vec![slot, slot + 1])
+            slot.is_multiple_of(2).then(|| vec![slot, slot + 1])
         } else {
             Some(vec![slot])
         }
