@@ -221,9 +221,26 @@ Fmax in MHz):
 | femtorv32 | 107.8 / 103.3 / 100.5 | 103.0 / 105.2 / 100.9 | −0.9%, within the seeds' spread |
 
 On those seeds the estimate is within 1% of quartus_sta after, and was
-0.5 to 3.7% optimistic before. sha256's placements are slower in Quartus
-under the new model. That's a regression this branch doesn't recover, and
-`route_quality`'s sha256 bound moved from 15.0 to 15.5 ns for it.
+0.5 to 3.7% optimistic before.
+
+Three seeds understated sha256's spread. Seeds 4 to 6, the same way
+(2026-11-11):
+
+| Design | Before, seeds 4/5/6 | After, seeds 4/5/6 |
+|---|---|---|
+| sha256 | 68.6 / 70.8 / 67.5 | 67.2 / 68.6 / 68.9 |
+
+Over all six seeds sha256 averages 69.7 MHz before and 68.3 after: −2.0%,
+about two standard errors (the old model's seeds spread 67.5 to 70.8, the
+new one's 67.2 to 69.0). Before, the estimate ran 2.4 to 6.0% optimistic
+on seeds 4 to 6; after, 0.9% pessimistic to 0.9% optimistic. The
+regression is smaller than the first three seeds showed but likely real.
+This merge doesn't recover it, and `route_quality`'s sha256 bound moved
+from 15.0 to 15.5 ns for it. Where to look: the LUT class factor (1.946)
+steering placement, CIN to COMBOUT dropping from 410 to 343 ps (carry
+chains look cheaper, so the placer stops pulling them together), and
+which LUT input the router puts critical signals on now that inputs A to D
+differ by more.
 
 ## On the board
 
