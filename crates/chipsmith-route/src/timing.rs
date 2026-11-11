@@ -71,6 +71,12 @@ const LUT_PIN: [Ps; 4] = [517.0, 497.0, 343.0, 233.0];
 const CARRY_HEAD: [Ps; 2] = [579.0, 548.0];
 /// CIN to COMBOUT (a chain's sum out). Input C's arc, see CARRY_HEAD.
 const CIN_COMBOUT: Ps = 343.0;
+/// CIN to COMBOUT as the placer sees it: the DMF value the placer was tuned
+/// on, not silicon's. With 343 ps chains look cheaper and the placer stops
+/// pulling them together: sha256 over seeds 1-6 under quartus_sta, 68.3 MHz
+/// with 343, 69.7 with 410 here only (STA and routing keep 343, the
+/// estimate within -0.7..+1.8% of quartus_sta). docs/timing-silicon.md.
+const PLACER_CIN_COMBOUT: Ps = 410.0;
 /// CIN to COUT inside a LAB half. Silicon.
 const CIN_COUT: Ps = 72.0;
 /// What a carry costs on top where it crosses the LAB's half-way buffer
@@ -173,8 +179,11 @@ pub struct Arc {
 
 /// Cell ports as timing nodes, and the arcs through cells. Net arcs (the
 /// routing) are supplied to `analyse`, since they change as the router works.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct Graph {
+    /// CIN to COMBOUT as this graph's user times it: [`CIN_COMBOUT`] for
+    /// STA and routing, [`PLACER_CIN_COMBOUT`] for placement.
+    cin_combout: Ps,
     names: Vec<String>,
     index: HashMap<(String, String), u32>,
     cell_arcs: Vec<Arc>,
@@ -194,7 +203,34 @@ pub struct Graph {
     cut_loops: bool,
 }
 
+impl Default for Graph {
+    /// A graph for STA and routing: silicon's delays.
+    fn default() -> Self {
+        Graph {
+            cin_combout: CIN_COMBOUT,
+            names: Vec::new(),
+            index: HashMap::new(),
+            cell_arcs: Vec::new(),
+            launch: Vec::new(),
+            setup: Vec::new(),
+            clocks: HashMap::new(),
+            lut: Vec::new(),
+            luts: 0,
+            cut_loops: false,
+        }
+    }
+}
+
 impl Graph {
+    /// A graph for the placer: carry chains a little dearer than silicon
+    /// ([`PLACER_CIN_COMBOUT`]).
+    pub fn placement() -> Self {
+        Graph {
+            cin_combout: PLACER_CIN_COMBOUT,
+            ..Graph::default()
+        }
+    }
+
     /// The timing node of a cell port, created on first use.
     pub fn node(&mut self, cell: &str, port: &str) -> u32 {
         let key = (cell.to_string(), port.to_string());
@@ -223,7 +259,10 @@ impl Graph {
                 }
                 for &i in ports {
                     for &o in ports {
-                        if let Some(delay) = lut_arc(i, o, le) {
+                        if let Some(mut delay) = lut_arc(i, o, le) {
+                            if (i, o) == ("CIN", "COMBOUT") {
+                                delay = self.cin_combout;
+                            }
                             let (from, to) = (self.node(cell, i), self.node(cell, o));
                             self.cell_arcs.push(Arc { from, to, delay });
                         }

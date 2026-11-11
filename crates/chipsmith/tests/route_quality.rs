@@ -146,7 +146,8 @@ const MULT_SELFTEST: (f64, f64) = (13.6, 14.70);
 /// docs/timing-silicon.md): 15.09, the estimate now within 1% of
 /// quartus_sta's 15.28 where it used to read 14.06 against 14.29; over
 /// placement seeds 1-3 quartus_sta's Fmax is 68.5 MHz mean, 70.4 before.
-const SHA256: (f64, f64) = (15.5, 19.27);
+/// Back to 15.0 with the placer's CIN to COMBOUT at 410 ps: 14.41.
+const SHA256: (f64, f64) = (15.0, 19.27);
 /// (bound, before), LEs: `qor3`'s picorv32 875 (971 without shared sums,
 /// 916 without the synchronous load), sha256 3,422 (3,672 without the
 /// load, 3,538 without its constant legs).

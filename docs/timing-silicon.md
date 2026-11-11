@@ -235,12 +235,33 @@ about two standard errors (the old model's seeds spread 67.5 to 70.8, the
 new one's 67.2 to 69.0). Before, the estimate ran 2.4 to 6.0% optimistic
 on seeds 4 to 6; after, 0.9% pessimistic to 0.9% optimistic. The
 regression is smaller than the first three seeds showed but likely real.
-This merge doesn't recover it, and `route_quality`'s sha256 bound moved
-from 15.0 to 15.5 ns for it. Where to look: the LUT class factor (1.946)
-steering placement, CIN to COMBOUT dropping from 410 to 343 ps (carry
-chains look cheaper, so the placer stops pulling them together), and
-which LUT input the router puts critical signals on now that inputs A to D
-differ by more.
+The merge didn't recover it, and `route_quality`'s sha256 bound moved
+from 15.0 to 15.5 ns for it.
+
+**Recovered (2026-11-11): the placer keeps 410 ps for CIN to COMBOUT.**
+With silicon's 343 ps, carry chains look cheaper and the placer stops
+pulling them together. Same six seeds, quartus_sta:
+
+| CIN to COMBOUT | seeds 1/2/3/4/5/6 | mean | estimate against quartus_sta |
+|---|---|---|---|
+| 343 ps everywhere (main) | 69.0 / 68.0 / 68.4 / 67.2 / 68.6 / 68.9 | 68.3 | −0.9..+0.9% |
+| 410 ps everywhere | 68.3 / 71.1 / 70.9 / 71.8 / 69.5 / 70.4 | 70.3 | −3.5..−0.3% |
+| 410 ps in the placer only | 67.4 / 70.0 / 70.0 / 70.9 / 70.9 / 69.2 | 69.7 | −0.7..+1.8% |
+
+The placer-only variant is what ships (`timing::Graph::placement`,
+`PLACER_CIN_COMBOUT`): +2.0% over 343 ps, about 2.3 standard errors, back to
+the mean before the merge, with STA and routing still on silicon's value.
+Its 0.6 MHz gap to 410 ps everywhere is within the seeds' spread, and that
+variant's estimate turns pessimistic. All 12 new bitstreams were byte-identical
+through Quartus. `route_quality`'s sha256 bound is back at 15.0 ns (the
+estimate on its seed 14.41). The other two leads (the LUT class factor in
+placement, the router's choice of LUT input) aren't measured.
+
+The other carry-chain designs, seeds 1/2/3, 343 ps against placer-only
+410 ps: femtorv32 103.0 / 105.2 / 100.9 against 106.0 / 100.3 / 105.9 MHz
+(+1.0% mean), mult-selftest 77.0 / 76.3 / 76.8 against 77.8 / 74.0 / 77.1
+(−0.5%), picorv32 145.0 / 146.9 / 130.6 against 142.6 / 144.4 / 155.1
+(+4.7% mean, median −0.4%). None moves beyond its seeds' spread.
 
 ## On the board
 

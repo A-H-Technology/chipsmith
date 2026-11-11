@@ -806,7 +806,7 @@ fn read_design(json: &Value) -> Result<Design> {
     // Timing: cell arcs, then every connection. A LUT's carry delay depends
     // on its LE index, which a chain fixes (head at LE 0); elsewhere it
     // doesn't matter.
-    let mut timing = timing::Graph::default();
+    let mut timing = timing::Graph::placement();
     for (i, c) in cells.iter().enumerate() {
         let ty = match c.kind {
             Kind::Lut => "LCELL_COMB",
