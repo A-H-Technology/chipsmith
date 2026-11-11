@@ -6,14 +6,6 @@ on:
     branches:
       - main
 
-env:
-  # The vendor-tool runner's crates (crates/vendor-*), which have always been
-  # held to clippy and rustfmt here.
-  VENDOR: >-
-    -p chipsmith-vendor -p chipsmith-core -p chipsmith-toolchain
-    -p chipsmith-sim -p chipsmith-quartus-common -p chipsmith-quartus-ii-13
-    -p chipsmith-quartus-prime -p chipsmith-quartus-pro
-
 jobs:
   test:
     name: Test
@@ -29,9 +21,7 @@ jobs:
       # databases, prjxray) that only the nix devshell provides.
       - run: cargo nextest run --workspace --lib --bins
 
-  # Clippy and rustfmt cover the vendor crates only, until the open crates
-  # are clean under both (32 clippy warnings and 349 rustfmt diffs at the
-  # merge); then drop $VENDOR for --workspace / --all.
+  # The whole workspace, open and vendor crates alike, since 2026-11-12.
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
@@ -40,7 +30,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - run: cargo clippy $VENDOR --all-targets -- -D warnings
+      # the USB-Blaster driver (crates/chipsmith-jtag) links libusb
+      - run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev pkg-config
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
   fmt:
     name: Format
@@ -50,4 +42,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --check $VENDOR
+      - run: cargo fmt --all --check

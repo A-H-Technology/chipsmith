@@ -1,0 +1,3 @@
+# Formatting-only commits, skipped by `git blame` (git config blame.ignoreRevsFile .git-blame-ignore-revs).
+# cargo fmt --all over the open crates
+e895546fcb5def11a1a67dc9dfef8fa0eb06070b
