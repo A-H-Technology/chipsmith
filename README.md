@@ -2141,9 +2141,13 @@ Next devices:
   settings in Rust instead of a5pnr's Python (`tests/pnr.rs`). Both tests
   are ignored by default: they need a Quartus Prime Pro install for the
   firmware, the routing graph dumped from it, and agilex5-re's specimens.
-  Open: `build` and `flash` for the DE25-Nano, a core of the
-  all-chipsmith flow on the board (the board-tested one came from yosys'
-  netlist), an HPS-first
+  On 2026-11-12 the first core with every step chipsmith's (hpsf_open:
+  Verilog through synthesis, place and route and assembly, with the HPS
+  shell lines from Quartus' HPS-first build) loaded on the board from
+  mercury's Linux: GIC bit 17 (irq0[0] = cnt[23]) at 3.1 Hz and 48 %
+  high, bit 20 (cnt[24] & cnt[23]) 26 % high, where the design gives
+  2.98 Hz at 50 % and 25 %. Open: `build` and `flash` for the DE25-Nano
+  (so far a scratch driver calls the crate), an HPS-first
   `.jic` in QSPI (the HPS boots from it), and the HPS-to-FPGA bridges
   after a load from Linux.
 
