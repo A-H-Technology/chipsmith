@@ -2130,8 +2130,9 @@ Next devices:
   Quartus Pro once per board. A wrong HPS IO hash or keyed hash wedges
   the SDM until phase 1 is reloaded over JTAG, so a loader must check the
   hash before it writes. agilex5-re's database is a flake (`db`, since
-  2026-11-12), and place and route and assembly are chipsmith's
-  (`crates/chipsmith-agilex5`, 2026-11-12). From a placed and routed
+  2026-11-12), and synthesis, place and route and assembly are
+  chipsmith's (`crates/chipsmith-agilex5`, 2026-11-12). Synthesis writes
+  a5synth's netlist for seven designs, blinky to sha_st (`tests/synth.rs`). From a placed and routed
   design file it writes the `.sof` and the core of each of the three
   open-flow designs that loaded on the board, byte for byte, and from
   Quartus' `.sof` Quartus' own core (`tests/image.rs`). Place and route
@@ -2140,7 +2141,9 @@ Next devices:
   settings in Rust instead of a5pnr's Python (`tests/pnr.rs`). Both tests
   are ignored by default: they need a Quartus Prime Pro install for the
   firmware, the routing graph dumped from it, and agilex5-re's specimens.
-  Open: synthesis in chipsmith, then `build` and `flash`, an HPS-first
+  Open: `build` and `flash` for the DE25-Nano, a core of the
+  all-chipsmith flow on the board (the board-tested one came from yosys'
+  netlist), an HPS-first
   `.jic` in QSPI (the HPS boots from it), and the HPS-to-FPGA bridges
   after a load from Linux.
 

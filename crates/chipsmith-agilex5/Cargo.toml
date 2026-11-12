@@ -1,6 +1,6 @@
 [package]
 name = "chipsmith-agilex5"
-description = "chipsmith's Agilex 5 (DE25-Nano) back end: the configuration database and the .rbf image writer"
+description = "chipsmith's Agilex 5 (DE25-Nano) back end: synthesis, place and route, the configuration database and the .rbf image writer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,6 +10,11 @@ repository.workspace = true
 anyhow.workspace = true
 # The device-independent electrostatic global placer (agilex5-re README (z14)).
 chipsmith-place.workspace = true
+# chipsmith's front end and device-independent synthesis with its K-input
+# LUT mapper (ADR-0013).
+chipsmith-netlist.workspace = true
+chipsmith-synth.workspace = true
+chipsmith-verilog.workspace = true
 lzma-rust2.workspace = true
 rustc-hash.workspace = true
 serde_json.workspace = true
