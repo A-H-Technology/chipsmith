@@ -14,15 +14,23 @@ pub enum Device {
     /// Zynq-7010 in the CLG400 package, speed grade -1: the Digilent Zybo's
     /// part. Database from openXC7's prjxray-db.
     Xc7z010clg400_1,
+    /// Agilex 5 E-series A5E 013B in the B23 package: the Terasic
+    /// DE25-Nano's part. Database from agilex5-re.
+    A5eb013bb23be4scs,
 }
 
 impl Device {
-    pub const ALL: &[Device] = &[Device::Ep2c35f672c6, Device::Xc7z010clg400_1];
+    pub const ALL: &[Device] = &[
+        Device::Ep2c35f672c6,
+        Device::Xc7z010clg400_1,
+        Device::A5eb013bb23be4scs,
+    ];
 
     pub fn part(self) -> &'static str {
         match self {
             Device::Ep2c35f672c6 => "EP2C35F672C6",
             Device::Xc7z010clg400_1 => "xc7z010clg400-1",
+            Device::A5eb013bb23be4scs => "A5EB013BB23BE4SCS",
         }
     }
 }

@@ -14,6 +14,12 @@
 //! Zybo's FT2232 cable (`chipsmith_jtag::ftdi`, `chipsmith_jtag::xc7`) are
 //! chipsmith's own.
 //!
+//! Agilex 5 (the DE25-Nano): no external program either, but data from
+//! the user's own Quartus Prime Pro install (its SDM firmware and the
+//! routing graph agilex5-re dumps from it) and the board's HPS-first shell
+//! from its one Quartus build. Synthesis, place and route and assembly are
+//! `chipsmith_agilex5`'s; the core loads from the board's own Linux.
+//!
 //! Each stage is one `Step` in a `Plan`, so replacing a tool with
 //! chipsmith's own code means replacing one step.
 //!
@@ -41,7 +47,7 @@ use chipsmith_jtag::{svf, xc7};
 
 use crate::device::{Clg400Pin, Device, Xc7Part, XC7Z010CLG400_1};
 use crate::manifest::{
-    Clock, De2Pin, Frequency, Manifest, PinAssignment, QuartusPin, Sources, Target,
+    A5Pin, Clock, De2Pin, Frequency, HpsFirst, Manifest, PinAssignment, QuartusPin, Sources, Target,
 };
 use chipsmith_cyclone2::pin::{IoRegisters, UnusedPins};
 use chipsmith_cyclone2::place::PinPlan;
@@ -71,6 +77,8 @@ impl Layout {
         let extension = match self.device {
             Device::Ep2c35f672c6 => "rbf",
             Device::Xc7z010clg400_1 => "bit",
+            // Phase 2 of an HPS-first boot, as quartus_pfg names it.
+            Device::A5eb013bb23be4scs => "core.rbf",
         };
         self.dir.join(format!("{}.{extension}", self.name))
     }
@@ -96,6 +104,15 @@ impl Layout {
     }
     fn fasm(&self) -> PathBuf {
         self.dir.join(format!("{}.fasm", self.name))
+    }
+    fn a5_pins(&self) -> PathBuf {
+        self.dir.join("pins.txt")
+    }
+    fn a5_design(&self) -> PathBuf {
+        self.dir.join("design.txt")
+    }
+    fn sof(&self) -> PathBuf {
+        self.dir.join(format!("{}.sof", self.name))
     }
 }
 
@@ -179,6 +196,41 @@ pub enum Step {
     /// bitstream) through the PS's DAP over the Digilent FT2232, verify it,
     /// and start it.
     ZynqQspi(PathBuf),
+    /// Read Verilog with the Agilex 5 cell library, elaborate `top` and
+    /// synthesize it to ALM-sized LUTs, carry chains, flops, MLAB RAM and
+    /// DSP products, in process (`chipsmith_agilex5::synth`); writes the
+    /// netlist as yosys JSON.
+    A5Synth {
+        verilog: Vec<PathBuf>,
+        top: String,
+        netlist: PathBuf,
+    },
+    /// Pack, place and route an Agilex 5 netlist and write its design file,
+    /// in process (`chipsmith_agilex5::pnr`); `pins` is the pin file it
+    /// reads (`<port> <ball> <volts>`, `<port> node <node>`).
+    A5Pnr {
+        netlist: PathBuf,
+        top: String,
+        pins: PathBuf,
+        design: PathBuf,
+    },
+    /// Assemble the design file and the board's HPS shell into the `.sof`
+    /// and the core.rbf for phase 1's HPS IO hash, in process
+    /// (`chipsmith_agilex5::flow::assemble`).
+    A5Assemble {
+        design: PathBuf,
+        hps: HpsFirst,
+        sof: PathBuf,
+        core: PathBuf,
+    },
+    /// Load an Agilex 5 core through `/dev/fpga-load` on `host`, piped over
+    /// ssh, once its HPS IO hash is checked to be `hps_io_hash`: any other
+    /// wedges the SDM.
+    A5LoadSsh {
+        core: PathBuf,
+        host: String,
+        hps_io_hash: [u8; 32],
+    },
     /// Build the DE2's serial flash loader into this project directory.
     BuildLoader(PathBuf),
     /// Configure the serial flash loader (an SVF) into the DE2's FPGA over
@@ -228,6 +280,10 @@ impl Step {
             Step::LoadBitSsh { .. } => "ssh: load through the board's fpga-manager",
             Step::ZynqQspi(_) => "QSPI: write and verify a boot image through the ARM's debug port",
             Step::ZynqBin { .. } => ".bit to .bin for Linux's fpga-manager",
+            Step::A5Synth { .. } => "synthesis",
+            Step::A5Pnr { .. } => "pack, place and route",
+            Step::A5Assemble { .. } => "bitstream",
+            Step::A5LoadSsh { .. } => "ssh: load the core through the board's fpga-manager",
             Step::BuildLoader(_) => "build the serial flash loader",
             Step::Epcs { op, .. } => match op {
                 EpcsOp::Program(_) => "EPCS: write and verify through the serial flash loader",
@@ -296,7 +352,88 @@ pub fn plan_build(manifest: &Manifest, layout: &Layout) -> Result<Plan> {
             Xc7Data::from_env(XC7Z010CLG400_1)?;
             plan_xc7(manifest, pins, clocks, layout)
         }
+        Target::A5eb013bb23be4scs { pins, hps } => {
+            agilex5_data()?;
+            plan_agilex5(manifest, pins, hps, layout)
+        }
     })
+}
+
+/// agilex5-re's database (the nix package and devshell set it), and what
+/// only the user's Quartus Prime Pro install can provide.
+pub fn agilex5_data() -> Result<chipsmith_agilex5::flow::Data> {
+    let var = |name: &str, what: &str| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .with_context(|| format!("{name} is not set: {what}"))
+    };
+    let data = chipsmith_agilex5::flow::Data {
+        db: var(
+            "CHIPSMITH_AGILEX5_DB",
+            "run chipsmith from its nix package or `nix develop`",
+        )?,
+        graph: var(
+            "CHIPSMITH_AGILEX5_GRAPH",
+            "the routing graph agilex5-re's tools/rgdump dumps from Quartus Prime Pro (specimens/rg/full)",
+        )?,
+        quartus: var(
+            "CHIPSMITH_QUARTUS_PRO",
+            "a Quartus Prime Pro 26.1.1 install, for the SDM firmware (docs/legal.md)",
+        )?,
+    };
+    for (what, path) in [
+        ("CHIPSMITH_AGILEX5_GRAPH", data.graph.join("usable.bin")),
+        (
+            "CHIPSMITH_QUARTUS_PRO",
+            data.quartus
+                .join("devices/programmer/firmware/agilex5e.zip"),
+        ),
+    ] {
+        ensure!(path.is_file(), "{what}: no {}", path.display());
+    }
+    Ok(data)
+}
+
+/// The pin file place and route reads.
+fn agilex5_pins(pins: &[PinAssignment<A5Pin>]) -> String {
+    pins.iter()
+        .map(|a| match &a.pin {
+            A5Pin::Ball { ball, vccio } => format!("{} {ball} {}\n", a.port, vccio.volts()),
+            A5Pin::Hps(h) => format!("{} node {}\n", a.port, h.node()),
+        })
+        .collect()
+}
+
+pub fn plan_agilex5(
+    manifest: &Manifest,
+    pins: &[PinAssignment<A5Pin>],
+    hps: &HpsFirst,
+    layout: &Layout,
+) -> Plan {
+    let mut steps: Vec<Step> = Vec::new();
+    let verilog = verilog_sources(manifest, layout, &mut steps);
+    steps.push(Step::A5Synth {
+        verilog,
+        top: manifest.top.clone(),
+        netlist: layout.netlist(),
+    });
+    steps.push(Step::A5Pnr {
+        netlist: layout.netlist(),
+        top: manifest.top.clone(),
+        pins: layout.a5_pins(),
+        design: layout.a5_design(),
+    });
+    steps.push(Step::A5Assemble {
+        design: layout.a5_design(),
+        hps: hps.clone(),
+        sof: layout.sof(),
+        core: layout.bitstream(),
+    });
+    Plan {
+        dir: Some(layout.dir.clone()),
+        files: vec![(layout.a5_pins(), agilex5_pins(pins))],
+        steps,
+    }
 }
 
 /// VHDL becomes Verilog through GHDL; Verilog is used as it is. Returns the
@@ -477,6 +614,13 @@ pub enum Flash {
         bit: PathBuf,
         host: String,
     },
+    /// An Agilex 5 core into the fabric from the HPS's own Linux, for the
+    /// phase 1 with this HPS IO hash.
+    Agilex5Ssh {
+        core: PathBuf,
+        host: String,
+        hps_io_hash: [u8; 32],
+    },
 }
 
 impl Flash {
@@ -503,6 +647,31 @@ impl Flash {
             ),
             (Persistence::Persistent, Loadable::Bit(bit)) => Flash::ZynqQspi(bit),
         })
+    }
+}
+
+impl Flash {
+    /// A `chipsmith flash` of a DE25-Nano project: only its core, only from
+    /// the board's Linux.
+    pub fn agilex5(
+        path: PathBuf,
+        persistence: Persistence,
+        via: Via,
+        hps: &HpsFirst,
+    ) -> Result<Self> {
+        match (persistence, via) {
+            (Persistence::Volatile, Via::Ssh(host)) => Ok(Flash::Agilex5Ssh {
+                core: path,
+                host,
+                hps_io_hash: hps.hps_io_hash,
+            }),
+            (Persistence::Persistent, _) => bail!(
+                "--persist: writing the DE25-Nano's QSPI isn't supported yet; load the core with --ssh HOST"
+            ),
+            (Persistence::Volatile, Via::Jtag) => bail!(
+                "the DE25-Nano's core loads from its HPS's Linux after phase 1: --ssh HOST"
+            ),
+        }
     }
 }
 
@@ -544,6 +713,21 @@ pub fn plan_flash(flash: &Flash, loader: &Loader, build_dir: &Path) -> Plan {
                 steps: vec![Step::LoadBitSsh {
                     bit: bit.clone(),
                     host: host.clone(),
+                }],
+            }
+        }
+        Flash::Agilex5Ssh {
+            core,
+            host,
+            hps_io_hash,
+        } => {
+            return Plan {
+                dir: None,
+                files: Vec::new(),
+                steps: vec![Step::A5LoadSsh {
+                    core: core.clone(),
+                    host: host.clone(),
+                    hps_io_hash: *hps_io_hash,
                 }],
             }
         }
@@ -652,6 +836,42 @@ impl Plan {
                 Step::LoadBitSsh { bit, host } => load_bit_ssh(bit, host)?,
                 Step::ZynqQspi(bit) => zynq_qspi(bit)?,
                 Step::ZynqBin { bit, bin } => zynq_bin(bit, bin)?,
+                Step::A5Synth {
+                    verilog,
+                    top,
+                    netlist,
+                } => stamp(step, &[netlist]).run(|| {
+                    let sources: Vec<&Path> = verilog.iter().map(PathBuf::as_path).collect();
+                    chipsmith_agilex5::synth::run(
+                        top,
+                        &sources,
+                        netlist,
+                        &chipsmith_agilex5::synth::Options::default(),
+                    )
+                })?,
+                Step::A5Pnr {
+                    netlist,
+                    top,
+                    pins,
+                    design,
+                } => stamp(step, &[design]).run(|| {
+                    a5_pnr(netlist, top, pins, design)?;
+                    Ok(vec![netlist.clone(), pins.clone()])
+                })?,
+                Step::A5Assemble {
+                    design,
+                    hps,
+                    sof,
+                    core,
+                } => stamp(step, &[core, sof]).run(|| {
+                    a5_assemble(design, hps, sof, core)?;
+                    Ok(vec![design.clone(), hps.shell.clone()])
+                })?,
+                Step::A5LoadSsh {
+                    core,
+                    host,
+                    hps_io_hash,
+                } => a5_load_ssh(core, host, hps_io_hash)?,
                 Step::BuildLoader(dir) => build_loader(dir)?,
                 Step::Epcs { loader, op } => persist::run_epcs(loader, op)?,
             }
@@ -1277,6 +1497,92 @@ fn load_bit_ssh(path: &Path, host: &str) -> Result<()> {
     Ok(())
 }
 
+fn a5_pnr(netlist: &Path, top: &str, pins: &Path, design: &Path) -> Result<()> {
+    let data = agilex5_data()?;
+    let s = |p: &Path| {
+        p.to_str()
+            .map(str::to_owned)
+            .with_context(|| format!("{} is not UTF-8", p.display()))
+    };
+    chipsmith_agilex5::pnr::run(
+        &s(&data.chip())?,
+        &s(&data.graph)?,
+        &s(&data.delays())?,
+        &s(netlist)?,
+        top,
+        &s(pins)?,
+        &s(design)?,
+        &chipsmith_agilex5::pnr::Options::default(),
+    )
+}
+
+/// Place and route's design file with the board's HPS shell after it.
+fn a5_assemble(design: &Path, hps: &HpsFirst, sof: &Path, core: &Path) -> Result<()> {
+    let read =
+        |p: &Path| std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()));
+    let text = read(design)? + &read(&hps.shell)?;
+    let rbf = chipsmith_agilex5::flow::assemble(&agilex5_data()?, &text, hps.hps_io_hash, sof)?;
+    std::fs::write(core, rbf).with_context(|| format!("writing {}", core.display()))
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|b| format!("{b:02X}")).collect()
+}
+
+/// The SDM wedges on a core for another phase 1 (agilex5-re README), so the
+/// hash is checked here, before anything reaches the board.
+fn a5_load_ssh(core: &Path, host: &str, hps_io_hash: &[u8; 32]) -> Result<()> {
+    let file = std::fs::read(core).with_context(|| format!("reading {}", core.display()))?;
+    ensure!(
+        chipsmith_agilex5::flow::is_rbf(&file),
+        "{}: not an Agilex 5 .rbf",
+        core.display()
+    );
+    let carried = chipsmith_agilex5::flow::hps_io_hash(&file)
+        .with_context(|| format!("{}: no IO section, so no HPS IO hash", core.display()))?;
+    ensure!(
+        &carried == hps_io_hash,
+        "{}: built for the phase 1 with HPS IO hash {}, but the manifest's is {}; the SDM would wedge",
+        core.display(),
+        hex(&carried),
+        hex(hps_io_hash)
+    );
+    let started = Instant::now();
+    // As load_bit_ssh: the load runs when /dev/fpga-load is closed.
+    let mut child = Command::new("ssh")
+        .arg(host)
+        .arg("cat > /dev/fpga-load && cat /sys/class/fpga_manager/fpga0/state")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("running ssh")?;
+    {
+        use std::io::Write;
+        let mut stdin = child.stdin.take().context("ssh's stdin")?;
+        stdin
+            .write_all(&file)
+            .with_context(|| format!("sending the core to {host}"))?;
+    }
+    let out = child.wait_with_output().context("waiting for ssh")?;
+    ensure!(
+        out.status.success(),
+        "{host}: loading through /dev/fpga-load failed ({})",
+        out.status
+    );
+    let state = String::from_utf8_lossy(&out.stdout);
+    let state = state.trim();
+    ensure!(
+        state == "operating",
+        "{host}: fpga-manager is {state:?} after the load, not \"operating\""
+    );
+    eprintln!(
+        "    loaded {} KiB, manager operating, in {:.1} s",
+        file.len() / 1024,
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
 /// Write the loader's sources into `dir` and build it.
 fn build_loader(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -1736,5 +2042,103 @@ mod tests {
     #[test]
     fn an_svf_cant_be_persisted() {
         assert!(Flash::new("/x.svf".into(), Persistence::Persistent, Via::Jtag).is_err());
+    }
+
+    const DE25: &str = r#"
+        [project]
+        name = "irq"
+        top = "irq"
+        sources = ["x.v"]
+
+        [target]
+        device = "A5EB013BB23BE4SCS"
+        hps_shell = "x.v"
+        hps_io_hash = "D921CDF7CADFEECA11572B24600BFD337FFD119E47601CA5075AA911EEC3D07A"
+
+        [pins]
+        CLOCK1_50 = { pin = "V16", vccio = "3.3 V" }
+        irq0 = "f2h_irq0[0]"
+        irq3 = "f2h_irq0[3]"
+    "#;
+
+    fn de25() -> (Manifest, Plan) {
+        let m = manifest_for(DE25, Sources::Verilog(vec!["/p/irq.v".into()]));
+        let Target::A5eb013bb23be4scs { pins, hps } = &m.target else {
+            unreachable!()
+        };
+        let plan = plan_agilex5(&m, pins, hps, &layout(&m));
+        (m, plan)
+    }
+
+    #[test]
+    fn the_de25_build_writes_place_and_routes_pin_file_and_a_core() {
+        let (_, plan) = de25();
+        assert_eq!(
+            labels(&plan),
+            ["synthesis", "pack, place and route", "bitstream"]
+        );
+        assert_eq!(
+            plan.files,
+            [(
+                PathBuf::from("/p/build/pins.txt"),
+                "CLOCK1_50 V16 3.3\nirq0 node RPII:X52Y51Z0I44\nirq3 node RPII:X52Y51Z0I24\n"
+                    .to_string()
+            )]
+        );
+        let Step::A5Assemble { core, .. } = &plan.steps[2] else {
+            panic!("{:?}", plan.steps[2]);
+        };
+        assert_eq!(core, Path::new("/p/build/irq.core.rbf"));
+    }
+
+    #[test]
+    fn the_de25s_core_loads_only_from_its_linux() {
+        let (m, _) = de25();
+        let Target::A5eb013bb23be4scs { hps, .. } = &m.target else {
+            unreachable!()
+        };
+        let core = PathBuf::from("/p/build/irq.core.rbf");
+        let ssh = Via::Ssh("mercury".into());
+        assert_eq!(
+            Flash::agilex5(core.clone(), Persistence::Volatile, ssh.clone(), hps).unwrap(),
+            Flash::Agilex5Ssh {
+                core: core.clone(),
+                host: "mercury".into(),
+                hps_io_hash: hps.hps_io_hash
+            }
+        );
+        assert!(Flash::agilex5(core.clone(), Persistence::Volatile, Via::Jtag, hps).is_err());
+        assert!(Flash::agilex5(core, Persistence::Persistent, ssh, hps).is_err());
+    }
+
+    /// A core's sections as far as the hash check reads them: the CMF
+    /// section's header at +0x400, then an IO section with its HPS IO hash.
+    fn core_with(hps_io_hash: [u8; 32]) -> Vec<u8> {
+        let mut f = vec![0u8; 0x2000];
+        f[0x400..0x404].copy_from_slice(&0x9756_6593u32.to_le_bytes());
+        f[0x408..0x40c].copy_from_slice(&0x1000u32.to_le_bytes());
+        f[0x1000..0x1004].copy_from_slice(&0x9756_6593u32.to_le_bytes());
+        f[0x1008..0x100c].copy_from_slice(&0x1000u32.to_le_bytes());
+        f[0x100c..0x1010].copy_from_slice(b"IO\0\0");
+        f[0x1374..0x1394].copy_from_slice(&hps_io_hash);
+        f
+    }
+
+    #[test]
+    fn a_core_for_another_phase_1_never_reaches_the_board() {
+        let dir = std::env::temp_dir().join(format!("chipsmith-a5load-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let core = dir.join("x.core.rbf");
+        std::fs::write(&core, core_with([1; 32])).unwrap();
+        assert_eq!(
+            chipsmith_agilex5::flow::hps_io_hash(&core_with([1; 32])),
+            Some([1; 32])
+        );
+        // No such host: the check has to fail before ssh is run.
+        let e = a5_load_ssh(&core, "no-such-host.invalid", &[2; 32]).unwrap_err();
+        assert!(e.to_string().contains("the SDM would wedge"), "{e}");
+        std::fs::write(&core, vec![0xff; 0x2000]).unwrap();
+        let e = a5_load_ssh(&core, "no-such-host.invalid", &[2; 32]).unwrap_err();
+        assert!(e.to_string().contains("not an Agilex 5 .rbf"), "{e}");
     }
 }

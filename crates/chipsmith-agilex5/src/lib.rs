@@ -9,6 +9,7 @@
 mod blank;
 pub mod db;
 mod ddb;
+pub mod flow;
 pub mod graph;
 mod pins;
 pub mod pnr;

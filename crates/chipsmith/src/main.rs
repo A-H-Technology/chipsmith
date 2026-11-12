@@ -22,7 +22,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// HDL to bitstream: build/<name>.rbf (Cyclone II) or .bit (7-series).
+    /// HDL to bitstream: build/<name>.rbf (Cyclone II), .bit (7-series) or
+    /// .core.rbf (Agilex 5).
     Build,
     /// Load a bitstream into the FPGA over JTAG (volatile; gone on power
     /// cycle), or with --persist write it into the board's configuration
@@ -36,9 +37,9 @@ enum Cmd {
         /// loads at power-up. The DE2's RUN/PROG switch stays in RUN.
         #[arg(long)]
         persist: bool,
-        /// Load a Zynq's PL from Linux on the board instead of over JTAG:
-        /// ssh to HOST and write the bitstream to nixos-fpga's
-        /// /dev/fpga-load.
+        /// Load from Linux on the board instead of over JTAG (a Zynq's PL,
+        /// the DE25-Nano's core): ssh to HOST and write the bitstream to
+        /// nixos-fpga's /dev/fpga-load.
         #[arg(long, value_name = "HOST")]
         ssh: Option<String>,
     },
@@ -161,7 +162,12 @@ fn main() -> Result<()> {
                 Some(host) => Via::Ssh(host),
                 None => Via::Jtag,
             };
-            let flash = Flash::new(path, persistence, via)?;
+            let flash = match &manifest.target {
+                chipsmith::manifest::Target::A5eb013bb23be4scs { hps, .. } => {
+                    Flash::agilex5(path, persistence, via, hps)?
+                }
+                _ => Flash::new(path, persistence, via)?,
+            };
             flow::plan_flash(&flash, &Loader::from_env(&layout.dir), &layout.dir).run()?;
         }
     }

@@ -62,6 +62,7 @@
         ];
         chipsmith = pkgs.callPackage ./nix/package.nix {
           cyclone2-db = open.db;
+          agilex5-db = agilex5-re.packages.${system}.db;
           inherit xc7;
         };
         # CUDA is unfree; this instance exists only so the rest of the

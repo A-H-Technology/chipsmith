@@ -13,7 +13,7 @@ mod ff;
 mod mult;
 mod ram;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use chipsmith_netlist::{attr, is_set, CellKind, Const, Design, Lut, Module, SigBit, State};
@@ -48,7 +48,9 @@ impl Default for Options {
 }
 
 /// Synthesize `top` from `sources` and write the netlist to `out`.
-pub fn run(top: &str, sources: &[&Path], out: &Path, opts: &Options) -> Result<()> {
+/// Returns every file the front end read (the sources and what they
+/// include).
+pub fn run(top: &str, sources: &[&Path], out: &Path, opts: &Options) -> Result<Vec<PathBuf>> {
     let t0 = std::time::Instant::now();
     let mut fe = chipsmith_verilog::Frontend::new();
     fe.read_library_source("a5pnr/yosys/cells.v", LIBRARY)?;
@@ -85,7 +87,7 @@ pub fn run(top: &str, sources: &[&Path], out: &Path, opts: &Options) -> Result<(
         s.dsps,
         t0.elapsed().as_secs_f64()
     );
-    Ok(())
+    Ok(fe.files_read())
 }
 
 struct Stats {

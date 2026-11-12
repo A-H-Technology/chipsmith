@@ -43,6 +43,12 @@ pub enum Target {
         pins: Vec<PinAssignment<Clg400Pin>>,
         clocks: Vec<Clock>,
     },
+    /// The DE25-Nano's Agilex 5, booted HPS-first: the build is phase 2,
+    /// the core, which the SDM takes only after `hps`'s phase 1.
+    A5eb013bb23be4scs {
+        pins: Vec<PinAssignment<A5Pin>>,
+        hps: HpsFirst,
+    },
 }
 
 impl Target {
@@ -50,8 +56,122 @@ impl Target {
         match self {
             Target::Ep2c35f672c6 { .. } => Device::Ep2c35f672c6,
             Target::Xc7z010clg400_1 { .. } => Device::Xc7z010clg400_1,
+            Target::A5eb013bb23be4scs { .. } => Device::A5eb013bb23be4scs,
         }
     }
+}
+
+/// An Agilex 5 pin: a package ball at its bank's I/O voltage, or an input
+/// of the HPS that the fabric drives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum A5Pin {
+    Ball { ball: String, vccio: A5Vccio },
+    Hps(HpsInput),
+}
+
+/// An Agilex 5 ball's bank voltage, as the board powers the bank.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum A5Vccio {
+    V3_3,
+    V1_8,
+    V1_1,
+}
+
+impl A5Vccio {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "3.3 V" => Some(A5Vccio::V3_3),
+            "1.8 V" => Some(A5Vccio::V1_8),
+            "1.1 V" => Some(A5Vccio::V1_1),
+            _ => None,
+        }
+    }
+
+    /// In volts, as place and route's pins take it.
+    pub fn volts(self) -> &'static str {
+        match self {
+            A5Vccio::V3_3 => "3.3",
+            A5Vccio::V1_8 => "1.8",
+            A5Vccio::V1_1 => "1.1",
+        }
+    }
+}
+
+/// The HPS inputs a design can drive: those whose entry into the HPS is
+/// known (agilex5-re README, "HPS-first": f2h_irq0[k] reaches
+/// SOC_HPS_WRAPPER_RE through these RPIIs, read back as GICD_ISPENDR1 bit
+/// 17 + k).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HpsInput {
+    F2hIrq0Bit0,
+    F2hIrq0Bit3,
+}
+
+impl HpsInput {
+    const ALL: [HpsInput; 2] = [HpsInput::F2hIrq0Bit0, HpsInput::F2hIrq0Bit3];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            HpsInput::F2hIrq0Bit0 => "f2h_irq0[0]",
+            HpsInput::F2hIrq0Bit3 => "f2h_irq0[3]",
+        }
+    }
+
+    /// The routing node the signal ends on.
+    pub fn node(self) -> &'static str {
+        match self {
+            HpsInput::F2hIrq0Bit0 => "RPII:X52Y51Z0I44",
+            HpsInput::F2hIrq0Bit3 => "RPII:X52Y51Z0I24",
+        }
+    }
+}
+
+/// Where an Agilex 5 pin entry points, before its settings are checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum A5Site {
+    Ball(String),
+    Hps(HpsInput),
+}
+
+impl fmt::Display for A5Site {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            A5Site::Ball(b) => f.write_str(b),
+            A5Site::Hps(h) => f.write_str(h.name()),
+        }
+    }
+}
+
+impl A5Site {
+    fn parse(s: &str) -> Result<Self, ManifestError> {
+        if let Some(h) = HpsInput::ALL.into_iter().find(|h| h.name() == s) {
+            return Ok(A5Site::Hps(h));
+        }
+        let letters = s.bytes().take_while(u8::is_ascii_uppercase).count();
+        let digits = &s[letters..];
+        if (1..=2).contains(&letters)
+            && (1..=2).contains(&digits.len())
+            && digits.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Ok(A5Site::Ball(s.to_string()));
+        }
+        Err(ManifestError::BadPin {
+            pin: s.to_string(),
+            device: Device::A5eb013bb23be4scs,
+            expected:
+                "pins are package balls like V16, or the HPS inputs f2h_irq0[0] and f2h_irq0[3]",
+        })
+    }
+}
+
+/// An HPS-first boot's phase 1, as the core must match it. Both come from
+/// the board's one Quartus Prime Pro HPS-first build: `shell` is its HPS
+/// and I/O configuration as design-file lines (agilex5-re
+/// `tools/hps_shell.sh`), the hash is its HPS IO hash (`quartus_pfg -i`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HpsFirst {
+    pub shell: PathBuf,
+    pub hps_io_hash: [u8; 32],
 }
 
 /// A clock entering at a pin, and the frequency it runs at.
@@ -210,6 +330,10 @@ pub enum ManifestError {
     BadUnusedPins(String),
     #[error("{0} has no I/O settings in the manifest yet; [pins] takes pin names only")]
     NoIoSettings(Device),
+    #[error("[target] {0}")]
+    BadTarget(String),
+    #[error("[clocks]: {0} builds don't take clock constraints yet; place and route times the design against its delay model alone")]
+    NoClocks(Device),
     #[error("pin {pin} is assigned to both {first} and {second}")]
     PinTwice {
         pin: String,
@@ -246,6 +370,8 @@ struct ProjectTable {
 struct TargetTable {
     device: String,
     unused_pins: Option<String>,
+    hps_shell: Option<String>,
+    hps_io_hash: Option<String>,
 }
 
 /// A `[pins]` entry written as a table: the pin or pins, and settings that
@@ -259,6 +385,8 @@ struct PinTable {
     drive: Option<String>,
     pull: Option<String>,
     registers: Option<Vec<String>>,
+    /// An Agilex 5 ball's bank voltage.
+    vccio: Option<String>,
 }
 
 impl PinTable {
@@ -267,6 +395,7 @@ impl PinTable {
             || self.drive.is_some()
             || self.pull.is_some()
             || self.registers.is_some()
+            || self.vccio.is_some()
     }
 }
 
@@ -332,6 +461,11 @@ fn de2_pin(port: &str, t: &PinTable) -> Result<De2Pin, ManifestError> {
         port: port.to_string(),
         reason,
     };
+    if t.vccio.is_some() {
+        return Err(bad(
+            "vccio is an Agilex 5 setting; a DE2 pin takes `standard`".into(),
+        ));
+    }
     let current = t
         .drive
         .as_deref()
@@ -426,6 +560,13 @@ impl Manifest {
             source: Box::new(source),
         })?;
         let device: Device = file.target.device.parse()?;
+        if device != Device::A5eb013bb23be4scs
+            && (file.target.hps_shell.is_some() || file.target.hps_io_hash.is_some())
+        {
+            return Err(ManifestError::BadTarget(format!(
+                "hps_shell and hps_io_hash are for an HPS-first Agilex 5, not {device}"
+            )));
+        }
         let mut entries = Vec::new();
         for (port, value) in file.pins {
             let entry = PinsEntry::parse(&port, value)?;
@@ -471,6 +612,89 @@ impl Manifest {
                 let clocks = parse_clocks(&file.clocks, &pins)?;
                 Target::Xc7z010clg400_1 { pins, clocks }
             }
+            Device::A5eb013bb23be4scs => {
+                if file.target.unused_pins.is_some() {
+                    return Err(ManifestError::NoIoSettings(device));
+                }
+                if !file.clocks.is_empty() {
+                    return Err(ManifestError::NoClocks(device));
+                }
+                let sites = flatten_pins(entries, A5Site::parse, |port, t| {
+                    let bad = |reason: String| ManifestError::BadPinEntry {
+                        port: port.to_string(),
+                        reason,
+                    };
+                    match t {
+                        Some(t)
+                            if t.standard.is_some()
+                                || t.drive.is_some()
+                                || t.pull.is_some()
+                                || t.registers.is_some() =>
+                        {
+                            Err(bad("an Agilex 5 pin takes only `vccio` so far".into()))
+                        }
+                        Some(PinTable { vccio: Some(v), .. }) => {
+                            A5Vccio::parse(v).map(Some).ok_or_else(|| {
+                                bad(format!(
+                                    "vccio = {v:?}: one of \"3.3 V\", \"1.8 V\", \"1.1 V\""
+                                ))
+                            })
+                        }
+                        _ => Ok(None),
+                    }
+                })?;
+                let pins = sites
+                    .into_iter()
+                    .map(|a| {
+                        let bad = |reason: String| ManifestError::BadPinEntry {
+                            port: a.port.to_string(),
+                            reason,
+                        };
+                        let pin = match (a.pin, a.io) {
+                            (A5Site::Ball(ball), Some(vccio)) => A5Pin::Ball { ball, vccio },
+                            (A5Site::Ball(ball), None) => {
+                                return Err(bad(format!(
+                                    "{ball}: give its bank's voltage, {{ pin = \"{ball}\", vccio = \"3.3 V\" }}"
+                                )))
+                            }
+                            (A5Site::Hps(h), None) => A5Pin::Hps(h),
+                            (A5Site::Hps(h), Some(_)) => {
+                                return Err(bad(format!("{} is inside the chip and has no vccio", h.name())))
+                            }
+                        };
+                        Ok(PinAssignment { port: a.port, pin, io: () })
+                    })
+                    .collect::<Result<_, _>>()?;
+                let shell = file.target.hps_shell.as_deref().ok_or_else(|| {
+                    ManifestError::BadTarget(
+                        "hps_shell: the board's HPS shell lines, from its Quartus HPS-first build"
+                            .into(),
+                    )
+                })?;
+                let shell = project_dir.join(shell);
+                if !shell.is_file() {
+                    return Err(ManifestError::BadTarget(format!(
+                        "hps_shell: no file {}",
+                        shell.display()
+                    )));
+                }
+                let hash = file.target.hps_io_hash.as_deref().ok_or_else(|| {
+                    ManifestError::BadTarget(
+                        "hps_io_hash: phase 1's HPS IO hash (quartus_pfg -i), 64 hex digits".into(),
+                    )
+                })?;
+                Target::A5eb013bb23be4scs {
+                    pins,
+                    hps: HpsFirst {
+                        shell,
+                        hps_io_hash: parse_hash(hash).ok_or_else(|| {
+                            ManifestError::BadTarget(format!(
+                                "hps_io_hash = {hash:?} is not 64 hex digits"
+                            ))
+                        })?,
+                    },
+                }
+            }
         };
         Ok(Manifest {
             name: file.project.name,
@@ -479,6 +703,18 @@ impl Manifest {
             target,
         })
     }
+}
+
+/// 64 hex digits, either case.
+fn parse_hash(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(out)
 }
 
 fn expand_sources(project_dir: &Path, patterns: &[String]) -> Result<Sources, ManifestError> {
@@ -898,6 +1134,124 @@ mod tests {
                 ),
                 "{text}"
             );
+        }
+    }
+
+    const DE25: &str = r#"
+        [project]
+        name = "irq"
+        top = "irq"
+        sources = ["src/*"]
+
+        [target]
+        device = "A5EB013BB23BE4SCS"
+        hps_shell = "hps-shell.txt"
+        hps_io_hash = "D921CDF7CADFEECA11572B24600BFD337FFD119E47601CA5075AA911EEC3D07A"
+
+        [pins]
+        CLOCK1_50 = { pin = "V16", vccio = "3.3 V" }
+        SW = { pins = ["DK24", "DD24"], vccio = "1.1 V" }
+        irq0 = "f2h_irq0[0]"
+    "#;
+
+    #[test]
+    fn the_de25_takes_balls_with_their_voltage_and_known_hps_inputs() {
+        let dir = scratch("de25", &["src/irq.v", "hps-shell.txt"]);
+        let m = Manifest::parse(DE25, &dir).unwrap();
+        let Target::A5eb013bb23be4scs { pins, hps } = &m.target else {
+            panic!("{:?} is not the DE25-Nano's part", m.target);
+        };
+        let pins: Vec<_> = pins
+            .iter()
+            .map(|a| match &a.pin {
+                A5Pin::Ball { ball, vccio } => format!("{} {ball} {}", a.port, vccio.volts()),
+                A5Pin::Hps(h) => format!("{} {}", a.port, h.node()),
+            })
+            .collect();
+        assert_eq!(
+            pins,
+            [
+                "CLOCK1_50 V16 3.3",
+                "SW[0] DK24 1.1",
+                "SW[1] DD24 1.1",
+                "irq0 RPII:X52Y51Z0I44"
+            ]
+        );
+        assert_eq!(hps.shell, dir.join("hps-shell.txt"));
+        assert_eq!(hps.hps_io_hash[..2], [0xd9, 0x21]);
+        assert_eq!(hps.hps_io_hash[31], 0x7a);
+    }
+
+    #[test]
+    fn a_de25_manifest_without_what_its_core_needs_is_rejected() {
+        let dir = scratch("de25-bad", &["src/irq.v", "hps-shell.txt"]);
+        let hash = "D921CDF7CADFEECA11572B24600BFD337FFD119E47601CA5075AA911EEC3D07A";
+        let pin_entry = [
+            // A ball without its bank's voltage, a voltage on an HPS input,
+            // a voltage the board has no bank at, a DE2 setting.
+            DE25.replace(r#"{ pin = "V16", vccio = "3.3 V" }"#, r#""V16""#),
+            DE25.replace(
+                r#"irq0 = "f2h_irq0[0]""#,
+                r#"irq0 = { pin = "f2h_irq0[0]", vccio = "3.3 V" }"#,
+            ),
+            DE25.replace(r#"vccio = "3.3 V""#, r#"vccio = "2.5 V""#),
+            DE25.replace(r#"vccio = "3.3 V""#, r#"vccio = "3.3 V", pull = "up""#),
+        ];
+        for text in pin_entry {
+            assert!(
+                matches!(
+                    Manifest::parse(&text, &dir),
+                    Err(ManifestError::BadPinEntry { .. })
+                ),
+                "{text}"
+            );
+        }
+        // An HPS input whose node isn't known, a pin that isn't a ball.
+        for text in [
+            DE25.replace("f2h_irq0[0]", "f2h_irq0[1]"),
+            DE25.replace(r#""V16""#, r#""PIN_N2""#),
+        ] {
+            assert!(
+                matches!(
+                    Manifest::parse(&text, &dir),
+                    Err(ManifestError::BadPin { .. })
+                ),
+                "{text}"
+            );
+        }
+        let target = [
+            DE25.replace("hps_shell = \"hps-shell.txt\"\n", ""),
+            DE25.replace("hps-shell.txt\"", "missing.txt\""),
+            DE25.replace(&format!("hps_io_hash = \"{hash}\"\n"), ""),
+            DE25.replace(hash, &hash[..62]),
+            DE25.replace(hash, &format!("+{}", &hash[1..])),
+        ];
+        for text in target {
+            assert!(
+                matches!(
+                    Manifest::parse(&text, &dir),
+                    Err(ManifestError::BadTarget(_))
+                ),
+                "{text}"
+            );
+        }
+        assert!(matches!(
+            Manifest::parse(&format!("{DE25}\n[clocks]\nCLOCK1_50 = \"50 MHz\"\n"), &dir),
+            Err(ManifestError::NoClocks(Device::A5eb013bb23be4scs))
+        ));
+        // The DE25's settings on the other boards.
+        let de2_dir = scratch("de2-a5", &["src/blinky.v"]);
+        for text in [
+            DE2.replace(
+                r#"device = "EP2C35F672C6""#,
+                "device = \"EP2C35F672C6\"\nhps_shell = \"x\"",
+            ),
+            DE2.replace(
+                r#"CLOCK_50 = "PIN_N2""#,
+                r#"CLOCK_50 = { pin = "PIN_N2", vccio = "3.3 V" }"#,
+            ),
+        ] {
+            assert!(Manifest::parse(&text, &de2_dir).is_err(), "{text}");
         }
     }
 }

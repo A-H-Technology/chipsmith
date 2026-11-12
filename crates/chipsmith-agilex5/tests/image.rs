@@ -23,6 +23,12 @@ fn str(p: &Path) -> &str {
     p.to_str().unwrap()
 }
 
+/// `out/hpsf_hps_auto.sof`'s, as `quartus_pfg -i` prints it (D921CDF7…C3D07A).
+const PHASE1_HPS_IO_HASH: [u8; 32] = [
+    0xd9, 0x21, 0xcd, 0xf7, 0xca, 0xdf, 0xee, 0xca, 0x11, 0x57, 0x2b, 0x24, 0x60, 0x0b, 0xfd, 0x33,
+    0x7f, 0xfd, 0x11, 0x9e, 0x47, 0x60, 0x1c, 0xa5, 0x07, 0x5a, 0xa9, 0x11, 0xee, 0xc3, 0xd0, 0x7a,
+];
+
 /// Paths and keys every test needs.
 struct Setup {
     db_root: PathBuf,
@@ -66,9 +72,13 @@ fn hps_first_cores_are_the_board_tested_ones() {
         ("out/hpsf.sof", "out/hpsf.core.rbf"),
     ] {
         let sof = Sof::read(str(&s.hps_first.join(sof))).unwrap();
-        assert!(
-            s.core(&mut db, &sof) == s.expect(expected),
-            "{expected} differs"
+        let core = s.core(&mut db, &sof);
+        assert!(core == s.expect(expected), "{expected} differs");
+        assert!(chipsmith_agilex5::flow::is_rbf(&core));
+        assert_eq!(
+            chipsmith_agilex5::flow::hps_io_hash(&core),
+            Some(PHASE1_HPS_IO_HASH),
+            "{expected}: not phase 1's HPS IO hash"
         );
     }
 }

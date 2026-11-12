@@ -11,6 +11,7 @@ repository.workspace = true
 gpu = ["chipsmith-cyclone2/gpu"]
 
 [dependencies]
+chipsmith-agilex5.workspace = true
 chipsmith-cyclone2.workspace = true
 chipsmith-jtag.workspace = true
 chipsmith-netlist.workspace = true

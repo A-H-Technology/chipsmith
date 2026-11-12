@@ -581,6 +581,7 @@ name = "chipsmith"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chipsmith-agilex5",
  "chipsmith-cyclone2",
  "chipsmith-jtag",
  "chipsmith-netlist",
