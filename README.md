@@ -2157,7 +2157,11 @@ Next devices:
   SPL and HPS handoff data, and the rest stays Quartus' bytes. Given
   either of agilex5-re's two Quartus builds of designs/hpsf (GCC 16 and
   Arm GNU 11.2 SPLs), it writes the other byte for byte
-  (`tests/phase1.rs`). Open: phase 1 built by nixos-fpga (SPL from source),
+  (`tests/phase1.rs`). `jic::jic` packs a phase 1 into the QSPI `.jic`
+  Quartus writes (the CMF four times, the rest at 2 MiB, bits reversed,
+  CRC-16/X-25): the same bytes as Quartus' `.jic` for both builds, among
+  them the one in the board's QSPI. Open: phase 1 built by nixos-fpga
+  (SPL from source),
   `[clocks]` and the I/O registers in a DE25 manifest, more HPS inputs
   than f2h_irq0[0] and [3], and the HPS-to-FPGA bridges after a load from
   Linux.

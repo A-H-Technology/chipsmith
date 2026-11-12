@@ -6,7 +6,8 @@
 //! `CHIPSMITH_AGILEX5_SPECIMENS` and `CHIPSMITH_AGILEX5_DB` (for the key).
 use std::path::PathBuf;
 
-use chipsmith_agilex5::rbf::phase1;
+use chipsmith_agilex5::{jic, rbf::phase1};
+use sha2::{Digest, Sha256};
 
 fn var(name: &str) -> PathBuf {
     std::env::var_os(name)
@@ -58,5 +59,33 @@ fn a_phase1_with_the_other_spl_is_the_other_build() {
     ] {
         let built = phase1::with_spl(base, spl, &key).unwrap();
         assert!(&built == expected, "{name} differs");
+    }
+}
+
+/// Each phase 1 as a QSPI image: Quartus' `.jic` of it (`quartus_pfg -c
+/// hpsf.sof hpsf.jic -o device=MT25QU128 -o flash_loader=A5EB013BB23B
+/// -o mode=ASX4 -o hps_path=<SPL hex> -o hps=1`), known by its SHA-256 so
+/// the 16 MiB files needn't be kept. The first is the one in the board's
+/// QSPI since 2026-11-12.
+#[test]
+#[ignore = "needs agilex5-re's specimens"]
+fn phase1_jics_are_quartus_jics() {
+    let out = var("CHIPSMITH_AGILEX5_SPECIMENS").join("hps-first/out");
+    for (rbf, sha256) in [
+        (
+            "spl11/hpsf.hps.rbf",
+            "70e9ffb6a13744f01023309775240d83b6e9982f69940af56aa1da8351cb32fb",
+        ),
+        (
+            "hpsf.hps.rbf",
+            "009eb5b04de0fdc19b71dc7cbd1eb4242a340740a8a86e96cbd9ed8df071e7f9",
+        ),
+    ] {
+        let j = jic::jic(&std::fs::read(out.join(rbf)).unwrap()).unwrap();
+        let got: String = Sha256::digest(&j)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(got, sha256, "{rbf}: .jic differs from Quartus'");
     }
 }

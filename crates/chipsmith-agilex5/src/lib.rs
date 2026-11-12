@@ -11,6 +11,7 @@ pub mod db;
 mod ddb;
 pub mod flow;
 pub mod graph;
+pub mod jic;
 mod pins;
 pub mod pnr;
 pub mod rbf;
