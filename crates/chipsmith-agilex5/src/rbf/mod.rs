@@ -8,6 +8,7 @@ pub mod core;
 pub mod deflate;
 pub mod install;
 pub mod io;
+pub mod phase1;
 pub mod section;
 mod tables;
 

@@ -2152,7 +2152,12 @@ Next devices:
   `.jic`, factory image backed up first), so after a power cycle the HPS
   boots Linux with no JTAG and no fabric, and `flash --ssh` loads
   examples/de25-irq onto it: bit 17 at 3.0 Hz and 52 % high, bit 20 26 %.
-  Open: phase 1 built by nixos-fpga instead of Quartus (SPL from source),
+  chipsmith-agilex5 puts any U-Boot SPL into a Quartus phase 1
+  (`rbf::phase1::with_spl`): the HPS section is one deflated stream of
+  SPL and HPS handoff data, and the rest stays Quartus' bytes. Given
+  either of agilex5-re's two Quartus builds of designs/hpsf (GCC 16 and
+  Arm GNU 11.2 SPLs), it writes the other byte for byte
+  (`tests/phase1.rs`). Open: phase 1 built by nixos-fpga (SPL from source),
   `[clocks]` and the I/O registers in a DE25 manifest, more HPS inputs
   than f2h_irq0[0] and [3], and the HPS-to-FPGA bridges after a load from
   Linux.

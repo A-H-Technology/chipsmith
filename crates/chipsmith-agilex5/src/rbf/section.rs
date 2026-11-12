@@ -72,7 +72,7 @@ fn put(b: &mut [u8], at: usize, v: &[u8]) {
 /// Pages from +0x2000 on (the first chain table, then everything in file
 /// order with the link tables placed), built back to front because each
 /// table holds the hash of the next.
-fn chain(pages: Vec<Page>) -> Vec<u8> {
+pub(crate) fn chain(pages: Vec<Page>) -> Vec<u8> {
     let hashed: Vec<usize> = pages
         .iter()
         .enumerate()
@@ -188,10 +188,7 @@ pub fn assemble(pages: Vec<Page>, f: &Fields, keyed_hash_key: &[u8]) -> Result<V
     for (at, v) in COMMON.iter().chain(consts) {
         put(&mut h, *at, &hex(v));
     }
-    put(&mut h, 0x8, &(size as u32).to_le_bytes());
-    put(&mut h, 0x3c, &Sha256::digest(&body)[..4]);
     put(&mut h, 0x78, &f.sum.to_le_bytes());
-    put(&mut h, 0xc0, &sha384(&body[..PAGE]));
     let d = f.design;
     match f.kind {
         Kind::Io => {
@@ -220,21 +217,37 @@ pub fn assemble(pages: Vec<Page>, f: &Fields, keyed_hash_key: &[u8]) -> Result<V
             put(&mut h, 0x374, hps_io_hash);
         }
     }
+    let out = seal(h, &body, f.following, keyed_hash_key)?;
+    ensure!(out.len() == size);
+    Ok(out)
+}
+
+/// A section from its header page (everything but what depends on the
+/// body) and its body: the body's size and hashes and the keyed hash go
+/// into the header, then the block holding the header's hash.
+pub fn seal(mut h: Vec<u8>, body: &[u8], following: u32, keyed_hash_key: &[u8]) -> Result<Vec<u8>> {
+    ensure!(h.len() == PAGE, "a section header is one page");
+    ensure!(
+        body.len() >= PAGE,
+        "a section body starts with a chain table page"
+    );
+    put(&mut h, 0x8, &((2 * PAGE + body.len()) as u32).to_le_bytes());
+    put(&mut h, 0x3c, &Sha256::digest(body)[..4]);
+    put(&mut h, 0xc0, &sha384(&body[..PAGE]));
     let mut mac = Hmac::<Sha256>::new_from_slice(keyed_hash_key)?;
     mac.update(&h[..0xbb0]);
     put(&mut h, 0xbb0, &mac.finalize().into_bytes());
-    put(&mut h, 0xbd0, &sha384(&body));
+    put(&mut h, 0xbd0, &sha384(body));
     let crc = crc32_bzip2(&h[..0xffc]);
     put(&mut h, 0xffc, &crc.to_le_bytes());
     let mut b1 = vec![0u8; PAGE];
     put(&mut b1, 0, &sha384(&h));
-    put(&mut b1, 0xf00, &f.following.to_le_bytes());
+    put(&mut b1, 0xf00, &following.to_le_bytes());
     let crc = crc32_bzip2(&b1[..0xffc]);
     put(&mut b1, 0xffc, &crc.to_le_bytes());
     let mut out = h;
     out.extend_from_slice(&b1);
-    out.extend_from_slice(&body);
-    ensure!(out.len() == size);
+    out.extend_from_slice(body);
     Ok(out)
 }
 
