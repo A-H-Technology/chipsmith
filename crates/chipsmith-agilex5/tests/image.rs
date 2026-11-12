@@ -5,8 +5,8 @@
 //!
 //! - `CHIPSMITH_QUARTUS_PRO`: a Quartus Prime Pro 26.1.1 install, for the
 //!   SDM firmware and the codebooks (docs/legal.md).
-//! - `CHIPSMITH_AGILEX5_GRAPH`: the routing graph agilex5-re dumps from that
-//!   install (`specimens/rg/full`).
+//! - `CHIPSMITH_AGILEX5_GRAPH`: agilex5-re's routing graph (the devshell
+//!   sets it).
 //! - `CHIPSMITH_AGILEX5_SPECIMENS`: agilex5-re's `specimens/`, the
 //!   designs, the board-tested files and Quartus' builds.
 use std::path::{Path, PathBuf};

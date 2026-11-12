@@ -2,9 +2,9 @@
 //! reproduce: `CHIPSMITH_AGILEX5_PNR_REF` holds, per design, the netlist
 //! (`<name>.json`), its pins (`<name>.pins`) and a5pnr's design file and
 //! flop map (`<name>.design.txt`, `.design.txt.ffmap`). One of them,
-//! hpsf_open, is the design whose core loaded on the DE25-Nano. Needs the
-//! routing graph dumped from Quartus (`CHIPSMITH_AGILEX5_GRAPH`), so it is
-//! ignored by default: `cargo test -p chipsmith-agilex5 -- --ignored`.
+//! hpsf_open, is the design whose core loaded on the DE25-Nano. The
+//! references are agilex5-re's specimens, so it is ignored by default:
+//! `cargo test -p chipsmith-agilex5 -- --ignored`.
 use std::path::PathBuf;
 
 use chipsmith_agilex5::pnr;

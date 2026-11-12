@@ -2194,9 +2194,11 @@ irq0 = "f2h_irq0[0]"                           # an HPS input, f2h_irq0[0] or [3
 
 A ball takes its bank's voltage (`3.3 V`, `1.8 V` or `1.1 V`) and nothing
 else; `[clocks]` isn't taken yet (place and route times against its delay
-model alone). The build needs `CHIPSMITH_QUARTUS_PRO`, a Quartus Prime Pro
-26.1.1 install for the SDM firmware, and `CHIPSMITH_AGILEX5_GRAPH`, the
-routing graph agilex5-re dumps from it. `chipsmith flash --ssh HOST` loads
+model alone). The database, keys and routing graph come with chipsmith
+(agilex5-re's flake). The SDM firmware is Altera's code, so the build reads
+it from Quartus Prime Pro 26.1.1 where `chipsmith-vendor install --backend
+quartus-pro` puts it (`$CHIPSMITH_INSTALL_ROOT/quartus-pro/26.1.1`, else
+`~/altera_pro/26.1.1`; `CHIPSMITH_QUARTUS_PRO` overrides). `chipsmith flash --ssh HOST` loads
 the core through the HPS's own Linux (nixos-fpga's `/dev/fpga-load`) and
 refuses a core whose HPS IO hash isn't the manifest's: the SDM would wedge
 on it. It can't tell which phase 1 the board actually booted.

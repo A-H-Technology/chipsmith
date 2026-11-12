@@ -104,16 +104,20 @@ requirement (above) is the remaining contract question.
 
 ## The Agilex 5 bitstream
 
-Nothing of chipsmith's builds for the DE25-Nano yet; agilex5-re's `a5db`
-writes the images. Moving that writer into chipsmith (ADR-0003) brings
-Altera's firmware and codebooks from the user's own Quartus Prime Pro
-install, read at build time and never committed, plus two keys that are
-committed:
+chipsmith builds DE25-Nano images (`crates/chipsmith-agilex5`, moved from
+agilex5-re, ADR-0003). Altera's firmware and codebooks come from the user's
+own Quartus Prime Pro install, read at build time and never committed. What
+agilex5-re took from Quartus for interoperability, the keys and the routing
+graph, is committed and shipped:
 
 - **The SDM firmware** (`main.cmf` and `.fw` modules). Altera signs it and
   the device checks the signature on every configuration, so it can only
   be copied, never written. Every image carries it. Reading it from the
   user's install is like reading a chip database, but it's code, not data.
+- **The routing graph** (agilex5-re `graph/`, 41 MB of xz): Quartus'
+  own graph of the die, dumped through its API (`tools/rgdump`). Data, the
+  same question as Cyclone II's `chipdb.txt.xz`, shipped on the same
+  reasoning (decided 2026-11-12).
 - **Two codebooks** (`sm4revb_npcf.ddb`) and a group list (`sof_meta.pb`):
   data, the Cyclone II database question again.
 - **Two 32-byte keys**: one in `libpgm_bitasm.so` for the keyed hash (an
