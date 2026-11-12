@@ -20,7 +20,7 @@ GitHub hosts the repository.
 | Third-party HDL in `examples/` | Licenses kept | Nothing to do |
 | prjxray-db | ISC/CC0 | Nothing to do |
 | Copyright holder | LICENSE names a person, repo sits under A-H-Technology | Open |
-| Agilex 5 (DE25-Nano) bitstreams: Altera's signed firmware and a key from Quartus Pro | Needed by any writer; the key is the new question | Open, see below |
+| Agilex 5 (DE25-Nano) bitstreams: Altera's signed firmware and two keys from Quartus Pro | Needed by any writer; keys shipped as constants (interoperability), firmware read from the install | Decided 2026-11-12, see below |
 
 ## The Quartus license
 
@@ -106,8 +106,9 @@ requirement (above) is the remaining contract question.
 
 Nothing of chipsmith's builds for the DE25-Nano yet; agilex5-re's `a5db`
 writes the images. Moving that writer into chipsmith (ADR-0003) brings
-three things from the user's own Quartus Prime Pro install, read at build
-time and never committed:
+Altera's firmware and codebooks from the user's own Quartus Prime Pro
+install, read at build time and never committed, plus two keys that are
+committed:
 
 - **The SDM firmware** (`main.cmf` and `.fw` modules). Altera signs it and
   the device checks the signature on every configuration, so it can only
@@ -115,22 +116,23 @@ time and never committed:
   user's install is like reading a chip database, but it's code, not data.
 - **Two codebooks** (`sm4revb_npcf.ddb`) and a group list (`sof_meta.pb`):
   data, the Cyclone II database question again.
-- **A 32-byte key** in `libpgm_bitasm.so`, for the keyed hash (an
-  HMAC-SHA256) at +0xBB0 of each design section. agilex5-re found it by
+- **Two 32-byte keys**: one in `libpgm_bitasm.so` for the keyed hash (an
+  HMAC-SHA256) at +0xBB0 of each design section, and one in
+  `libpgm_pof.so` for the `.sof` HMAC. agilex5-re commits both under
+  `keys/`. The section key is the one the device enforces. agilex5-re found it by
   disassembly. On 2026-11-12 the SDM refused an image with either keyed
   hash zeroed and everything else valid (agilex5-re README, "The SDM
   checks the keyed hash"), so an open writer can't leave it out, unlike
   the IO and design hashes, which the SDM ignores.
 
-The key is the new question. It's a constant every Quartus install
+**Decided (2026-11-12): ship the keys as constants.** The key is a constant every Quartus install
 shares, needed only to make a file the device accepts, which is the
 interoperability Art. 6 allows decompiling for. But a check value the
 device enforces could be read as a technical protection measure (see
 Circumvention). Against that: it guards integrity, not access. The chip
 is unprovisioned, nothing is encrypted, and Altera's own tool hands the
-same images to anyone. Decide before chipsmith ships a writer that uses
-it. Options: read the key from the user's install at build time (as for
-the firmware), or ship it as a constant.
+same images to anyone. The firmware is different: it's Altera's code, so
+it stays read from the install.
 
 ## Timing values
 
