@@ -2147,11 +2147,15 @@ Next devices:
   high, bit 20 (cnt[24] & cnt[23]) 26 % high, where the design gives
   2.98 Hz at 50 % and 25 %. Since the same day `chipsmith build` and
   `chipsmith flash --ssh` do it (`examples/de25-irq`, its core the same
-  bytes; build 71 s, most of it loading the routing graph twice). Open:
+  bytes; build 71 s, most of it loading the routing graph twice). Also
+  2026-11-12: the board's QSPI holds that HPS-first phase 1 (Quartus'
+  `.jic`, factory image backed up first), so after a power cycle the HPS
+  boots Linux with no JTAG and no fabric, and `flash --ssh` loads
+  examples/de25-irq onto it: bit 17 at 3.0 Hz and 52 % high, bit 20 26 %.
+  Open: phase 1 built by nixos-fpga instead of Quartus (SPL from source),
   `[clocks]` and the I/O registers in a DE25 manifest, more HPS inputs
-  than f2h_irq0[0] and [3], an HPS-first
-  `.jic` in QSPI (the HPS boots from it), and the HPS-to-FPGA bridges
-  after a load from Linux.
+  than f2h_irq0[0] and [3], and the HPS-to-FPGA bridges after a load from
+  Linux.
 
 ## Manifest
 
