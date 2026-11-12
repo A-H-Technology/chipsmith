@@ -20,7 +20,7 @@ GitHub hosts the repository.
 | Third-party HDL in `examples/` | Licenses kept | Nothing to do |
 | prjxray-db | ISC/CC0 | Nothing to do |
 | Copyright holder | LICENSE names a person, repo sits under A-H-Technology | Open |
-| Agilex 5 (DE25-Nano) bitstreams: Altera's signed firmware and two keys from Quartus Pro | Needed by any writer; keys shipped as constants (interoperability), firmware read from the install | Decided 2026-11-12, see below |
+| Agilex 5 (DE25-Nano) bitstreams: Altera's signed firmware and two keys from Quartus Pro | Needed by any writer; keys and data shipped (interoperability), firmware shipped as every published bitstream carries it (tolerated, not licensed) | Decided 2026-11-12, see below |
 
 ## The Quartus license
 
@@ -105,20 +105,32 @@ requirement (above) is the remaining contract question.
 ## The Agilex 5 bitstream
 
 chipsmith builds DE25-Nano images (`crates/chipsmith-agilex5`, moved from
-agilex5-re, ADR-0003). Altera's firmware and codebooks come from the user's
-own Quartus Prime Pro install, read at build time and never committed. What
-agilex5-re took from Quartus for interoperability, the keys and the routing
-graph, is committed and shipped:
+agilex5-re, ADR-0003) without a Quartus install: everything an image takes
+from Quartus is committed in agilex5-re and shipped through its flake.
 
-- **The SDM firmware** (`main.cmf` and `.fw` modules). Altera signs it and
-  the device checks the signature on every configuration, so it can only
-  be copied, never written. Every image carries it. Reading it from the
-  user's install is like reading a chip database, but it's code, not data.
+- **The SDM firmware** (agilex5-re `quartus/`, nine `.cmf`/`.fw` modules,
+  ~640 KB). Altera signs it and the device checks the signature on every
+  configuration, so it can only be copied, never written. Every image
+  carries it: all but one 1 KiB block of each module appears verbatim in a
+  Quartus-built core. It's Altera's code, not data, so neither SAS (formats
+  and functionality, not the program filling them) nor Art. 6 (reproducing
+  for interface information, not redistributing the program) covers
+  shipping it, and Quartus' licence lets licensees distribute programmed
+  devices (s. 2.1, 1.22), not files, and forbids distributing "any portions"
+  of the software (s. 2.2.3). It's shipped anyway, decided 2026-11-12, as
+  the same bytes every public `.sof` and `.rbf` on GitHub carries for this
+  die: tolerated practice Altera has never acted on, not a licence. The
+  arguments if it ever matters: lock-out (*Lexmark v. Static Control*,
+  *Sega v. Accolade*; US, and weaker for 640 KB than for 55 bytes), and
+  that the device admits no other bytes. It's in its own package
+  (`quartus`) so it can be pulled alone, and `CHIPSMITH_AGILEX5_QUARTUS`
+  takes a whole Quartus install instead (same bytes, `tests/image.rs`).
 - **The routing graph** (agilex5-re `graph/`, 41 MB of xz): Quartus'
   own graph of the die, dumped through its API (`tools/rgdump`). Data, the
   same question as Cyclone II's `chipdb.txt.xz`, shipped on the same
   reasoning (decided 2026-11-12).
-- **Two codebooks** (`sm4revb_npcf.ddb`) and a group list (`sof_meta.pb`):
+- **Two codebooks** (`sm4revb_npcf.ddb`), a group list (`sof_meta.pb`),
+  the S4 flag lists and the programming sequence (agilex5-re `quartus/`):
   data, the Cyclone II database question again.
 - **Two 32-byte keys**: one in `libpgm_bitasm.so` for the keyed hash (an
   HMAC-SHA256) at +0xBB0 of each design section, and one in
@@ -135,8 +147,7 @@ interoperability Art. 6 allows decompiling for. But a check value the
 device enforces could be read as a technical protection measure (see
 Circumvention). Against that: it guards integrity, not access. The chip
 is unprovisioned, nothing is encrypted, and Altera's own tool hands the
-same images to anyone. The firmware is different: it's Altera's code, so
-it stays read from the install.
+same images to anyone. The firmware is different, see above.
 
 ## Timing values
 

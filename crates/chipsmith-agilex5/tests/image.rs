@@ -1,12 +1,12 @@
 //! Assembly against files known to be right: the open-flow designs whose
 //! cores loaded on the DE25-Nano, and Quartus' own core for the same shell.
-//! Needs what the repository can't hold, so it is ignored by default
+//! Needs agilex5-re's specimens, so it is ignored by default
 //! (`cargo test -p chipsmith-agilex5 -- --ignored`):
 //!
-//! - `CHIPSMITH_QUARTUS_PRO`: a Quartus Prime Pro 26.1.1 install, for the
-//!   SDM firmware and the codebooks (docs/legal.md).
-//! - `CHIPSMITH_AGILEX5_GRAPH`: agilex5-re's routing graph (the devshell
-//!   sets it).
+//! - `CHIPSMITH_AGILEX5_QUARTUS`, `CHIPSMITH_AGILEX5_GRAPH`: agilex5-re's
+//!   Quartus files (the SDM firmware, the codebooks) and routing graph;
+//!   the devshell sets both. A whole Quartus Prime Pro 26.1.1 install works
+//!   for the first and gives the same bytes.
 //! - `CHIPSMITH_AGILEX5_SPECIMENS`: agilex5-re's `specimens/`, the
 //!   designs, the board-tested files and Quartus' builds.
 use std::path::{Path, PathBuf};
@@ -43,7 +43,7 @@ impl Setup {
         let db_root = var("CHIPSMITH_AGILEX5_DB");
         let hps_first = var("CHIPSMITH_AGILEX5_SPECIMENS").join("hps-first");
         Setup {
-            install: rbf::install::Install::open(&var("CHIPSMITH_QUARTUS_PRO")).unwrap(),
+            install: rbf::install::Install::open(&var("CHIPSMITH_AGILEX5_QUARTUS")).unwrap(),
             rbf_key: std::fs::read(db_root.join("keys/rbf_keyed_hash.key")).unwrap(),
             phase1: rbf::Phase1::parse(str(&hps_first.join("out/hpsf_hps_auto.sof"))).unwrap(),
             db_root,
@@ -61,7 +61,7 @@ impl Setup {
 }
 
 #[test]
-#[ignore = "needs a Quartus Prime Pro install and agilex5-re's specimens"]
+#[ignore = "needs agilex5-re's specimens"]
 fn hps_first_cores_are_the_board_tested_ones() {
     let s = Setup::new();
     let mut db = Db::open(str(&s.db_root.join("db/sm4revb"))).unwrap();
@@ -86,7 +86,7 @@ fn hps_first_cores_are_the_board_tested_ones() {
 /// A design file, assembled: the `.sof` the board-tested core was made from,
 /// and that core.
 #[test]
-#[ignore = "needs a Quartus Prime Pro install, its routing graph and agilex5-re's specimens"]
+#[ignore = "needs agilex5-re's specimens"]
 fn designs_assemble_to_the_board_tested_files() {
     let s = Setup::new();
     let (mut db, graph) = route::open(

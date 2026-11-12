@@ -359,61 +359,21 @@ pub fn plan_build(manifest: &Manifest, layout: &Layout) -> Result<Plan> {
     })
 }
 
-/// agilex5-re's database and routing graph (the nix package and devshell
-/// set them), and the user's Quartus Prime Pro install, for the SDM
-/// firmware: Altera's code, which chipsmith can't ship (docs/legal.md).
+/// agilex5-re's database, routing graph and the Quartus files the image
+/// writer reads (the nix package and devshell set all three).
+/// CHIPSMITH_AGILEX5_QUARTUS can also name a whole Quartus Prime Pro 26.1.1
+/// install.
 pub fn agilex5_data() -> Result<chipsmith_agilex5::flow::Data> {
     let var = |name: &str| {
         std::env::var_os(name).map(PathBuf::from).with_context(|| {
             format!("{name} is not set; run chipsmith from its nix package or `nix develop`")
         })
     };
-    let data = chipsmith_agilex5::flow::Data {
+    Ok(chipsmith_agilex5::flow::Data {
         db: var("CHIPSMITH_AGILEX5_DB")?,
         graph: var("CHIPSMITH_AGILEX5_GRAPH")?,
-        quartus: quartus_pro(),
-    };
-    let firmware = data
-        .quartus
-        .join("devices/programmer/firmware/agilex5e.zip");
-    ensure!(
-        firmware.is_file(),
-        "no Quartus Prime Pro {QUARTUS_PRO_VERSION} at {} (it has the SDM firmware every \
-         DE25-Nano image carries): `chipsmith-vendor install --backend quartus-pro {QUARTUS_PRO_VERSION}`, \
-         or point CHIPSMITH_QUARTUS_PRO at an install",
-        data.quartus.display()
-    );
-    Ok(data)
-}
-
-/// The Quartus Prime Pro release whose firmware and codebooks the Agilex 5
-/// writer is checked against (crates/chipsmith-agilex5/tests/image.rs).
-const QUARTUS_PRO_VERSION: &str = "26.1.1";
-
-/// Where Quartus Prime Pro is: CHIPSMITH_QUARTUS_PRO, else where
-/// chipsmith-vendor installs it (vendor-quartus-common's `InstallBase`:
-/// `$CHIPSMITH_INSTALL_ROOT/quartus-pro/<version>`, else
-/// `~/altera_pro/<version>`, the installer's own default). Read here rather
-/// than through the vendor crates, which the open toolchain doesn't build.
-fn quartus_pro() -> PathBuf {
-    quartus_pro_from(|name| {
-        std::env::var_os(name)
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
+        quartus: var("CHIPSMITH_AGILEX5_QUARTUS")?,
     })
-}
-
-fn quartus_pro_from(set: impl Fn(&str) -> Option<PathBuf>) -> PathBuf {
-    if let Some(dir) = set("CHIPSMITH_QUARTUS_PRO") {
-        return dir;
-    }
-    match set("CHIPSMITH_INSTALL_ROOT") {
-        Some(root) => root.join("quartus-pro").join(QUARTUS_PRO_VERSION),
-        None => set("HOME")
-            .unwrap_or_default()
-            .join("altera_pro")
-            .join(QUARTUS_PRO_VERSION),
-    }
 }
 
 /// The pin file place and route reads.
@@ -2162,34 +2122,5 @@ mod tests {
         std::fs::write(&core, vec![0xff; 0x2000]).unwrap();
         let e = a5_load_ssh(&core, "no-such-host.invalid", &[2; 32]).unwrap_err();
         assert!(e.to_string().contains("not an Agilex 5 .rbf"), "{e}");
-    }
-
-    #[test]
-    fn quartus_pro_is_where_chipsmith_vendor_installs_it() {
-        let env = |vars: &'static [(&'static str, &'static str)]| {
-            move |name: &str| {
-                vars.iter()
-                    .find(|(k, _)| *k == name)
-                    .map(|(_, v)| PathBuf::from(v))
-            }
-        };
-        assert_eq!(
-            quartus_pro_from(env(&[("HOME", "/home/u")])),
-            Path::new("/home/u/altera_pro/26.1.1")
-        );
-        assert_eq!(
-            quartus_pro_from(env(&[
-                ("HOME", "/home/u"),
-                ("CHIPSMITH_INSTALL_ROOT", "/pool/dev/altera_pro")
-            ])),
-            Path::new("/pool/dev/altera_pro/quartus-pro/26.1.1")
-        );
-        assert_eq!(
-            quartus_pro_from(env(&[
-                ("CHIPSMITH_INSTALL_ROOT", "/r"),
-                ("CHIPSMITH_QUARTUS_PRO", "/q")
-            ])),
-            Path::new("/q")
-        );
     }
 }

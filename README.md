@@ -2139,8 +2139,7 @@ Next devices:
   writes a5pnr's design file and flop map for eight designs, from blinky
   to sha_st (1,375 ALMs) and the board-tested hpsf_open, with the IOPLL
   settings in Rust instead of a5pnr's Python (`tests/pnr.rs`). Both tests
-  are ignored by default: they need a Quartus Prime Pro install for the
-  firmware, the routing graph dumped from it, and agilex5-re's specimens.
+  are ignored by default: they need agilex5-re's specimens.
   On 2026-11-12 the first core with every step chipsmith's (hpsf_open:
   Verilog through synthesis, place and route and assembly, with the HPS
   shell lines from Quartus' HPS-first build) loaded on the board from
@@ -2195,10 +2194,9 @@ irq0 = "f2h_irq0[0]"                           # an HPS input, f2h_irq0[0] or [3
 A ball takes its bank's voltage (`3.3 V`, `1.8 V` or `1.1 V`) and nothing
 else; `[clocks]` isn't taken yet (place and route times against its delay
 model alone). The database, keys and routing graph come with chipsmith
-(agilex5-re's flake). The SDM firmware is Altera's code, so the build reads
-it from Quartus Prime Pro 26.1.1 where `chipsmith-vendor install --backend
-quartus-pro` puts it (`$CHIPSMITH_INSTALL_ROOT/quartus-pro/26.1.1`, else
-`~/altera_pro/26.1.1`; `CHIPSMITH_QUARTUS_PRO` overrides). `chipsmith flash --ssh HOST` loads
+(agilex5-re's flake), and so do the 15 files of Quartus Prime Pro an image
+needs, the SDM firmware among them (docs/legal.md): a DE25-Nano build needs
+no Quartus. `chipsmith flash --ssh HOST` loads
 the core through the HPS's own Linux (nixos-fpga's `/dev/fpga-load`) and
 refuses a core whose HPS IO hash isn't the manifest's: the SDM would wedge
 on it. It can't tell which phase 1 the board actually booted.

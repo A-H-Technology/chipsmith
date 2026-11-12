@@ -1,8 +1,10 @@
-//! What the writer takes from the user's own Quartus install: the signed
-//! SDM firmware (`main.cmf` and the `.fw` modules), the CORE codebooks from
-//! the programming database, the CRAM `s4` group list from `sof_meta.pb`,
-//! and the S4 flag lists from `fm_sector_bnxplv_rif_t*.ddb`. None of it is
-//! committed (README (l), (o)).
+//! What the writer takes from Quartus Prime Pro: the signed SDM firmware
+//! (`main.cmf` and the `.fw` modules), the CORE codebooks from the
+//! programming database, the CRAM `s4` group list from `sof_meta.pb`, and
+//! the S4 flag lists from `fm_sector_bnxplv_rif_t*.ddb` (agilex5-re README
+//! (l), (o)). Read from an install, or from agilex5-re's `quartus/`, which
+//! holds just these files in the install's layout, the firmware modules
+//! unzipped (chipsmith docs/legal.md).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -30,9 +32,7 @@ pub struct Install {
 
 impl Install {
     pub fn open(root: &Path) -> Result<Install> {
-        let zip = std::fs::read(root.join("devices/programmer/firmware/agilex5e.zip"))
-            .context("reading the firmware zip")?;
-        let fw = unzip(&zip, "sm4revb/SHA_384/")?;
+        let fw = firmware(root)?;
         let npcf = crate::ddb::Ddb::open(&root.join("devices/programmer/sm4revb_npcf.ddb"))?;
         let version = format!("Quartus Prime {}", npcf.version_string);
         let (cb1, cb2) = codebooks(&npcf.body)?;
@@ -76,6 +76,34 @@ impl Install {
             .map(Vec::as_slice)
             .with_context(|| format!("{name} not in the firmware zip"))
     }
+}
+
+/// The firmware modules: an install's zip, or the modules unzipped beside
+/// where it would be.
+fn firmware(root: &Path) -> Result<HashMap<String, Vec<u8>>> {
+    let dir = root.join("devices/programmer/firmware");
+    let zip = dir.join("agilex5e.zip");
+    if zip.is_file() {
+        let zip = std::fs::read(&zip).context("reading the firmware zip")?;
+        return unzip(&zip, "sm4revb/SHA_384/");
+    }
+    let modules = dir.join("sm4revb/SHA_384");
+    let mut fw = HashMap::new();
+    for e in std::fs::read_dir(&modules)
+        .with_context(|| format!("no firmware zip, and no modules in {}", modules.display()))?
+    {
+        let p = e?.path();
+        let name = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .context("module name")?
+            .to_owned();
+        fw.insert(
+            name,
+            std::fs::read(&p).with_context(|| format!("reading {}", p.display()))?,
+        );
+    }
+    Ok(fw)
 }
 
 fn u16le(b: &[u8], p: usize) -> usize {

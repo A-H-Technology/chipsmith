@@ -10,11 +10,12 @@
   cyclone2-db,
   # nix/xc7.nix: prjxray-db (the 7-series tools are the devshell's oracles)
   xc7,
-  # agilex5-re's db and graph packages: the Agilex 5 database, keys and
-  # routing graph (ADR-0003). The SDM firmware is Altera's code, so it comes
-  # from the user's own Quartus Prime Pro install (chipsmith-vendor's).
+  # agilex5-re's packages: the Agilex 5 database, keys, routing graph and the
+  # few Quartus Prime Pro files an image needs, the SDM firmware among them
+  # (ADR-0003, docs/legal.md).
   agilex5-db,
   agilex5-graph,
+  agilex5-quartus,
 }:
 
 let
@@ -103,5 +104,6 @@ runCommand "chipsmith-${unwrapped.version}"
       --set CHIPSMITH_XC7_GRAPH ${xc7RoutingGraph} \
       --set CHIPSMITH_PRJXRAY_DB ${xc7.prjxray-db} \
       --set CHIPSMITH_AGILEX5_DB ${agilex5-db} \
-      --set CHIPSMITH_AGILEX5_GRAPH ${agilex5-graph}
+      --set CHIPSMITH_AGILEX5_GRAPH ${agilex5-graph} \
+      --set CHIPSMITH_AGILEX5_QUARTUS ${agilex5-quartus}
   ''
