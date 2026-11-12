@@ -8,6 +8,8 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+# The device-independent electrostatic global placer (agilex5-re README (z14)).
+chipsmith-place.workspace = true
 lzma-rust2.workspace = true
 rustc-hash.workspace = true
 serde_json.workspace = true

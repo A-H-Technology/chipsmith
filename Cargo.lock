@@ -601,6 +601,7 @@ name = "chipsmith-agilex5"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chipsmith-place",
  "flate2",
  "hmac",
  "libz-sys",

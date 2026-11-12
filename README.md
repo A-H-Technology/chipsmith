@@ -2130,14 +2130,17 @@ Next devices:
   Quartus Pro once per board. A wrong HPS IO hash or keyed hash wedges
   the SDM until phase 1 is reloaded over JTAG, so a loader must check the
   hash before it writes. agilex5-re's database is a flake (`db`, since
-  2026-11-12), and assembly is chipsmith's (`crates/chipsmith-agilex5`,
-  2026-11-12): from a placed and routed design file it writes the `.sof`
-  and the core of each of the three open-flow designs that loaded on the
-  board, byte for byte, and from Quartus' `.sof` Quartus' own core
-  (`tests/image.rs`, ignored by default: it needs a Quartus Prime Pro
-  install for the firmware, the routing graph dumped from it, and
-  agilex5-re's specimens). Open: the rest of the flow in chipsmith (place
-  and route and synthesis, then `build` and `flash`), an HPS-first
+  2026-11-12), and place and route and assembly are chipsmith's
+  (`crates/chipsmith-agilex5`, 2026-11-12). From a placed and routed
+  design file it writes the `.sof` and the core of each of the three
+  open-flow designs that loaded on the board, byte for byte, and from
+  Quartus' `.sof` Quartus' own core (`tests/image.rs`). Place and route
+  writes a5pnr's design file and flop map for eight designs, from blinky
+  to sha_st (1,375 ALMs) and the board-tested hpsf_open, with the IOPLL
+  settings in Rust instead of a5pnr's Python (`tests/pnr.rs`). Both tests
+  are ignored by default: they need a Quartus Prime Pro install for the
+  firmware, the routing graph dumped from it, and agilex5-re's specimens.
+  Open: synthesis in chipsmith, then `build` and `flash`, an HPS-first
   `.jic` in QSPI (the HPS boots from it), and the HPS-to-FPGA bridges
   after a load from Linux.
 
