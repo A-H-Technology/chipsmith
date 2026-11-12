@@ -16,6 +16,12 @@
     # purpose: its packages (boost, python 3.12, antlr 4.9) are only
     # verified against that one. Bump with the rest of the set.
     openxc7.url = "github:openXC7/toolchain-nix/42323cb00c8b76486619695166498dfa72b1e3e2";
+    # The Agilex 5 database and keys (its db package).
+    agilex5-re = {
+      url = "github:cramt/agilex5-re";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.flake-utils.follows = "flake-utils";
+    };
   };
 
   outputs =
@@ -25,6 +31,7 @@
       flake-utils,
       cyclone2-re,
       openxc7,
+      agilex5-re,
       ...
     }:
     let
@@ -129,6 +136,7 @@
           # build doesn't read it.
           CHIPSMITH_CYCLONE2_SYNTH = open.cyclone2-synth;
           CHIPSMITH_CYCLONE2_DB = "${open.db}";
+          CHIPSMITH_AGILEX5_DB = "${agilex5-re.packages.${system}.db}";
           # nextpnr's chip database, for comparing against the flow it ran.
           CHIPSMITH_XC7_CHIPDB = xc7.chipdb;
           CHIPSMITH_PRJXRAY_DB = xc7.prjxray-db;

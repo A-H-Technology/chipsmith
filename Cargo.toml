@@ -6,6 +6,7 @@ members = ["crates/*"]
 # `-p chipsmith-vendor` or `--workspace`.
 default-members = [
     "crates/chipsmith",
+    "crates/chipsmith-agilex5",
     "crates/chipsmith-cyclone2",
     "crates/chipsmith-jtag",
     "crates/chipsmith-netlist",
@@ -25,6 +26,7 @@ repository = "https://github.com/A-H-Technology/chipsmith"
 authors = ["Alexandra Østermark <alex.cramt@gmail.com>"]
 
 [workspace.dependencies]
+chipsmith-agilex5 = { path = "crates/chipsmith-agilex5" }
 chipsmith-cyclone2 = { path = "crates/chipsmith-cyclone2" }
 chipsmith-jtag = { path = "crates/chipsmith-jtag" }
 chipsmith-netlist = { path = "crates/chipsmith-netlist" }

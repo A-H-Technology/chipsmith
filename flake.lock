@@ -1,5 +1,28 @@
 {
   "nodes": {
+    "agilex5-re": {
+      "inputs": {
+        "flake-utils": [
+          "flake-utils"
+        ],
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1794474306,
+        "narHash": "sha256-JT5SARmX5DJhIeDO3hwYuPQq41DFKZ+JzZGKVaDu5G4=",
+        "owner": "cramt",
+        "repo": "agilex5-re",
+        "rev": "a26aa10fc91025a058e47aa899d40b85d2899496",
+        "type": "github"
+      },
+      "original": {
+        "owner": "cramt",
+        "repo": "agilex5-re",
+        "type": "github"
+      }
+    },
     "cyclone2-re": {
       "inputs": {
         "flake-utils": "flake-utils",
@@ -107,6 +130,7 @@
     },
     "root": {
       "inputs": {
+        "agilex5-re": "agilex5-re",
         "cyclone2-re": "cyclone2-re",
         "flake-utils": [
           "cyclone2-re",

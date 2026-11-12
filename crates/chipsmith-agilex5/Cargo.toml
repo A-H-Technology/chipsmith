@@ -1,0 +1,22 @@
+[package]
+name = "chipsmith-agilex5"
+description = "chipsmith's Agilex 5 (DE25-Nano) back end: the configuration database and the .rbf image writer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+lzma-rust2.workspace = true
+rustc-hash.workspace = true
+serde_json.workspace = true
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+hmac = "0.12"
+sha2 = "0.10"
+# The .ddb containers' LZMA1 streams, which lzma-rust2 doesn't read raw.
+lzma-rs = "0.3"
+# pfg's deflate is zlib's own (level 9, 8 KiB window, Z_FIXED); only zlib
+# reproduces it byte for byte, so link the bundled C zlib (agilex5-re
+# README (l)).
+libz-sys = { version = "1.1", default-features = false, features = ["static"] }
