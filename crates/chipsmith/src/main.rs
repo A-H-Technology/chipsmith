@@ -128,7 +128,11 @@ fn main() -> Result<()> {
             );
             let read =
                 |p: &PathBuf| std::fs::read(p).with_context(|| format!("reading {}", p.display()));
-            let key = read(&flow::agilex5_data()?.db.join("keys/rbf_keyed_hash.key"))?;
+            // Only the key: no routing graph or Quartus files for this.
+            let db = std::env::var_os("CHIPSMITH_AGILEX5_DB").map(PathBuf::from).context(
+                "CHIPSMITH_AGILEX5_DB is not set; run chipsmith from its nix package or `nix develop`",
+            )?;
+            let key = read(&db.join("keys/rbf_keyed_hash.key"))?;
             let phase1 = chipsmith_agilex5::rbf::phase1::with_spl(&read(base)?, &read(spl)?, &key)?;
             if let Some(p) = rbf {
                 std::fs::write(p, &phase1)?;
