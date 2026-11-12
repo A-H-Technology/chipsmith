@@ -2123,13 +2123,17 @@ Next devices:
 - **DE25-Nano** (Agilex 5): no public reverse engineering existed, so
   agilex5-re does it. The Secure Device Manager accepts a fabric image we
   write: on an unprovisioned device it checks neither the design hash nor
-  an owner signature. Since 2026-11-09, cores from the open flow (a5pnr,
-  `a5db rbf hps-first=`) load from the board's own Linux through the
-  fpga-manager, after an HPS-first shell build from Quartus Pro once per
-  board. A wrong HPS IO hash wedges the SDM until a power cycle, so a
-  loader must check the hash before it writes. Open: an HPS-first `.jic`
-  in QSPI (the HPS boots from it), the HPS-to-FPGA bridges after a load
-  from Linux, and moving the flow into chipsmith.
+  an owner signature, only each section's keyed hash, whose key
+  agilex5-re commits (docs/legal.md). Since 2026-11-09, cores from the
+  open flow (a5pnr, `a5db rbf hps-first=`) load from the board's own
+  Linux through the fpga-manager, after an HPS-first shell build from
+  Quartus Pro once per board. A wrong HPS IO hash or keyed hash wedges
+  the SDM until phase 1 is reloaded over JTAG, so a loader must check the
+  hash before it writes. agilex5-re's database is a flake (`db`, since
+  2026-11-12). Open: moving the flow into chipsmith (image writer, then
+  place and route and synthesis, then `build` and `flash`), an HPS-first
+  `.jic` in QSPI (the HPS boots from it), and the HPS-to-FPGA bridges
+  after a load from Linux.
 
 ## Manifest
 
