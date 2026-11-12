@@ -2214,6 +2214,12 @@ the core through the HPS's own Linux (nixos-fpga's `/dev/fpga-load`) and
 refuses a core whose HPS IO hash isn't the manifest's: the SDM would wedge
 on it. It can't tell which phase 1 the board actually booted.
 
+Phase 1 itself is agilex5-re's `phase1/de25-nano` (the one in the board's
+QSPI). `chipsmith agilex5-phase1 BASE SPL --rbf OUT --jic OUT` puts another
+U-Boot SPL (`u-boot-spl-dtb.bin`) into it and writes the `.hps.rbf` for a
+JTAG load and the QSPI `.jic` quartus_pgm programs; the shell lines and HPS
+IO hash stay the same, so cores built for the board still load.
+
 A `[clocks]` table gives the frequency of a clock entering at a pin:
 
 ```toml

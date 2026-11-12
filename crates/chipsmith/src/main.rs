@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use chipsmith::flow::{self, Flash, Layout, Persistence, Via};
@@ -65,6 +65,19 @@ enum Cmd {
     /// Map a yosys netlist's simple gates to 4-input LUTs (in place of abc).
     #[command(hide = true)]
     Lutmap { netlist: PathBuf, mapped: PathBuf },
+    /// DE25-Nano phase 1 with another U-Boot SPL: BASE is a Quartus
+    /// HPS-first `.hps.rbf` for the board's HPS settings, SPL the
+    /// `u-boot-spl-dtb.bin` to put in it.
+    Agilex5Phase1 {
+        base: PathBuf,
+        spl: PathBuf,
+        /// Write the phase 1 `.hps.rbf` here (for a JTAG load).
+        #[arg(long)]
+        rbf: Option<PathBuf>,
+        /// Write the QSPI image here, as the `.jic` quartus_pgm programs.
+        #[arg(long)]
+        jic: Option<PathBuf>,
+    },
 }
 
 fn build(manifest: &Manifest, layout: &Layout) -> Result<()> {
@@ -103,6 +116,28 @@ fn main() -> Result<()> {
             eprintln!("{s:?}");
             return Ok(());
         }
+        Cmd::Agilex5Phase1 {
+            base,
+            spl,
+            rbf,
+            jic,
+        } => {
+            anyhow::ensure!(
+                rbf.is_some() || jic.is_some(),
+                "nothing to write: give --rbf or --jic"
+            );
+            let read =
+                |p: &PathBuf| std::fs::read(p).with_context(|| format!("reading {}", p.display()));
+            let key = read(&flow::agilex5_data()?.db.join("keys/rbf_keyed_hash.key"))?;
+            let phase1 = chipsmith_agilex5::rbf::phase1::with_spl(&read(base)?, &read(spl)?, &key)?;
+            if let Some(p) = rbf {
+                std::fs::write(p, &phase1)?;
+            }
+            if let Some(p) = jic {
+                std::fs::write(p, chipsmith_agilex5::jic::jic(&phase1)?)?;
+            }
+            return Ok(());
+        }
         _ => {}
     }
     let project_dir = std::path::absolute(&cli.project_dir)?;
@@ -117,7 +152,8 @@ fn main() -> Result<()> {
         | Cmd::Xc7RoutingGraph { .. }
         | Cmd::Pack { .. }
         | Cmd::PackDiff { .. }
-        | Cmd::Lutmap { .. } => {
+        | Cmd::Lutmap { .. }
+        | Cmd::Agilex5Phase1 { .. } => {
             unreachable!("handled before the manifest")
         }
         Cmd::FlashDump { out } => {
