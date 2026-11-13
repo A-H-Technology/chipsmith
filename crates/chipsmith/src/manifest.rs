@@ -61,12 +61,12 @@ impl Target {
     }
 }
 
-/// An Agilex 5 pin: a package ball at its bank's I/O voltage, or an input
-/// of the HPS that the fabric drives.
+/// An Agilex 5 pin: a package ball at its bank's I/O voltage, or one bit of
+/// a signal of the HPS the fabric meets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum A5Pin {
     Ball { ball: String, vccio: A5Vccio },
-    Hps(HpsInput),
+    Hps(HpsBit),
 }
 
 /// An Agilex 5 ball's bank voltage, as the board powers the bank.
@@ -97,31 +97,125 @@ impl A5Vccio {
     }
 }
 
-/// The HPS inputs a design can drive: those whose entry into the HPS is
-/// known (agilex5-re README, "HPS-first": f2h_irq0[k] reaches
-/// SOC_HPS_WRAPPER_RE through these RPIIs, read back as GICD_ISPENDR1 bit
-/// 17 + k).
+/// Which way an HPS signal crosses into the fabric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HpsInput {
-    F2hIrq0Bit0,
-    F2hIrq0Bit3,
+pub enum HpsDir {
+    /// The fabric drives it: the design's port is an output.
+    IntoHps,
+    /// The HPS drives it: the design's port is an input.
+    FromHps,
 }
 
-impl HpsInput {
-    const ALL: [HpsInput; 2] = [HpsInput::F2hIrq0Bit0, HpsInput::F2hIrq0Bit3];
+/// A signal of the HPS a design can connect to, by the name Quartus' HPS
+/// wrapper gives it. Where each bit meets the fabric is agilex5-re's
+/// (`db/sm4revb/hps/lwhps2fpga.tsv`), looked up by place and route.
+#[derive(Debug, PartialEq, Eq)]
+pub struct HpsSignalDef {
+    pub name: &'static str,
+    /// The HPS atom's port.
+    pub atom: &'static str,
+    pub width: u8,
+    pub dir: HpsDir,
+}
 
-    pub fn name(self) -> &'static str {
-        match self {
-            HpsInput::F2hIrq0Bit0 => "f2h_irq0[0]",
-            HpsInput::F2hIrq0Bit3 => "f2h_irq0[3]",
+/// One of [`HPS_SIGNALS`].
+pub type HpsSignal = &'static HpsSignalDef;
+
+macro_rules! hps_signals {
+    ($($name:literal $atom:literal $width:literal $dir:ident;)*) => {
+        &[$(HpsSignalDef { name: $name, atom: $atom, width: $width, dir: HpsDir::$dir },)*]
+    };
+}
+
+/// f2h_irq0, and the lightweight HPS-to-FPGA bridge as its phase 1 sets it
+/// up: AXI4, 32-bit data, 29-bit addresses, 4-bit IDs (agilex5-re README,
+/// "The lightweight bridge at the fabric"); `lwhps2fpga_clk` clocks it.
+pub static HPS_SIGNALS: &[HpsSignalDef] = hps_signals! {
+    "f2h_irq0" "F2S_FPGA_IRQ" 64 IntoHps;
+    "lwhps2fpga_clk" "LWSOC2FPGA_CLK" 1 IntoHps;
+    "lwhps2fpga_awid" "LWSOC2FPGA_AW_ID" 4 FromHps;
+    "lwhps2fpga_awaddr" "LWSOC2FPGA_AW_ADDR" 29 FromHps;
+    "lwhps2fpga_awlen" "LWSOC2FPGA_AW_LEN" 8 FromHps;
+    "lwhps2fpga_awsize" "LWSOC2FPGA_AW_SIZE" 3 FromHps;
+    "lwhps2fpga_awburst" "LWSOC2FPGA_AW_BURST" 2 FromHps;
+    "lwhps2fpga_awlock" "LWSOC2FPGA_AW_LOCK" 1 FromHps;
+    "lwhps2fpga_awcache" "LWSOC2FPGA_AW_CACHE" 4 FromHps;
+    "lwhps2fpga_awprot" "LWSOC2FPGA_AW_PROT" 3 FromHps;
+    "lwhps2fpga_awvalid" "LWSOC2FPGA_AW_VALID" 1 FromHps;
+    "lwhps2fpga_awready" "LWSOC2FPGA_AW_READY" 1 IntoHps;
+    "lwhps2fpga_wdata" "LWSOC2FPGA_W_DATA" 32 FromHps;
+    "lwhps2fpga_wstrb" "LWSOC2FPGA_W_STRB" 4 FromHps;
+    "lwhps2fpga_wlast" "LWSOC2FPGA_W_LAST" 1 FromHps;
+    "lwhps2fpga_wvalid" "LWSOC2FPGA_W_VALID" 1 FromHps;
+    "lwhps2fpga_wready" "LWSOC2FPGA_W_READY" 1 IntoHps;
+    "lwhps2fpga_bid" "LWSOC2FPGA_B_ID" 4 IntoHps;
+    "lwhps2fpga_bresp" "LWSOC2FPGA_B_RESP" 2 IntoHps;
+    "lwhps2fpga_bvalid" "LWSOC2FPGA_B_VALID" 1 IntoHps;
+    "lwhps2fpga_bready" "LWSOC2FPGA_B_READY" 1 FromHps;
+    "lwhps2fpga_arid" "LWSOC2FPGA_AR_ID" 4 FromHps;
+    "lwhps2fpga_araddr" "LWSOC2FPGA_AR_ADDR" 29 FromHps;
+    "lwhps2fpga_arlen" "LWSOC2FPGA_AR_LEN" 8 FromHps;
+    "lwhps2fpga_arsize" "LWSOC2FPGA_AR_SIZE" 3 FromHps;
+    "lwhps2fpga_arburst" "LWSOC2FPGA_AR_BURST" 2 FromHps;
+    "lwhps2fpga_arlock" "LWSOC2FPGA_AR_LOCK" 1 FromHps;
+    "lwhps2fpga_arcache" "LWSOC2FPGA_AR_CACHE" 4 FromHps;
+    "lwhps2fpga_arprot" "LWSOC2FPGA_AR_PROT" 3 FromHps;
+    "lwhps2fpga_arvalid" "LWSOC2FPGA_AR_VALID" 1 FromHps;
+    "lwhps2fpga_arready" "LWSOC2FPGA_AR_READY" 1 IntoHps;
+    "lwhps2fpga_rid" "LWSOC2FPGA_R_ID" 4 IntoHps;
+    "lwhps2fpga_rdata" "LWSOC2FPGA_R_DATA" 32 IntoHps;
+    "lwhps2fpga_rresp" "LWSOC2FPGA_R_RESP" 2 IntoHps;
+    "lwhps2fpga_rlast" "LWSOC2FPGA_R_LAST" 1 IntoHps;
+    "lwhps2fpga_rvalid" "LWSOC2FPGA_R_VALID" 1 IntoHps;
+    "lwhps2fpga_rready" "LWSOC2FPGA_R_READY" 1 FromHps;
+};
+
+/// One bit of an HPS signal; the bit is below the signal's width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HpsBit {
+    signal: HpsSignal,
+    bit: u8,
+}
+
+impl HpsBit {
+    fn new(signal: HpsSignal, bit: u8) -> Option<HpsBit> {
+        (bit < signal.width).then_some(HpsBit { signal, bit })
+    }
+    pub fn signal(self) -> HpsSignal {
+        self.signal
+    }
+    pub fn bit(self) -> u8 {
+        self.bit
+    }
+}
+
+impl fmt::Display for HpsBit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.signal.width == 1 {
+            f.write_str(self.signal.name)
+        } else {
+            write!(f, "{}[{}]", self.signal.name, self.bit)
         }
     }
+}
 
-    /// The routing node the signal ends on.
-    pub fn node(self) -> &'static str {
-        match self {
-            HpsInput::F2hIrq0Bit0 => "RPII:X52Y51Z0I44",
-            HpsInput::F2hIrq0Bit3 => "RPII:X52Y51Z0I24",
+/// An HPS site in [pins]: one bit, or a whole signal for a port of its width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HpsSite {
+    Bit(HpsBit),
+    Whole(HpsSignal),
+}
+
+impl HpsSite {
+    fn parse(s: &str) -> Option<HpsSite> {
+        let (name, bit) = match s.strip_suffix(']').and_then(|s| s.split_once('[')) {
+            Some((name, bit)) => (name, Some(bit.parse::<u8>().ok()?)),
+            None => (s, None),
+        };
+        let signal = HPS_SIGNALS.iter().find(|d| d.name == name)?;
+        match bit {
+            Some(b) => HpsBit::new(signal, b).map(HpsSite::Bit),
+            None => Some(HpsSite::Whole(signal)),
         }
     }
 }
@@ -130,21 +224,22 @@ impl HpsInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum A5Site {
     Ball(String),
-    Hps(HpsInput),
+    Hps(HpsSite),
 }
 
 impl fmt::Display for A5Site {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             A5Site::Ball(b) => f.write_str(b),
-            A5Site::Hps(h) => f.write_str(h.name()),
+            A5Site::Hps(HpsSite::Bit(b)) => b.fmt(f),
+            A5Site::Hps(HpsSite::Whole(s)) => f.write_str(s.name),
         }
     }
 }
 
 impl A5Site {
     fn parse(s: &str) -> Result<Self, ManifestError> {
-        if let Some(h) = HpsInput::ALL.into_iter().find(|h| h.name() == s) {
+        if let Some(h) = HpsSite::parse(s) {
             return Ok(A5Site::Hps(h));
         }
         let letters = s.bytes().take_while(u8::is_ascii_uppercase).count();
@@ -159,7 +254,7 @@ impl A5Site {
             pin: s.to_string(),
             device: Device::A5eb013bb23be4scs,
             expected:
-                "pins are package balls like V16, or the HPS inputs f2h_irq0[0] and f2h_irq0[3]",
+                "pins are package balls like V16, or HPS signals: f2h_irq0[k], lwhps2fpga_clk and the lightweight bridge's lwhps2fpga_* (a whole one, or [bit])",
         })
     }
 }
@@ -643,28 +738,59 @@ impl Manifest {
                         _ => Ok(None),
                     }
                 })?;
-                let pins = sites
-                    .into_iter()
-                    .map(|a| {
-                        let bad = |reason: String| ManifestError::BadPinEntry {
-                            port: a.port.to_string(),
-                            reason,
-                        };
-                        let pin = match (a.pin, a.io) {
-                            (A5Site::Ball(ball), Some(vccio)) => A5Pin::Ball { ball, vccio },
-                            (A5Site::Ball(ball), None) => {
-                                return Err(bad(format!(
-                                    "{ball}: give its bank's voltage, {{ pin = \"{ball}\", vccio = \"3.3 V\" }}"
-                                )))
-                            }
-                            (A5Site::Hps(h), None) => A5Pin::Hps(h),
-                            (A5Site::Hps(h), Some(_)) => {
-                                return Err(bad(format!("{} is inside the chip and has no vccio", h.name())))
-                            }
-                        };
-                        Ok(PinAssignment { port: a.port, pin, io: () })
-                    })
-                    .collect::<Result<_, _>>()?;
+                let mut pins: Vec<PinAssignment<A5Pin>> = Vec::new();
+                for a in sites {
+                    let bad = |reason: String| ManifestError::BadPinEntry {
+                        port: a.port.to_string(),
+                        reason,
+                    };
+                    let hps = match (a.pin, a.io) {
+                        (A5Site::Ball(ball), Some(vccio)) => {
+                            pins.push(PinAssignment { port: a.port, pin: A5Pin::Ball { ball, vccio }, io: () });
+                            continue;
+                        }
+                        (A5Site::Ball(ball), None) => {
+                            return Err(bad(format!(
+                                "{ball}: give its bank's voltage, {{ pin = \"{ball}\", vccio = \"3.3 V\" }}"
+                            )))
+                        }
+                        (A5Site::Hps(h), Some(_)) => {
+                            return Err(bad(format!("{} is inside the chip and has no vccio", A5Site::Hps(h))))
+                        }
+                        (A5Site::Hps(h), None) => h,
+                    };
+                    // A whole signal is the port's bits 0.. in order; a
+                    // one-bit signal keeps the port as it is written.
+                    let bits: Vec<(PortBit, HpsBit)> = match (hps, &a.port) {
+                        (HpsSite::Bit(b), _) => vec![(a.port.clone(), b)],
+                        (HpsSite::Whole(s), port) if s.width == 1 => {
+                            vec![(port.clone(), HpsBit { signal: s, bit: 0 })]
+                        }
+                        (HpsSite::Whole(s), PortBit::Scalar(name)) => (0..s.width)
+                            .map(|i| (PortBit::Bit(name.clone(), i as usize), HpsBit { signal: s, bit: i }))
+                            .collect(),
+                        (HpsSite::Whole(s), PortBit::Bit(..)) => {
+                            return Err(bad(format!(
+                                "{} is {} bits wide: give one bit of it, {}[k], or the whole signal for the whole port",
+                                s.name, s.width, s.name
+                            )))
+                        }
+                    };
+                    for (port, b) in bits {
+                        if let Some(first) = pins.iter().find(|p| p.pin == A5Pin::Hps(b)) {
+                            return Err(ManifestError::PinTwice {
+                                pin: b.to_string(),
+                                first: first.port.clone(),
+                                second: port,
+                            });
+                        }
+                        pins.push(PinAssignment {
+                            port,
+                            pin: A5Pin::Hps(b),
+                            io: (),
+                        });
+                    }
+                }
                 let shell = file.target.hps_shell.as_deref().ok_or_else(|| {
                     ManifestError::BadTarget(
                         "hps_shell: the board's HPS shell lines, from its Quartus HPS-first build"
@@ -1165,7 +1291,7 @@ mod tests {
             .iter()
             .map(|a| match &a.pin {
                 A5Pin::Ball { ball, vccio } => format!("{} {ball} {}", a.port, vccio.volts()),
-                A5Pin::Hps(h) => format!("{} {}", a.port, h.node()),
+                A5Pin::Hps(h) => format!("{} {h}", a.port),
             })
             .collect();
         assert_eq!(
@@ -1174,12 +1300,85 @@ mod tests {
                 "CLOCK1_50 V16 3.3",
                 "SW[0] DK24 1.1",
                 "SW[1] DD24 1.1",
-                "irq0 RPII:X52Y51Z0I44"
+                "irq0 f2h_irq0[0]"
             ]
         );
         assert_eq!(hps.shell, dir.join("hps-shell.txt"));
         assert_eq!(hps.hps_io_hash[..2], [0xd9, 0x21]);
         assert_eq!(hps.hps_io_hash[31], 0x7a);
+    }
+
+    #[test]
+    fn de25_hps_signals_are_whole_ports_or_single_bits() {
+        let dir = scratch("de25-lw", &["src/irq.v", "hps-shell.txt"]);
+        let text = DE25.replace(
+            r#"irq0 = "f2h_irq0[0]""#,
+            r#"irq0 = "f2h_irq0[0]"
+        lw_clk = "lwhps2fpga_clk"
+        s_axi_araddr = "lwhps2fpga_araddr"
+        s_axi_arvalid = "lwhps2fpga_arvalid"
+        s_axi_rresp = ["lwhps2fpga_rresp[1]", "lwhps2fpga_rresp[0]"]"#,
+        );
+        let m = Manifest::parse(&text, &dir).unwrap();
+        let Target::A5eb013bb23be4scs { pins, .. } = &m.target else {
+            panic!("{:?}", m.target);
+        };
+        let hps: Vec<(String, String, &str, u8)> = pins
+            .iter()
+            .filter_map(|a| match &a.pin {
+                A5Pin::Hps(h) => {
+                    Some((a.port.to_string(), h.to_string(), h.signal().atom, h.bit()))
+                }
+                A5Pin::Ball { .. } => None,
+            })
+            .collect();
+        assert_eq!(hps.len(), 1 + 1 + 29 + 1 + 2);
+        assert_eq!(
+            hps[1],
+            (
+                "lw_clk".into(),
+                "lwhps2fpga_clk".into(),
+                "LWSOC2FPGA_CLK",
+                0
+            )
+        );
+        assert_eq!(
+            hps[2 + 28],
+            (
+                "s_axi_araddr[28]".into(),
+                "lwhps2fpga_araddr[28]".into(),
+                "LWSOC2FPGA_AR_ADDR",
+                28
+            )
+        );
+        assert_eq!(hps[31].0, "s_axi_arvalid");
+        assert_eq!(
+            hps[32],
+            (
+                "s_axi_rresp[0]".into(),
+                "lwhps2fpga_rresp[1]".into(),
+                "LWSOC2FPGA_R_RESP",
+                1
+            )
+        );
+        // A whole multi-bit signal as one bit of a list; one bit twice.
+        for (bad, err) in [
+            (
+                r#"s_axi_rresp = ["lwhps2fpga_rresp", "lwhps2fpga_rresp[0]"]"#,
+                "BadPinEntry",
+            ),
+            (
+                r#"s_axi_rresp = ["lwhps2fpga_rresp[0]", "lwhps2fpga_rresp[0]"]"#,
+                "PinTwice",
+            ),
+        ] {
+            let text = text.replace(
+                r#"s_axi_rresp = ["lwhps2fpga_rresp[1]", "lwhps2fpga_rresp[0]"]"#,
+                bad,
+            );
+            let e = Manifest::parse(&text, &dir).unwrap_err();
+            assert!(format!("{e:?}").starts_with(err), "{bad}: {e:?}");
+        }
     }
 
     #[test]
@@ -1206,9 +1405,12 @@ mod tests {
                 "{text}"
             );
         }
-        // An HPS input whose node isn't known, a pin that isn't a ball.
+        // A bit past an HPS signal's width, one it doesn't have, a pin that
+        // isn't a ball.
         for text in [
-            DE25.replace("f2h_irq0[0]", "f2h_irq0[1]"),
+            DE25.replace("f2h_irq0[0]", "f2h_irq0[64]"),
+            DE25.replace("f2h_irq0[0]", "lwhps2fpga_awaddr[29]"),
+            DE25.replace("f2h_irq0[0]", "lwhps2fpga_awsomething"),
             DE25.replace(r#""V16""#, r#""PIN_N2""#),
         ] {
             assert!(

@@ -2160,11 +2160,17 @@ Next devices:
   (`tests/phase1.rs`). `jic::jic` packs a phase 1 into the QSPI `.jic`
   Quartus writes (the CMF four times, the rest at 2 MiB, bits reversed,
   CRC-16/X-25): the same bytes as Quartus' `.jic` for both builds, among
-  them the one in the board's QSPI. Open: phase 1 built by nixos-fpga
-  (SPL from source),
-  `[clocks]` and the I/O registers in a DE25 manifest, more HPS inputs
-  than f2h_irq0[0] and [3], and the HPS-to-FPGA bridges after a load from
-  Linux.
+  them the one in the board's QSPI. nixos-fpga builds that phase 1 from
+  source (`phase1-terasic-de25-nano`; in the board's QSPI and booted from
+  it 2026-11-12). A core's load brings the HPS-to-FPGA bridges up with no
+  driver (agilex5-re README). Since 2026-11-13 a DE25 manifest takes the
+  lightweight bridge's AXI4 signals and f2h_irq0 by HPS signal name, and
+  examples/de25-lw (a register block on the bridge) builds: its 50 inputs
+  into the HPS, the 62 outputs it reads and the bridge clock route to the
+  nodes Quartus' route dumps found (agilex5-re
+  `db/sm4revb/hps/lwhps2fpga.tsv`). Not yet run on the board. Open: that
+  board run, `[clocks]` and the I/O registers in a DE25 manifest, and the
+  other bridges.
 
 ## Manifest
 
@@ -2201,8 +2207,23 @@ hps_io_hash = "D921CDF7…"     # phase 1's HPS IO hash (quartus_pfg -i), 64 hex
 
 [pins]
 CLOCK1_50 = { pin = "V16", vccio = "3.3 V" }   # a ball and its bank's voltage
-irq0 = "f2h_irq0[0]"                           # an HPS input, f2h_irq0[0] or [3]
+irq0 = "f2h_irq0[0]"                           # one bit of an HPS signal
+lw_clk = "lwhps2fpga_clk"                      # the lightweight bridge's clock
+araddr = "lwhps2fpga_araddr"                   # a whole signal: araddr[0..28]
 ```
+
+HPS signals are the names Quartus' HPS wrapper gives them: `f2h_irq0`
+(64 bits) and the lightweight HPS-to-FPGA bridge, `lwhps2fpga_clk` and
+`lwhps2fpga_{aw,w,b,ar,r}*`, AXI4 with 32-bit data, 29-bit addresses and
+4-bit IDs (examples/de25-lw has all of them). A port takes a whole signal of
+its width, or one bit (`"lwhps2fpga_rresp[1]"`). The direction follows the
+signal: into the HPS from an output, out of it into an input. The design
+connects straight to the HPS's AXI4 ports, with none of the register stages
+Quartus' HPS IP puts in between [inf: the ports handshake as plain AXI].
+A constant into the HPS isn't routed: it reads 1 undriven, and 0 is the
+input's routing-tile inverter, as Quartus does it. The HPS shell's own
+inverters on the signals a design names are dropped, since they are the
+Quartus design's constants (its 0s on `bresp`, `rresp` and `rdata[31]`).
 
 A ball takes its bank's voltage (`3.3 V`, `1.8 V` or `1.1 V`) and nothing
 else; `[clocks]` isn't taken yet (place and route times against its delay

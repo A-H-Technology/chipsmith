@@ -93,6 +93,15 @@ pub fn run(
     // `<port> node <graph node>`: an output that ends on a fabric node instead
     // of a pin, e.g. an HPS input's RPII (README, "HPS-first").
     let mut sink_of: HashMap<String, String> = HashMap::default();
+    // `<port> hps <HPS atom port> <bit>`: a signal of the HPS, from agilex5-re's
+    // table of where each bit meets the fabric: into the HPS ends on a node
+    // (a sink, as `node`), out of it starts on one (a source for an input).
+    let mut source_of: HashMap<String, String> = HashMap::default();
+    // The ports given by HPS signal (`hps`): only these own their RPI and
+    // may be constants. A raw `node` line is a5pnr's form and means the node
+    // alone.
+    let mut hps_ports: std::collections::HashSet<String> = Default::default();
+    let hps_nodes = hps_nodes(db)?;
     for l in std::fs::read_to_string(pins)
         .context("reading pins")?
         .lines()
@@ -100,11 +109,62 @@ pub fn run(
         let f: Vec<&str> = l.split_whitespace().collect();
         if f.len() == 3 && f[1] == "node" && !f[0].starts_with('#') {
             sink_of.insert(f[0].to_owned(), f[2].to_owned());
+        } else if f.len() == 4 && f[1] == "hps" && !f[0].starts_with('#') {
+            let bit: u32 = f[3].parse().with_context(|| format!("pins.txt: {l}"))?;
+            let (into_hps, node) = hps_nodes.get(&(f[2].to_owned(), bit)).with_context(|| {
+                format!(
+                    "{}[{bit}]: where it meets the fabric isn't known (db/sm4revb/hps)",
+                    f[2]
+                )
+            })?;
+            let map = if *into_hps {
+                &mut sink_of
+            } else {
+                &mut source_of
+            };
+            map.insert(f[0].to_owned(), node.clone());
+            hps_ports.insert(f[0].to_owned());
         } else if f.len() >= 3 && !f[0].starts_with('#') {
             pin_of.insert(f[0].to_owned(), (f[1].to_owned(), f[2].to_owned()));
             if f.get(3) == Some(&"reg") {
                 reg_ports.push(f[0].to_owned());
             }
+        }
+    }
+    // The RPI after each RPII sink is this design's: `# owns` lines tell the
+    // shell merge to drop its own setting there (flow::with_shell). A
+    // constant isn't routed: an undriven HPS input reads 1, and the RPI's
+    // inverter makes it 0, as Quartus does it (agilex5-re README, "Where the
+    // interrupts enter").
+    let rpis = rpi_inverters(db)?;
+    let mut const_lines: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < nl.ports.len() {
+        let p = &nl.ports[i];
+        let Some(node) = sink_of.get(&p.name).filter(|_| hps_ports.contains(&p.name)) else {
+            i += 1;
+            continue;
+        };
+        let rpi = node
+            .strip_prefix("RPII:")
+            .and_then(|r| rpis.get(&format!("RPI:{r}")));
+        if let Some((tile, path)) = rpi {
+            const_lines.push(format!("# owns\t{tile}\t{path}"));
+        }
+        match (p.input, p.net) {
+            (false, netlist::Sig::Const(v)) => {
+                if !v {
+                    let (tile, path) = rpi.with_context(|| {
+                        format!(
+                            "{}: {node} has no inverter, so it can't be held at 0",
+                            p.name
+                        )
+                    })?;
+                    const_lines.push(format!("attr\t{tile}\t{path}/rpi_sel\tINV"));
+                }
+                nl.ports.remove(i);
+            }
+            _ => i += 1,
         }
     }
     let reg_idx: Vec<usize> = reg_ports
@@ -163,12 +223,33 @@ pub fn run(
         t0.elapsed().as_secs_f64()
     );
     let mut port_node: HashMap<usize, u32> = HashMap::default();
+    // A port's position for placement, where it isn't its node's own.
+    let mut port_at: HashMap<usize, u32> = HashMap::default();
     let mut pin_lines = Vec::new();
     let mut pll_ball: HashMap<usize, String> = HashMap::default();
     for (pi, p) in nl.ports.iter().enumerate() {
         if let Some(node) = sink_of.get(&p.name) {
-            anyhow::ensure!(!p.input, "port {}: only outputs can end on a node", p.name);
+            anyhow::ensure!(
+                !p.input,
+                "port {}: it goes into the HPS, so it must be an output",
+                p.name
+            );
             port_node.insert(pi, g.node(node).with_context(|| format!("no node {node}"))?);
+            continue;
+        }
+        if let Some(node) = source_of.get(&p.name) {
+            anyhow::ensure!(
+                p.input,
+                "port {}: it comes from the HPS, so it must be an input",
+                p.name
+            );
+            let n = g.node(node).with_context(|| format!("no node {node}"))?;
+            port_node.insert(pi, n);
+            // The HPS wrapper's nodes all sit at X0 Y52; placement pulls
+            // toward where this one enters the fabric instead.
+            if let Some(e) = g.fanout(n).next() {
+                port_at.insert(pi, g.dst[e]);
+            }
             continue;
         }
         let Some((ball, std)) = pin_of.get(&p.name) else {
@@ -426,7 +507,10 @@ pub fn run(
     }
     let port_xy: HashMap<usize, (u32, u32)> = port_node
         .iter()
-        .map(|(&p, &n)| (p, (g.x[n as usize] as u32, g.y[n as usize] as u32)))
+        .map(|(&p, &n)| {
+            let n = port_at.get(&p).copied().unwrap_or(n);
+            (p, (g.x[n as usize] as u32, g.y[n as usize] as u32))
+        })
         .collect();
     let labs = place::labs(db)?;
     let sites = place::m20k_sites(db)?;
@@ -797,7 +881,7 @@ pub fn run(
 
     // The design file (README (q), docs/toolchain.md).
     let mut text = format!("# a5pnr design: {top} from {json}\n");
-    for l in &pin_lines {
+    for l in pin_lines.iter().chain(&const_lines) {
         writeln!(text, "{l}")?;
     }
     // Only edges with bits: pass-through and hardwired hops (class PASS)
@@ -886,4 +970,41 @@ pub fn run(
         t0.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+/// agilex5-re's map of the HPS signals the fabric meets
+/// (`db/sm4revb/hps/lwhps2fpga.tsv`): (atom port, bit) → (into the HPS, node).
+fn hps_nodes(db: &str) -> Result<HashMap<(String, u32), (bool, String)>> {
+    let path = format!("{db}/hps/lwhps2fpga.tsv");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(HashMap::default());
+    };
+    text.lines()
+        .filter(|l| !l.starts_with('#') && !l.is_empty())
+        .map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            anyhow::ensure!(f.len() == 4, "{path}: {l}");
+            let into = match f[2] {
+                "in" => true,
+                "out" => false,
+                d => anyhow::bail!("{path}: direction {d}"),
+            };
+            Ok(((f[0].to_owned(), f[1].parse()?), (into, f[3].to_owned())))
+        })
+        .collect()
+}
+
+/// The I/O routing tiles' programmable inverters by RPI node: (tile, attribute
+/// path; `<path>/rpi_sel = INV` inverts), agilex5-re `db/sm4revb/io/rpi.tsv`.
+fn rpi_inverters(db: &str) -> Result<HashMap<String, (String, String)>> {
+    let path = format!("{db}/io/rpi.tsv");
+    Ok(std::fs::read_to_string(&path)
+        .with_context(|| format!("reading {path}"))?
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            (f.len() == 3).then(|| (f[2].to_owned(), (f[0].to_owned(), f[1].to_owned())))
+        })
+        .collect())
 }

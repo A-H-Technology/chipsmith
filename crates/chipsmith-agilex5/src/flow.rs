@@ -91,3 +91,32 @@ pub fn hps_io_hash(rbf: &[u8]) -> Option<[u8; 32]> {
 pub fn is_rbf(file: &[u8]) -> bool {
     file.get(0x400..0x404) == Some(&0x9756_6593u32.to_le_bytes()[..])
 }
+
+/// The design file with the board's HPS shell after it, minus the shell's
+/// settings of the RPIs the design owns (its `# owns <tile> <path>` lines, one
+/// per RPI before an HPS input it drives or ties). The shell is one Quartus
+/// design's: it holds at 0, by RPI inverter, whatever that design tied to 0
+/// (designs/hpsf: bresp, rresp, rdata[31]), which would invert a design that
+/// drives those bits.
+pub fn with_shell(design: &str, shell: &str) -> String {
+    let owned: std::collections::HashSet<(&str, &str)> = design
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.strip_prefix("# owns\t")?.split('\t').collect();
+            (f.len() == 2).then(|| (f[0], f[1]))
+        })
+        .collect();
+    let mut text = design.to_owned();
+    for l in shell.lines() {
+        let f: Vec<&str> = l.split('\t').collect();
+        let rpi = (f.len() == 4 && f[0] == "attr")
+            .then(|| f[2].strip_suffix("/rpi_sel"))
+            .flatten();
+        if rpi.is_some_and(|path| owned.contains(&(f[1], path))) {
+            continue;
+        }
+        text.push_str(l);
+        text.push('\n');
+    }
+    text
+}

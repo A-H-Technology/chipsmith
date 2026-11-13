@@ -381,7 +381,7 @@ fn agilex5_pins(pins: &[PinAssignment<A5Pin>]) -> String {
     pins.iter()
         .map(|a| match &a.pin {
             A5Pin::Ball { ball, vccio } => format!("{} {ball} {}\n", a.port, vccio.volts()),
-            A5Pin::Hps(h) => format!("{} node {}\n", a.port, h.node()),
+            A5Pin::Hps(h) => format!("{} hps {} {}\n", a.port, h.signal().atom, h.bit()),
         })
         .collect()
 }
@@ -1502,7 +1502,7 @@ fn a5_pnr(netlist: &Path, top: &str, pins: &Path, design: &Path) -> Result<()> {
 fn a5_assemble(design: &Path, hps: &HpsFirst, sof: &Path, core: &Path) -> Result<()> {
     let read =
         |p: &Path| std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()));
-    let text = read(design)? + &read(&hps.shell)?;
+    let text = chipsmith_agilex5::flow::with_shell(&read(design)?, &read(&hps.shell)?);
     let rbf = chipsmith_agilex5::flow::assemble(&agilex5_data()?, &text, hps.hps_io_hash, sof)?;
     std::fs::write(core, rbf).with_context(|| format!("writing {}", core.display()))
 }
@@ -2063,8 +2063,7 @@ mod tests {
             plan.files,
             [(
                 PathBuf::from("/p/build/pins.txt"),
-                "CLOCK1_50 V16 3.3\nirq0 node RPII:X52Y51Z0I44\nirq3 node RPII:X52Y51Z0I24\n"
-                    .to_string()
+                "CLOCK1_50 V16 3.3\nirq0 hps F2S_FPGA_IRQ 0\nirq3 hps F2S_FPGA_IRQ 3\n".to_string()
             )]
         );
         let Step::A5Assemble { core, .. } = &plan.steps[2] else {

@@ -1,0 +1,53 @@
+[project]
+name = "lw"
+top = "lw"
+sources = ["src/*.v"]
+
+# HPS-first, as examples/de25-irq: phase 1's HPS shell and HPS IO hash.
+[target]
+device = "A5EB013BB23BE4SCS"
+hps_shell = "hps-shell.txt"
+hps_io_hash = "D921CDF7CADFEECA11572B24600BFD337FFD119E47601CA5075AA911EEC3D07A"
+
+# The lightweight bridge's signals by the names Quartus' HPS wrapper gives
+# them; a whole signal is the port's bits in order. lwhps2fpga_clk clocks the
+# bridge's fabric side.
+[pins]
+CLOCK1_50 = { pin = "V16", vccio = "3.3 V" }
+lw_clk = "lwhps2fpga_clk"
+irq = "f2h_irq0[0]"
+awid = "lwhps2fpga_awid"
+awaddr = "lwhps2fpga_awaddr"
+awlen = "lwhps2fpga_awlen"
+awsize = "lwhps2fpga_awsize"
+awburst = "lwhps2fpga_awburst"
+awlock = "lwhps2fpga_awlock"
+awcache = "lwhps2fpga_awcache"
+awprot = "lwhps2fpga_awprot"
+awvalid = "lwhps2fpga_awvalid"
+awready = "lwhps2fpga_awready"
+wdata = "lwhps2fpga_wdata"
+wstrb = "lwhps2fpga_wstrb"
+wlast = "lwhps2fpga_wlast"
+wvalid = "lwhps2fpga_wvalid"
+wready = "lwhps2fpga_wready"
+bid = "lwhps2fpga_bid"
+bresp = "lwhps2fpga_bresp"
+bvalid = "lwhps2fpga_bvalid"
+bready = "lwhps2fpga_bready"
+arid = "lwhps2fpga_arid"
+araddr = "lwhps2fpga_araddr"
+arlen = "lwhps2fpga_arlen"
+arsize = "lwhps2fpga_arsize"
+arburst = "lwhps2fpga_arburst"
+arlock = "lwhps2fpga_arlock"
+arcache = "lwhps2fpga_arcache"
+arprot = "lwhps2fpga_arprot"
+arvalid = "lwhps2fpga_arvalid"
+arready = "lwhps2fpga_arready"
+rid = "lwhps2fpga_rid"
+rdata = "lwhps2fpga_rdata"
+rresp = "lwhps2fpga_rresp"
+rlast = "lwhps2fpga_rlast"
+rvalid = "lwhps2fpga_rvalid"
+rready = "lwhps2fpga_rready"
