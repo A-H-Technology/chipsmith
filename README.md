@@ -947,9 +947,16 @@ Zybo limits:
   are fed from interconnect around 20 columns from the PS7's own tile, so
   the router grows a net's region to take in the far feeders of its sinks
   (`chipsmith-route`, `far_entries`); a slice input's feeders are its own
-  tile's, so other designs route as before. There's no timing model of
-  the PS7's pins yet: a path to or from them isn't timed (Vivado's timer
-  puts GP0's outputs late enough that 125 MHz misses by 0.2 ns).
+  tile's, so other designs route as before. M_AXI_GP0's pins are timed
+  as Vivado times them (`crates/chipsmith-xc7/src/ps7_timing.tsv`, from
+  `get_timing_arcs` on a synthesized PS7): each output launches 0.36-1.45 ns
+  after MAXIGP0ACLK, each input wants 0.52-0.78 ns of setup, on whatever
+  clock drives MAXIGP0ACLK. zybo-gp0's critical path now starts at the PS7
+  (WSTRB[1] through two LUTs to a clock enable, 4.0 ns). Clock skew isn't
+  modelled, between the PS7's clock pin and the fabric's registers or
+  anywhere else; a Vivado build of a larger GP0 design missed 125 MHz by
+  0.2 ns. The PS7's other ports aren't timed yet (Vivado gives an arc only
+  for a pin the design connects).
 - Cells: what synthesis makes ("7-series synthesis", above). No SRLs,
   MUXF7/F8, latches or I/O-tile registers; no DSP48E1 ALU modes or
   pre-adder (a product, or a cascaded pair's sum).

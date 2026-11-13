@@ -18,6 +18,7 @@ pub mod part;
 mod phys;
 mod place;
 pub mod pnr;
+mod ps7_timing;
 pub mod synth;
 pub mod vivado;
 pub mod xray;

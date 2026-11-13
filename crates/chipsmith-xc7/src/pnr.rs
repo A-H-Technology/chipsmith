@@ -126,6 +126,18 @@ pub fn run(
                 }
                 None
             }
+            // The PS7's clocked pins, each on its clock pin's net.
+            Kind::Ps7 => {
+                for (port, _) in &c.pins {
+                    if let Some((clk_pin, _)) = crate::ps7_timing::of(port) {
+                        if let Some(clk) = c.net(clk_pin) {
+                            let n = timing.graph.node(&c.name, port);
+                            timing.graph.set_clock(n, clk);
+                        }
+                    }
+                }
+                None
+            }
             _ => None,
         };
         if let Some(clk) = clock {

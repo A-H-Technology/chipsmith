@@ -667,7 +667,25 @@ impl Timing {
                         }
                     }
                 }
-                // Pins, the BSCAN, the PS7 and clock buffers neither launch nor
+                // The PS7's clocked pins, as Vivado times them: an output
+                // launches after its clock-to-out, an input captures with
+                // its setup (`crate::ps7_timing`).
+                Kind::Ps7 => {
+                    for &p in &ports {
+                        match crate::ps7_timing::of(p) {
+                            Some((_, crate::ps7_timing::Arc::ClockToOut(dl))) => {
+                                let n = node(&mut g, p);
+                                g.set_launch(n, dl);
+                            }
+                            Some((_, crate::ps7_timing::Arc::Setup(s))) => {
+                                let n = node(&mut g, p);
+                                g.set_setup(n, s + delays.clock_margin);
+                            }
+                            None => {}
+                        }
+                    }
+                }
+                // Pins, the BSCAN and clock buffers neither launch nor
                 // capture: like Quartus' and nextpnr's reports with only a
                 // clock constraint, paths run register to register.
                 _ => {}
