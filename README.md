@@ -943,7 +943,11 @@ Zybo limits:
   with IRQF2P[0] as its interrupt, read and written from Linux through
   nixos-fpga's /dev/uio "gp0" (its ID word, a 100.17 MHz counter, 64
   walking-bit writes of a scratch register read back with 0 errors, and
-  the interrupt woken on in `read()`, three of three). Several PS7 inputs
+  the interrupt woken on in `read()`, three of three). facet-hdl's hello (Spade
+  SystemVerilog, 822 LUTs and 12 RAM32Ms behind GP0) runs the same way:
+  built by chipsmith from facet-hdl's `examples/hello/zybo/chipsmith`, its
+  RPC calls over GP0 answered right on venus (`add_one(41) = 42`; 64
+  overlapping and 10,000 back-to-back calls, 0 wrong). Several PS7 inputs
   are fed from interconnect around 20 columns from the PS7's own tile, so
   the router grows a net's region to take in the far feeders of its sinks
   (`chipsmith-route`, `far_entries`); a slice input's feeders are its own
