@@ -2209,16 +2209,15 @@ package doesn't have as user I/O, is an error when the manifest loads.
 The Zynq builds `build/<name>.bit` instead of `.rbf`.
 
 The DE25-Nano's Agilex 5 (`device = "A5EB013BB23BE4SCS"`) boots
-HPS-first: Quartus Prime Pro's build of the HPS configures it (phase 1),
-and chipsmith builds phase 2, the core, as `build/<name>.core.rbf`. The
-SDM takes a core only with phase 1's HPS IO hash, so the manifest names
+HPS-first: phase 1 configures the HPS (nixos-fpga's build, in the board's
+QSPI), and chipsmith builds phase 2, the core, as `build/<name>.core.rbf`.
+The SDM takes a core only with phase 1's HPS IO hash, so the manifest names
 that phase 1 (`examples/de25-irq`):
 
 ```toml
 [target]
 device = "A5EB013BB23BE4SCS"
-hps_shell = "hps-shell.txt"   # phase 1's HPS and I/O lines (agilex5-re tools/hps_shell.sh)
-hps_io_hash = "D921CDF7…"     # phase 1's HPS IO hash (quartus_pfg -i), 64 hex digits
+phase1 = "de25-nano"          # the board's phase 1: its HPS shell lines and HPS IO hash
 
 [pins]
 CLOCK1_50 = { pin = "V16", vccio = "3.3 V" }   # a ball and its bank's voltage
@@ -2249,6 +2248,12 @@ no Quartus. `chipsmith flash --ssh HOST` loads
 the core through the HPS's own Linux (nixos-fpga's `/dev/fpga-load`) and
 refuses a core whose HPS IO hash isn't the manifest's: the SDM would wedge
 on it. It can't tell which phase 1 the board actually booted.
+
+`phase1` comes from agilex5-re's `phase1` package (`de25-nano`, the one in
+the board's QSPI), which the nix package and devshell point
+`CHIPSMITH_AGILEX5_PHASE1` at. A board with a phase 1 of its own gives it
+instead: `hps_shell` (its HPS and I/O lines, agilex5-re
+`tools/hps_shell.sh`) and `hps_io_hash` (`quartus_pfg -i`, 64 hex digits).
 
 Phase 1 itself is agilex5-re's `phase1/de25-nano` (the one in the board's
 QSPI). `chipsmith agilex5-phase1 BASE SPL --rbf OUT --jic OUT` puts another

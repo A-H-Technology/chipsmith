@@ -3,16 +3,13 @@ name = "irq"
 top = "irq"
 sources = ["src/*.v"]
 
-# The DE25-Nano boots HPS-first: Quartus Prime Pro's build of the HPS
-# configures it (phase 1) and this is phase 2, the core, which the SDM takes
-# only with phase 1's HPS IO hash. hps-shell.txt is that build's HPS and I/O
-# configuration as design-file lines (agilex5-re: `a5db extract` of its .sof,
-# then tools/hps_shell.sh). It comes from the user's own Quartus build, so it
-# isn't in the repository.
 [target]
 device = "A5EB013BB23BE4SCS"
-hps_shell = "hps-shell.txt"
-hps_io_hash = "D921CDF7CADFEECA11572B24600BFD337FFD119E47601CA5075AA911EEC3D07A"
+# The DE25-Nano boots HPS-first: phase 1 (in its QSPI, built by nixos-fpga)
+# configures the HPS, and this core is phase 2, which the SDM takes only with
+# phase 1's HPS IO hash. phase1 names it: its HPS shell lines and that hash
+# come from agilex5-re's phase1 package.
+phase1 = "de25-nano"
 
 # Terasic DE25-Nano: CLOCK1_50 on V16 (bank 3.3 V); the interrupts end at
 # the HPS.

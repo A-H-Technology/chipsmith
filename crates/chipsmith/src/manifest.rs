@@ -467,6 +467,7 @@ struct TargetTable {
     unused_pins: Option<String>,
     hps_shell: Option<String>,
     hps_io_hash: Option<String>,
+    phase1: Option<String>,
 }
 
 /// A `[pins]` entry written as a table: the pin or pins, and settings that
@@ -635,6 +636,56 @@ fn de2_pin(port: &str, t: &PinTable) -> Result<De2Pin, ManifestError> {
     })
 }
 
+/// Where agilex5-re's `phase1` package is: `<board>/shell.txt` and
+/// `<board>/hps_io_hash` per board.
+pub const PHASE1_VAR: &str = "CHIPSMITH_AGILEX5_PHASE1";
+
+fn named_phase1(board: &str, root: Option<&Path>) -> Result<HpsFirst, ManifestError> {
+    let root = root.ok_or_else(|| {
+        ManifestError::BadTarget(format!(
+            "phase1 = {board:?}: {PHASE1_VAR} is not set; run chipsmith from its nix package or `nix develop`"
+        ))
+    })?;
+    let dir = root.join(board);
+    let hash_file = dir.join("hps_io_hash");
+    let hash = std::fs::read_to_string(&hash_file).map_err(|_| {
+        let known: Vec<String> = std::fs::read_dir(root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().join("hps_io_hash").is_file())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        ManifestError::BadTarget(format!(
+            "phase1 = {board:?}: no such phase 1 in {}; there is {}",
+            root.display(),
+            known.join(", ")
+        ))
+    })?;
+    Ok(HpsFirst {
+        shell: dir.join("shell.txt"),
+        hps_io_hash: parse_hash(hash.trim()).ok_or_else(|| {
+            ManifestError::BadTarget(format!("{}: not 64 hex digits", hash_file.display()))
+        })?,
+    })
+}
+
+fn explicit_phase1(project_dir: &Path, shell: &str, hash: &str) -> Result<HpsFirst, ManifestError> {
+    let shell = project_dir.join(shell);
+    if !shell.is_file() {
+        return Err(ManifestError::BadTarget(format!(
+            "hps_shell: no file {}",
+            shell.display()
+        )));
+    }
+    Ok(HpsFirst {
+        shell,
+        hps_io_hash: parse_hash(hash).ok_or_else(|| {
+            ManifestError::BadTarget(format!("hps_io_hash = {hash:?} is not 64 hex digits"))
+        })?,
+    })
+}
+
 impl Manifest {
     pub fn load(project_dir: &Path) -> Result<Self, ManifestError> {
         let path = project_dir.join(FILE_NAME);
@@ -648,18 +699,32 @@ impl Manifest {
         })
     }
 
-    /// `project_dir` anchors the source globs.
+    /// `project_dir` anchors the source globs. A `phase1 = "<board>"` is
+    /// looked up under `$CHIPSMITH_AGILEX5_PHASE1` (agilex5-re's `phase1`
+    /// package, which the nix package and devshell set).
     pub fn parse(text: &str, project_dir: &Path) -> Result<Self, ManifestError> {
+        let root = std::env::var_os(PHASE1_VAR).map(PathBuf::from);
+        Self::parse_with(text, project_dir, root.as_deref())
+    }
+
+    /// [`Manifest::parse`] with the phase-1 packages' root given.
+    pub fn parse_with(
+        text: &str,
+        project_dir: &Path,
+        phase1_root: Option<&Path>,
+    ) -> Result<Self, ManifestError> {
         let file: ManifestFile = toml::from_str(text).map_err(|source| ManifestError::Syntax {
             path: PathBuf::from(FILE_NAME),
             source: Box::new(source),
         })?;
         let device: Device = file.target.device.parse()?;
         if device != Device::A5eb013bb23be4scs
-            && (file.target.hps_shell.is_some() || file.target.hps_io_hash.is_some())
+            && (file.target.hps_shell.is_some()
+                || file.target.hps_io_hash.is_some()
+                || file.target.phase1.is_some())
         {
             return Err(ManifestError::BadTarget(format!(
-                "hps_shell and hps_io_hash are for an HPS-first Agilex 5, not {device}"
+                "phase1, hps_shell and hps_io_hash are for an HPS-first Agilex 5, not {device}"
             )));
         }
         let mut entries = Vec::new();
@@ -791,35 +856,21 @@ impl Manifest {
                         });
                     }
                 }
-                let shell = file.target.hps_shell.as_deref().ok_or_else(|| {
-                    ManifestError::BadTarget(
-                        "hps_shell: the board's HPS shell lines, from its Quartus HPS-first build"
-                            .into(),
-                    )
-                })?;
-                let shell = project_dir.join(shell);
-                if !shell.is_file() {
-                    return Err(ManifestError::BadTarget(format!(
-                        "hps_shell: no file {}",
-                        shell.display()
-                    )));
-                }
-                let hash = file.target.hps_io_hash.as_deref().ok_or_else(|| {
-                    ManifestError::BadTarget(
-                        "hps_io_hash: phase 1's HPS IO hash (quartus_pfg -i), 64 hex digits".into(),
-                    )
-                })?;
-                Target::A5eb013bb23be4scs {
-                    pins,
-                    hps: HpsFirst {
-                        shell,
-                        hps_io_hash: parse_hash(hash).ok_or_else(|| {
-                            ManifestError::BadTarget(format!(
-                                "hps_io_hash = {hash:?} is not 64 hex digits"
-                            ))
-                        })?,
-                    },
-                }
+                let hps = match (&file.target.phase1, &file.target.hps_shell, &file.target.hps_io_hash) {
+                    (Some(board), None, None) => named_phase1(board, phase1_root)?,
+                    (None, Some(shell), Some(hash)) => explicit_phase1(project_dir, shell, hash)?,
+                    (Some(_), _, _) => {
+                        return Err(ManifestError::BadTarget(
+                            "phase1 names the board's phase 1, which brings its HPS shell and HPS IO hash: give it, or hps_shell and hps_io_hash, not both".into(),
+                        ))
+                    }
+                    (None, _, _) => {
+                        return Err(ManifestError::BadTarget(
+                            "phase1 = \"de25-nano\" (the phase 1 nixos-fpga builds and agilex5-re ships), or a phase 1 of your own: hps_shell (its HPS shell lines) and hps_io_hash (its HPS IO hash, quartus_pfg -i)".into(),
+                        ))
+                    }
+                };
+                Target::A5eb013bb23be4scs { pins, hps }
             }
         };
         Ok(Manifest {
@@ -1306,6 +1357,50 @@ mod tests {
         assert_eq!(hps.shell, dir.join("hps-shell.txt"));
         assert_eq!(hps.hps_io_hash[..2], [0xd9, 0x21]);
         assert_eq!(hps.hps_io_hash[31], 0x7a);
+    }
+
+    #[test]
+    fn a_de25_phase1_by_name_brings_its_shell_and_hash() {
+        let dir = scratch("de25-phase1", &["src/irq.v"]);
+        let root = dir.join("phase1");
+        std::fs::create_dir_all(root.join("de25-nano")).unwrap();
+        std::fs::write(root.join("de25-nano/shell.txt"), "").unwrap();
+        std::fs::write(
+            root.join("de25-nano/hps_io_hash"),
+            "D921CDF7CADFEECA11572B24600BFD337FFD119E47601CA5075AA911EEC3D07A\n",
+        )
+        .unwrap();
+        let hash = "D921CDF7CADFEECA11572B24600BFD337FFD119E47601CA5075AA911EEC3D07A";
+        let named = DE25
+            .replace(
+                "hps_shell = \"hps-shell.txt\"\n",
+                "phase1 = \"de25-nano\"\n",
+            )
+            .replace(&format!("hps_io_hash = \"{hash}\"\n"), "");
+        let m = Manifest::parse_with(&named, &dir, Some(&root)).unwrap();
+        let Target::A5eb013bb23be4scs { hps, .. } = &m.target else {
+            panic!("{:?}", m.target);
+        };
+        assert_eq!(hps.shell, root.join("de25-nano/shell.txt"));
+        assert_eq!(hps.hps_io_hash[..2], [0xd9, 0x21]);
+        // Another board, both forms at once, no package root.
+        for (text, root) in [
+            (
+                named.replace("de25-nano", "de10-nano"),
+                Some(root.as_path()),
+            ),
+            (
+                named.replace("phase1 =", "hps_shell = \"x\"\nphase1 ="),
+                Some(root.as_path()),
+            ),
+            (named.clone(), None),
+        ] {
+            let e = Manifest::parse_with(&text, &dir, root).unwrap_err();
+            assert!(matches!(e, ManifestError::BadTarget(_)), "{text}: {e:?}");
+        }
+        let e = Manifest::parse_with(&named.replace("de25-nano", "de10-nano"), &dir, Some(&root))
+            .unwrap_err();
+        assert!(e.to_string().contains("there is de25-nano"), "{e}");
     }
 
     #[test]

@@ -16,6 +16,9 @@
   agilex5-db,
   agilex5-graph,
   agilex5-quartus,
+  # agilex5-re's phase1: each board's phase 1 shell lines and HPS IO hash,
+  # for a manifest's `phase1 = "<board>"`.
+  agilex5-phase1,
 }:
 
 let
@@ -105,5 +108,6 @@ runCommand "chipsmith-${unwrapped.version}"
       --set CHIPSMITH_PRJXRAY_DB ${xc7.prjxray-db} \
       --set CHIPSMITH_AGILEX5_DB ${agilex5-db} \
       --set CHIPSMITH_AGILEX5_GRAPH ${agilex5-graph} \
-      --set CHIPSMITH_AGILEX5_QUARTUS ${agilex5-quartus}
+      --set CHIPSMITH_AGILEX5_QUARTUS ${agilex5-quartus} \
+      --set CHIPSMITH_AGILEX5_PHASE1 ${agilex5-phase1}
   ''

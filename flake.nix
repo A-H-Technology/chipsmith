@@ -65,6 +65,7 @@
           agilex5-db = agilex5-re.packages.${system}.db;
           agilex5-graph = agilex5-re.packages.${system}.graph;
           agilex5-quartus = agilex5-re.packages.${system}.quartus;
+          agilex5-phase1 = agilex5-re.packages.${system}.phase1;
           inherit xc7;
         };
         # CUDA is unfree; this instance exists only so the rest of the
@@ -142,6 +143,7 @@
           CHIPSMITH_AGILEX5_DB = "${agilex5-re.packages.${system}.db}";
           CHIPSMITH_AGILEX5_GRAPH = "${agilex5-re.packages.${system}.graph}";
           CHIPSMITH_AGILEX5_QUARTUS = "${agilex5-re.packages.${system}.quartus}";
+          CHIPSMITH_AGILEX5_PHASE1 = "${agilex5-re.packages.${system}.phase1}";
           # nextpnr's chip database, for comparing against the flow it ran.
           CHIPSMITH_XC7_CHIPDB = xc7.chipdb;
           CHIPSMITH_PRJXRAY_DB = xc7.prjxray-db;
