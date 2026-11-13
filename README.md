@@ -8,6 +8,7 @@ nix run github:A-H-Technology/chipsmith/open -- -C examples/blinky-vhdl flash
 nix run github:A-H-Technology/chipsmith/open -- -C examples/blinky-vhdl flash --persist  # DE2: into the EPCS
 nix run github:A-H-Technology/chipsmith/open -- -C examples/zybo-jtag-counter flash --persist  # Zybo: into the QSPI
 nix run github:A-H-Technology/chipsmith/open -- -C examples/zybo-jtag-counter flash --ssh venus  # Zybo, through its Linux
+nix run github:A-H-Technology/chipsmith/open -- flash --ssh venus design.bit  # any Zynq .bit, no project needed
 ```
 
 The first run builds cyclone2-re's device database package and flattens

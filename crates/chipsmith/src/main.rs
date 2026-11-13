@@ -145,6 +145,33 @@ fn main() -> Result<()> {
         _ => {}
     }
     let project_dir = std::path::absolute(&cli.project_dir)?;
+    // A given Zynq .bit loads over ssh as it is: nothing in it needs a
+    // project. A DE25-Nano core does, for the HPS IO hash its load is checked
+    // against.
+    if let Cmd::Flash {
+        bitstream: Some(path),
+        persist,
+        ssh: Some(host),
+    } = &cli.command
+    {
+        if !project_dir.join(chipsmith::manifest::FILE_NAME).exists() {
+            let is_core = std::fs::read(path)
+                .map(|f| chipsmith_agilex5::flow::is_rbf(&f))
+                .unwrap_or(false);
+            anyhow::ensure!(
+                !is_core,
+                "{}: a DE25-Nano core loads only with its project (-C DIR), whose hps_io_hash it is checked against; another phase 1's core wedges the SDM",
+                path.display()
+            );
+            let persistence = if *persist {
+                Persistence::Persistent
+            } else {
+                Persistence::Volatile
+            };
+            let flash = Flash::new(path.clone(), persistence, Via::Ssh(host.clone()))?;
+            return flow::plan_flash(&flash, &Loader::from_env(&project_dir), &project_dir).run();
+        }
+    }
     let manifest = Manifest::load(&project_dir)?;
     let layout = Layout::new(&project_dir, &manifest);
     match cli.command {
