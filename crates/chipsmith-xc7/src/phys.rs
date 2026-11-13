@@ -508,7 +508,7 @@ impl Builder<'_> {
                 pin(port.to_string())
             }
             (Kind::Bram { .. }, _) => pin(self.bram_pin(site, port)?),
-            (Kind::Dsp { .. }, _) => pin(port.to_string()),
+            (Kind::Dsp { .. } | Kind::Ps7, _) => pin(port.to_string()),
             (kind, bel) => bail!("{}: {kind:?} at {bel:?}", cell.name),
         }
     }
@@ -541,7 +541,7 @@ impl Builder<'_> {
                 (s, port.to_string(), None)
             }
             (Kind::Bram { .. }, _) => (s.clone(), self.bram_pin(&s, port)?, None),
-            (Kind::Dsp { .. }, _) => (s, port.to_string(), None),
+            (Kind::Dsp { .. } | Kind::Ps7, _) => (s, port.to_string(), None),
             (kind, bel) => bail!("{}: output {port} of {kind:?} at {bel:?}", cell.name),
         })
     }
@@ -861,7 +861,16 @@ pub(crate) fn build(
         }
     }
     if ps7 {
+        let connected: std::collections::HashSet<&str> = d
+            .cells
+            .iter()
+            .filter(|c| matches!(c.kind, Kind::Ps7))
+            .flat_map(|c| c.pins.iter().map(|(pin, _)| pin.as_str()))
+            .collect();
         for pin in ps7_inputs(db, family)? {
+            if connected.contains(pin.as_str()) {
+                continue;
+            }
             let node = pin_node(db, "PS7_X0Y0", &pin)?;
             optional.insert(node);
             const_sinks.push((node, p.gnd, Vec::new()));

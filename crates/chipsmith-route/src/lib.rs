@@ -10,7 +10,7 @@ pub mod gpu;
 pub mod timing;
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Mutex;
 
 use rayon::prelude::*;
@@ -210,6 +210,10 @@ pub struct Router<'a> {
     /// source and sinks (VPR's `bb_factor`), unless a sink can't be reached
     /// inside it (`CHIPSMITH_ROUTE_BBOX_MARGIN`; `inf`: the whole chip).
     bbox_margin: f32,
+    /// A sink fed from beyond `BBOX_MARGIN` of itself (a PS7 input, whose
+    /// node sits at the PS7 but is reached from interconnect columns away):
+    /// the box its feeders span, which a net's region takes in.
+    entry: HashMap<NodeId, chipdb::Box>,
     /// `ASTAR`, or `CHIPSMITH_ROUTE_ASTAR` for tuning it.
     astar: f32,
     /// How nets are grouped to route side by side (`CHIPSMITH_ROUTE_BATCH`:
@@ -335,6 +339,36 @@ fn pin_extras(db: &ChipDb) -> Vec<Vec<(u32, Ps)>> {
         .collect()
 }
 
+/// The sinks of `design` with a feeder reaching more than `BBOX_MARGIN` tiles
+/// beyond them, and the box those feeders span. A slice's inputs are fed from its own
+/// interconnect, so for them this is empty and their nets' regions are as
+/// before.
+fn far_entries(db: &ChipDb, design: &Design, node: &[NodeInfo]) -> HashMap<NodeId, chipdb::Box> {
+    let sinks: HashSet<NodeId> = design
+        .nets
+        .iter()
+        .flat_map(|n| n.sinks.iter().copied())
+        .collect();
+    let margin = BBOX_MARGIN as u8;
+    let mut entry: HashMap<NodeId, chipdb::Box> = HashMap::default();
+    for src in 0..db.nodes() as NodeId {
+        for e in db.downhill(src) {
+            if !sinks.contains(&e.dst) {
+                continue;
+            }
+            let near = node[e.dst as usize].bbox.grow(margin);
+            let b = node[src as usize].bbox;
+            if b.union(near) != near {
+                entry
+                    .entry(e.dst)
+                    .and_modify(|x| *x = x.union(b))
+                    .or_insert(b);
+            }
+        }
+    }
+    entry
+}
+
 impl<'a> Router<'a> {
     pub fn new(db: &'a ChipDb, design: &'a Design) -> Self {
         let n = db.nodes();
@@ -355,6 +389,7 @@ impl<'a> Router<'a> {
                 })
                 .collect()
         };
+        let entry = far_entries(db, design, &node);
         let extras = pin_extras(db);
         for tile in 0..db.width * db.height {
             for &(w, extra) in &extras[db.tile_type_index(tile) as usize] {
@@ -370,6 +405,7 @@ impl<'a> Router<'a> {
         let var = |name: &str| std::env::var(name).ok();
         Router {
             db,
+            entry,
             node,
             present_factor: 0.5,
             scratch: Scratch::new(n),
@@ -701,6 +737,9 @@ impl<'a> Router<'a> {
             let mut b = self.node[net.source as usize].bbox;
             for &n in &net.sinks {
                 b = b.union(self.node[n as usize].bbox);
+                if let Some(&e) = self.entry.get(&n) {
+                    b = b.union(e);
+                }
             }
             b.grow(self.bbox_margin.min(255.0) as u8)
         })

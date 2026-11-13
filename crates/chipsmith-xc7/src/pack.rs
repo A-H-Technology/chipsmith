@@ -111,7 +111,7 @@ fn drives(kind: &Kind, pin: &str) -> bool {
         Kind::Bufg => pin == "O",
         Kind::Cmt { .. } => pin.starts_with("CLKOUT") || pin == "CLKFBOUT" || pin == "LOCKED",
         Kind::Bscan { .. } => pin != "TDO",
-        Kind::Ps7 => false,
+        Kind::Ps7 => ps7_output(pin.trim_end_matches(|c: char| c.is_ascii_digit())),
         Kind::Bram { .. } => pin.starts_with("DO"),
         Kind::Dsp { .. } => DSP_OUTPUTS.iter().any(|o| {
             pin.strip_prefix(o)
@@ -119,6 +119,29 @@ fn drives(kind: &Kind, pin: &str) -> bool {
         }),
         Kind::Gnd | Kind::Vcc => true,
     }
+}
+
+/// Is `port` one of the PS7's outputs (its declaration in cells.v, the one
+/// source of the PS7's ports)?
+fn ps7_output(port: &str) -> bool {
+    static OUTPUTS: std::sync::OnceLock<std::collections::HashSet<&'static str>> =
+        std::sync::OnceLock::new();
+    OUTPUTS
+        .get_or_init(|| {
+            let lib = crate::synth::cells::LIBRARY;
+            let decl = lib
+                .split_once("module PS7 (")
+                .and_then(|(_, rest)| rest.split_once(");"))
+                .map_or("", |(decl, _)| decl);
+            decl.split(',')
+                .filter_map(|d| {
+                    let d = d.trim();
+                    d.strip_prefix("output")
+                        .map(|rest| rest.split_whitespace().last().unwrap_or(""))
+                })
+                .collect()
+        })
+        .contains(port)
 }
 
 fn param_bits(g: &Generic, name: &str) -> u64 {
@@ -551,17 +574,27 @@ pub(crate) fn pack(
                 p.push(name, Kind::Bscan { chain }, pins, Conf::Bscan);
             }
             "PS7" => {
-                // Every PS7 input is tied to 0 where the bitstream is made
-                // (`crate::phys`); a design driving or reading the PS7's
-                // pins isn't packed yet.
+                // Its pins by prjxray's site pin names (cells.v): bit k of a
+                // vector port is NAMEk. An input left at 0 isn't a pin here:
+                // every unconnected PS7 input is tied to 0 where the bitstream
+                // is made (`crate::phys`).
+                let mut pins = Vec::new();
                 for gp in &g.ports {
-                    ensure!(
-                        gp.sig.iter().all(|b| matches!(b, SigBit::Const(State::Zero))),
-                        "{name}: PS7 port {} is connected; only a PS7 with its inputs tied to 0 is supported",
-                        gp.name
-                    );
+                    let output = ps7_output(&gp.name);
+                    for (i, &b) in gp.sig.iter().enumerate() {
+                        let pin = if gp.sig.len() == 1 {
+                            gp.name.clone()
+                        } else {
+                            format!("{}{i}", gp.name)
+                        };
+                        match b {
+                            SigBit::Net(n) => pins.push((pin, p.net(n))),
+                            SigBit::Const(State::One) if !output => pins.push((pin, p.vcc)),
+                            SigBit::Const(_) => {}
+                        }
+                    }
                 }
-                p.push(name, Kind::Ps7, Vec::new(), Conf::Ps7);
+                p.push(name, Kind::Ps7, pins, Conf::Ps7);
             }
             other => bail!("cell {name}: {other} isn't packed on the 7-series yet"),
         }
