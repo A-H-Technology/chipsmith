@@ -26,8 +26,25 @@ pub struct Graph {
     pub cfgs: Vec<String>,
 }
 
+/// The cache of assembly's graph in a graph directory.
+pub const CACHE: &str = "asm-graph.cache";
+const CACHE_MAGIC: &str = "chipsmith-agilex5 assembly graph 1";
+
 impl Graph {
     pub fn load(dir: &Path) -> Result<Graph> {
+        if let Some(mut r) = crate::cache::Reader::open(&dir.join(CACHE), CACHE_MAGIC)? {
+            let g = Graph {
+                names: r.strs()?,
+                first: r.u32s()?,
+                dst: r.u32s()?,
+                uid: r.u32s()?,
+                cfg: r.u32s()?,
+                uids: r.strs()?,
+                cfgs: r.strs()?,
+            };
+            r.done()?;
+            return Ok(g);
+        }
         let text = std::fs::read_to_string(dir.join("nodes.tsv")).context("reading nodes.tsv")?;
         let mut names = Vec::new();
         for l in text.lines() {
@@ -93,6 +110,19 @@ impl Graph {
             uids: lines("uids.txt")?,
             cfgs: lines("configs.txt")?,
         })
+    }
+
+    /// This graph as the cache `load` reads (`crate::cache`).
+    pub fn save_cache(&self, dir: &Path) -> Result<()> {
+        let mut w = crate::cache::Writer::new(CACHE_MAGIC);
+        w.strs(&self.names);
+        w.u32s(&self.first);
+        w.u32s(&self.dst);
+        w.u32s(&self.uid);
+        w.u32s(&self.cfg);
+        w.strs(&self.uids);
+        w.strs(&self.cfgs);
+        w.save(&dir.join(CACHE))
     }
 
     pub fn fanout(&self, g: u32) -> std::ops::Range<usize> {

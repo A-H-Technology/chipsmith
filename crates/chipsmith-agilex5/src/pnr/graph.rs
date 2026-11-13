@@ -7,6 +7,10 @@ use std::path::Path;
 use anyhow::{ensure, Context, Result};
 use rustc_hash::FxHashMap;
 
+/// The cache of place and route's graph in a graph directory.
+pub const CACHE: &str = "pnr-graph.cache";
+const CACHE_MAGIC: &str = "chipsmith-agilex5 pnr graph 1";
+
 /// Edge classes, as `a5db usable` writes them (a5db src/route.rs).
 pub const NO: u8 = 0;
 pub const MUX: u8 = 1;
@@ -62,6 +66,36 @@ impl Graph {
     }
 
     pub fn load(dir: &Path) -> Result<Graph> {
+        if let Some(mut r) = crate::cache::Reader::open(&dir.join(CACHE), CACHE_MAGIC)? {
+            let types = r.strs()?;
+            let mut g = Graph {
+                ty: r.u16s()?,
+                x: r.u8s()?,
+                y: r.u8s()?,
+                z: r.u16s()?,
+                i: r.u32s()?,
+                first: r.u32s()?,
+                dst: r.u32s()?,
+                class: r.u8s()?,
+                ambiguous: r.u8s()?.into_iter().map(|b| b != 0).collect(),
+                index: FxHashMap::default(),
+                type_index: types
+                    .iter()
+                    .enumerate()
+                    .map(|(k, t)| (t.clone(), k as u16))
+                    .collect(),
+                types,
+            };
+            r.done()?;
+            g.index.reserve(g.ty.len());
+            for n in 0..g.ty.len() {
+                if g.ty[n] != u16::MAX {
+                    g.index
+                        .insert((g.ty[n], g.x[n], g.y[n], g.z[n], g.i[n]), n as u32);
+                }
+            }
+            return Ok(g);
+        }
         let text = std::fs::read_to_string(dir.join("nodes.tsv")).context("reading nodes.tsv")?;
         let mut g = Graph {
             types: Vec::new(),
@@ -161,6 +195,28 @@ impl Graph {
 
     pub fn len(&self) -> usize {
         self.ty.len()
+    }
+
+    /// This graph as the cache `load` reads (`crate::cache`).
+    pub fn save_cache(&self, dir: &Path) -> Result<()> {
+        let mut w = crate::cache::Writer::new(CACHE_MAGIC);
+        w.strs(&self.types);
+        w.u16s(&self.ty);
+        w.u8s(&self.x);
+        w.u8s(&self.y);
+        w.u16s(&self.z);
+        w.u32s(&self.i);
+        w.u32s(&self.first);
+        w.u32s(&self.dst);
+        w.u8s(&self.class);
+        w.u8s(
+            &self
+                .ambiguous
+                .iter()
+                .map(|&b| u8::from(b))
+                .collect::<Vec<_>>(),
+        );
+        w.save(&dir.join(CACHE))
     }
 
     pub fn fanout(&self, n: u32) -> std::ops::Range<usize> {

@@ -77,6 +77,14 @@ let
   xc7RoutingGraph = runCommand "xc7z010-routing-graph" { } ''
     ${lib.getExe unwrapped} xc7-routing-graph ${xc7.prjxray-db}/zynq7 $out
   '';
+  # agilex5-re's routing graph with both of the DE25 flow's loaders'
+  # caches added (crates/chipsmith-agilex5/src/cache.rs): a build reads
+  # arrays instead of parsing 660 MB of graph text, about 15 s less. The
+  # devshell keeps the raw graph (the loaders parse it), since the cache is
+  # made by chipsmith itself.
+  agilex5GraphCache = runCommand "agilex5-graph-cache" { } ''
+    ${lib.getExe unwrapped} agilex5-graph-cache ${agilex5-graph} $out
+  '';
 in
 runCommand "chipsmith-${unwrapped.version}"
   {
@@ -87,6 +95,7 @@ runCommand "chipsmith-${unwrapped.version}"
         routingGraph
         xc7RoutingGraph
         de2Loader
+        agilex5GraphCache
         ;
     };
     meta.mainProgram = "chipsmith";
@@ -107,7 +116,7 @@ runCommand "chipsmith-${unwrapped.version}"
       --set CHIPSMITH_XC7_GRAPH ${xc7RoutingGraph} \
       --set CHIPSMITH_PRJXRAY_DB ${xc7.prjxray-db} \
       --set CHIPSMITH_AGILEX5_DB ${agilex5-db} \
-      --set CHIPSMITH_AGILEX5_GRAPH ${agilex5-graph} \
+      --set CHIPSMITH_AGILEX5_GRAPH ${agilex5GraphCache} \
       --set CHIPSMITH_AGILEX5_QUARTUS ${agilex5-quartus} \
       --set CHIPSMITH_AGILEX5_PHASE1 ${agilex5-phase1}
   ''

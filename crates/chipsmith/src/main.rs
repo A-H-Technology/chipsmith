@@ -65,6 +65,10 @@ enum Cmd {
     /// Map a yosys netlist's simple gates to 4-input LUTs (in place of abc).
     #[command(hide = true)]
     Lutmap { netlist: PathBuf, mapped: PathBuf },
+    /// The DE25-Nano's routing graph with both loaders' caches added: the
+    /// nix package makes it once, so a build doesn't parse the graph again.
+    #[command(hide = true)]
+    Agilex5GraphCache { graph: PathBuf, out: PathBuf },
     /// DE25-Nano phase 1 with another U-Boot SPL: BASE is a Quartus
     /// HPS-first `.hps.rbf` for the board's HPS settings, SPL the
     /// `u-boot-spl-dtb.bin` to put in it.
@@ -115,6 +119,9 @@ fn main() -> Result<()> {
             let s = chipsmith_synth::lutmap::map_file(netlist, mapped)?;
             eprintln!("{s:?}");
             return Ok(());
+        }
+        Cmd::Agilex5GraphCache { graph, out } => {
+            return chipsmith_agilex5::graph_cache(graph, out);
         }
         Cmd::Agilex5Phase1 {
             base,
@@ -184,7 +191,8 @@ fn main() -> Result<()> {
         | Cmd::Pack { .. }
         | Cmd::PackDiff { .. }
         | Cmd::Lutmap { .. }
-        | Cmd::Agilex5Phase1 { .. } => {
+        | Cmd::Agilex5Phase1 { .. }
+        | Cmd::Agilex5GraphCache { .. } => {
             unreachable!("handled before the manifest")
         }
         Cmd::FlashDump { out } => {

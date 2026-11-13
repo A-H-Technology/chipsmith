@@ -7,6 +7,7 @@
 //! routing graph dumped from Quartus, and the firmware and codebooks of the
 //! user's own Quartus Prime Pro install (docs/legal.md).
 mod blank;
+mod cache;
 pub mod db;
 mod ddb;
 pub mod flow;
@@ -20,3 +21,17 @@ pub mod route;
 pub mod sof;
 pub mod sofgen;
 pub mod synth;
+
+/// The routing graph at `src` (agilex5-re's graph package) with both
+/// loaders' caches added, in `out`: the package's files linked, then
+/// `pnr-graph.cache` and `asm-graph.cache` (`crate::cache`).
+pub fn graph_cache(src: &std::path::Path, out: &std::path::Path) -> anyhow::Result<()> {
+    use anyhow::Context;
+    std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
+    for e in std::fs::read_dir(src)? {
+        let e = e?;
+        std::os::unix::fs::symlink(e.path(), out.join(e.file_name()))?;
+    }
+    pnr::graph::Graph::load(src)?.save_cache(out)?;
+    graph::Graph::load(src)?.save_cache(out)
+}

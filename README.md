@@ -2173,7 +2173,10 @@ Next devices:
   high, bit 20 (cnt[24] & cnt[23]) 26 % high, where the design gives
   2.98 Hz at 50 % and 25 %. Since the same day `chipsmith build` and
   `chipsmith flash --ssh` do it (`examples/de25-irq`, its core the same
-  bytes; build 71 s, most of it loading the routing graph twice). Also
+  bytes; build 71 s then, 61 s since 2026-11-13: the nix package caches
+  the routing graph's loaded arrays and agilex5-re's db package ships its
+  tables decompressed, where loading the graph twice and decompressing
+  io96's 318 MB layout took 47 of 81 s). Also
   2026-11-12: the board's QSPI holds that HPS-first phase 1 (Quartus'
   `.jic`, factory image backed up first), so after a power cycle the HPS
   boots Linux with no JTAG and no fabric, and `flash --ssh` loads

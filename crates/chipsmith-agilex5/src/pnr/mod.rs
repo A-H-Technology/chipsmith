@@ -10,7 +10,7 @@
 mod det;
 mod dsp;
 mod emit;
-mod graph;
+pub(crate) mod graph;
 mod ioreg;
 mod netlist;
 pub mod pack;
