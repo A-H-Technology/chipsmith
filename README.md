@@ -2176,7 +2176,13 @@ Next devices:
   bytes; build 71 s then, 61 s since 2026-11-13: the nix package caches
   the routing graph's loaded arrays and agilex5-re's db package ships its
   tables decompressed, where loading the graph twice and decompressing
-  io96's 318 MB layout took 47 of 81 s). Also
+  io96's 318 MB layout took 47 of 81 s). Routing is what's left: facet-hdl's hello
+  (644 ALMs, 1,171 nets) routes in 31 s on a quiet machine, about 9.5
+  million A* expansions an iteration at ~1.2 us each. Packing the
+  router's per-node arrays into one record (fewer cache misses, the same
+  routes) measured no faster, 31.8 s against 30.9 over three alternating
+  runs each; a faster search means routes a5pnr's tests don't pin, so it
+  waits for the board. Also
   2026-11-12: the board's QSPI holds that HPS-first phase 1 (Quartus'
   `.jic`, factory image backed up first), so after a power cycle the HPS
   boots Linux with no JTAG and no fabric, and `flash --ssh` loads
