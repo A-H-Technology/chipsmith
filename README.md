@@ -1001,7 +1001,15 @@ to the FASM, and since 2026-11-02 to the `.bit` (ADR-0013):
   riscv-bram +2%, bram-selftest +4%, mult-selftest's 62.5 MHz logic -6%;
   by Vivado on picorv32's five seeds, even (145.4 against 145.1 MHz,
   137.7-155.7 against 131.0-158.0); placement 4 to 5 times faster on
-  picorv32 and riscv-bram.
+  picorv32 and riscv-bram. Since 2026-11-14 the cold anneal starts at
+  0.125 standard deviations of its moves' cost changes instead of 0.5:
+  every seed's critical path had settled within ~4 s, and the hottest of
+  the eight seeds (their starting temperatures spread 3x) set the wall
+  time. sha256 places in 20 s instead of 50, by Vivado on chipsmith's
+  routing at 97.8 MHz against 96.6 (five seeds, 96.2-100.0 against
+  94.4-99.1); by the router's estimate, ten seeds each, picorv32 +1%
+  and riscv-bram -0.6%, five each bram-selftest +0.2% and mult-selftest
+  +1%, all within their seeds' spread, each placing 20-45% faster.
 - **Clocks** (`cmt.rs`, since 2026-11-04, ADR-0017): `XC7_PLL` and
   `XC7_MMCM` ask for a PLLE2_ADV or MMCME2_ADV by ratio, CY2_PLL's terms
   (ADR-0008): `INCLK0_INPUT_FREQUENCY` in ps, per output
@@ -1118,7 +1126,9 @@ side, and skips the critical-path repair, which moved neither design's
 critical path by more than 0.01 ns. zybo-picorv32 places in 4 s and
 routes in 12 to 15 s (24 s before), zybo-sha256 in 52 s and 65 to 82 s
 (113 to 120 s before), at the same Fmax estimate over three placer seeds
-(docs/fast-pnr-status.md, "7-series routing").
+(docs/fast-pnr-status.md, "7-series routing"). Since 2026-11-14 the
+placer's cold anneal is shorter ("Placement", above): zybo-sha256 places
+in 18 to 32 s.
 
 The self-tests against Vivado the same way (2026-11-08, branch xc7-qor2; Vivado's own
 2026-11-02, bram-selftest's on its earlier RTL):
@@ -1980,8 +1990,10 @@ Next devices:
     ADR-0016; on the board 2026-11-06). No MUXF7/F8, by measurement
     ("7-series synthesis", above). The electrostatic placer is
     timing-driven since branch xc7-timing (nets reweighted by criticality
-    every 25 iterations). Open: the annealer after it shorter (sha256's
-    cold anneal is still about 13 million moves).
+    every 25 iterations). The annealer after it starts cooler since
+    2026-11-14 (sha256's anneal from 13 million moves to about 6, placed
+    in 20 s instead of 50 at Vivado's 97.8 MHz against 96.6; "Placement",
+    above).
   - Router (done, interconnect only). The routing graph comes from
     prjxray-db (`tilegrid.json`, `tile_type_*.json`, `tileconn.json`, and
     `segbits`/`ppips` for which pips a bitstream can express), into the

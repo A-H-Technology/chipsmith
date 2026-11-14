@@ -1542,7 +1542,7 @@ enum Start {
 }
 
 /// One anneal from `start`; returns the moves tried.
-fn anneal(s: &mut State, rng: &mut Rng, start: Start) -> u64 {
+fn anneal(s: &mut State, rng: &mut Rng, start: Start, seed: usize) -> u64 {
     let d = s.d;
     let g = s.g;
     let objects: Vec<Obj> = (0..d.bles.len() as u32)
@@ -1645,8 +1645,19 @@ fn anneal(s: &mut State, rng: &mut Rng, start: Start) -> u64 {
     } * var.sqrt();
     let live_nets = d.net_cells.iter().filter(|c| !c.is_empty()).count().max(1);
 
+    // CHIPSMITH_XC7_TRACE: each temperature's cost and critical path, per seed.
+    let trace = std::env::var_os("CHIPSMITH_XC7_TRACE").is_some();
+    let started = Instant::now();
     loop {
-        s.analyse(true);
+        let critical = s.analyse(true);
+        if trace {
+            eprintln!(
+                "anneal {seed} {:6.2} s  moves {total_moves:9}  t {t:10.4}  r {r:5.2}  cost {:10.1}  critical {:6.0} ps",
+                started.elapsed().as_secs_f64(),
+                s.total(),
+                critical
+            );
+        }
         let mut accepted = 0;
         for _ in 0..moves_per_t {
             total_moves += 1;
@@ -1670,6 +1681,14 @@ fn anneal(s: &mut State, rng: &mut Rng, start: Start) -> u64 {
     for _ in 0..moves_per_t {
         total_moves += 1;
         attempt(s, rng, 1.0, 0.0);
+    }
+    if trace {
+        eprintln!(
+            "anneal {seed} done in {:.2} s, {total_moves} moves, cost {:.1}, critical {:.0} ps",
+            started.elapsed().as_secs_f64(),
+            s.total(),
+            s.analyse(false)
+        );
     }
     total_moves
 }
@@ -1905,7 +1924,18 @@ fn fixed_sites(db: &ChipDb, d: &Design, g: &Grid) -> Result<Vec<(CellId, String,
 /// 158 MHz). The global placement is wirelength-only and its BLEs are
 /// legalised greedily, so the anneal has timing left to fix.
 const COLD_RANGE: f64 = 3.0;
-const COLD_TEMPERATURE: f64 = 0.5;
+///
+/// The starting temperature was 0.5, until a trace (CHIPSMITH_XC7_TRACE)
+/// showed every seed's critical path settled within ~4 s of a 25-45 s
+/// anneal, and the seeds' starting temperatures spread 3x (the deltas are
+/// heavy-tailed, so their deviation is a noisy sample), the hottest
+/// seed setting the wall time. Five seeds each, the router's Fmax at 0.5,
+/// 0.25, 0.125, 0.0625: sha256 103.4, 103.3, 104.3, 104.8 MHz placed in
+/// 49.6, 34.1, 20.4, 14.8 s; riscv-bram (ten seeds) 141.1, -, 140.3,
+/// 138.0; picorv32 (ten seeds at 0.5, 0.125) 162.1, 163.7. By Vivado,
+/// sha256 at 0.125 makes 97.8 MHz against 96.6 at 0.5. 0.03 lost sha256's
+/// worst seed (100.3); cooling at 0.9 instead of 0.95 lost 1.4%.
+const COLD_TEMPERATURE: f64 = 0.125;
 const COLD_MOVES: f64 = 1.0;
 
 /// Anneals run in parallel from the same start with different seeds; the
@@ -1925,7 +1955,7 @@ fn best_of<'a>(start: &State<'a>, seeds: usize, from: Start) -> (State<'a>, u64)
                     let mut rng = Rng(0x9e37_79b9_7f4a_7c15
                         ^ (i as u64 + 1).wrapping_mul(0xbf58_476d_1ce4_e5b9)
                         ^ base.wrapping_mul(0x94d0_49bb_1331_11eb));
-                    let moves = anneal(&mut s, &mut rng, from);
+                    let moves = anneal(&mut s, &mut rng, from, i);
                     (s, moves)
                 })
             })
@@ -2224,7 +2254,14 @@ pub(crate) fn place(db: &ChipDb, delays: Option<&Delays>, d: &Design) -> Result<
         _ => objects >= ELECTRO_FROM,
     };
     let (mut start, from) = if electro {
-        (global(d, &g, timing.as_ref(), &fixed)?, Start::Cold)
+        let s = global(d, &g, timing.as_ref(), &fixed)?;
+        if std::env::var_os("CHIPSMITH_XC7_TRACE").is_some() {
+            eprintln!(
+                "global placement in {:.1} s",
+                started.elapsed().as_secs_f64()
+            );
+        }
+        (s, Start::Cold)
     } else {
         (initial(d, &g, timing.as_ref())?, Start::Hot)
     };
