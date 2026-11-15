@@ -2215,8 +2215,13 @@ Next devices:
   examples/de25-lw (a register block on the bridge) builds: its 50 inputs
   into the HPS, the 62 outputs it reads and the bridge clock route to the
   nodes Quartus' route dumps found (agilex5-re
-  `db/sm4revb/hps/lwhps2fpga.tsv`). Not yet run on the board. Open: that
-  board run, `[clocks]` and the I/O registers in a DE25 manifest, and the
+  `db/sm4revb/hps/lwhps2fpga.tsv`). On the board (2026-11-15, loaded by
+  `chipsmith flash --ssh`): Linux reads its ID 0xC5B1D6E0 at 0x20000000, the
+  scratch register holds each of four patterns written to it, the counter
+  climbs 50 counts a microsecond (CLOCK1_50), and setting bit 0 of 0x0C raises
+  GIC 49 (`/dev/uio0`) once per set, three of three, with none on clearing it.
+  Only single-beat accesses are tested (busybox `devmem`). Open: bursts,
+  `[clocks]` and the I/O registers in a DE25 manifest, and the
   other bridges.
 
 ## Manifest
