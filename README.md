@@ -2220,7 +2220,10 @@ Next devices:
   scratch register holds each of four patterns written to it, the counter
   climbs 50 counts a microsecond (CLOCK1_50), and setting bit 0 of 0x0C raises
   GIC 49 (`/dev/uio0`) once per set, three of three, with none on clearing it.
-  Only single-beat accesses are tested (busybox `devmem`). Open: bursts,
+  Only single-beat accesses are tested (busybox `devmem`). facet-hdl's hello,
+  built by chipsmith from its `examples/hello/de25/chipsmith` (644 ALMs),
+  answers its RPC calls the same day, polled and through `/dev/uio0`'s
+  interrupt (facet-hdl README), and its Quartus build is gone. Open: bursts,
   `[clocks]` and the I/O registers in a DE25 manifest, and the
   other bridges.
 
