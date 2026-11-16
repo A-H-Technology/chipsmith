@@ -19,8 +19,8 @@ lzma-rust2.workspace = true
 rustc-hash.workspace = true
 serde_json.workspace = true
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-hmac = "0.12"
-sha2 = "0.10"
+hmac = "0.13"
+sha2 = "0.11"
 # The .ddb containers' LZMA1 streams, which lzma-rust2 doesn't read raw.
 lzma-rs = "0.3"
 # pfg's deflate is zlib's own (level 9, 8 KiB window, Z_FIXED); only zlib
