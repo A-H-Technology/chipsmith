@@ -1017,10 +1017,27 @@ pub fn run(
 /// agilex5-re's map of the HPS signals the fabric meets
 /// (`db/sm4revb/hps/lwhps2fpga.tsv`): (atom port, bit) → (into the HPS, node).
 fn hps_nodes(db: &str) -> Result<HashMap<(String, u32), (bool, String)>> {
-    let path = format!("{db}/hps/lwhps2fpga.tsv");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Ok(HashMap::default());
+    // One table per bridge (lwhps2fpga.tsv, hps2fpga.tsv, ...), each keyed
+    // by the atom's port names, which don't overlap.
+    let mut out = HashMap::default();
+    let Ok(dir) = std::fs::read_dir(format!("{db}/hps")) else {
+        return Ok(out);
     };
+    let mut paths: Vec<_> = dir
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "tsv"))
+        .collect();
+    paths.sort();
+    for p in paths {
+        out.extend(hps_table(&p.to_string_lossy())?);
+    }
+    Ok(out)
+}
+
+/// One of agilex5-re's HPS tables: (atom port, bit) → (into the HPS, node).
+fn hps_table(path: &str) -> Result<HashMap<(String, u32), (bool, String)>> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
     text.lines()
         .filter(|l| !l.starts_with('#') && !l.is_empty())
         .map(|l| {

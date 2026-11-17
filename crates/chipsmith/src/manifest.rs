@@ -176,6 +176,44 @@ pub static HPS_SIGNALS: &[HpsSignalDef] = hps_signals! {
     "lwhps2fpga_rlast" "LWSOC2FPGA_R_LAST" 1 IntoHps;
     "lwhps2fpga_rvalid" "LWSOC2FPGA_R_VALID" 1 IntoHps;
     "lwhps2fpga_rready" "LWSOC2FPGA_R_READY" 1 FromHps;
+    // The HPS-to-FPGA bridge (0x40000000 for the HPS): 128-bit data,
+    // 32-bit addresses (the atom has 40; the rest aren't routed).
+    "hps2fpga_clk" "SOC2FPGA_CLK" 1 IntoHps;
+    "hps2fpga_awid" "SOC2FPGA_AW_ID" 4 FromHps;
+    "hps2fpga_awaddr" "SOC2FPGA_AW_ADDR" 32 FromHps;
+    "hps2fpga_awlen" "SOC2FPGA_AW_LEN" 8 FromHps;
+    "hps2fpga_awsize" "SOC2FPGA_AW_SIZE" 3 FromHps;
+    "hps2fpga_awburst" "SOC2FPGA_AW_BURST" 2 FromHps;
+    "hps2fpga_awlock" "SOC2FPGA_AW_LOCK" 1 FromHps;
+    "hps2fpga_awcache" "SOC2FPGA_AW_CACHE" 4 FromHps;
+    "hps2fpga_awprot" "SOC2FPGA_AW_PROT" 3 FromHps;
+    "hps2fpga_awvalid" "SOC2FPGA_AW_VALID" 1 FromHps;
+    "hps2fpga_awready" "SOC2FPGA_AW_READY" 1 IntoHps;
+    "hps2fpga_wdata" "SOC2FPGA_W_DATA" 128 FromHps;
+    "hps2fpga_wstrb" "SOC2FPGA_W_STRB" 16 FromHps;
+    "hps2fpga_wlast" "SOC2FPGA_W_LAST" 1 FromHps;
+    "hps2fpga_wvalid" "SOC2FPGA_W_VALID" 1 FromHps;
+    "hps2fpga_wready" "SOC2FPGA_W_READY" 1 IntoHps;
+    "hps2fpga_bid" "SOC2FPGA_B_ID" 4 IntoHps;
+    "hps2fpga_bresp" "SOC2FPGA_B_RESP" 2 IntoHps;
+    "hps2fpga_bvalid" "SOC2FPGA_B_VALID" 1 IntoHps;
+    "hps2fpga_bready" "SOC2FPGA_B_READY" 1 FromHps;
+    "hps2fpga_arid" "SOC2FPGA_AR_ID" 4 FromHps;
+    "hps2fpga_araddr" "SOC2FPGA_AR_ADDR" 32 FromHps;
+    "hps2fpga_arlen" "SOC2FPGA_AR_LEN" 8 FromHps;
+    "hps2fpga_arsize" "SOC2FPGA_AR_SIZE" 3 FromHps;
+    "hps2fpga_arburst" "SOC2FPGA_AR_BURST" 2 FromHps;
+    "hps2fpga_arlock" "SOC2FPGA_AR_LOCK" 1 FromHps;
+    "hps2fpga_arcache" "SOC2FPGA_AR_CACHE" 4 FromHps;
+    "hps2fpga_arprot" "SOC2FPGA_AR_PROT" 3 FromHps;
+    "hps2fpga_arvalid" "SOC2FPGA_AR_VALID" 1 FromHps;
+    "hps2fpga_arready" "SOC2FPGA_AR_READY" 1 IntoHps;
+    "hps2fpga_rid" "SOC2FPGA_R_ID" 4 IntoHps;
+    "hps2fpga_rdata" "SOC2FPGA_R_DATA" 128 IntoHps;
+    "hps2fpga_rresp" "SOC2FPGA_R_RESP" 2 IntoHps;
+    "hps2fpga_rlast" "SOC2FPGA_R_LAST" 1 IntoHps;
+    "hps2fpga_rvalid" "SOC2FPGA_R_VALID" 1 IntoHps;
+    "hps2fpga_rready" "SOC2FPGA_R_READY" 1 FromHps;
 };
 
 /// One bit of an HPS signal; the bit is below the signal's width.
@@ -262,7 +300,7 @@ impl A5Site {
             pin: s.to_string(),
             device: Device::A5eb013bb23be4scs,
             expected:
-                "pins are package balls like V16, or HPS signals: f2h_irq0[k], lwhps2fpga_clk and the lightweight bridge's lwhps2fpga_* (a whole one, or [bit])",
+                "pins are package balls like V16, or HPS signals: f2h_irq0[k], the lightweight bridge's lwhps2fpga_* and the HPS-to-FPGA bridge's hps2fpga_* (a whole one, or [bit])",
         })
     }
 }
@@ -983,7 +1021,7 @@ impl Manifest {
 }
 
 /// 64 hex digits, either case.
-fn parse_hash(s: &str) -> Option<[u8; 32]> {
+pub(crate) fn parse_hash(s: &str) -> Option<[u8; 32]> {
     if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }

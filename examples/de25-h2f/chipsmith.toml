@@ -1,0 +1,58 @@
+[project]
+name = "h2f"
+top = "h2f"
+sources = ["src/*.v"]
+
+[target]
+device = "A5EB013BB23BE4SCS"
+# The DE25-Nano boots HPS-first: phase 1 (in its QSPI, built by nixos-fpga)
+# configures the HPS, and this core is phase 2, which the SDM takes only with
+# phase 1's HPS IO hash. phase1 names it: its HPS shell lines and that hash
+# come from agilex5-re's phase1 package.
+phase1 = "de25-nano"
+
+# The HPS-to-FPGA bridge's signals by the names Quartus' HPS wrapper gives
+# them; a whole signal is the port's bits in order. hps2fpga_clk clocks the
+# bridge's fabric side.
+[pins]
+CLOCK1_50 = { pin = "V16", vccio = "3.3 V" }
+lw_clk = "hps2fpga_clk"
+awid = "hps2fpga_awid"
+awaddr = "hps2fpga_awaddr"
+awlen = "hps2fpga_awlen"
+awsize = "hps2fpga_awsize"
+awburst = "hps2fpga_awburst"
+awlock = "hps2fpga_awlock"
+awcache = "hps2fpga_awcache"
+awprot = "hps2fpga_awprot"
+awvalid = "hps2fpga_awvalid"
+awready = "hps2fpga_awready"
+wdata = "hps2fpga_wdata"
+wstrb = "hps2fpga_wstrb"
+wlast = "hps2fpga_wlast"
+wvalid = "hps2fpga_wvalid"
+wready = "hps2fpga_wready"
+bid = "hps2fpga_bid"
+bresp = "hps2fpga_bresp"
+bvalid = "hps2fpga_bvalid"
+bready = "hps2fpga_bready"
+arid = "hps2fpga_arid"
+araddr = "hps2fpga_araddr"
+arlen = "hps2fpga_arlen"
+arsize = "hps2fpga_arsize"
+arburst = "hps2fpga_arburst"
+arlock = "hps2fpga_arlock"
+arcache = "hps2fpga_arcache"
+arprot = "hps2fpga_arprot"
+arvalid = "hps2fpga_arvalid"
+arready = "hps2fpga_arready"
+rid = "hps2fpga_rid"
+rdata = "hps2fpga_rdata"
+rresp = "hps2fpga_rresp"
+rlast = "hps2fpga_rlast"
+rvalid = "hps2fpga_rvalid"
+rready = "hps2fpga_rready"
+
+# The board's 50 MHz oscillator.
+[clocks]
+CLOCK1_50 = "50 MHz"

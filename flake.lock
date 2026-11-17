@@ -10,11 +10,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1794585840,
-        "narHash": "sha256-gFH8lKMij3DTrX6yJdbt94ZtfTep9OG3L63S5Q3d6KQ=",
+        "lastModified": 1794929916,
+        "narHash": "sha256-Gl2g+6Yizl/FkFkpROMxoiZb4rBRUHjec32nVP7xmmc=",
         "owner": "cramt",
         "repo": "agilex5-re",
-        "rev": "b683c93e0422899a82884567f5fdb97348a43b4e",
+        "rev": "62a8c6d0c9e6363e0e1d9275f2dc793663be7eb5",
         "type": "github"
       },
       "original": {

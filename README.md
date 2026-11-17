@@ -2336,8 +2336,17 @@ Next devices:
   24 read bursts of more than one beat, up to 4 beats written and 8 read
   (the bridge's fabric side is 32 bits); with the write address held
   within a burst, every burst access fails. A DE25
-  manifest takes I/O registers since the same day (board run owed). Open:
-  the other bridges.
+  manifest takes I/O registers since the same day (board run owed), and
+  the HPS-to-FPGA bridge (`hps2fpga_*`, 128-bit data at 0x40000000; its
+  table from a Quartus route dump, agilex5-re `db/sm4revb/hps/hps2fpga.tsv`):
+  examples/de25-h2f, a 32 x 128-bit memory on it, answers from mercury's
+  Linux (`h2ftest.c`, through /dev/mem) with every word right over 32-,
+  64-, 128-bit and 64-byte accesses and byte strobes. The CPU's accesses
+  to a device mapping reach this bridge as single beats, so its bursts are
+  unexercised (de25-burst covers the same logic on the lightweight
+  bridge). Open: FPGA-to-SDRAM, whose requests don't enter through the
+  HPS atom (agilex5-re README), and FPGA-to-HPS, which the board's phase
+  1 doesn't have.
 
 ## Manifest
 
@@ -2393,9 +2402,11 @@ araddr = "lwhps2fpga_araddr"                   # a whole signal: araddr[0..28]
 ```
 
 HPS signals are the names Quartus' HPS wrapper gives them: `f2h_irq0`
-(64 bits) and the lightweight HPS-to-FPGA bridge, `lwhps2fpga_clk` and
+(64 bits), the lightweight HPS-to-FPGA bridge, `lwhps2fpga_clk` and
 `lwhps2fpga_{aw,w,b,ar,r}*`, AXI4 with 32-bit data, 29-bit addresses and
-4-bit IDs (examples/de25-lw has all of them). A port takes a whole signal of
+4-bit IDs (examples/de25-lw has all of them), and the HPS-to-FPGA bridge,
+`hps2fpga_*` the same with 128-bit data and 32-bit addresses
+(examples/de25-h2f). A port takes a whole signal of
 its width, or one bit (`"lwhps2fpga_rresp[1]"`). The direction follows the
 signal: into the HPS from an output, out of it into an input. The design
 connects straight to the HPS's AXI4 ports, with none of the register stages
