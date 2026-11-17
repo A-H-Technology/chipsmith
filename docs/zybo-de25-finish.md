@@ -58,9 +58,14 @@ Z5-Z9 and slice F7/F8 mapping moved to "Cool stuff to do eventually"
   every word right from Linux (single beats; a device mapping gives no
   bursts on a 128-bit bridge). FPGA-to-SDRAM built and routed
   (`f2sdram_*`, the MPFE atom's table): examples/de25-f2sdram's reads come
-  back, all DECERR; left is the bridge's enable handshake, which nothing
-  runs on an HPS-first boot (a kernel or secure-firmware step in
-  nixos-fpga). FPGA-to-HPS needs a phase 1 that has it.
+  back, all DECERR, at every address and AxPROT. Not the bridge enable
+  (set by hand, still DECERR), not anything the core sets (the HPS↔MPFE
+  links and the MPFE's inner path have no core bits; Quartus' image of
+  the same master differs from phase 1's only in fabric logic), and the
+  SMMU records nothing for stream IDs 0 and 11-63 (agilex5-re README,
+  "FPGA-to-SDRAM on the board"). Next: the Quartus oracle
+  (`HPSF_F2STEST`) past its lightweight-bridge hang, or the master's
+  stream ID above 63. FPGA-to-HPS needs a phase 1 that has it.
 - [x] **D5 Router speed** (2026-11-17). The A* weight 2 → 6, chosen over
   4, 5, 6 and 8 on six designs (`bench/de25-astar.sh`): facet-hdl's hello
   routes in 7 s (31), de25-f2sdram in 5.8 (277), critical paths 1.6-12%
