@@ -656,3 +656,15 @@ endmodule
 module MUXF8 (input I0, input I1, input S, output O);
   assign O = S ? I1 : I0;
 endmodule
+
+// Latches a design instantiates itself, for the RTL side as above.
+module LDCE #(parameter [0:0] INIT = 1'b0, parameter [0:0] IS_G_INVERTED = 1'b0)
+  (input G, input GE, input CLR, input D, output reg Q);
+  initial Q = INIT;
+  always @* if (CLR) Q = 1'b0; else if (GE && (G ^ IS_G_INVERTED)) Q = D;
+endmodule
+module LDPE #(parameter [0:0] INIT = 1'b1, parameter [0:0] IS_G_INVERTED = 1'b0)
+  (input G, input GE, input PRE, input D, output reg Q);
+  initial Q = INIT;
+  always @* if (PRE) Q = 1'b1; else if (GE && (G ^ IS_G_INVERTED)) Q = D;
+endmodule

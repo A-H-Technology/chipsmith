@@ -543,3 +543,15 @@ endmodule
                                   output CLKOUT0, CLKOUT1, CLKOUT2, CLKOUT3, CLKOUT4, CLKOUT5,
                                   CLKOUT6, output LOCKED);
 endmodule
+
+// Latches (a slice's storage elements in latch mode): transparent while G
+// is high (low with IS_G_INVERTED) and GE is; CLR clears (LDCE) and PRE
+// presets (LDPE) at once.
+(* blackbox *) module LDCE (output Q, input CLR, D, G, GE);
+  parameter [0:0] INIT = 0;
+  parameter [0:0] IS_G_INVERTED = 0;
+endmodule
+(* blackbox *) module LDPE (output Q, input PRE, D, G, GE);
+  parameter [0:0] INIT = 1;
+  parameter [0:0] IS_G_INVERTED = 0;
+endmodule

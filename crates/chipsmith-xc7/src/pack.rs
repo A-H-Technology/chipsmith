@@ -358,10 +358,53 @@ pub(crate) fn pack(
                     sr,
                     clk_inv: param_bits(g, "IS_C_INVERTED") == 1,
                     sync: matches!(g.ty.as_str(), "FDRE" | "FDSE"),
+                    latch: false,
                 };
                 let conf = Conf::Ff {
                     init: param_bits(g, "INIT") == 1,
                     srval: matches!(g.ty.as_str(), "FDSE" | "FDPE"),
+                };
+                p.push(name, Kind::Ff(cs), pins, conf);
+            }
+            // A latch is a slice register in latch mode, its gate on CK.
+            "LDCE" | "LDPE" => {
+                let preset = g.ty == "LDPE";
+                let gate = match bit(g, "G", 0) {
+                    Some(SigBit::Net(n)) => p.net(n),
+                    _ => bail!("latch {name} has no gate"),
+                };
+                let mut pins = vec![("CK".to_string(), gate)];
+                let ce = match bit(g, "GE", 0).unwrap_or(SigBit::ONE) {
+                    SigBit::Const(State::One) => None,
+                    b => Some(p.sig(b)),
+                };
+                let sr = match bit(g, if preset { "PRE" } else { "CLR" }, 0).unwrap_or(SigBit::ZERO)
+                {
+                    SigBit::Const(State::Zero | State::X | State::Z) => None,
+                    b => Some(p.sig(b)),
+                };
+                if let Some(ce) = ce {
+                    pins.push(("CE".into(), ce));
+                }
+                if let Some(sr) = sr {
+                    pins.push(("SR".into(), sr));
+                }
+                let d = bit(g, "D", 0).with_context(|| format!("{name}: no D"))?;
+                pins.push(("D".into(), p.sig(d)));
+                if let Some(SigBit::Net(q)) = bit(g, "Q", 0) {
+                    pins.push(("Q".into(), p.net(q)));
+                }
+                let cs = ControlSet {
+                    clk: Some(gate),
+                    ce,
+                    sr,
+                    clk_inv: param_bits(g, "IS_G_INVERTED") == 1,
+                    sync: false,
+                    latch: true,
+                };
+                let conf = Conf::Ff {
+                    init: param_bits(g, "INIT") == 1,
+                    srval: preset,
                 };
                 p.push(name, Kind::Ff(cs), pins, conf);
             }

@@ -100,6 +100,8 @@ pub(crate) struct SliceConf {
     pub outmux: [Option<&'static str>; 4],
     pub carry: Option<PreCyInit>,
     pub clkinv: bool,
+    /// The storage elements are latches (`LATCH`).
+    pub latch: bool,
     pub ffsync: bool,
     pub srused: bool,
     pub ceused: bool,
@@ -838,7 +840,11 @@ pub(crate) fn build(
                 };
                 let s = slices.get_mut(site).unwrap();
                 s.ff[k] = Some(conf);
-                s.clkinv = cs.clk_inv;
+                // A slice latch is transparent while its clock is low:
+                // CLKINV makes a gate active high (Vivado's LDCE and LDPE,
+                // bench/zybo-latch/sweep.py).
+                s.clkinv = cs.clk_inv != cs.latch;
+                s.latch = cs.latch;
                 s.ffsync = cs.sync;
                 s.srused = cs.sr.is_some();
                 s.ceused = cs.ce.is_some();

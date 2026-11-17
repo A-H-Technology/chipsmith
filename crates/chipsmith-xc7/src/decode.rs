@@ -256,6 +256,8 @@ struct Half {
     cy0_o5: [bool; 4],
     precyinit: Option<String>,
     clkinv: bool,
+    /// `LATCH`: the four registers are latches, the 5FFs unused.
+    latch: bool,
     sync: bool,
     srused: bool,
     ceused: bool,
@@ -509,6 +511,7 @@ pub fn decode_routed(
                     }
                     (["PRECYINIT", input], None) => h.precyinit = Some(input.to_string()),
                     (["CLKINV"], None) => h.clkinv = true,
+                    (["LATCH"], None) => h.latch = true,
                     (["FFSYNC"], None) => h.sync = true,
                     (["SRUSEDMUX"], None) => h.srused = true,
                     (["CEUSEDMUX"], None) => h.ceused = true,
@@ -1025,6 +1028,23 @@ pub fn decode_routed(
                 (false, true) => Reset::AsyncClear(sr),
                 (false, false) => Reset::AsyncPreset(sr),
             };
+            if h.latch {
+                // Transparent while the clock is low; CLKINV while high.
+                d.m.add_cell(
+                    format!("{key}.{}ld", LETTERS[k]),
+                    cells::Ld {
+                        d: dsrc,
+                        g: clk,
+                        g_inv: !h.clkinv,
+                        ge: ce,
+                        reset: (sr, !h.zrst[k]),
+                        init: !h.zini[k],
+                        q: n.q[k],
+                    }
+                    .cell(),
+                );
+                continue;
+            }
             d.m.add_cell(
                 format!("{key}.{}ff", LETTERS[k]),
                 Fd {

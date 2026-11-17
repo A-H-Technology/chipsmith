@@ -29,8 +29,10 @@ and the DE2's peripherals (README, Roadmap).
   Wide muxes: a design's own MUXF7/MUXF8 build (lowered to LUTs); slice
   F7/F8 mapping measured at a fifth of a 16:1-64:1 multiplexer's LUTs and
   nothing on the examples, left out until a design needs it (README).
-- [ ] **Z4 Latches.** LDCE/LDPE (a slice register in latch mode). Done like
-  Z3.
+- [x] **Z4 Latches** (2026-11-17). LDCE/LDPE from RTL latches and a
+  design's own, resets and gate enables found in the front end's enable;
+  Vivado's and chipsmith's bitstreams co-simulate, and examples/zybo-latch
+  runs 60 million checks with 0 wrong on the board.
 - [ ] **Z5 DSP48E1 pre-adder and ALU modes.** (A+D)*B and multiply-
   accumulate in the DSP, as Vivado infers them. Done when the shape bench
   co-simulates through the bitstream and the board runs it.

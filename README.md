@@ -670,6 +670,10 @@ The Zybo examples:
   ```
 
   With zybo-blinky loaded instead, the same read returns all zeros.
+- `examples/zybo-latch`: four slice latches (gated high, gated low, gate
+  enable and clear, preset), each checked against a register model and
+  read over JTAG (`cargo run --release -p chipsmith-jtag --example
+  xc7_latch`).
 - `examples/zybo-srl`: shift-register LUTs: delay lines of 100, 37 (with
   a clock enable) and 20 (falling edge) stages and an SRLC32E at a sweeping
   address, each checked against a reference and read over JTAG
@@ -1000,10 +1004,30 @@ Zybo limits:
   anywhere else; a Vivado build of a larger GP0 design missed 125 MHz by
   0.2 ns. The PS7's other ports aren't timed yet (Vivado gives an arc only
   for a pin the design connects).
-- Cells: what synthesis makes ("7-series synthesis", above). No MUXF7/F8
-  or latches; no DSP48E1 ALU modes or pre-adder (a product, or a cascaded
-  pair's sum). A design's own IBUF, OBUF, OBUFT and IOBUF are its pins'
+- Cells: what synthesis makes ("7-series synthesis", above). No slice
+  MUXF7/F8 of its own; no DSP48E1 ALU modes or pre-adder (a product, or a
+  cascaded pair's sum). A design's own IBUF, OBUF, OBUFT and IOBUF are its pins'
   buffers (since 2026-11-17).
+- Latches (since 2026-11-17): a latch as RTL writes it (`always @*` with
+  a branch that doesn't assign) or a design's own LDCE/LDPE is a slice
+  storage element in latch mode (`LATCH`; transparent while the slice's
+  clock is low, so `CLKINV` makes a gate active high, as Vivado writes
+  it). A reset the front end folds into the latch's enable (`if (rst) q =
+  v; else if (g) q = d;`) becomes its asynchronous clear or preset, a gate
+  that is an inverter's output its input with `IS_G_INVERTED`, and a gate
+  ANDed with a signal the gate and its gate enable (GE), so the gate is a
+  design signal on a BUFG rather than logic racing its data. A latch slice
+  holds latches of one control set and no 5FFs. bench/zybo-latch/sweep.py
+  builds every LDCE/LDPE shape in Vivado; its bitstream and chipsmith's
+  decode to netlists that co-simulate against the RTL (`xc7_bitstream`
+  `latches`, `rtl_latches`). Timing treats a latch as a register on its
+  gate (no time borrowing). On the board (examples/zybo-latch, read over
+  JTAG): latches gated high and low, with a gate enable and a clear, with
+  a preset, each against a register model, 60 million checks with 0
+  wrong; with one gate's sense flipped in the RTL, its count saturates.
+  The example's inputs change only on edges where the gate holds still:
+  a reset released, or data changed, on the edge a gate closes races the
+  gate's BUFG, in any latch design.
 - Shift registers (since 2026-11-17): a chain of four or more registers
   with no reset, one clock, edge and clock enable, each read only by the
   next, keeps its first and last register and shifts the rest in SRLC32Es

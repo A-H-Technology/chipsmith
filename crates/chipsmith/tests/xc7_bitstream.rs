@@ -457,6 +457,19 @@ fn registers_and_arithmetic() {
     design_built("regs_arith.v", "regs_arith");
 }
 
+/// Every slice latch shape (LDCE, LDPE; bench/zybo-latch/sweep.py), through
+/// the bitstream; `CHIPSMITH_XC7_LATCH_BIT` decodes Vivado's instead.
+#[test]
+fn latches() {
+    project_built("latch", "CHIPSMITH_XC7_LATCH_BIT");
+}
+
+/// Latches written as RTL, through synthesis and the bitstream.
+#[test]
+fn rtl_latches() {
+    design_built("latch_rtl.v", "latch_rtl");
+}
+
 /// A design's own MUXF7s and MUXF8s, lowered to LUTs, through the bitstream.
 #[test]
 fn wide_muxes() {

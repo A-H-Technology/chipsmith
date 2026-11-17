@@ -324,6 +324,9 @@ pub(crate) fn write(
             if has_ff && s.ffsync {
                 line(format!("{p}.FFSYNC"));
             }
+            if s.latch {
+                line(format!("{p}.LATCH"));
+            }
             line(format!(
                 "{p}.{}",
                 if s.clkinv { "CLKINV" } else { "NOCLKINV" }

@@ -61,6 +61,10 @@ pub(crate) struct ControlSet {
     pub clk_inv: bool,
     /// SR acts on the clock edge (FDRE, FDSE) rather than at once.
     pub sync: bool,
+    /// The slice's storage elements are latches (LDCE, LDPE): `clk` is the
+    /// gate, `clk_inv` its active-low sense, `ce` the gate enable. Latch
+    /// mode leaves the 5FFs unusable.
+    pub latch: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -402,8 +406,10 @@ pub(crate) fn build(
     };
     for &(l6, l5) in pairs {
         let ff = first_ff(&d, &taken, l6);
-        let ff5 =
-            first_ff(&d, &taken, l5).filter(|&f5| ff.is_none_or(|f| cs_of(&d, f) == cs_of(&d, f5)));
+        let ff5 = first_ff(&d, &taken, l5).filter(|&f5| {
+            ff.is_none_or(|f| cs_of(&d, f) == cs_of(&d, f5))
+                && cs_of(&d, f5).is_some_and(|cs| !cs.latch)
+        });
         for c in [Some(l6), Some(l5), ff, ff5].into_iter().flatten() {
             taken[c as usize] = true;
             ble_of_lut[c as usize] = true;
@@ -2365,6 +2371,7 @@ mod tests {
             sr: None,
             clk_inv: false,
             sync: true,
+            latch: false,
         }
     }
 

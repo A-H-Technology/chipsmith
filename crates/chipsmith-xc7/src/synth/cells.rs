@@ -165,6 +165,44 @@ impl Fd {
     }
 }
 
+/// A slice storage element as a latch: transparent while the gate `g` is
+/// high (low with `g_inv`) and `ge` is, cleared (LDCE) or preset (LDPE) at
+/// once while `reset` is.
+pub struct Ld {
+    pub d: SigBit,
+    pub g: SigBit,
+    pub g_inv: bool,
+    pub ge: SigBit,
+    /// The reset and whether it presets (LDPE) rather than clears (LDCE).
+    pub reset: (SigBit, bool),
+    pub init: bool,
+    pub q: SigBit,
+}
+
+impl Ld {
+    pub fn cell(self) -> CellKind {
+        let (ty, pin) = if self.reset.1 {
+            ("LDPE", "PRE")
+        } else {
+            ("LDCE", "CLR")
+        };
+        generic(
+            ty,
+            BTreeMap::from([
+                ("INIT".to_string(), bits(self.init.into(), 1)),
+                ("IS_G_INVERTED".to_string(), bits(self.g_inv.into(), 1)),
+            ]),
+            vec![
+                port("G", Dir::In, vec![self.g]),
+                port("GE", Dir::In, vec![self.ge]),
+                port(pin, Dir::In, vec![self.reset.0]),
+                port("D", Dir::In, vec![self.d]),
+                port("Q", Dir::Out, vec![self.q]),
+            ],
+        )
+    }
+}
+
 /// One SRLC32E: `len` stages (1 to 32) from `d` to `q`, `init[i]` stage
 /// i's power-up value, shifted on enabled edges of `clk` (falling with
 /// `clk_inv`). Its address is the constant `len - 1`.
