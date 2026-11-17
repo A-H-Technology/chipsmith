@@ -43,9 +43,10 @@ Z5-Z9 and slice F7/F8 mapping moved to "Cool stuff to do eventually"
   model (named by its input port) and fails on a miss: de25-lw at 50 MHz
   has 17.9 ns of slack, at 600 MHz the build fails. Cores are unchanged
   byte for byte.
-- [ ] **D2 Bursts on the lightweight bridge.** AXI4 INCR bursts read and
-  written from Linux (a memcpy through the uio mapping), checked word for
-  word.
+- [x] **D2 Bursts on the lightweight bridge** (2026-11-17).
+  examples/de25-burst's memory, written and read from Linux with 32-, 64-
+  and 128-bit accesses and memcpy (bursts of up to 4 beats written, 8
+  read), every word right; a core with the burst address held fails.
 - [ ] **D3 I/O registers** in a DE25 manifest.
 - [ ] **D4 The other bridges.** HPS-to-FPGA (the full 128-bit bridge),
   FPGA-to-HPS and FPGA-to-SDRAM, each named by signal like the lightweight

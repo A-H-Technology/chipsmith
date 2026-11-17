@@ -2328,7 +2328,14 @@ Next devices:
   built by chipsmith from its `examples/hello/de25/chipsmith` (644 ALMs),
   answers its RPC calls the same day, polled and through `/dev/uio0`'s
   interrupt (facet-hdl README), and its Quartus build is gone. Since 2026-11-17
-  a DE25 manifest takes `[clocks]`. Open: bursts, the I/O registers in a
+  a DE25 manifest takes `[clocks]`, and bursts on the lightweight bridge
+  are checked on the board: examples/de25-burst, a 32-word memory (MLABs)
+  that takes INCR bursts with byte strobes, written and read from mercury's
+  Linux with 32-, 64- and 128-bit accesses and memcpy
+  (`examples/de25-burst/bursttest.c`): every word right, over 32 write and
+  24 read bursts of more than one beat, up to 4 beats written and 8 read
+  (the bridge's fabric side is 32 bits); with the write address held
+  within a burst, every burst access fails. Open: the I/O registers in a
   DE25 manifest, and the other bridges.
 
 ## Manifest
