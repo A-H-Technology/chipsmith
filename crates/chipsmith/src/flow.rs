@@ -1578,8 +1578,14 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|b| format!("{b:02X}")).collect()
 }
 
+/// Where a board says which phase 1 it booted: its HPS IO hash, 64 hex
+/// digits (nixos-fpga's `hardware.terasic.de25-nano.phase1HpsIoHash`).
+const BOARD_PHASE1_HASH: &str = "/etc/fpga/phase1/hps_io_hash";
+
 /// The SDM wedges on a core for another phase 1 (agilex5-re README), so the
-/// hash is checked here, before anything reaches the board.
+/// hash is checked here, before anything reaches the board: the core's
+/// against the manifest's, then against the board's own.
+
 fn a5_load_ssh(core: &Path, host: &str, hps_io_hash: &[u8; 32]) -> Result<()> {
     let file = std::fs::read(core).with_context(|| format!("reading {}", core.display()))?;
     ensure!(
@@ -1596,6 +1602,30 @@ fn a5_load_ssh(core: &Path, host: &str, hps_io_hash: &[u8; 32]) -> Result<()> {
         hex(&carried),
         hex(hps_io_hash)
     );
+    // The board's own word on its phase 1 (nixos-fpga installs it): a core
+    // for another one would wedge the SDM, so it isn't sent.
+    let board = Command::new("ssh")
+        .arg(host)
+        .arg(format!("cat {BOARD_PHASE1_HASH} 2>/dev/null || true"))
+        .output()
+        .context("running ssh")?;
+    ensure!(
+        board.status.success(),
+        "{host}: ssh failed ({})",
+        board.status
+    );
+    let board = String::from_utf8_lossy(&board.stdout);
+    match crate::manifest::parse_hash(board.trim()) {
+        Some(h) => ensure!(
+            &h == hps_io_hash,
+            "{host} booted the phase 1 with HPS IO hash {} ({BOARD_PHASE1_HASH}), but this core is for {}; the SDM would wedge",
+            hex(&h),
+            hex(hps_io_hash)
+        ),
+        None => say!(
+            "{host} doesn't say which phase 1 it booted (no {BOARD_PHASE1_HASH}): loading on the manifest's word"
+        ),
+    }
     let started = Instant::now();
     // As load_bit_ssh: the load runs when /dev/fpga-load is closed.
     let mut child = Command::new("ssh")

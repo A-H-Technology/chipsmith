@@ -63,8 +63,10 @@ Z5-Z9 and slice F7/F8 mapping moved to "Cool stuff to do eventually"
   nixos-fpga). FPGA-to-HPS needs a phase 1 that has it.
 - [ ] **D5 Router speed.** facet-hdl's hello under 31 s, with the board as
   the check since faster routes leave a5pnr's tests.
-- [ ] **D6 Which phase 1 booted.** `flash --ssh` reads the board's HPS IO
-  hash (or an equivalent) before loading, instead of trusting the manifest.
+- [x] **D6 Which phase 1 booted** (2026-11-17). nixos-fpga installs the
+  booted phase 1's HPS IO hash at `/etc/fpga/phase1/hps_io_hash`, and
+  `flash --ssh` reads it before loading: on mercury de25-burst loads, a
+  core for hash 00...01 is refused before anything is sent.
 
 ## Cool stuff to do eventually
 

@@ -2441,8 +2441,11 @@ not sign-off). A clock that only feeds an IOPLL isn't timed itself. The database
 needs, the SDM firmware among them (docs/legal.md): a DE25-Nano build needs
 no Quartus. `chipsmith flash --ssh HOST` loads
 the core through the HPS's own Linux (nixos-fpga's `/dev/fpga-load`) and
-refuses a core whose HPS IO hash isn't the manifest's: the SDM would wedge
-on it. It can't tell which phase 1 the board actually booted.
+refuses a core whose HPS IO hash isn't the manifest's, or isn't the one
+the board says it booted (`/etc/fpga/phase1/hps_io_hash`, nixos-fpga's
+`phase1HpsIoHash`; 2026-11-17, mercury refuses a core for another hash):
+the SDM would wedge on it. A board without that file loads on the
+manifest's word.
 
 `phase1` comes from agilex5-re's `phase1` package (`de25-nano`, the one in
 the board's QSPI), which the nix package and devshell point
