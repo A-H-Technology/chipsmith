@@ -225,12 +225,57 @@ impl IoRegs {
     }
 }
 
+/// Which of a port's registers the pin file asks for (`reg in`, `reg out`,
+/// `reg out,oe`; a bare `reg` is whichever the port has, a5pnr's form).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Roles {
+    pub input: bool,
+    pub output: bool,
+    pub oe: bool,
+    /// A bare `reg`: whichever the port has.
+    pub any: bool,
+}
+
+impl Roles {
+    pub fn parse(s: Option<&str>) -> Result<Roles> {
+        let mut r = Roles {
+            input: false,
+            output: false,
+            oe: false,
+            any: s.is_none(),
+        };
+        for role in s.into_iter().flat_map(|s| s.split(',')) {
+            match role {
+                "in" => r.input = true,
+                "out" => r.output = true,
+                "oe" => r.oe = true,
+                _ => bail!("pins.txt: register role {role:?}: in, out or oe"),
+            }
+        }
+        Ok(r)
+    }
+}
+
+impl std::fmt::Display for Roles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<&str> = [
+            (self.input, "input"),
+            (self.output, "output"),
+            (self.oe, "output-enable"),
+        ]
+        .into_iter()
+        .filter_map(|(on, n)| on.then_some(n))
+        .collect();
+        write!(f, "{}", names.join(", "))
+    }
+}
+
 /// Moves each `reg` port's flops into its I/O cell: an input's one flop
 /// on the pin, an output's flop driving it (and through a `$_TBUF_`, its
 /// OE flop). Each must have nothing else on its pin side; the output and
 /// OE flops share the enable and the clear, as the block does, and only
 /// the input register has a synchronous clear (README (z10)).
-pub fn choose(nl: &mut super::netlist::Netlist, ports: &[usize]) -> Result<Vec<IoRegs>> {
+pub fn choose(nl: &mut super::netlist::Netlist, ports: &[(usize, Roles)]) -> Result<Vec<IoRegs>> {
     use super::netlist::{Cell, Sig};
     let mut loads: HashMap<u32, usize> = HashMap::default();
     let mut drv: HashMap<u32, usize> = HashMap::default();
@@ -309,7 +354,7 @@ pub fn choose(nl: &mut super::netlist::Netlist, ports: &[usize]) -> Result<Vec<I
     };
     let mut out = Vec::new();
     let mut need_const = false;
-    for &pi in ports {
+    for &(pi, roles) in ports {
         let p = &nl.ports[pi];
         let Sig::Net(n) = p.net else {
             bail!("{}: a constant port has no I/O register", p.name)
@@ -343,6 +388,13 @@ pub fn choose(nl: &mut super::netlist::Netlist, ports: &[usize]) -> Result<Vec<I
             };
             if loads[&n] != 1 {
                 bail!("{}: the pin feeds more than its register", p.name);
+            }
+            if !roles.any && (!roles.input || roles.output || roles.oe) {
+                bail!(
+                    "{}: an input's I/O block takes its input register; registers asks for {}",
+                    p.name,
+                    roles
+                );
             }
             let f = ff(*i).unwrap();
             r.input = Some(*i);
@@ -386,6 +438,18 @@ pub fn choose(nl: &mut super::netlist::Netlist, ports: &[usize]) -> Result<Vec<I
                 bail!(
                     "{}: an output register has no synchronous clear (fold it into the data)",
                     p.name
+                );
+            }
+            if !roles.any && (roles.input || !roles.output || roles.oe != oe.is_some()) {
+                bail!(
+                    "{}: an output's I/O block takes its output register{}; registers asks for {}",
+                    p.name,
+                    if oe.is_some() {
+                        " and, tri-stated, its output-enable register"
+                    } else {
+                        ""
+                    },
+                    roles
                 );
             }
             r.output = Some(data);

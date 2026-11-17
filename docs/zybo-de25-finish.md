@@ -47,7 +47,12 @@ Z5-Z9 and slice F7/F8 mapping moved to "Cool stuff to do eventually"
   examples/de25-burst's memory, written and read from Linux with 32-, 64-
   and 128-bit accesses and memcpy (bursts of up to 4 beats written, 8
   read), every word right; a core with the burst address held fails.
-- [ ] **D3 I/O registers** in a DE25 manifest.
+- [ ] **D3 I/O registers** in a DE25 manifest. Built (2026-11-17):
+  `registers` on a ball, the roles checked against the port in place and
+  route; examples/de25-ioreg builds with D0's output and OE registers and
+  D1's input register in hvio_3_1. Owed: its board run, which needs a
+  jumper on GPIO0 header pins 1 and 2 (load it, then `devmem 0x20000004`
+  good, `0x20000008` bad).
 - [ ] **D4 The other bridges.** HPS-to-FPGA (the full 128-bit bridge),
   FPGA-to-HPS and FPGA-to-SDRAM, each named by signal like the lightweight
   bridge, each with a board test.

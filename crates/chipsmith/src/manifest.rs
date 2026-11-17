@@ -67,7 +67,13 @@ impl Target {
 /// a signal of the HPS the fabric meets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum A5Pin {
-    Ball { ball: String, vccio: A5Vccio },
+    /// A ball, its bank's voltage, and the registers that go in its I/O
+    /// block.
+    Ball {
+        ball: String,
+        vccio: A5Vccio,
+        registers: chipsmith_xc7::io::Registers,
+    },
     Hps(HpsBit),
 }
 
@@ -635,7 +641,7 @@ fn de2_pin(port: &str, t: &PinTable) -> Result<De2Pin, ManifestError> {
 /// slow, no pull). Which standards share a bank is checked against the
 /// package's banks by place and route.
 fn xc7_pin(port: &str, t: Option<&PinTable>) -> Result<chipsmith_xc7::io::PinIo, ManifestError> {
-    use chipsmith_xc7::io::{Drive, PinIo, Pull, Registers, Settings, Slew, Standard};
+    use chipsmith_xc7::io::{Drive, PinIo, Pull, Settings, Slew, Standard};
     let bad = |reason: String| ManifestError::BadPinEntry {
         port: port.to_string(),
         reason,
@@ -648,22 +654,7 @@ fn xc7_pin(port: &str, t: Option<&PinTable>) -> Result<chipsmith_xc7::io::PinIo,
             "vccio is an Agilex 5 setting; a Zynq pin's `standard` gives its bank voltage".into(),
         ));
     }
-    let mut registers = Registers::default();
-    for r in t.registers.iter().flatten() {
-        let flag = match r.as_str() {
-            "input" => &mut registers.input,
-            "output" => &mut registers.output,
-            "output-enable" => &mut registers.output_enable,
-            _ => {
-                return Err(bad(format!(
-                    "registers: {r:?} is not \"input\", \"output\" or \"output-enable\""
-                )))
-            }
-        };
-        if std::mem::replace(flag, true) {
-            return Err(bad(format!("registers lists {r:?} twice")));
-        }
-    }
+    let registers = parse_registers(port, t)?;
     let standard = match t.standard.as_deref() {
         None => Standard::Lvcmos33,
         Some(s) => Standard::parse(s).ok_or_else(|| {
@@ -703,6 +694,35 @@ fn xc7_pin(port: &str, t: Option<&PinTable>) -> Result<chipsmith_xc7::io::PinIo,
         settings,
         registers,
     })
+}
+
+/// A pin's `registers`: which of its input, output and output-enable
+/// registers go in its I/O cell.
+fn parse_registers(
+    port: &str,
+    t: &PinTable,
+) -> Result<chipsmith_xc7::io::Registers, ManifestError> {
+    let bad = |reason: String| ManifestError::BadPinEntry {
+        port: port.to_string(),
+        reason,
+    };
+    let mut registers = chipsmith_xc7::io::Registers::default();
+    for r in t.registers.iter().flatten() {
+        let flag = match r.as_str() {
+            "input" => &mut registers.input,
+            "output" => &mut registers.output,
+            "output-enable" => &mut registers.output_enable,
+            _ => {
+                return Err(bad(format!(
+                    "registers: {r:?} is not \"input\", \"output\" or \"output-enable\""
+                )))
+            }
+        };
+        if std::mem::replace(flag, true) {
+            return Err(bad(format!("registers lists {r:?} twice")));
+        }
+    }
+    Ok(registers)
 }
 
 /// Where agilex5-re's `phase1` package is: `<board>/shell.txt` and
@@ -852,18 +872,25 @@ impl Manifest {
                             if t.standard.is_some()
                                 || t.drive.is_some()
                                 || t.slew.is_some()
-                                || t.pull.is_some()
-                                || t.registers.is_some() =>
+                                || t.pull.is_some() =>
                         {
-                            Err(bad("an Agilex 5 pin takes only `vccio` so far".into()))
+                            Err(bad(
+                                "an Agilex 5 pin takes `vccio` and `registers` so far".into()
+                            ))
                         }
-                        Some(PinTable { vccio: Some(v), .. }) => {
-                            A5Vccio::parse(v).map(Some).ok_or_else(|| {
+                        Some(t @ PinTable { vccio: Some(v), .. }) => {
+                            let vccio = A5Vccio::parse(v).ok_or_else(|| {
                                 bad(format!(
                                     "vccio = {v:?}: one of \"3.3 V\", \"1.8 V\", \"1.1 V\""
                                 ))
-                            })
+                            })?;
+                            Ok(Some((vccio, parse_registers(port, t)?)))
                         }
+                        Some(PinTable {
+                            registers: Some(_), ..
+                        }) => Err(bad(
+                            "registers are a ball's: give its `pin` and `vccio`".into()
+                        )),
                         _ => Ok(None),
                     }
                 })?;
@@ -874,8 +901,16 @@ impl Manifest {
                         reason,
                     };
                     let hps = match (a.pin, a.io) {
-                        (A5Site::Ball(ball), Some(vccio)) => {
-                            pins.push(PinAssignment { port: a.port, pin: A5Pin::Ball { ball, vccio }, io: () });
+                        (A5Site::Ball(ball), Some((vccio, registers))) => {
+                            pins.push(PinAssignment {
+                                port: a.port,
+                                pin: A5Pin::Ball {
+                                    ball,
+                                    vccio,
+                                    registers,
+                                },
+                                io: (),
+                            });
                             continue;
                         }
                         (A5Site::Ball(ball), None) => {
@@ -1444,7 +1479,7 @@ mod tests {
         let pins: Vec<_> = pins
             .iter()
             .map(|a| match &a.pin {
-                A5Pin::Ball { ball, vccio } => format!("{} {ball} {}", a.port, vccio.volts()),
+                A5Pin::Ball { ball, vccio, .. } => format!("{} {ball} {}", a.port, vccio.volts()),
                 A5Pin::Hps(h) => format!("{} {h}", a.port),
             })
             .collect();
@@ -1635,6 +1670,32 @@ mod tests {
                 "{text}"
             );
         }
+        // A ball's registers; an HPS signal has none.
+        let regs = Manifest::parse(
+            &DE25.replace(
+                r#"CLOCK1_50 = { pin = "V16", vccio = "3.3 V" }"#,
+                r#"CLOCK1_50 = { pin = "V16", vccio = "3.3 V", registers = ["input"] }"#,
+            ),
+            &dir,
+        )
+        .unwrap();
+        let Target::A5eb013bb23be4scs { pins, .. } = &regs.target else {
+            unreachable!()
+        };
+        assert!(matches!(
+            &pins[0].pin,
+            A5Pin::Ball { registers, .. } if registers.input && !registers.output
+        ));
+        assert!(matches!(
+            Manifest::parse(
+                &DE25.replace(
+                    r#"irq0 = "f2h_irq0[0]""#,
+                    r#"irq0 = { pin = "f2h_irq0[0]", registers = ["output"] }"#
+                ),
+                &dir
+            ),
+            Err(ManifestError::BadPinEntry { .. })
+        ));
         let with_clock =
             Manifest::parse(&format!("{DE25}\n[clocks]\nCLOCK1_50 = \"50 MHz\"\n"), &dir).unwrap();
         let Target::A5eb013bb23be4scs { clocks, .. } = &with_clock.target else {

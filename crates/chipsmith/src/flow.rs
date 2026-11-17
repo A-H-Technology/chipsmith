@@ -383,7 +383,28 @@ pub fn agilex5_data() -> Result<chipsmith_agilex5::flow::Data> {
 fn agilex5_pins(pins: &[PinAssignment<A5Pin>]) -> String {
     pins.iter()
         .map(|a| match &a.pin {
-            A5Pin::Ball { ball, vccio } => format!("{} {ball} {}\n", a.port, vccio.volts()),
+            A5Pin::Ball {
+                ball,
+                vccio,
+                registers: r,
+            } => {
+                // `reg` and its roles: `in`, `out`, `oe` (pnr::ioreg).
+                let roles: Vec<&str> =
+                    [(r.input, "in"), (r.output, "out"), (r.output_enable, "oe")]
+                        .into_iter()
+                        .filter_map(|(on, role)| on.then_some(role))
+                        .collect();
+                if roles.is_empty() {
+                    format!("{} {ball} {}\n", a.port, vccio.volts())
+                } else {
+                    format!(
+                        "{} {ball} {} reg {}\n",
+                        a.port,
+                        vccio.volts(),
+                        roles.join(",")
+                    )
+                }
+            }
             A5Pin::Hps(h) => format!("{} hps {} {}\n", a.port, h.signal().atom, h.bit()),
         })
         .collect()

@@ -2335,8 +2335,9 @@ Next devices:
   (`examples/de25-burst/bursttest.c`): every word right, over 32 write and
   24 read bursts of more than one beat, up to 4 beats written and 8 read
   (the bridge's fabric side is 32 bits); with the write address held
-  within a burst, every burst access fails. Open: the I/O registers in a
-  DE25 manifest, and the other bridges.
+  within a burst, every burst access fails. A DE25
+  manifest takes I/O registers since the same day (board run owed). Open:
+  the other bridges.
 
 ## Manifest
 
@@ -2405,7 +2406,15 @@ inverters on the signals a design names are dropped, since they are the
 Quartus design's constants (its 0s on `bresp`, `rresp` and `rdata[31]`).
 
 A ball takes its bank's voltage (`3.3 V`, `1.8 V` or `1.1 V`) and nothing
-else. `[clocks]` gives a clock's frequency at its ball or HPS signal (since
+else, and `registers` (since 2026-11-17): `["input"]` on an input,
+`["output"]` on an output or `["output", "output-enable"]` on a tri-stated
+one puts those registers in the pin's I/O block (a5pnr's I/O registers,
+agilex5-re README (z10); HVIO blocks hvio_3_1 and hvio_0_1 and two IO96
+lanes, a register driving only its pin). examples/de25-ioreg puts GPIO0
+D0's output and OE registers and D1's input register there, checked
+through a jumper between them and read over the lightweight bridge; it
+builds with all three in hvio_3_1, the board run is owed (it needs the
+jumper on header pins 1 and 2). `[clocks]` gives a clock's frequency at its ball or HPS signal (since
 2026-11-17): place and route reports each clock's longest register to
 register path by its delay model, named by its input port, and the build
 fails on a clock that misses its frequency, as on the Zybo (an estimate,

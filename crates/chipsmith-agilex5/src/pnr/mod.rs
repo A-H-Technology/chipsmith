@@ -104,7 +104,7 @@ pub fn run(
     // Pins: port → (ball, std), and the ports whose flops go into the pin's
     // I/O cell (a fourth column `reg`, README (z10)).
     let mut pin_of: HashMap<String, (String, String)> = HashMap::default();
-    let mut reg_ports: Vec<String> = Vec::new();
+    let mut reg_ports: Vec<(String, ioreg::Roles)> = Vec::new();
     // `<port> node <graph node>`: an output that ends on a fabric node instead
     // of a pin, e.g. an HPS input's RPII (README, "HPS-first").
     let mut sink_of: HashMap<String, String> = HashMap::default();
@@ -142,7 +142,7 @@ pub fn run(
         } else if f.len() >= 3 && !f[0].starts_with('#') {
             pin_of.insert(f[0].to_owned(), (f[1].to_owned(), f[2].to_owned()));
             if f.get(3) == Some(&"reg") {
-                reg_ports.push(f[0].to_owned());
+                reg_ports.push((f[0].to_owned(), ioreg::Roles::parse(f.get(4).copied())?));
             }
         }
     }
@@ -182,13 +182,15 @@ pub fn run(
             _ => i += 1,
         }
     }
-    let reg_idx: Vec<usize> = reg_ports
+    let reg_idx: Vec<(usize, ioreg::Roles)> = reg_ports
         .iter()
-        .map(|n| {
-            nl.ports
+        .map(|(n, roles)| {
+            let i = nl
+                .ports
                 .iter()
                 .position(|p| &p.name == n)
-                .with_context(|| format!("pins.txt: no port {n}"))
+                .with_context(|| format!("pins.txt: no port {n}"))?;
+            Ok((i, *roles))
         })
         .collect::<Result<_>>()?;
     let io = ioreg::choose(&mut nl, &reg_idx)?;
