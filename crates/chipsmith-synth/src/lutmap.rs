@@ -1094,8 +1094,8 @@ impl Network {
         let old = &self.aig;
         let n = old.nodes.len();
         let mut refs = vec![0u32; n];
-        for v in 0..n {
-            if let Node::And(a, b) = old.nodes[v] {
+        for node in &old.nodes {
+            if let Node::And(a, b) = *node {
                 refs[node_of(a)] += 1;
                 refs[node_of(b)] += 1;
             }

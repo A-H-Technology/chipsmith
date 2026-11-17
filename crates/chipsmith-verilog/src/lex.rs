@@ -186,9 +186,7 @@ macro_rules! puncts {
             while i < a.len() {
                 let mut j = i;
                 while j > 0 && a[j - 1].0.len() < a[j].0.len() {
-                    let t = a[j - 1];
-                    a[j - 1] = a[j];
-                    a[j] = t;
+                    a.swap(j - 1, j);
                     j -= 1;
                 }
                 i += 1;

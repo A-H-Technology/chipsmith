@@ -217,8 +217,8 @@ fn core_section(inst: &Install, img: &[u8], f: &Fields, key: &[u8]) -> Result<Ve
     for s in 0..2 {
         data.push(Page::Hashed(inst.cb2.clone(), s as u32));
     }
-    for s in 0..2 {
-        data.push(Page::Hashed(enc.bbm[s].clone(), s as u32));
+    for (s, bbm) in enc.bbm.iter().enumerate().take(2) {
+        data.push(Page::Hashed(bbm.clone(), s as u32));
     }
     let mut bitmap = Vec::new();
     let mut next = [0usize; 2];

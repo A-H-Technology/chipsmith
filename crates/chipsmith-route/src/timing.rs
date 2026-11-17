@@ -440,9 +440,9 @@ impl Graph {
         let mut out = Vec::new();
         for &from in &launch_clocks {
             let mut g = self.clone();
-            for v in 0..g.len() {
-                if g.launch[v].is_some() && self.clock(v as u32) != from {
-                    g.launch[v] = None;
+            for (v, launch) in g.launch.iter_mut().enumerate() {
+                if launch.is_some() && self.clock(v as u32) != from {
+                    *launch = None;
                 }
             }
             let a = g.analyse(net_arcs);

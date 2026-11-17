@@ -456,12 +456,13 @@ impl ChipDb {
         }
         for (tile, &t) in tiles.iter().enumerate() {
             let (x, y) = ((tile as u32 % width) as u8, (tile as u32 / width) as u8);
-            for w in 0..tile_types[t as usize].wires.len() {
+            let tt = &tile_types[t as usize];
+            for (w, &wire_type) in tt.wire_types.iter().enumerate().take(tt.wires.len()) {
                 let fw = wire_base[tile] as usize + w;
                 if node_of[fw] == u32::MAX {
                     node_of[fw] = node_box.len() as NodeId;
                     node_box.push(Box::tile(x, y));
-                    node_type.push(tile_types[t as usize].wire_types[w]);
+                    node_type.push(wire_type);
                 }
             }
         }

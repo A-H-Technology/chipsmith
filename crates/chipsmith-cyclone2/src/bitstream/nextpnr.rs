@@ -1096,10 +1096,10 @@ impl Routed {
                     ] {
                         ensure!(routed == wanted, "{name}: {pin} not routed");
                     }
-                    for k in 0..2 {
+                    for (k, enable) in controls.enable.iter().enumerate().take(2) {
                         let pin = format!("ENA{k}");
                         ensure!(
-                            controls.enable[k].is_some() == c.conns.contains_key(&pin),
+                            enable.is_some() == c.conns.contains_key(&pin),
                             "{name}: {pin} not routed"
                         );
                     }

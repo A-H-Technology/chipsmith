@@ -300,8 +300,8 @@ impl Mult {
                 .into_iter()
                 .enumerate()
             {
-                for op in 0..2 {
-                    put(one(t, op as i32)?, r.input[row][op])?;
+                for (op, &input) in r.input[row].iter().enumerate().take(2) {
+                    put(one(t, op as i32)?, input)?;
                 }
             }
             for k in 0..2 {
