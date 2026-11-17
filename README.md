@@ -23,7 +23,7 @@ nextpnr, no prjxray tool, only prjxray-db's data.
 | device | board | build | on hardware |
 |---|---|---|---|
 | EP2C35F672C6 (Cyclone II) | Terasic DE2 | yes, with no external tool but GHDL for VHDL (2026-10-25: chipsmith's own Verilog front end and synthesis): LUT/carry/register logic, M4K RAM blocks and embedded multipliers (below), global clocks from pins and from logic (a register, the JTAG block's TCK; one clock per LAB), PLLs (`CY2_PLL`; both on the board 2026-10-26, examples/de2-jtag-counter on TCK and examples/de2-pll-counter at 100 and 40 MHz from CLOCK_50; 2026-10-30 a PLL clock on its PLL's clock output pin, 2026-10-31 on any pin or into logic as data, the DE2's SDRAM run at 100 MHz with 0 errors by examples/sdram-selftest, its SRAM by examples/sram-selftest); pins input, output, tri-state, bidirectional, open drain, at 3.3-V LVTTL (any current) or LVCMOS or 2.5-V inputs, with pull-up or bus hold and I/O-cell registers (with the cell's clock enables, asynchronous clears and presets and falling-edge clocks as Quartus packs them since 2026-10-31, examples/de2-ioregs; an output or OE register's synchronous reset as logic on its D; Manifest, below) | yes (2026-10-25, chipsmith's own synthesis end to end, checked over JTAG: examples/de2-jtag-counter (its earlier CLOCK_50-sampled version) reads back `"DE2!"` at 50.00 MHz after a JTAG load and after `flash --persist` (loader synthesized by chipsmith too, EPCS written, verified and reloaded from; 2026-10-26 also after a power cycle); picorv32 with the same readback added runs its loop at 3.33 MHz; 2026-11-09 examples/spade-jtag-counter, the same design in Spade, at 50.00 MHz ("Spade", below). 2026-10-24, synthesized by yosys: picorv32 built with chipsmith's LUT mapper by the nix package, flashed by chipsmith, counting on the LEDs; examples/bidir driving, releasing and reading back its pins; examples/ram-leds stepping its ROM and RAM on the LEDs; `flash --persist` writes the EPCS16 and the design runs from it, roadmap step 6) |
-| xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes, with no external tool but GHDL for VHDL (2026-11-01: chipsmith's own Verilog front end, synthesis, packing, placement, routing and FASM; 2026-11-02: frames and `.bit`; "The Zybo flow", below): LUT1-LUT6, CARRY4, FDRE/FDSE/FDCE/FDPE, RAM32M, block RAM (RAMB18E1, since 2026-11-02; "7-series block RAM", below), multipliers (DSP48E1, since 2026-11-02; "7-series multipliers", below), LUT6_2 pairs, LVCMOS33 pins, BUFGs, BSCANs, PLLs and MMCMs (PLLE2_ADV, MMCME2_ADV, since 2026-11-04; ADR-0017) and the PS7 (its fabric ports driven and read since 2026-11-13: M_AXI_GP0 and IRQF2P on the board, examples/zybo-gp0) | yes, with the earlier flow (2026-10-24, yosys and nextpnr around chipsmith's placement and routing: zybo-jtag-counter read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga). chipsmith's own flow is checked at the bitstream (decoded and co-simulated against the RTL, below) and, since 2026-11-06, on the board: zybo-jtag-counter (125.01 MHz), zybo-mult-selftest, zybo-riscv-bram and zybo-bram-selftest (every RAMB18E1 mode it has) read back over JTAG with 0 errors (riscv-bram's register file is 11 RAM32Ms, so their write-data pins as xc7-timing fixed them run on silicon), and through a webcam zybo-blinky's LD0 at 0.93 Hz (125 MHz / 2^27) and zybo-pll's four LEDs, two bits of a counter on each PLL output (125 and 62.5 MHz), at 0.96/1.83 Hz each (expected 0.93/1.86) |
+| xc7z010clg400-1 (Zynq-7010, PL only) | Digilent Zybo (original, "legacy") | yes, with no external tool but GHDL for VHDL (2026-11-01: chipsmith's own Verilog front end, synthesis, packing, placement, routing and FASM; 2026-11-02: frames and `.bit`; "The Zybo flow", below): LUT1-LUT6, CARRY4, FDRE/FDSE/FDCE/FDPE, RAM32M, block RAM (RAMB18E1, since 2026-11-02; "7-series block RAM", below), multipliers (DSP48E1, since 2026-11-02; "7-series multipliers", below), LUT6_2 pairs, pins with an I/O standard (LVCMOS33/LVTTL/LVCMOS25/18/15/12), drive, slew and pull or keeper each, as Vivado sets them (since 2026-11-17; on the board, examples/zybo-io), BUFGs, BSCANs, PLLs and MMCMs (PLLE2_ADV, MMCME2_ADV, since 2026-11-04; ADR-0017) and the PS7 (its fabric ports driven and read since 2026-11-13: M_AXI_GP0 and IRQF2P on the board, examples/zybo-gp0) | yes, with the earlier flow (2026-10-24, yosys and nextpnr around chipsmith's placement and routing: zybo-jtag-counter read back over JTAG at 125.00 MHz, loaded over JTAG and with `flash --ssh` through Linux on the board; a bitstream loaded at every boot through nixos-fpga). chipsmith's own flow is checked at the bitstream (decoded and co-simulated against the RTL, below) and, since 2026-11-06, on the board: zybo-jtag-counter (125.01 MHz), zybo-mult-selftest, zybo-riscv-bram and zybo-bram-selftest (every RAMB18E1 mode it has) read back over JTAG with 0 errors (riscv-bram's register file is 11 RAM32Ms, so their write-data pins as xc7-timing fixed them run on silicon), and through a webcam zybo-blinky's LD0 at 0.93 Hz (125 MHz / 2^27) and zybo-pll's four LEDs, two bits of a counter on each PLL output (125 and 62.5 MHz), at 0.96/1.83 Hz each (expected 0.93/1.86) |
 
 `examples/picorv32` is a RISC-V core (PicoRV32, RV32I) counting on the
 LEDs, 852 LEs and two M4Ks (its register file); a build takes 20 to 24 s
@@ -670,6 +670,9 @@ The Zybo examples:
   ```
 
   With zybo-blinky loaded instead, the same read returns all zeros.
+- `examples/zybo-io`: pin settings on Pmod JE (pull-up, pull-down,
+  keeper, LVTTL at 24 mA and fast), each checked every cycle and read
+  over JTAG (`cargo run --release -p chipsmith-jtag --example xc7_io`).
 - `examples/zybo-pll`: a PLL's 125 MHz and 62.5 MHz, the second 90
   degrees later, each with a counter on two of the LEDs (`XC7_PLL`, "The
   Zybo flow", below). Builds in about 20 s.
@@ -919,10 +922,30 @@ chipsmith takes every product to DSPs. On the board: owed.
 
 Zybo limits:
 
-- Every pin is LVCMOS33, outputs at 16 mA and slow slew (what nextpnr
-  wrote, `LVCMOS33_LVTTL.DRIVE.I12_I16`), inputs with no pull. The
-  manifest has no I/O standards yet, and the Zybo's PL banks (34, 35) are
-  both 3.3 V.
+- A pin takes Vivado's `IOSTANDARD` (LVCMOS33 by default, LVTTL,
+  LVCMOS25, LVCMOS18, LVCMOS15, LVCMOS12), `DRIVE` (12 mA by default, the
+  standard's own currents), `SLEW` (slow by default) and a pull-up,
+  pull-down or keeper (none by default) in `[pins]` (Manifest, below).
+  Since 2026-11-17 each setting is written as Vivado writes it:
+  `bench/zybo-io/sweep.py` builds every standard, drive, slew and pull in
+  Vivado and in chipsmith, and bit2fasm reads the same I/O features out of
+  both bitstreams, every IOB of the device, used or not, and each bank's
+  HCLK_IOI3 (a bank under 2.5 V sets its stepdown on all 50 IOBs and its
+  clock tile). The one difference is PUDC_B (U13), which Vivado makes a
+  pulled-up input when a design leaves it unused. The settings until then,
+  12 mA and slow, are the defaults, and those bitstreams are unchanged
+  byte for byte (nextpnr's table, which chipsmith's writer followed,
+  names LVCMOS33's 12 mA `I12_I16` and has 12 and 16 mA the wrong way
+  round, so the 16 mA written here before was 12). A bank has one VCCO, so
+  place and route refuses two standards of different voltages in one
+  bank; the Zybo powers both PL banks (34, 35) at 3.3 V, so on the Zybo
+  that's LVCMOS33 and LVTTL. On the board (examples/zybo-io, Pmod JE with
+  nothing plugged in, read over JTAG): a pull-up reads 1 and a pull-down 0
+  every cycle, two keepers hold whichever level they were last driven to
+  8 ms after release (681 trials, 0 lost), and an LVTTL 24 mA fast pin
+  reads back what it drives. With the pulls swapped in the manifest, both
+  pulls' error counts saturate and a pull-down in the keepers' place loses
+  the high level.
 - Pins are the package's 100 PL user I/O balls (prjxray-db's
   `package_pins.csv`). PS pins (MIO, DDR) are rejected in the manifest.
 - The PS isn't configured from the fabric side beyond one thing: every
@@ -2247,6 +2270,19 @@ The device decides how pins are written: `PIN_N2` on Cyclone II, the
 package ball (`L16`) on the Zynq. A pin of the wrong form, or one the
 package doesn't have as user I/O, is an error when the manifest loads.
 The Zynq builds `build/<name>.bit` instead of `.rbf`.
+
+A Zynq pin takes Vivado's settings, with Vivado's defaults (LVCMOS33,
+12 mA, slow, no pull):
+
+```toml
+[pins]
+btn = { pin = "R18", pull = "down" }                    # "up", "down", "keeper"
+je = { pins = ["V12", "W16"], standard = "LVTTL", drive = "24 mA", slew = "fast" }
+```
+
+Every pin of a bank shares the bank's voltage, so its standards must
+agree on it (LVCMOS33 and LVTTL at 3.3 V; LVCMOS25, 18, 15 and 12 each
+alone).
 
 The DE25-Nano's Agilex 5 (`device = "A5EB013BB23BE4SCS"`) boots
 HPS-first: phase 1 configures the HPS (nixos-fpga's build, in the board's

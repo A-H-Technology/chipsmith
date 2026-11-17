@@ -13,6 +13,7 @@ pub mod delay;
 pub mod dsp;
 mod fasm;
 pub mod frames;
+pub mod io;
 mod pack;
 pub mod part;
 mod phys;

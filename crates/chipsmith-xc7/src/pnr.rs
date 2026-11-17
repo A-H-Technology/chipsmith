@@ -9,11 +9,11 @@
 //! site input's own delay into its site, and a margin for the clock tree,
 //! whose clocks are otherwise taken to arrive everywhere at once.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use chipsmith_route::chipdb::ChipDb;
 use chipsmith_route::timing::{Arc, Ps};
 use chipsmith_route::{Design, NetReq, Router, Tree};
@@ -71,6 +71,33 @@ pub struct Report {
     pub cmt_inputs: Vec<CmtInput>,
 }
 
+/// A port bit's package ball (`M14`) and its electrical settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pin {
+    pub ball: String,
+    pub io: crate::io::Settings,
+}
+
+/// Every pin of a bank shares its VCCO, so its standards must agree on it.
+fn check_banks(pins: &BTreeMap<String, Pin>, banks: &HashMap<String, u32>) -> Result<()> {
+    let mut first: BTreeMap<u32, (&str, &Pin)> = BTreeMap::new();
+    for (port, pin) in pins {
+        let Some(&bank) = banks.get(&pin.ball) else {
+            continue; // pack reports a ball the package doesn't have
+        };
+        let (other, o) = *first.entry(bank).or_insert((port, pin));
+        let (a, b) = (o.io.standard(), pin.io.standard());
+        ensure!(
+            a.vcco_mv() == b.vcco_mv(),
+            "bank {bank} can't power both {other} ({a}, {} V) and {port} ({b}, {} V): \
+             a bank has one VCCO",
+            a.vcco_mv() as f64 / 1000.0,
+            b.vcco_mv() as f64 / 1000.0
+        );
+    }
+    Ok(())
+}
+
 /// Places, routes and writes the FASM of `netlist` (synthesis' yosys JSON);
 /// `pins` maps each port bit to its package pin; `family` is prjxray-db's
 /// directory of the part's family.
@@ -79,12 +106,29 @@ pub fn run(
     delays: &Delays,
     family: &Path,
     netlist: &Path,
-    pins: &BTreeMap<String, String>,
+    pins: &BTreeMap<String, Pin>,
     fasm_out: &Path,
 ) -> Result<Report> {
     let text = std::fs::read(netlist).with_context(|| format!("reading {}", netlist.display()))?;
     let netlist = chipsmith_netlist::read_json(&text)
         .with_context(|| format!("parsing {}", netlist.display()))?;
+    let banks = crate::xray::banks(family, crate::part::XC7Z010CLG400_1.part)?;
+    check_banks(pins, &banks)?;
+    let stepdown_banks: Vec<u32> = pins
+        .values()
+        .filter(|p| p.io.stepdown())
+        .filter_map(|p| banks.get(&p.ball).copied())
+        .collect();
+    let stepdown_sites: Vec<String> = db
+        .pads
+        .iter()
+        .filter(|pad| {
+            banks
+                .get(&pad.pin)
+                .is_some_and(|b| stepdown_banks.contains(b))
+        })
+        .map(|pad| pad.bel.clone())
+        .collect();
     let packed = pack::pack(&netlist, pins, db)?;
     let d = &packed.design;
 
@@ -217,7 +261,7 @@ pub fn run(
     check(db, &design.nets, &trees)?;
 
     let pips: Vec<_> = trees.iter().flat_map(|t| t.pips.iter().copied()).collect();
-    let text = fasm::write(db, &ph, &pips)?;
+    let text = fasm::write(db, &ph, &pips, &stepdown_sites)?;
     std::fs::write(fasm_out, text).with_context(|| format!("writing {}", fasm_out.display()))?;
 
     if let Some(path) = std::env::var_os("CHIPSMITH_XC7_CONNS") {
@@ -598,4 +642,40 @@ fn clock_timing(
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::{Pull, Settings, Slew, Standard};
+
+    fn pin(ball: &str, standard: Standard) -> Pin {
+        Pin {
+            ball: ball.into(),
+            io: Settings::new(standard, None, Slew::Slow, Pull::None).unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_bank_has_one_vcco() {
+        let banks: HashMap<String, u32> = [("V12", 34), ("W16", 34), ("L16", 35)]
+            .into_iter()
+            .map(|(b, n)| (b.to_string(), n))
+            .collect();
+        let pins = |a: Standard, b: Standard, c: Standard| -> BTreeMap<String, Pin> {
+            [
+                ("a", pin("V12", a)),
+                ("b", pin("W16", b)),
+                ("c", pin("L16", c)),
+            ]
+            .into_iter()
+            .map(|(p, x)| (p.to_string(), x))
+            .collect()
+        };
+        use Standard::*;
+        // LVTTL and LVCMOS33 share 3.3 V; another bank can be at 1.8 V.
+        assert!(check_banks(&pins(Lvcmos33, Lvttl, Lvcmos18), &banks).is_ok());
+        let e = check_banks(&pins(Lvcmos33, Lvcmos25, Lvcmos33), &banks).unwrap_err();
+        assert!(e.to_string().contains("bank 34"), "{e}");
+    }
 }

@@ -7,8 +7,8 @@
 //!   bits 0-31 and its 6LUT half in 32-63), the register and output muxes,
 //!   ZINI and ZRST, the slice's clock inversion (NOCLKINV on every half of
 //!   a used tile), SR mode and CE/SR use, the carry-in mux;
-//! - pins at LVCMOS33: outputs 16 mA (nextpnr's `I12_I16`) and slow,
-//!   inputs with `IN_ONLY` unless also driven, no pull;
+//! - pins with their standard, drive, slew and pull as Vivado sets them
+//!   (`crate::io`), inputs with `IN_ONLY` unless also driven;
 //! - each pip `<tile>.<dst>.<src>`, a pseudo pip its site's bits instead
 //!   (`crate::xray::pseudo_pip_features`), with nextpnr's renaming in
 //!   single-IOB (`_SING`) I/O tiles;
@@ -109,7 +109,49 @@ pub(crate) fn cascout_enable(wire: &str) -> Option<&'static str> {
 }
 
 /// The design's FASM; `pips` every routed pip.
-pub(crate) fn write(db: &ChipDb, phys: &Physical, pips: &[Edge]) -> Result<String> {
+/// An IOB site's FASM prefix, `<tile>.IOB_Y<n>`: in a two-IOB tile the
+/// lower site (relative Y0) is `IOB_Y1`, nextpnr's naming.
+fn iob_prefix(db: &ChipDb, site: &str) -> Result<String> {
+    let s = db
+        .sites
+        .get(site)
+        .with_context(|| format!("no site {site}"))?;
+    let name = tile_name(db, s.tile);
+    let y = if name.contains("_SING_") {
+        u32::from(top_sing(db, s.tile))
+    } else {
+        let rel: u32 = s
+            .relative
+            .rsplit_once('Y')
+            .and_then(|(_, y)| y.parse().ok())
+            .with_context(|| format!("site {site} at {}", s.relative))?;
+        1 - rel
+    };
+    Ok(format!("{name}.IOB_Y{y}"))
+}
+
+/// The HCLK_IOI3 tile of an IOB's bank: the one nearest it, a bank being
+/// the 50 IOBs around its clock row.
+fn bank_hclk(db: &ChipDb, site: &str) -> Result<u32> {
+    let s = db
+        .sites
+        .get(site)
+        .with_context(|| format!("no site {site}"))?;
+    let (x, y) = (s.tile % db.width, s.tile / db.width);
+    (0..db.width * db.height)
+        .filter(|&t| tile_name(db, t).starts_with("HCLK_IOI3_"))
+        .filter(|&t| (t % db.width).abs_diff(x) <= 4)
+        .min_by_key(|&t| (t / db.width).abs_diff(y))
+        .with_context(|| format!("no HCLK_IOI3 tile for {site}"))
+}
+
+/// `stepdown_sites` are every IOB site of the banks below 2.5 V.
+pub(crate) fn write(
+    db: &ChipDb,
+    phys: &Physical,
+    pips: &[Edge],
+    stepdown_sites: &[String],
+) -> Result<String> {
     let mut out = String::new();
     let mut line = |s: String| {
         out.push_str(&s);
@@ -210,37 +252,22 @@ pub(crate) fn write(db: &ChipDb, phys: &Physical, pips: &[Edge]) -> Result<Strin
 
     // Pins.
     for pad in &phys.pads {
-        let s = db
-            .sites
-            .get(&pad.site)
-            .with_context(|| format!("no site {}", pad.site))?;
-        let name = tile_name(db, s.tile);
-        let y = if name.contains("_SING_") {
-            u32::from(top_sing(db, s.tile))
-        } else {
-            let rel: u32 = s
-                .relative
-                .rsplit_once('Y')
-                .and_then(|(_, y)| y.parse().ok())
-                .with_context(|| format!("site {} at {}", pad.site, s.relative))?;
-            1 - rel
+        let p = iob_prefix(db, &pad.site)?;
+        let u = crate::io::Use {
+            input: pad.input,
+            output: pad.output,
         };
-        let p = format!("{name}.IOB_Y{y}");
-        if pad.output {
-            line(format!("{p}.LVCMOS33_LVTTL.DRIVE.I12_I16"));
-            line(format!(
-                "{p}.LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVTTL_SSTL135_SSTL15.SLEW.SLOW"
-            ));
+        for f in pad.io.features(u) {
+            line(format!("{p}.{f}"));
         }
-        if pad.input {
-            line(format!("{p}.LVCMOS25_LVCMOS33_LVTTL.IN"));
-            if !pad.output {
-                line(format!(
-                    "{p}.LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVDS_25_LVTTL_SSTL135_SSTL15_TMDS_33.IN_ONLY"
-                ));
-            }
-        }
-        line(format!("{p}.PULLTYPE.NONE"));
+    }
+    let mut hclks = BTreeSet::new();
+    for site in stepdown_sites {
+        line(format!("{}.{}", iob_prefix(db, site)?, crate::io::STEPDOWN));
+        hclks.insert(bank_hclk(db, site)?);
+    }
+    for t in hclks {
+        line(format!("{}.{}", tile_name(db, t), crate::io::BANK_STEPDOWN));
     }
 
     for b in &phys.brams {

@@ -605,6 +605,23 @@ pub fn load(part: Xc7Part) -> Result<ChipDb> {
     Ok(db)
 }
 
+/// Each user I/O ball's bank, from the part's `package_pins.csv` (`family`
+/// is prjxray-db's family directory).
+pub fn banks(family: &Path, part: &str) -> Result<HashMap<String, u32>> {
+    let path = family.join(part).join("package_pins.csv");
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let mut out = HashMap::new();
+    for line in text.lines().skip(1) {
+        let f: Vec<&str> = line.split(',').collect();
+        ensure!(f.len() >= 5, "{}: short line {line:?}", path.display());
+        if f[4].starts_with("IO_") {
+            out.insert(f[0].to_string(), f[1].parse()?);
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

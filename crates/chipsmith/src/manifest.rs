@@ -40,7 +40,7 @@ pub enum Target {
         unused_pins: UnusedPins,
     },
     Xc7z010clg400_1 {
-        pins: Vec<PinAssignment<Clg400Pin>>,
+        pins: Vec<PinAssignment<Clg400Pin, chipsmith_xc7::io::Settings>>,
         clocks: Vec<Clock>,
     },
     /// The DE25-Nano's Agilex 5, booted HPS-first: the build is phase 2,
@@ -423,8 +423,8 @@ pub enum ManifestError {
     BadPinEntry { port: String, reason: String },
     #[error("[target] unused_pins = {0:?}: one of \"tri-stated\", \"pull-up\", \"bus-hold\" (driving unused pins to ground would short the DE2's other chips)")]
     BadUnusedPins(String),
-    #[error("{0} has no I/O settings in the manifest yet; [pins] takes pin names only")]
-    NoIoSettings(Device),
+    #[error("[target] unused_pins: {0} leaves unused pins as the bitstream does; the setting is the DE2's")]
+    NoUnusedPins(Device),
     #[error("[target] {0}")]
     BadTarget(String),
     #[error("[clocks]: {0} builds don't take clock constraints yet; place and route times the design against its delay model alone")]
@@ -479,20 +479,12 @@ struct PinTable {
     pins: Option<Vec<String>>,
     standard: Option<String>,
     drive: Option<String>,
+    /// A 7-series output's slew rate.
+    slew: Option<String>,
     pull: Option<String>,
     registers: Option<Vec<String>>,
     /// An Agilex 5 ball's bank voltage.
     vccio: Option<String>,
-}
-
-impl PinTable {
-    fn has_settings(&self) -> bool {
-        self.standard.is_some()
-            || self.drive.is_some()
-            || self.pull.is_some()
-            || self.registers.is_some()
-            || self.vccio.is_some()
-    }
 }
 
 /// A `[pins]` entry, its form checked.
@@ -561,6 +553,9 @@ fn de2_pin(port: &str, t: &PinTable) -> Result<De2Pin, ManifestError> {
         return Err(bad(
             "vccio is an Agilex 5 setting; a DE2 pin takes `standard`".into(),
         ));
+    }
+    if t.slew.is_some() {
+        return Err(bad("a DE2 pin has no slew setting".into()));
     }
     let current = t
         .drive
@@ -634,6 +629,63 @@ fn de2_pin(port: &str, t: &PinTable) -> Result<De2Pin, ManifestError> {
         settings: PinSettings { standard, pull },
         registers,
     })
+}
+
+/// A Zynq pin's settings, Vivado's names and defaults (LVCMOS33, 12 mA,
+/// slow, no pull). Which standards share a bank is checked against the
+/// package's banks by place and route.
+fn xc7_pin(port: &str, t: Option<&PinTable>) -> Result<chipsmith_xc7::io::Settings, ManifestError> {
+    use chipsmith_xc7::io::{Drive, Pull, Settings, Slew, Standard};
+    let bad = |reason: String| ManifestError::BadPinEntry {
+        port: port.to_string(),
+        reason,
+    };
+    let Some(t) = t else {
+        return Ok(Settings::default());
+    };
+    if t.vccio.is_some() {
+        return Err(bad(
+            "vccio is an Agilex 5 setting; a Zynq pin's `standard` gives its bank voltage".into(),
+        ));
+    }
+    if t.registers.is_some() {
+        return Err(bad("a Zynq pin takes no `registers` yet".into()));
+    }
+    let standard = match t.standard.as_deref() {
+        None => Standard::Lvcmos33,
+        Some(s) => Standard::parse(s).ok_or_else(|| {
+            let names: Vec<&str> = Standard::ALL.iter().map(|s| s.name()).collect();
+            bad(format!("standard = {s:?}: one of {}", names.join(", ")))
+        })?,
+    };
+    let drive = t
+        .drive
+        .as_deref()
+        .map(|d| {
+            d.strip_suffix("mA")
+                .map(str::trim_end)
+                .and_then(|n| n.parse::<u32>().ok())
+                .and_then(Drive::from_ma)
+                .ok_or_else(|| {
+                    bad(format!(
+                        "drive = {d:?}: 4, 8, 12, 16 or 24 mA, like \"8 mA\""
+                    ))
+                })
+        })
+        .transpose()?;
+    let slew = match t.slew.as_deref() {
+        None | Some("slow") => Slew::Slow,
+        Some("fast") => Slew::Fast,
+        Some(s) => return Err(bad(format!("slew = {s:?}: \"slow\" or \"fast\""))),
+    };
+    let pull = match t.pull.as_deref() {
+        None => Pull::None,
+        Some("up") => Pull::Up,
+        Some("down") => Pull::Down,
+        Some("keeper") => Pull::Keeper,
+        Some(p) => return Err(bad(format!("pull = {p:?}: \"up\", \"down\" or \"keeper\""))),
+    };
+    Settings::new(standard, drive, slew, pull).map_err(|e| bad(e.to_string()))
 }
 
 /// Where agilex5-re's `phase1` package is: `<board>/shell.txt` and
@@ -753,7 +805,7 @@ impl Manifest {
             }
             Device::Xc7z010clg400_1 => {
                 if file.target.unused_pins.is_some() {
-                    return Err(ManifestError::NoIoSettings(device));
+                    return Err(ManifestError::NoUnusedPins(device));
                 }
                 let pins = flatten_pins(
                     entries,
@@ -764,17 +816,14 @@ impl Manifest {
                             expected: "pins are the package's programmable-logic balls, like L16 (PS/MIO pins are not)",
                         })
                     },
-                    |_, t| match t {
-                        Some(t) if t.has_settings() => Err(ManifestError::NoIoSettings(device)),
-                        _ => Ok(()),
-                    },
+                    xc7_pin,
                 )?;
                 let clocks = parse_clocks(&file.clocks, &pins)?;
                 Target::Xc7z010clg400_1 { pins, clocks }
             }
             Device::A5eb013bb23be4scs => {
                 if file.target.unused_pins.is_some() {
-                    return Err(ManifestError::NoIoSettings(device));
+                    return Err(ManifestError::NoUnusedPins(device));
                 }
                 if !file.clocks.is_empty() {
                     return Err(ManifestError::NoClocks(device));
@@ -788,6 +837,7 @@ impl Manifest {
                         Some(t)
                             if t.standard.is_some()
                                 || t.drive.is_some()
+                                || t.slew.is_some()
                                 || t.pull.is_some()
                                 || t.registers.is_some() =>
                         {
@@ -1296,22 +1346,55 @@ mod tests {
     }
 
     #[test]
-    fn the_zybo_takes_no_io_settings() {
+    fn a_zybo_pin_takes_vivados_io_settings() {
+        use chipsmith_xc7::io::{Drive, Pull, Settings, Slew, Standard};
         let dir = scratch("zybo-settings", &["src/a.v"]);
-        let plain = format!("{ZYBO}\nbtn = {{ pin = \"R18\" }}\n");
-        assert!(Manifest::parse(&plain, &dir).is_ok());
-        for text in [
-            format!("{ZYBO}\nbtn = {{ pin = \"R18\", pull = \"up\" }}\n"),
-            ZYBO.replace("[target]\n", "[target]\nunused_pins = \"pull-up\"\n"),
+        let pin = |entry: &str| -> Result<Settings, ManifestError> {
+            let m = Manifest::parse(&format!("{ZYBO}\nbtn = {entry}\n"), &dir)?;
+            let Target::Xc7z010clg400_1 { pins, .. } = m.target else {
+                unreachable!()
+            };
+            Ok(pins
+                .iter()
+                .find(|a| a.port.to_string() == "btn")
+                .unwrap()
+                .io)
+        };
+        assert_eq!(pin("\"R18\"").unwrap(), Settings::default());
+        assert_eq!(pin("{ pin = \"R18\" }").unwrap(), Settings::default());
+        assert_eq!(
+            pin(r#"{ pin = "R18", standard = "LVTTL", drive = "24 mA", slew = "fast", pull = "keeper" }"#)
+                .unwrap(),
+            Settings::new(Standard::Lvttl, Some(Drive::Ma24), Slew::Fast, Pull::Keeper).unwrap()
+        );
+        assert_eq!(
+            pin(r#"{ pin = "R18", pull = "down" }"#).unwrap(),
+            Settings::new(Standard::Lvcmos33, None, Slew::Slow, Pull::Down).unwrap()
+        );
+        for (entry, why) in [
+            (
+                r#"{ pin = "R18", standard = "LVCMOS33", drive = "24 mA" }"#,
+                "LVCMOS33 drives 4, 8, 12, 16 mA, not 24 mA",
+            ),
+            (r#"{ pin = "R18", drive = "6 mA" }"#, "drive"),
+            (r#"{ pin = "R18", standard = "SSTL15" }"#, "one of LVCMOS33"),
+            (r#"{ pin = "R18", pull = "bus-hold" }"#, "keeper"),
+            (r#"{ pin = "R18", slew = "medium" }"#, "slew"),
+            (r#"{ pin = "R18", vccio = "3.3 V" }"#, "vccio"),
+            (r#"{ pin = "R18", registers = ["input"] }"#, "registers"),
         ] {
-            assert!(
-                matches!(
-                    Manifest::parse(&text, &dir),
-                    Err(ManifestError::NoIoSettings(_))
-                ),
-                "{text}"
-            );
+            match pin(entry) {
+                Err(ManifestError::BadPinEntry { reason, .. }) => {
+                    assert!(reason.contains(why), "{entry}: {reason}")
+                }
+                other => panic!("{entry}: {other:?}"),
+            }
         }
+        let unused = ZYBO.replace("[target]\n", "[target]\nunused_pins = \"pull-up\"\n");
+        assert!(matches!(
+            Manifest::parse(&unused, &dir),
+            Err(ManifestError::NoUnusedPins(_))
+        ));
     }
 
     const DE25: &str = r#"

@@ -1,0 +1,21 @@
+[project]
+name = "zybo_io"
+top = "zybo_io"
+sources = ["src/*.v"]
+
+[target]
+device = "xc7z010clg400-1"
+
+# Original Zybo. Pmod JE with nothing plugged in: each pin reads what its
+# pull (or keeper) makes of a floating ball. Digilent's Zybo-Master.xdc.
+[pins]
+clk = "L16"
+led = ["M14", "M15", "G14", "D18"]
+up = { pin = "V12", pull = "up" }                  # JE1
+down = { pin = "W16", pull = "down" }              # JE2
+keep = { pins = ["V13", "U17"], pull = "keeper" }  # JE7, JE8: driven, then released
+# JE9: driven by LVTTL at 24 mA, fast, and read back at its own ball.
+loop = { pin = "T17", standard = "LVTTL", drive = "24 mA", slew = "fast" }
+
+[clocks]
+clk = "125 MHz"

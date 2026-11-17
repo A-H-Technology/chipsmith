@@ -109,6 +109,7 @@ pub(crate) struct PadConf {
     pub site: String,
     pub input: bool,
     pub output: bool,
+    pub io: crate::io::Settings,
 }
 
 /// A used block RAM site: its tile and half (0 lower, 1 upper; a RAMB36E1
@@ -811,10 +812,11 @@ pub(crate) fn build(
                     (None, None) => PreCyInit::Ax,
                 });
             }
-            (Kind::Pad { site, .. }, Conf::Pad) => pads.push(PadConf {
+            (Kind::Pad { site, .. }, Conf::Pad(io)) => pads.push(PadConf {
                 site: site.clone(),
                 input: cell.net("O").is_some(),
                 output: cell.net("I").is_some(),
+                io: *io,
             }),
             (Kind::Bufg, Conf::Bufg) => {
                 let (site, _) = b.at(c)?;

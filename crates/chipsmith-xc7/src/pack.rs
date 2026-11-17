@@ -69,8 +69,9 @@ pub(crate) enum Conf {
         wclk_inv: bool,
     },
     /// A pin's IOB, with its buffer: pins `O` (to the fabric), `I` (to the
-    /// pin), `T` (high releases it), as the buffer has them.
-    Pad,
+    /// pin), `T` (high releases it), as the buffer has them; its
+    /// electrical settings.
+    Pad(crate::io::Settings),
     /// A block RAM; its pins are its site's.
     Bram(Box<crate::bram::Config>),
     /// A DSP48E1; its pins are its site's (`A0`, `OPMODE3`, `CLK`, ...).
@@ -210,7 +211,7 @@ impl Packer {
 /// (`led[2]`) to its package pin (`G14`).
 pub(crate) fn pack(
     netlist: &Netlist,
-    pins: &BTreeMap<String, String>,
+    pins: &BTreeMap<String, crate::pnr::Pin>,
     db: &ChipDb,
 ) -> Result<Packed> {
     let m = netlist
@@ -248,7 +249,7 @@ pub(crate) fn pack(
         .iter()
         .map(|pad| (pad.pin.as_str(), pad.bel.as_str()))
         .collect();
-    let pad_site = |pad: SigBit, cell: &str| -> Result<(String, String)> {
+    let pad_site = |pad: SigBit, cell: &str| -> Result<(String, String, crate::io::Settings)> {
         let port = pad
             .net()
             .and_then(|n| port_of.get(&n))
@@ -257,9 +258,9 @@ pub(crate) fn pack(
             .get(port)
             .with_context(|| format!("port {port} has no pin in the manifest"))?;
         let site = site_of_pin
-            .get(pin.as_str())
-            .with_context(|| format!("port {port}: pin {pin} isn't one of the package's"))?;
-        Ok((site.to_string(), port.clone()))
+            .get(pin.ball.as_str())
+            .with_context(|| format!("port {port}: pin {} isn't one of the package's", pin.ball))?;
+        Ok((site.to_string(), port.clone(), pin.io))
     };
 
     let mut carries: Vec<CellId> = Vec::new();
@@ -480,7 +481,7 @@ pub(crate) fn pack(
                     _ => "O",
                 };
                 let pad = bit(g, pad_port, 0).with_context(|| format!("{name}: no pad"))?;
-                let (site, port) = pad_site(pad, &name)?;
+                let (site, port, io) = pad_site(pad, &name)?;
                 let mut pins = Vec::new();
                 match g.ty.as_str() {
                     "IBUF" => {
@@ -502,7 +503,7 @@ pub(crate) fn pack(
                         }
                     }
                 }
-                p.push(name, Kind::Pad { site, port }, pins, Conf::Pad);
+                p.push(name, Kind::Pad { site, port }, pins, Conf::Pad(io));
             }
             "BUFG" => {
                 let i = bit(g, "I", 0).with_context(|| format!("{name}: no I"))?;

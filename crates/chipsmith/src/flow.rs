@@ -171,7 +171,7 @@ pub enum Step {
     Xc7Pnr {
         netlist: PathBuf,
         fasm: PathBuf,
-        pins: BTreeMap<String, String>,
+        pins: BTreeMap<String, chipsmith_xc7::pnr::Pin>,
         clocks: BTreeMap<String, Frequency>,
     },
     /// Write a 7-series design's FASM as a `.bit`, in process
@@ -497,11 +497,9 @@ pub fn plan_cyclone2(
     }
 }
 
-/// Every pin is LVCMOS33: the Zybo's PL banks (34, 35) are both powered at
-/// 3.3 V, and the manifest has no I/O standards yet.
 pub fn plan_xc7(
     manifest: &Manifest,
-    pins: &[PinAssignment<Clg400Pin>],
+    pins: &[PinAssignment<Clg400Pin, chipsmith_xc7::io::Settings>],
     clocks: &[Clock],
     layout: &Layout,
 ) -> Plan {
@@ -517,7 +515,13 @@ pub fn plan_xc7(
         fasm: layout.fasm(),
         pins: pins
             .iter()
-            .map(|a| (a.port.to_string(), a.pin.to_string()))
+            .map(|a| {
+                let pin = chipsmith_xc7::pnr::Pin {
+                    ball: a.pin.to_string(),
+                    io: a.io,
+                };
+                (a.port.to_string(), pin)
+            })
             .collect(),
         clocks: clocks
             .iter()
@@ -997,7 +1001,7 @@ fn xc7_synth(verilog: &[PathBuf], top: &str, netlist: &Path) -> Result<Vec<PathB
 fn xc7_pnr(
     netlist: &Path,
     fasm: &Path,
-    pins: &BTreeMap<String, String>,
+    pins: &BTreeMap<String, chipsmith_xc7::pnr::Pin>,
     clocks: &BTreeMap<String, Frequency>,
 ) -> Result<()> {
     let part = XC7Z010CLG400_1;
@@ -1852,7 +1856,7 @@ mod tests {
         assert_eq!(fasm, Path::new("/p/build/blinky.fasm"));
         assert_eq!(
             pins.iter()
-                .map(|(a, b)| (a.as_str(), b.as_str()))
+                .map(|(a, b)| (a.as_str(), b.ball.as_str()))
                 .collect::<Vec<_>>(),
             [("clk", "L16"), ("led[0]", "M14"), ("led[1]", "M15")]
         );
