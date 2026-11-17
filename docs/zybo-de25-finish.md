@@ -56,9 +56,11 @@ Z5-Z9 and slice F7/F8 mapping moved to "Cool stuff to do eventually"
 - [ ] **D4 The other bridges.** HPS-to-FPGA done (2026-11-17):
   `hps2fpga_*` from agilex5-re's new route-dump table, examples/de25-h2f
   every word right from Linux (single beats; a device mapping gives no
-  bursts on a 128-bit bridge). Left: FPGA-to-SDRAM (its requests enter
-  through a block other than the HPS atom, not yet found) and FPGA-to-HPS
-  (not in the board's phase 1).
+  bursts on a 128-bit bridge). FPGA-to-SDRAM built and routed
+  (`f2sdram_*`, the MPFE atom's table): examples/de25-f2sdram's reads come
+  back, all DECERR; left is the bridge's enable handshake, which nothing
+  runs on an HPS-first boot (a kernel or secure-firmware step in
+  nixos-fpga). FPGA-to-HPS needs a phase 1 that has it.
 - [ ] **D5 Router speed.** facet-hdl's hello under 31 s, with the board as
   the check since faster routes leave a5pnr's tests.
 - [ ] **D6 Which phase 1 booted.** `flash --ssh` reads the board's HPS IO

@@ -122,7 +122,7 @@ pub struct HpsSignalDef {
     pub name: &'static str,
     /// The HPS atom's port.
     pub atom: &'static str,
-    pub width: u8,
+    pub width: u16,
     pub dir: HpsDir,
 }
 
@@ -214,23 +214,70 @@ pub static HPS_SIGNALS: &[HpsSignalDef] = hps_signals! {
     "hps2fpga_rlast" "SOC2FPGA_R_LAST" 1 IntoHps;
     "hps2fpga_rvalid" "SOC2FPGA_R_VALID" 1 IntoHps;
     "hps2fpga_rready" "SOC2FPGA_R_READY" 1 FromHps;
+    // The FPGA-to-SDRAM bridge (the SM_SOC_MPFE atom's): 256-bit data,
+    // 32-bit addresses (the atom has 44), its clock from the fabric.
+    "f2sdram_clk" "F2SDRAM_CLK" 1 IntoHps;
+    "f2sdram_awid" "F2SDRAM_AWID" 5 IntoHps;
+    "f2sdram_awaddr" "F2SDRAM_AWADDR" 32 IntoHps;
+    "f2sdram_awregion" "F2SDRAM_AWREGION" 4 IntoHps;
+    "f2sdram_awlen" "F2SDRAM_AWLEN" 8 IntoHps;
+    "f2sdram_awsize" "F2SDRAM_AWSIZE" 3 IntoHps;
+    "f2sdram_awburst" "F2SDRAM_AWBURST" 2 IntoHps;
+    "f2sdram_awlock" "F2SDRAM_AWLOCK" 1 IntoHps;
+    "f2sdram_awcache" "F2SDRAM_AWCACHE" 4 IntoHps;
+    "f2sdram_awprot" "F2SDRAM_AWPROT" 3 IntoHps;
+    "f2sdram_awqos" "F2SDRAM_AWQOS" 4 IntoHps;
+    "f2sdram_awuser" "F2SDRAM_AWUSER" 25 IntoHps;
+    "f2sdram_awvalid" "F2SDRAM_AWVALID" 1 IntoHps;
+    "f2sdram_awready" "F2SDRAM_AWREADY" 1 FromHps;
+    "f2sdram_arid" "F2SDRAM_ARID" 5 IntoHps;
+    "f2sdram_araddr" "F2SDRAM_ARADDR" 32 IntoHps;
+    "f2sdram_arregion" "F2SDRAM_ARREGION" 4 IntoHps;
+    "f2sdram_arlen" "F2SDRAM_ARLEN" 8 IntoHps;
+    "f2sdram_arsize" "F2SDRAM_ARSIZE" 3 IntoHps;
+    "f2sdram_arburst" "F2SDRAM_ARBURST" 2 IntoHps;
+    "f2sdram_arlock" "F2SDRAM_ARLOCK" 1 IntoHps;
+    "f2sdram_arcache" "F2SDRAM_ARCACHE" 4 IntoHps;
+    "f2sdram_arprot" "F2SDRAM_ARPROT" 3 IntoHps;
+    "f2sdram_arqos" "F2SDRAM_ARQOS" 4 IntoHps;
+    "f2sdram_aruser" "F2SDRAM_ARUSER" 25 IntoHps;
+    "f2sdram_arvalid" "F2SDRAM_ARVALID" 1 IntoHps;
+    "f2sdram_arready" "F2SDRAM_ARREADY" 1 FromHps;
+    "f2sdram_wdata" "F2SDRAM_WDATA" 256 IntoHps;
+    "f2sdram_wstrb" "F2SDRAM_WSTRB" 32 IntoHps;
+    "f2sdram_wlast" "F2SDRAM_WLAST" 1 IntoHps;
+    "f2sdram_wuser" "F2SDRAM_WUSER" 8 IntoHps;
+    "f2sdram_wvalid" "F2SDRAM_WVALID" 1 IntoHps;
+    "f2sdram_wready" "F2SDRAM_WREADY" 1 FromHps;
+    "f2sdram_bid" "F2SDRAM_BID" 5 FromHps;
+    "f2sdram_bresp" "F2SDRAM_BRESP" 2 FromHps;
+    "f2sdram_buser" "F2SDRAM_BUSER" 8 FromHps;
+    "f2sdram_bvalid" "F2SDRAM_BVALID" 1 FromHps;
+    "f2sdram_bready" "F2SDRAM_BREADY" 1 IntoHps;
+    "f2sdram_rid" "F2SDRAM_RID" 5 FromHps;
+    "f2sdram_rdata" "F2SDRAM_RDATA" 256 FromHps;
+    "f2sdram_rresp" "F2SDRAM_RRESP" 2 FromHps;
+    "f2sdram_rlast" "F2SDRAM_RLAST" 1 FromHps;
+    "f2sdram_ruser" "F2SDRAM_RUSER" 8 FromHps;
+    "f2sdram_rvalid" "F2SDRAM_RVALID" 1 FromHps;
+    "f2sdram_rready" "F2SDRAM_RREADY" 1 IntoHps;
 };
 
 /// One bit of an HPS signal; the bit is below the signal's width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HpsBit {
     signal: HpsSignal,
-    bit: u8,
+    bit: u16,
 }
 
 impl HpsBit {
-    fn new(signal: HpsSignal, bit: u8) -> Option<HpsBit> {
+    fn new(signal: HpsSignal, bit: u16) -> Option<HpsBit> {
         (bit < signal.width).then_some(HpsBit { signal, bit })
     }
     pub fn signal(self) -> HpsSignal {
         self.signal
     }
-    pub fn bit(self) -> u8 {
+    pub fn bit(self) -> u16 {
         self.bit
     }
 }
@@ -255,7 +302,7 @@ enum HpsSite {
 impl HpsSite {
     fn parse(s: &str) -> Option<HpsSite> {
         let (name, bit) = match s.strip_suffix(']').and_then(|s| s.split_once('[')) {
-            Some((name, bit)) => (name, Some(bit.parse::<u8>().ok()?)),
+            Some((name, bit)) => (name, Some(bit.parse::<u16>().ok()?)),
             None => (s, None),
         };
         let signal = HPS_SIGNALS.iter().find(|d| d.name == name)?;
@@ -300,7 +347,7 @@ impl A5Site {
             pin: s.to_string(),
             device: Device::A5eb013bb23be4scs,
             expected:
-                "pins are package balls like V16, or HPS signals: f2h_irq0[k], the lightweight bridge's lwhps2fpga_* and the HPS-to-FPGA bridge's hps2fpga_* (a whole one, or [bit])",
+                "pins are package balls like V16, or HPS signals: f2h_irq0[k], the bridges' lwhps2fpga_*, hps2fpga_* and f2sdram_* (a whole one, or [bit])",
         })
     }
 }
@@ -1594,7 +1641,7 @@ mod tests {
         let Target::A5eb013bb23be4scs { pins, .. } = &m.target else {
             panic!("{:?}", m.target);
         };
-        let hps: Vec<(String, String, &str, u8)> = pins
+        let hps: Vec<(String, String, &str, u16)> = pins
             .iter()
             .filter_map(|a| match &a.pin {
                 A5Pin::Hps(h) => {

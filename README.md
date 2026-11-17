@@ -2344,9 +2344,16 @@ Next devices:
   64-, 128-bit and 64-byte accesses and byte strobes. The CPU's accesses
   to a device mapping reach this bridge as single beats, so its bursts are
   unexercised (de25-burst covers the same logic on the lightweight
-  bridge). Open: FPGA-to-SDRAM, whose requests don't enter through the
-  HPS atom (agilex5-re README), and FPGA-to-HPS, which the board's phase
-  1 doesn't have.
+  bridge). FPGA-to-SDRAM (`f2sdram_*`, 256-bit
+  data, the `SM_SOC_MPFE` atom's; agilex5-re `f2sdram.tsv`) builds and
+  routes: examples/de25-f2sdram, a master driven from Linux over the
+  lightweight bridge, gets every read beat back, but every response is
+  DECERR, at every address and AxPROT/AxCACHE. No bridge driver runs on
+  mercury (no `/sys/class/fpga_bridge`) and every bridge is out of reset,
+  so the open step is F2SDRAM's enable handshake (the idle/flush
+  handshake `bridge enable` does in U-Boot, secure firmware's on Agilex
+  5), which nothing does on an HPS-first boot. FPGA-to-HPS isn't in the
+  board's phase 1.
 
 ## Manifest
 
