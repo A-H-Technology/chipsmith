@@ -53,3 +53,7 @@ rresp = "lwhps2fpga_rresp"
 rlast = "lwhps2fpga_rlast"
 rvalid = "lwhps2fpga_rvalid"
 rready = "lwhps2fpga_rready"
+
+# The board's 50 MHz oscillator.
+[clocks]
+CLOCK1_50 = "50 MHz"

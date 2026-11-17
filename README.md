@@ -2327,9 +2327,9 @@ Next devices:
   Only single-beat accesses are tested (busybox `devmem`). facet-hdl's hello,
   built by chipsmith from its `examples/hello/de25/chipsmith` (644 ALMs),
   answers its RPC calls the same day, polled and through `/dev/uio0`'s
-  interrupt (facet-hdl README), and its Quartus build is gone. Open: bursts,
-  `[clocks]` and the I/O registers in a DE25 manifest, and the
-  other bridges.
+  interrupt (facet-hdl README), and its Quartus build is gone. Since 2026-11-17
+  a DE25 manifest takes `[clocks]`. Open: bursts, the I/O registers in a
+  DE25 manifest, and the other bridges.
 
 ## Manifest
 
@@ -2398,8 +2398,11 @@ inverters on the signals a design names are dropped, since they are the
 Quartus design's constants (its 0s on `bresp`, `rresp` and `rdata[31]`).
 
 A ball takes its bank's voltage (`3.3 V`, `1.8 V` or `1.1 V`) and nothing
-else; `[clocks]` isn't taken yet (place and route times against its delay
-model alone). The database, keys and routing graph come with chipsmith
+else. `[clocks]` gives a clock's frequency at its ball or HPS signal (since
+2026-11-17): place and route reports each clock's longest register to
+register path by its delay model, named by its input port, and the build
+fails on a clock that misses its frequency, as on the Zybo (an estimate,
+not sign-off). A clock that only feeds an IOPLL isn't timed itself. The database, keys and routing graph come with chipsmith
 (agilex5-re's flake), and so do the 15 files of Quartus Prime Pro an image
 needs, the SDM firmware among them (docs/legal.md): a DE25-Nano build needs
 no Quartus. `chipsmith flash --ssh HOST` loads

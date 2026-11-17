@@ -17,3 +17,7 @@ phase1 = "de25-nano"
 CLOCK1_50 = { pin = "V16", vccio = "3.3 V" }
 irq0 = "f2h_irq0[0]"
 irq3 = "f2h_irq0[3]"
+
+# The board's 50 MHz oscillator.
+[clocks]
+CLOCK1_50 = "50 MHz"

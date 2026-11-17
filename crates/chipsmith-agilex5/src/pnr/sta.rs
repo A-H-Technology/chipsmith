@@ -61,6 +61,9 @@ pub struct Report {
     /// The worst path from a clocked start (flop, M20K) to a clocked capture
     /// in the same domain: what quartus_sta's Fmax counts (README (z4)).
     pub core_worst: f32,
+    /// The same per clock domain: (clock net, its worst path, ns), each
+    /// domain with a timed path once.
+    pub clocks: Vec<(u32, f32)>,
 }
 
 fn ff_clock(nl: &Netlist, ff: usize) -> u32 {
@@ -444,16 +447,22 @@ impl Sta {
             }
         }
         // Per capture point with a clocked arrival: that arrival plus setup.
-        let core_ends: Vec<f32> = self
+        let core_ends: Vec<(u32, f32)> = self
             .ends
             .iter()
-            .filter(|(x, _, c, _)| {
-                c.is_some_and(|c| core_clk[*x as usize] == c)
-                    && core[*x as usize] > f32::NEG_INFINITY
+            .filter_map(|(x, extra, c, _)| {
+                let c = (*c)?;
+                (core_clk[*x as usize] == c && core[*x as usize] > f32::NEG_INFINITY)
+                    .then(|| (c, core[*x as usize] + extra))
             })
-            .map(|(x, extra, _, _)| core[*x as usize] + extra)
             .collect();
-        let core_worst = core_ends.iter().copied().fold(0.0, f32::max);
+        let core_worst = core_ends.iter().map(|e| e.1).fold(0.0, f32::max);
+        let mut by_clock: std::collections::BTreeMap<u32, f32> = Default::default();
+        for &(c, t) in &core_ends {
+            let w = by_clock.entry(c).or_insert(0.0);
+            *w = w.max(t);
+        }
+        let clocks = by_clock.into_iter().collect();
         // Capture: paths launched by another clock than the capturing one
         // (ports launch on any) aren't timed.
         let mut worst = (0.0f32, String::new());
@@ -502,6 +511,7 @@ impl Sta {
             at: worst.1,
             crit,
             core_worst,
+            clocks,
         }
     }
 }

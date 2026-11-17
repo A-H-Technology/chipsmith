@@ -47,6 +47,8 @@ pub enum Target {
     /// the core, which the SDM takes only after `hps`'s phase 1.
     A5eb013bb23be4scs {
         pins: Vec<PinAssignment<A5Pin>>,
+        /// Clocks entering at a ball or out of the HPS (`lwhps2fpga_clk`).
+        clocks: Vec<Clock>,
         hps: HpsFirst,
     },
 }
@@ -427,8 +429,6 @@ pub enum ManifestError {
     NoUnusedPins(Device),
     #[error("[target] {0}")]
     BadTarget(String),
-    #[error("[clocks]: {0} builds don't take clock constraints yet; place and route times the design against its delay model alone")]
-    NoClocks(Device),
     #[error("pin {pin} is assigned to both {first} and {second}")]
     PinTwice {
         pin: String,
@@ -842,9 +842,6 @@ impl Manifest {
                 if file.target.unused_pins.is_some() {
                     return Err(ManifestError::NoUnusedPins(device));
                 }
-                if !file.clocks.is_empty() {
-                    return Err(ManifestError::NoClocks(device));
-                }
                 let sites = flatten_pins(entries, A5Site::parse, |port, t| {
                     let bad = |reason: String| ManifestError::BadPinEntry {
                         port: port.to_string(),
@@ -937,7 +934,8 @@ impl Manifest {
                         ))
                     }
                 };
-                Target::A5eb013bb23be4scs { pins, hps }
+                let clocks = parse_clocks(&file.clocks, &pins)?;
+                Target::A5eb013bb23be4scs { pins, clocks, hps }
             }
         };
         Ok(Manifest {
@@ -1440,7 +1438,7 @@ mod tests {
     fn the_de25_takes_balls_with_their_voltage_and_known_hps_inputs() {
         let dir = scratch("de25", &["src/irq.v", "hps-shell.txt"]);
         let m = Manifest::parse(DE25, &dir).unwrap();
-        let Target::A5eb013bb23be4scs { pins, hps } = &m.target else {
+        let Target::A5eb013bb23be4scs { pins, hps, .. } = &m.target else {
             panic!("{:?} is not the DE25-Nano's part", m.target);
         };
         let pins: Vec<_> = pins
@@ -1637,9 +1635,16 @@ mod tests {
                 "{text}"
             );
         }
+        let with_clock =
+            Manifest::parse(&format!("{DE25}\n[clocks]\nCLOCK1_50 = \"50 MHz\"\n"), &dir).unwrap();
+        let Target::A5eb013bb23be4scs { clocks, .. } = &with_clock.target else {
+            unreachable!()
+        };
+        assert_eq!(clocks.len(), 1);
+        assert_eq!(clocks[0].frequency.hz(), 50_000_000);
         assert!(matches!(
-            Manifest::parse(&format!("{DE25}\n[clocks]\nCLOCK1_50 = \"50 MHz\"\n"), &dir),
-            Err(ManifestError::NoClocks(Device::A5eb013bb23be4scs))
+            Manifest::parse(&format!("{DE25}\n[clocks]\nnope = \"50 MHz\"\n"), &dir),
+            Err(ManifestError::ClockWithoutPin(_))
         ));
         // The DE25's settings on the other boards.
         let de2_dir = scratch("de2-a5", &["src/blinky.v"]);

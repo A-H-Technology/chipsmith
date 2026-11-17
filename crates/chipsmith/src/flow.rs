@@ -207,12 +207,15 @@ pub enum Step {
     },
     /// Pack, place and route an Agilex 5 netlist and write its design file,
     /// in process (`chipsmith_agilex5::pnr`); `pins` is the pin file it
-    /// reads (`<port> <ball> <volts>`, `<port> node <node>`).
+    /// reads (`<port> <ball> <volts>`, `<port> node <node>`). Each clock's
+    /// critical path is reported against `clocks` (by port bit) and fails
+    /// the build if it misses.
     A5Pnr {
         netlist: PathBuf,
         top: String,
         pins: PathBuf,
         design: PathBuf,
+        clocks: BTreeMap<String, Frequency>,
     },
     /// Assemble the design file and the board's HPS shell into the `.sof`
     /// and the core.rbf for phase 1's HPS IO hash, in process
@@ -352,9 +355,9 @@ pub fn plan_build(manifest: &Manifest, layout: &Layout) -> Result<Plan> {
             Xc7Data::from_env(XC7Z010CLG400_1)?;
             plan_xc7(manifest, pins, clocks, layout)
         }
-        Target::A5eb013bb23be4scs { pins, hps } => {
+        Target::A5eb013bb23be4scs { pins, clocks, hps } => {
             agilex5_data()?;
-            plan_agilex5(manifest, pins, hps, layout)
+            plan_agilex5(manifest, pins, clocks, hps, layout)
         }
     })
 }
@@ -389,6 +392,7 @@ fn agilex5_pins(pins: &[PinAssignment<A5Pin>]) -> String {
 pub fn plan_agilex5(
     manifest: &Manifest,
     pins: &[PinAssignment<A5Pin>],
+    clocks: &[Clock],
     hps: &HpsFirst,
     layout: &Layout,
 ) -> Plan {
@@ -404,6 +408,10 @@ pub fn plan_agilex5(
         top: manifest.top.clone(),
         pins: layout.a5_pins(),
         design: layout.a5_design(),
+        clocks: clocks
+            .iter()
+            .map(|c| (c.port.to_string(), c.frequency))
+            .collect(),
     });
     steps.push(Step::A5Assemble {
         design: layout.a5_design(),
@@ -841,8 +849,9 @@ impl Plan {
                     top,
                     pins,
                     design,
+                    clocks,
                 } => stamp(step, &[design]).run(|| {
-                    a5_pnr(netlist, top, pins, design)?;
+                    a5_pnr(netlist, top, pins, design, clocks)?;
                     Ok(vec![netlist.clone(), pins.clone()])
                 })?,
                 Step::A5Assemble {
@@ -1063,40 +1072,13 @@ fn xc7_pnr(
             );
         }
     }
-    let mut failed = Vec::new();
-    for c in &r.clocks {
-        let ns = c.critical / 1000.0;
-        let fmax = if ns > 0.0 {
-            1e3 / ns as f64
-        } else {
-            f64::INFINITY
-        };
+    report_clocks(r.clocks.iter().map(|c| {
         let period_ns = clocks
             .get(&c.name)
             .map(|f| f.period_ns())
             .or(c.hz.map(|hz| 1e9 / hz));
-        match period_ns {
-            Some(period) => {
-                let slack = period - ns as f64;
-                say!(
-                    "clock {}: {ns:.2} ns, Fmax {fmax:.1} MHz at {:.3} MHz, slack {slack:.3} ns (estimate)",
-                    c.name,
-                    1e3 / period
-                );
-                if slack < 0.0 {
-                    failed.push(c.name.clone());
-                }
-            }
-            None => say!(
-                "clock {}: {ns:.2} ns, Fmax {fmax:.1} MHz (estimate)",
-                c.name
-            ),
-        }
-    }
-    if !failed.is_empty() {
-        bail!("clocks missing their frequency: {}", failed.join(", "));
-    }
-    Ok(())
+        (c.name.as_str(), period_ns, f64::from(c.critical) / 1000.0)
+    }))
 }
 
 fn xc7_bitstream(fasm: &Path, bit: &Path, design: &str) -> Result<()> {
@@ -1487,14 +1469,20 @@ fn load_bit_ssh(path: &Path, host: &str) -> Result<()> {
     Ok(())
 }
 
-fn a5_pnr(netlist: &Path, top: &str, pins: &Path, design: &Path) -> Result<()> {
+fn a5_pnr(
+    netlist: &Path,
+    top: &str,
+    pins: &Path,
+    design: &Path,
+    clocks: &BTreeMap<String, Frequency>,
+) -> Result<()> {
     let data = agilex5_data()?;
     let s = |p: &Path| {
         p.to_str()
             .map(str::to_owned)
             .with_context(|| format!("{} is not UTF-8", p.display()))
     };
-    chipsmith_agilex5::pnr::run(
+    let r = chipsmith_agilex5::pnr::run(
         &s(&data.chip())?,
         &s(&data.graph)?,
         &s(&data.delays())?,
@@ -1503,7 +1491,57 @@ fn a5_pnr(netlist: &Path, top: &str, pins: &Path, design: &Path) -> Result<()> {
         &s(pins)?,
         &s(design)?,
         &chipsmith_agilex5::pnr::Options::default(),
+    )?;
+    let timed: Vec<(String, Option<Frequency>, f32)> = r
+        .clocks
+        .iter()
+        .map(|c| {
+            // A clock by any of its net's names, the port's first.
+            let given = c.names.iter().find_map(|n| clocks.get(n).map(|f| (n, *f)));
+            match given {
+                Some((n, f)) => (n.clone(), Some(f), c.critical_ns),
+                None => (c.names[0].clone(), None, c.critical_ns),
+            }
+        })
+        .collect();
+    for port in clocks.keys() {
+        if !timed.iter().any(|(n, f, _)| n == port && f.is_some()) {
+            say!("clock {port}: no register on it directly (an IOPLL's input?), not timed");
+        }
+    }
+    report_clocks(
+        timed
+            .iter()
+            .map(|(n, f, ns)| (n.as_str(), f.map(|f| f.period_ns()), f64::from(*ns))),
     )
+}
+
+/// Prints each clock's critical path (ns), Fmax and, with a period (ns),
+/// slack; fails if one misses its period.
+fn report_clocks<'a>(clocks: impl Iterator<Item = (&'a str, Option<f64>, f64)>) -> Result<()> {
+    let mut failed = Vec::new();
+    for (name, period, ns) in clocks {
+        let fmax = if ns > 0.0 { 1e3 / ns } else { f64::INFINITY };
+        match period {
+            Some(period) => {
+                let slack = period - ns;
+                say!(
+                    "clock {name}: {ns:.2} ns, Fmax {fmax:.1} MHz at {:.3} MHz, slack {slack:.3} ns (estimate)",
+                    1e3 / period
+                );
+                if slack < 0.0 {
+                    failed.push(name.to_string());
+                }
+            }
+            None => say!("clock {name}: {ns:.2} ns, Fmax {fmax:.1} MHz (estimate)"),
+        }
+    }
+    ensure!(
+        failed.is_empty(),
+        "clocks missing their frequency: {}",
+        failed.join(", ")
+    );
+    Ok(())
 }
 
 /// Place and route's design file with the board's HPS shell after it.
@@ -2053,10 +2091,10 @@ mod tests {
 
     fn de25() -> (Manifest, Plan) {
         let m = manifest_for(DE25, Sources::Verilog(vec!["/p/irq.v".into()]));
-        let Target::A5eb013bb23be4scs { pins, hps } = &m.target else {
+        let Target::A5eb013bb23be4scs { pins, clocks, hps } = &m.target else {
             unreachable!()
         };
-        let plan = plan_agilex5(&m, pins, hps, &layout(&m));
+        let plan = plan_agilex5(&m, pins, clocks, hps, &layout(&m));
         (m, plan)
     }
 

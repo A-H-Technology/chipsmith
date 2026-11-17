@@ -52,6 +52,21 @@ impl Default for Options {
     }
 }
 
+/// A clock domain's longest register-to-register path by the delay model
+/// (setup included): every name the netlist gives the clock's net (its
+/// input ports first), and the path in ns.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClockTiming {
+    pub names: Vec<String>,
+    pub critical_ns: f32,
+}
+
+/// What place and route found about the design's timing.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Report {
+    pub clocks: Vec<ClockTiming>,
+}
+
 /// A flop's names for the ffmap (every visible name of its output, `!`
 /// before each when the image holds the inverse).
 fn ff_names(nl: &netlist::Netlist, i: usize, inv: bool) -> String {
@@ -82,7 +97,7 @@ pub fn run(
     pins: &str,
     out: &str,
     opts: &Options,
-) -> Result<()> {
+) -> Result<Report> {
     let mut seed = opts.seed;
     let t0 = std::time::Instant::now();
     let mut nl = netlist::read(json, top)?;
@@ -969,7 +984,32 @@ pub fn run(
         if rep.worst > 0.0 { 1000.0 / rep.worst } else { 0.0 },
         t0.elapsed().as_secs_f64()
     );
-    Ok(())
+    let clocks = rep
+        .clocks
+        .iter()
+        .map(|&(c, ns)| {
+            // The input ports on the net first: a clock is reported by its
+            // pin's name, not by what the design calls it inside.
+            let mut names: Vec<String> = nl
+                .ports
+                .iter()
+                .filter(|p| p.input && p.net == Sig::Net(c))
+                .map(|p| p.name.clone())
+                .collect();
+            for n in std::iter::once(&nl.nets[c as usize])
+                .chain(nl.aliases.get(&c).into_iter().flatten())
+            {
+                if !names.contains(n) {
+                    names.push(n.clone());
+                }
+            }
+            ClockTiming {
+                names,
+                critical_ns: ns,
+            }
+        })
+        .collect();
+    Ok(Report { clocks })
 }
 
 /// agilex5-re's map of the HPS signals the fabric meets
