@@ -162,6 +162,64 @@ impl Decoder<'_> {
     }
 }
 
+/// Which register of an I/O tile.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IoiRole {
+    /// ILOGICE3's IFF, on the pin's input.
+    Input,
+    /// OLOGICE3's OUTFF, driving the pin.
+    Output,
+    /// OLOGICE3's TFF, driving the pin's output enable (T, high releases).
+    OutputEnable,
+}
+
+/// An I/O tile register the bitstream configures, as Vivado writes an SDR
+/// register (`crate::fasm`'s `ioi_lines`): its site, role, Q net, and the
+/// bits that set it up.
+struct IoiFf {
+    site: String,
+    role: IoiRole,
+    q: SigBit,
+    init: bool,
+    srval: bool,
+    sync: bool,
+    clk_inv: bool,
+    sr_used: bool,
+}
+
+/// The features of an ILOGIC or OLOGIC site, under its `<KIND>_Y<n>.`.
+fn ioi_features(
+    db: &ChipDb,
+    tiles: &BTreeMap<String, Vec<Feature>>,
+    site: &str,
+) -> HashSet<String> {
+    let Some(s) = db.sites.get(site) else {
+        return HashSet::new();
+    };
+    let tile = db.tile_names[s.tile as usize].as_str();
+    let kind = site.split('_').next().unwrap_or_default();
+    let rel: u32 = s
+        .relative
+        .rsplit_once('Y')
+        .and_then(|(_, y)| y.parse().ok())
+        .unwrap_or(0);
+    let sing = tile.contains("_SING_");
+    let prefix = format!("{kind}_Y{}.", 1 - rel.min(1));
+    tiles
+        .get(tile)
+        .into_iter()
+        .flatten()
+        .filter_map(|f| {
+            if sing {
+                let rest = f.name.strip_prefix(kind)?.strip_prefix("_Y")?;
+                Some(rest.get(2..)?.to_string())
+            } else {
+                Some(f.name.strip_prefix(&prefix)?.to_string())
+            }
+        })
+        .collect()
+}
+
 /// The site of `tile` whose relative name starts with `prefix`.
 fn site_in(db: &ChipDb, tile: u32, prefix: &str) -> Option<String> {
     let mut sites: Vec<(&String, &chipsmith_route::chipdb::Site)> = db
@@ -363,6 +421,12 @@ pub fn decode_routed(
                 );
                 let dst = dst.replacen("OLOGIC1", "OLOGIC0", 1);
                 if d.pip(tile, &dst, &src) {
+                    continue;
+                }
+                // The writer drops `_SING` from the tile's own clock wires
+                // (`IOI_SING_LEAF_GCLK0` is `IOI_LEAF_GCLK0` in FASM).
+                let sing_src = src.replacen("IOI_", "IOI_SING_", 1);
+                if d.pip(tile, &dst, &sing_src) || d.pip(tile, parts[0], &sing_src) {
                     continue;
                 }
             }
@@ -610,6 +674,9 @@ pub fn decode_routed(
             .collect()
     };
     let mut pad_nets: HashMap<String, SigBit> = HashMap::new();
+    let mut input_nets: HashMap<String, SigBit> = HashMap::new();
+    let mut tff_q: HashMap<String, SigBit> = HashMap::new();
+    let mut ioi_ffs: Vec<IoiFf> = Vec::new();
     // An input-only pin no port names (Vivado always configures PUDC_B as
     // one) drives nothing the check compares; anything it did drive would
     // read 1 and show.
@@ -636,6 +703,56 @@ pub fn decode_routed(
             let o = d.net();
             d.m.add_cell(format!("ibuf_{site}"), cells::ibuf(pad, o));
             d.source.insert(d.pin(site, "I")?, o);
+            input_nets.insert(site.clone(), o);
+        }
+        // The I/O tile's registers: their outputs are sources like any
+        // site's, the cells come once every source is known.
+        let il = site.replacen("IOB_", "ILOGIC_", 1);
+        let f = ioi_features(db, &tiles, &il);
+        if *input && f.contains("IDDR.IN_USE") {
+            let q = d.net();
+            d.source.insert(d.pin(&il, "Q1")?, q);
+            ioi_ffs.push(IoiFf {
+                site: il,
+                role: IoiRole::Input,
+                q,
+                init: !f.contains("IFF.ZINIT_Q1"),
+                srval: !f.contains("IFF.ZSRVAL_Q1"),
+                sync: f.contains("IFF.SRTYPE.SYNC"),
+                clk_inv: !f.contains("IFF.ZINV_C"),
+                sr_used: true,
+            });
+        }
+        let ol = site.replacen("IOB_", "OLOGIC_", 1);
+        let f = ioi_features(db, &tiles, &ol);
+        let clk_inv = !f.contains("ZINV_CLK");
+        if *output && f.contains("OSERDES.DATA_RATE_OQ.SDR") {
+            let q = d.net();
+            d.source.insert(d.pin(&ol, "OQ")?, q);
+            ioi_ffs.push(IoiFf {
+                site: ol.clone(),
+                role: IoiRole::Output,
+                q,
+                init: !f.contains("ZINIT_OQ"),
+                srval: !f.contains("ZSRVAL_OQ"),
+                sync: f.contains("OSERDES.SRTYPE.SYNC"),
+                clk_inv,
+                sr_used: f.contains("ODDR.SRUSED"),
+            });
+        }
+        if *output && f.contains("OSERDES.DATA_RATE_TQ.SDR") {
+            let q = d.net();
+            tff_q.insert(site.clone(), q);
+            ioi_ffs.push(IoiFf {
+                site: ol,
+                role: IoiRole::OutputEnable,
+                q,
+                init: !f.contains("ZINIT_TQ"),
+                srval: !f.contains("ZSRVAL_TQ"),
+                sync: f.contains("OSERDES.TSRTYPE.SYNC"),
+                clk_inv,
+                sr_used: f.contains("TDDR.SRUSED"),
+            });
         }
     }
     let mut bufg_out = Vec::new();
@@ -884,6 +1001,10 @@ pub fn decode_routed(
         }
         let pad = pad_nets[site];
         let data = d.resolve_pin(site, "O")?;
+        if let Some(&t) = tff_q.get(site) {
+            d.m.add_cell(format!("obuft_{site}"), cells::obuft(data, t, pad));
+            continue;
+        }
         // The IOB's T is its OLOGIC's TQ, which is T1 inverted unless
         // ZINV_T1 (the pseudo pip TQ <- T1) is set: an unused T1 reads 1,
         // so an unconfigured OLOGIC drives the pin.
@@ -923,6 +1044,55 @@ pub fn decode_routed(
                 d.m.add_cell(format!("obuft_{site}"), cells::obuft(data, t, pad))
             }
         };
+    }
+
+    for f in &ioi_ffs {
+        let (dpin, cepin) = match f.role {
+            IoiRole::Input => ("", "CE1"),
+            IoiRole::Output => ("D1", "OCE"),
+            IoiRole::OutputEnable => ("T1", "TCE"),
+        };
+        let data = match f.role {
+            IoiRole::Input => input_nets[&f.site.replacen("ILOGIC_", "IOB_", 1)],
+            _ => d.resolve_pin(&f.site, dpin)?,
+        };
+        // An unrouted CE or SR reads 1, as every site input does: Vivado
+        // ties an unused SR to GND (bench/zybo-ioreg/sweep.py's routes).
+        let ce = d.resolve_pin(&f.site, cepin)?;
+        let sr = if f.sr_used {
+            Some(d.resolve_pin(&f.site, "SR")?)
+        } else {
+            None
+        };
+        let reset = match (sr, f.sync, f.srval) {
+            (None, ..) => Reset::None,
+            (Some(r), true, false) => Reset::SyncClear(r),
+            (Some(r), true, true) => Reset::SyncSet(r),
+            (Some(r), false, false) => Reset::AsyncClear(r),
+            (Some(r), false, true) => Reset::AsyncPreset(r),
+        };
+        let clk = d.resolve_pin(&f.site, "CLK")?;
+        d.m.add_cell(
+            format!(
+                "{}_{}",
+                f.site,
+                match f.role {
+                    IoiRole::Input => "iff",
+                    IoiRole::Output => "outff",
+                    IoiRole::OutputEnable => "tff",
+                }
+            ),
+            Fd {
+                d: data,
+                clk,
+                clk_inv: f.clk_inv,
+                ce,
+                reset,
+                init: f.init,
+                q: f.q,
+            }
+            .cell(),
+        );
     }
 
     // Ports, the bits of each grouped into its wire.

@@ -52,6 +52,66 @@ pub struct Delays {
     pub imux: Ps,
     pub bram: BramDelays,
     pub dsp: DspDelays,
+    pub ioi: IoiDelays,
+}
+
+/// An I/O tile's registers (ILOGICE3's IFF, OLOGICE3's OUTFF and TFF):
+/// the input register's clock to Q1 and its CE and SR setup ([`IFF`]); the
+/// output and output-enable registers' setup on D1, T1, their clock
+/// enables and SR, from RIOI3.sdf, which Vivado's timer agrees with to the
+/// picosecond. Their clock to the pin isn't a path chipsmith
+/// times (pins neither launch nor capture).
+#[derive(Debug, Clone, Default)]
+pub struct IoiDelays {
+    pub clock_to_q1: Ps,
+    pub setup_ice: Ps,
+    pub setup_isr: Ps,
+    pub setup_d1: Ps,
+    pub setup_t1: Ps,
+    pub setup_oce: Ps,
+    pub setup_tce: Ps,
+    pub setup_osr: Ps,
+}
+
+/// The IFF's clock to Q1 and its setup on CE and SR (ps), as Vivado 2026.1's
+/// timer has them (bench/zybo-ioreg/sweep.py's arcs.tsv): RIOI3.sdf has no
+/// clock to Q1, and its CE and SR setup (726, 922) read short of Vivado's.
+const IFF: [Ps; 3] = [517.0, 758.0, 1121.0];
+
+impl IoiDelays {
+    fn parse(sdf: &str) -> Result<Self> {
+        let sdf = read_sdf(sdf);
+        let setup = |cell: &str, pin: &str| -> Result<Ps> {
+            sdf.get(&(cell.into(), "SETUP".into(), pin.into(), String::new()))
+                .copied()
+                .with_context(|| format!("RIOI3.sdf has no setup on {pin} of {cell}"))
+        };
+        Ok(IoiDelays {
+            clock_to_q1: IFF[0],
+            setup_ice: IFF[1],
+            setup_isr: IFF[2],
+            setup_d1: setup("OLOGICE3_OUTFF_FF", "D1")?,
+            setup_t1: setup("OLOGICE3_TFF_FF", "D1")?,
+            setup_oce: setup("OLOGICE3_OUTFF", "OCE")?,
+            setup_tce: setup("OLOGICE3_TFF", "TCE")?,
+            setup_osr: setup("OLOGICE3_OUTFF", "SR")?.max(setup("OLOGICE3_TFF", "SR")?),
+        })
+    }
+
+    /// A pad pin's setup, if it is an I/O-tile register's input
+    /// (`crate::pack::absorb_io_registers`'s names).
+    pub fn setup(&self, pin: &str) -> Option<Ps> {
+        Some(match pin {
+            "ICE" => self.setup_ice,
+            "ISR" => self.setup_isr,
+            "D1" => self.setup_d1,
+            "T1" => self.setup_t1,
+            "OCE" => self.setup_oce,
+            "TCE" => self.setup_tce,
+            "OSR" => self.setup_osr,
+            _ => return None,
+        })
+    }
 }
 
 /// A slice register's clock to Q, and its setup times on D, CE and SR (ps),
@@ -288,9 +348,13 @@ impl Delays {
         let dsp_path = family.join("timings").join("DSP_L.sdf");
         let dsp = std::fs::read_to_string(&dsp_path)
             .with_context(|| format!("reading {}", dsp_path.display()))?;
+        let ioi_path = family.join("timings").join("RIOI3.sdf");
+        let ioi = std::fs::read_to_string(&ioi_path)
+            .with_context(|| format!("reading {}", ioi_path.display()))?;
         let mut d = Self::parse(&sdf, &int)?;
         d.bram = BramDelays::parse(&bram)?;
         d.dsp = DspDelays::parse(&dsp)?;
+        d.ioi = IoiDelays::parse(&ioi)?;
         Ok(d)
     }
 
@@ -339,6 +403,7 @@ impl Delays {
             imux: hop("imux")?,
             bram: BramDelays::default(),
             dsp: DspDelays::default(),
+            ioi: IoiDelays::default(),
         })
     }
 

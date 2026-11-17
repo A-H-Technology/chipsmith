@@ -590,3 +590,45 @@ module MMCME2_ADV (input CLKIN1, input CLKFBIN, input RST, output CLKFBOUT, outp
   assign CLKFBOUT = cs_out[7].o;
   assign LOCKED = cs_locked;
 endmodule
+
+// Pin buffers a design instantiates itself, for the RTL side of a
+// co-simulation (the netlist side flattens yosys' own models).
+module IBUF (input I, output O);
+  assign O = I;
+endmodule
+module OBUF (input I, output O);
+  assign O = I;
+endmodule
+module OBUFT (input I, input T, output O);
+  assign O = T ? 1'bz : I;
+endmodule
+module IOBUF (input I, input T, output O, inout IO);
+  assign IO = T ? 1'bz : I;
+  assign O = IO;
+endmodule
+
+// Slice registers a design instantiates itself, for the RTL side as above.
+module FDRE #(parameter [0:0] INIT = 1'b0, parameter [0:0] IS_C_INVERTED = 1'b0)
+  (input C, input CE, input R, input D, output reg Q);
+  initial Q = INIT;
+  wire c = C ^ IS_C_INVERTED;
+  always @(posedge c) if (R) Q <= 1'b0; else if (CE) Q <= D;
+endmodule
+module FDSE #(parameter [0:0] INIT = 1'b1, parameter [0:0] IS_C_INVERTED = 1'b0)
+  (input C, input CE, input S, input D, output reg Q);
+  initial Q = INIT;
+  wire c = C ^ IS_C_INVERTED;
+  always @(posedge c) if (S) Q <= 1'b1; else if (CE) Q <= D;
+endmodule
+module FDCE #(parameter [0:0] INIT = 1'b0, parameter [0:0] IS_C_INVERTED = 1'b0)
+  (input C, input CE, input CLR, input D, output reg Q);
+  initial Q = INIT;
+  wire c = C ^ IS_C_INVERTED;
+  always @(posedge c, posedge CLR) if (CLR) Q <= 1'b0; else if (CE) Q <= D;
+endmodule
+module FDPE #(parameter [0:0] INIT = 1'b1, parameter [0:0] IS_C_INVERTED = 1'b0)
+  (input C, input CE, input PRE, input D, output reg Q);
+  initial Q = INIT;
+  wire c = C ^ IS_C_INVERTED;
+  always @(posedge c, posedge PRE) if (PRE) Q <= 1'b1; else if (CE) Q <= D;
+endmodule

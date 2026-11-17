@@ -110,6 +110,7 @@ pub(crate) struct PadConf {
     pub input: bool,
     pub output: bool,
     pub io: crate::io::Settings,
+    pub regs: crate::pack::IoRegs,
 }
 
 /// A used block RAM site: its tile and half (0 lower, 1 upper; a RAMB36E1
@@ -499,12 +500,23 @@ impl Builder<'_> {
                 }
                 _ => bail!("{}: CARRY4 port {port}", cell.name),
             },
-            // The buffer's I (what the pin drives) is the IOB's O.
-            (Kind::Pad { site, .. }, _) => match port {
-                "I" => Ok(End::Pin(site.clone(), "O".into())),
-                "T" => Ok(End::Pin(site.clone(), "T".into())),
-                _ => bail!("{}: pin buffer port {port}", cell.name),
-            },
+            // The buffer's I (what the pin drives) is the IOB's O; its
+            // I/O-tile registers' pins are their ILOGIC's and OLOGIC's.
+            (Kind::Pad { site, .. }, _) => {
+                let ologic = || site.replacen("IOB_", "OLOGIC_", 1);
+                let ilogic = || site.replacen("IOB_", "ILOGIC_", 1);
+                Ok(match port {
+                    "I" => End::Pin(site.clone(), "O".into()),
+                    "T" => End::Pin(site.clone(), "T".into()),
+                    "D1" | "T1" | "OCE" | "TCE" => End::Pin(ologic(), port.into()),
+                    "OCLK" => End::Pin(ologic(), "CLK".into()),
+                    "OSR" => End::Pin(ologic(), "SR".into()),
+                    "ICLK" => End::Pin(ilogic(), "CLK".into()),
+                    "ICE" => End::Pin(ilogic(), "CE1".into()),
+                    "ISR" => End::Pin(ilogic(), "SR".into()),
+                    _ => bail!("{}: pin buffer port {port}", cell.name),
+                })
+            }
             (Kind::Bufg, _) | (Kind::Bscan { .. }, _) | (Kind::Cmt { .. }, _) => {
                 pin(port.to_string())
             }
@@ -536,6 +548,9 @@ impl Builder<'_> {
                     (port[1..].parse::<usize>()?, "XOR")
                 };
                 (s, format!("{}MUX", LETTERS[k]), Some((k, mux)))
+            }
+            (Kind::Pad { site, .. }, _) if port == "Q1" => {
+                (site.replacen("IOB_", "ILOGIC_", 1), "Q1".into(), None)
             }
             (Kind::Pad { site, .. }, _) => (site.clone(), "I".into(), None),
             (Kind::Bufg, _) | (Kind::Bscan { .. }, _) | (Kind::Cmt { .. }, _) => {
@@ -812,11 +827,12 @@ pub(crate) fn build(
                     (None, None) => PreCyInit::Ax,
                 });
             }
-            (Kind::Pad { site, .. }, Conf::Pad(io)) => pads.push(PadConf {
+            (Kind::Pad { site, .. }, Conf::Pad { io, regs }) => pads.push(PadConf {
                 site: site.clone(),
-                input: cell.net("O").is_some(),
-                output: cell.net("I").is_some(),
+                input: cell.net("O").is_some() || regs.input.is_some(),
+                output: cell.net("I").is_some() || regs.output.is_some(),
                 io: *io,
+                regs: *regs,
             }),
             (Kind::Bufg, Conf::Bufg) => {
                 let (site, _) = b.at(c)?;

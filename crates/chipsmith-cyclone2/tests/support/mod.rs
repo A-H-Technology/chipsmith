@@ -2416,12 +2416,13 @@ pub fn cosim_with(
     let mut clocks = Vec::new();
     let mut inputs = Vec::new();
     let mut outputs = Vec::new();
+    let mut inouts = Vec::new();
     for (_, w, dir) in t.ports() {
         match dir {
             Dir::In if is_clock(&w.name) => clocks.push(w.name.clone()),
             Dir::In => inputs.push((w.name.clone(), w.bits.len())),
             Dir::Out => outputs.push((w.name.clone(), w.bits.len())),
-            Dir::InOut => return Err(format!("co-simulation: inout port {}", w.name)),
+            Dir::InOut => inouts.push((w.name.clone(), w.bits.len())),
         }
     }
     let Some(main) = clocks.first().cloned() else {
@@ -2439,12 +2440,27 @@ pub fn cosim_with(
     for (n, w) in &outputs {
         tb += &format!("  wire [{}:0] {n}_g, {n}_t;\n", w - 1);
     }
+    // An inout: the testbench drives it weakly with stimulus of its own,
+    // so the design's driver wins where it drives; each side's pin is
+    // compared like an output.
+    for (n, w) in &inouts {
+        tb += &format!(
+            "  reg [{m}:0] {n}_drv;\n  tri [{m}:0] {n}_g, {n}_t;\n  \
+             assign (weak0, weak1) {n}_g = {n}_drv;\n  assign (weak0, weak1) {n}_t = {n}_drv;\n",
+            m = w - 1
+        );
+    }
     let conns = |sfx: &str| -> String {
         clocks
             .iter()
             .map(|c| format!(".{c}({c})"))
             .chain(inputs.iter().map(|(n, _)| format!(".{n}({n})")))
-            .chain(outputs.iter().map(|(n, _)| format!(".{n}({n}_{sfx})")))
+            .chain(
+                outputs
+                    .iter()
+                    .chain(&inouts)
+                    .map(|(n, _)| format!(".{n}({n}_{sfx})")),
+            )
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -2454,7 +2470,12 @@ pub fn cosim_with(
     // zeros, the top bit alone, the top bit clear; input k uses pattern
     // (cyc + k) % 4 so the pairs vary), so a sign or a carry at the end
     // of a multiplier operand is seen; random after.
-    let draw: String = inputs
+    let driven: Vec<(String, usize)> = inputs
+        .iter()
+        .cloned()
+        .chain(inouts.iter().map(|(n, w)| (format!("{n}_drv"), *w)))
+        .collect();
+    let draw: String = driven
         .iter()
         .enumerate()
         .map(|(k, (n, w))| {
@@ -2481,7 +2502,7 @@ pub fn cosim_with(
     }
     tb += &format!("  initial begin\n{draw}  end\n");
     let mut check = String::new();
-    for (n, w) in &outputs {
+    for (n, w) in outputs.iter().chain(&inouts) {
         check += &format!(
             "    for (i = 0; i < {w}; i = i + 1)\n      if ({n}_g[i] !== 1'bx) begin\n        compared = compared + 1;\n        \
              if ({n}_g[i] !== {n}_t[i]) begin\n          $display(\"MISMATCH seed=%0d cycle=%0d {n}[%0d] rtl=%b netlist=%b\", {seed}, cyc, i, {n}_g[i], {n}_t[i]);\n          $finish;\n        end\n      end\n"

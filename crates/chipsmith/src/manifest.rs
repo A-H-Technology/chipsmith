@@ -40,7 +40,7 @@ pub enum Target {
         unused_pins: UnusedPins,
     },
     Xc7z010clg400_1 {
-        pins: Vec<PinAssignment<Clg400Pin, chipsmith_xc7::io::Settings>>,
+        pins: Vec<PinAssignment<Clg400Pin, chipsmith_xc7::io::PinIo>>,
         clocks: Vec<Clock>,
     },
     /// The DE25-Nano's Agilex 5, booted HPS-first: the build is phase 2,
@@ -634,22 +634,35 @@ fn de2_pin(port: &str, t: &PinTable) -> Result<De2Pin, ManifestError> {
 /// A Zynq pin's settings, Vivado's names and defaults (LVCMOS33, 12 mA,
 /// slow, no pull). Which standards share a bank is checked against the
 /// package's banks by place and route.
-fn xc7_pin(port: &str, t: Option<&PinTable>) -> Result<chipsmith_xc7::io::Settings, ManifestError> {
-    use chipsmith_xc7::io::{Drive, Pull, Settings, Slew, Standard};
+fn xc7_pin(port: &str, t: Option<&PinTable>) -> Result<chipsmith_xc7::io::PinIo, ManifestError> {
+    use chipsmith_xc7::io::{Drive, PinIo, Pull, Registers, Settings, Slew, Standard};
     let bad = |reason: String| ManifestError::BadPinEntry {
         port: port.to_string(),
         reason,
     };
     let Some(t) = t else {
-        return Ok(Settings::default());
+        return Ok(PinIo::default());
     };
     if t.vccio.is_some() {
         return Err(bad(
             "vccio is an Agilex 5 setting; a Zynq pin's `standard` gives its bank voltage".into(),
         ));
     }
-    if t.registers.is_some() {
-        return Err(bad("a Zynq pin takes no `registers` yet".into()));
+    let mut registers = Registers::default();
+    for r in t.registers.iter().flatten() {
+        let flag = match r.as_str() {
+            "input" => &mut registers.input,
+            "output" => &mut registers.output,
+            "output-enable" => &mut registers.output_enable,
+            _ => {
+                return Err(bad(format!(
+                    "registers: {r:?} is not \"input\", \"output\" or \"output-enable\""
+                )))
+            }
+        };
+        if std::mem::replace(flag, true) {
+            return Err(bad(format!("registers lists {r:?} twice")));
+        }
     }
     let standard = match t.standard.as_deref() {
         None => Standard::Lvcmos33,
@@ -685,7 +698,11 @@ fn xc7_pin(port: &str, t: Option<&PinTable>) -> Result<chipsmith_xc7::io::Settin
         Some("keeper") => Pull::Keeper,
         Some(p) => return Err(bad(format!("pull = {p:?}: \"up\", \"down\" or \"keeper\""))),
     };
-    Settings::new(standard, drive, slew, pull).map_err(|e| bad(e.to_string()))
+    let settings = Settings::new(standard, drive, slew, pull).map_err(|e| bad(e.to_string()))?;
+    Ok(PinIo {
+        settings,
+        registers,
+    })
 }
 
 /// Where agilex5-re's `phase1` package is: `<board>/shell.txt` and
@@ -1358,7 +1375,8 @@ mod tests {
                 .iter()
                 .find(|a| a.port.to_string() == "btn")
                 .unwrap()
-                .io)
+                .io
+                .settings)
         };
         assert_eq!(pin("\"R18\"").unwrap(), Settings::default());
         assert_eq!(pin("{ pin = \"R18\" }").unwrap(), Settings::default());
@@ -1381,7 +1399,11 @@ mod tests {
             (r#"{ pin = "R18", pull = "bus-hold" }"#, "keeper"),
             (r#"{ pin = "R18", slew = "medium" }"#, "slew"),
             (r#"{ pin = "R18", vccio = "3.3 V" }"#, "vccio"),
-            (r#"{ pin = "R18", registers = ["input"] }"#, "registers"),
+            (r#"{ pin = "R18", registers = ["inputs"] }"#, "registers"),
+            (
+                r#"{ pin = "R18", registers = ["input", "input"] }"#,
+                "twice",
+            ),
         ] {
             match pin(entry) {
                 Err(ManifestError::BadPinEntry { reason, .. }) => {

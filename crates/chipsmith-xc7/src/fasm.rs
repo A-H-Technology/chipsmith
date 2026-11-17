@@ -87,7 +87,21 @@ pub(crate) fn pip_lines(db: &ChipDb, e: &Edge) -> Vec<String> {
     if tile.contains("IOI") && dst.contains("OCLKB") && src.contains("IOI_OCLKM_") {
         return Vec::new();
     }
-    vec![format!("{tile}.{dst}.{src}")]
+    let mut out = vec![format!("{tile}.{dst}.{src}")];
+    // Vivado clocks an IFF's CLKB and an OLOGIC's OCLKM from the same clock
+    // as its CLK and OCLK (bench/zybo-ioreg/sweep.py).
+    if tile.contains("IOI") && ["GCLK", "IOCLK", "RCLK"].iter().any(|c| src.contains(c)) {
+        if let Some(i) = dst
+            .strip_prefix("IOI_ILOGIC")
+            .and_then(|r| r.strip_suffix("_CLK"))
+        {
+            out.push(format!("{tile}.IOI_ILOGIC{i}_CLKB.{src}"));
+        }
+        if let Some(i) = dst.strip_prefix("IOI_OCLK_") {
+            out.push(format!("{tile}.IOI_OCLKM_{i}.{src}"));
+        }
+    }
+    out
 }
 
 /// The tile bit that drives a BRAM tile's address cascade out of
@@ -110,8 +124,10 @@ pub(crate) fn cascout_enable(wire: &str) -> Option<&'static str> {
 
 /// The design's FASM; `pips` every routed pip.
 /// An IOB site's FASM prefix, `<tile>.IOB_Y<n>`: in a two-IOB tile the
-/// lower site (relative Y0) is `IOB_Y1`, nextpnr's naming.
+/// lower site (relative Y0) is `IOB_Y1`, nextpnr's naming. ILOGIC and
+/// OLOGIC sites the same way (`<tile>.OLOGIC_Y<n>`).
 fn iob_prefix(db: &ChipDb, site: &str) -> Result<String> {
+    let kind = site.split('_').next().unwrap_or("IOB");
     let s = db
         .sites
         .get(site)
@@ -127,7 +143,86 @@ fn iob_prefix(db: &ChipDb, site: &str) -> Result<String> {
             .with_context(|| format!("site {site} at {}", s.relative))?;
         1 - rel
     };
-    Ok(format!("{name}.IOB_Y{y}"))
+    Ok(format!("{name}.{kind}_Y{y}"))
+}
+
+/// A pad's I/O-tile registers as Vivado writes them for an SDR register
+/// (bench/zybo-ioreg/sweep.py): the input's in its ILOGIC's IFF (in IDDR
+/// mode, as Vivado has it), the output's and output enable's in its
+/// OLOGIC. Their clock pips, CLKB and OCLKM beside CLK and OCLK, come
+/// from the routes ([`pip_lines`]).
+fn ioi_lines(db: &ChipDb, pad: &crate::phys::PadConf, line: &mut impl FnMut(String)) -> Result<()> {
+    let r = &pad.regs;
+    if let Some(f) = r.input {
+        let site = pad.site.replacen("IOB_", "ILOGIC_", 1);
+        let p = iob_prefix(db, &site)?;
+        let mut w = |s: &str| line(format!("{p}.{s}"));
+        for s in [
+            "IDDR.IN_USE",
+            "IDDR_OR_ISERDES.IN_USE",
+            "IFF.DDR_CLK_EDGE.OPPOSITE_EDGE",
+            "ZINV_D",
+        ] {
+            w(s);
+        }
+        if f.sync {
+            w("IFF.SRTYPE.SYNC");
+        }
+        if !f.init {
+            w("IFF.ZINIT_Q1");
+        }
+        if !f.srval {
+            w("IFF.ZSRVAL_Q1");
+        }
+        if !f.clk_inv {
+            w("IFF.ZINV_C");
+        }
+    }
+    if r.output.is_none() && r.oe.is_none() {
+        return Ok(());
+    }
+    let site = pad.site.replacen("IOB_", "OLOGIC_", 1);
+    let p = iob_prefix(db, &site)?;
+    let mut w = |s: &str| line(format!("{p}.{s}"));
+    w("ODDR_TDDR.IN_USE");
+    w("OQUSED");
+    // The two share the OLOGIC's clock, so its edge is either's.
+    let clk_inv = r.output.or(r.oe).is_some_and(|f| f.clk_inv);
+    if !clk_inv {
+        w("ODDR.DDR_CLK_EDGE.SAME_EDGE");
+        w("ZINV_CLK");
+    }
+    if let Some(f) = r.output {
+        w("ODDR.SRUSED");
+        w("OSERDES.DATA_RATE_OQ.SDR");
+        if f.sync {
+            w("OSERDES.SRTYPE.SYNC");
+        }
+        if !f.init {
+            w("ZINIT_OQ");
+        }
+        if !f.srval {
+            w("ZSRVAL_OQ");
+        }
+    }
+    match r.oe {
+        Some(f) => {
+            w("TDDR.SRUSED");
+            w("OSERDES.DATA_RATE_TQ.SDR");
+            w("ZINV_T1");
+            if f.sync {
+                w("OSERDES.TSRTYPE.SYNC");
+            }
+            if !f.init {
+                w("ZINIT_TQ");
+            }
+            if !f.srval {
+                w("ZSRVAL_TQ");
+            }
+        }
+        None => w("OSERDES.DATA_RATE_TQ.BUF"),
+    }
+    Ok(())
 }
 
 /// The HCLK_IOI3 tile of an IOB's bank: the one nearest it, a bank being
@@ -157,6 +252,7 @@ pub(crate) fn write(
         out.push_str(&s);
         out.push('\n');
     };
+    let mut suppressed: BTreeSet<String> = BTreeSet::new();
 
     // Slices, by tile: both halves of a used tile get their clock
     // inversion bit.
@@ -259,6 +355,12 @@ pub(crate) fn write(
         };
         for f in pad.io.features(u) {
             line(format!("{p}.{f}"));
+        }
+        ioi_lines(db, pad, &mut line)?;
+        // The output enable's register, not the bypass, drives TQ.
+        if pad.regs.oe.is_some() {
+            let o = iob_prefix(db, &pad.site.replacen("IOB_", "OLOGIC_", 1))?;
+            suppressed.insert(format!("{o}.OSERDES.DATA_RATE_TQ.BUF"));
         }
     }
     let mut hclks = BTreeSet::new();
@@ -391,7 +493,7 @@ pub(crate) fn write(
     let mut seen = BTreeSet::new();
     let mut dedup = String::new();
     for l in out.lines() {
-        if seen.insert(l.to_string()) {
+        if !suppressed.contains(l) && seen.insert(l.to_string()) {
             let _ = writeln!(dedup, "{l}");
         }
     }

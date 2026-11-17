@@ -1,0 +1,18 @@
+[project]
+name = "zybo_ioreg"
+top = "zybo_ioreg"
+sources = ["src/*.v"]
+
+[target]
+device = "xc7z010clg400-1"
+
+# Original Zybo, Pmod JE with nothing plugged in (Digilent's Zybo-Master.xdc).
+# Each pin's output, output-enable and input registers sit in its I/O tile.
+[pins]
+clk = "L16"
+led = ["M14", "M15", "G14", "D18"]
+rise = { pin = "V12", pull = "up", registers = ["input", "output", "output-enable"] }   # JE1
+fall = { pin = "W16", pull = "down", registers = ["input", "output", "output-enable"] } # JE2
+
+[clocks]
+clk = "125 MHz"

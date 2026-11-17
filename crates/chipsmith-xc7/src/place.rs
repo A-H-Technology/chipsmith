@@ -685,9 +685,23 @@ impl Timing {
                         }
                     }
                 }
-                // Pins, the BSCAN and clock buffers neither launch nor
-                // capture: like Quartus' and nextpnr's reports with only a
-                // clock constraint, paths run register to register.
+                // A pin's I/O-tile registers: the input's Q1 launches, the
+                // registers' inputs capture.
+                Kind::Pad { .. } => {
+                    for &p in &ports {
+                        if p == "Q1" {
+                            let n = node(&mut g, p);
+                            g.set_launch(n, delays.ioi.clock_to_q1);
+                        } else if let Some(s) = delays.ioi.setup(p) {
+                            let n = node(&mut g, p);
+                            g.set_setup(n, s + delays.clock_margin);
+                        }
+                    }
+                }
+                // Pins otherwise, the BSCAN and clock buffers neither
+                // launch nor capture: like Quartus' and nextpnr's reports
+                // with only a clock constraint, paths run register to
+                // register.
                 _ => {}
             }
         }

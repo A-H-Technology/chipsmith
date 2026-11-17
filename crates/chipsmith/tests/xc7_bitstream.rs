@@ -512,6 +512,43 @@ fn dsp() {
     assert!(failures.is_empty(), "failed: {failures:?}");
 }
 
+/// Every register shape as a pin's input, output and output-enable
+/// register in its I/O tile (`chipsmith-xc7/tests/designs/ioreg`, from
+/// bench/zybo-ioreg/sweep.py), through the bitstream.
+/// `CHIPSMITH_XC7_IOREG_BIT=<.bit>` decodes that bitstream of the same
+/// design instead (Vivado's, from the sweep), to check the decoder.
+#[test]
+fn io_registers() {
+    let s = scratch("ioreg");
+    let src = Path::new(ROOT).join("crates/chipsmith-xc7/tests/designs/ioreg");
+    let dir = s.join("project");
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    copy_dir(&src, &dir);
+    let bit = match std::env::var("CHIPSMITH_XC7_IOREG_BIT") {
+        Ok(b) => PathBuf::from(b),
+        Err(_) => {
+            let out = Command::new(env!("CARGO_BIN_EXE_chipsmith"))
+                .arg("-C")
+                .arg(&dir)
+                .arg("build")
+                .env("CHIPSMITH_CACHE", "0")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "ioreg: build failed:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let bit = PathBuf::from(String::from_utf8(out.stdout).unwrap().trim());
+            prjxray_agrees(&bit, &s);
+            bit
+        }
+    };
+    check("ioreg", &example_at(&dir), &bit, &s, 3000);
+}
+
 /// `CHIPSMITH_XC7_BIT=<.bit> CHIPSMITH_XC7_EXAMPLE=<example>`: decode a
 /// given bitstream of that example (nextpnr's, to check the decoder).
 #[test]

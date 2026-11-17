@@ -49,6 +49,27 @@ pub fn pads(m: &mut Module) -> Result<()> {
             }
         }
     }
+    // A port the design buffers itself (an IBUF's I, an OBUF's or OBUFT's
+    // O, an IOBUF's IO): its buffer is the pin's.
+    let mut buffered = vec![false; m.net_count()];
+    for c in &m.cells {
+        if let CellKind::Other(g) = &c.kind {
+            let pad = match g.ty.as_str() {
+                cells::IBUF => "I",
+                cells::OBUF | cells::OBUFT => "O",
+                cells::IOBUF => "IO",
+                _ => continue,
+            };
+            for n in g
+                .port(pad)
+                .into_iter()
+                .flat_map(|p| p.sig.iter())
+                .filter_map(|b| b.net())
+            {
+                buffered[n.index()] = true;
+            }
+        }
+    }
     let mut used_tribufs = vec![false; m.cells.len()];
     let mut subst = Subst::new(m);
     let mut new_cells: Vec<CellKind> = Vec::new();
@@ -59,6 +80,9 @@ pub fn pads(m: &mut Module) -> Result<()> {
         };
         for bi in 0..g.m.wires[wi].bits.len() {
             let b = g.m.wires[wi].bits[bi];
+            if b.net().is_some_and(|n| buffered[n.index()]) {
+                continue;
+            }
             let pad = SigBit::Net(g.m.new_net());
             let tri = b.net().and_then(|n| tribuf_of[n.index()]);
             let cell = match (dir, tri) {

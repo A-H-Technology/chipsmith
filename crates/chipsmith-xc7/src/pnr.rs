@@ -76,6 +76,7 @@ pub struct Report {
 pub struct Pin {
     pub ball: String,
     pub io: crate::io::Settings,
+    pub registers: crate::io::Registers,
 }
 
 /// Every pin of a bank shares its VCCO, so its standards must agree on it.
@@ -164,6 +165,22 @@ pub fn run(
                 };
                 for (port, _) in &c.pins {
                     if let Some(clk) = pin_clock(place::bram_port(port, *sdp)) {
+                        let n = timing.graph.node(&c.name, port);
+                        timing.graph.set_clock(n, clk);
+                    }
+                }
+                None
+            }
+            // A pin's I/O-tile registers: the ILOGIC's on ICLK, the
+            // OLOGIC's on OCLK.
+            Kind::Pad { .. } => {
+                for (port, _) in &c.pins {
+                    let clk = match port.as_str() {
+                        "Q1" | "ICE" | "ISR" => c.net("ICLK"),
+                        "D1" | "T1" | "OCE" | "TCE" | "OSR" => c.net("OCLK"),
+                        _ => None,
+                    };
+                    if let Some(clk) = clk {
                         let n = timing.graph.node(&c.name, port);
                         timing.graph.set_clock(n, clk);
                     }
@@ -653,6 +670,7 @@ mod tests {
         Pin {
             ball: ball.into(),
             io: Settings::new(standard, None, Slew::Slow, Pull::None).unwrap(),
+            registers: Default::default(),
         }
     }
 

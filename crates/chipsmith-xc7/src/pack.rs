@@ -70,8 +70,12 @@ pub(crate) enum Conf {
     },
     /// A pin's IOB, with its buffer: pins `O` (to the fabric), `I` (to the
     /// pin), `T` (high releases it), as the buffer has them; its
-    /// electrical settings.
-    Pad(crate::io::Settings),
+    /// electrical settings, and the registers in its I/O tile
+    /// ([`absorb_io_registers`]).
+    Pad {
+        io: crate::io::Settings,
+        regs: IoRegs,
+    },
     /// A block RAM; its pins are its site's.
     Bram(Box<crate::bram::Config>),
     /// A DSP48E1; its pins are its site's (`A0`, `OPMODE3`, `CLK`, ...).
@@ -83,6 +87,29 @@ pub(crate) enum Conf {
     Ps7,
     Gnd,
     Vcc,
+}
+
+/// A register in an I/O tile (ILOGICE3's IFF, OLOGICE3's OUTFF or TFF), as
+/// the slice register it was: power-up value, the value SR sets, whether SR
+/// acts on the clock edge, a falling-edge clock, and whether CE and SR are
+/// connected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IoFf {
+    pub init: bool,
+    pub srval: bool,
+    pub sync: bool,
+    pub clk_inv: bool,
+    pub ce: bool,
+    pub sr: bool,
+}
+
+/// A pad's I/O-tile registers: the input's (ILOGIC), the output's and the
+/// output enable's (OLOGIC, which share its clock and SR).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct IoRegs {
+    pub input: Option<IoFf>,
+    pub output: Option<IoFf>,
+    pub oe: Option<IoFf>,
 }
 
 /// A clock management tile's block: what its bits hold, and the period of
@@ -108,7 +135,7 @@ fn drives(kind: &Kind, pin: &str) -> bool {
         Kind::Lut { .. } => pin == "O6" || pin == "O5",
         Kind::Ff(_) => pin == "Q",
         Kind::Carry => pin.starts_with('O') || pin.starts_with("CO"),
-        Kind::Pad { .. } => pin == "O",
+        Kind::Pad { .. } => pin == "O" || pin == "Q1",
         Kind::Bufg => pin == "O",
         Kind::Cmt { .. } => pin.starts_with("CLKOUT") || pin == "CLKFBOUT" || pin == "LOCKED",
         Kind::Bscan { .. } => pin != "TDO",
@@ -503,7 +530,11 @@ pub(crate) fn pack(
                         }
                     }
                 }
-                p.push(name, Kind::Pad { site, port }, pins, Conf::Pad(io));
+                let conf = Conf::Pad {
+                    io,
+                    regs: IoRegs::default(),
+                };
+                p.push(name, Kind::Pad { site, port }, pins, conf);
             }
             "BUFG" => {
                 let i = bit(g, "I", 0).with_context(|| format!("{name}: no I"))?;
@@ -601,6 +632,7 @@ pub(crate) fn pack(
         }
     }
 
+    let carries = absorb_io_registers(&mut p, pins, carries)?;
     feed_throughs(&mut p, &carries);
     let pairs = pair_luts(&mut p);
 
@@ -635,6 +667,188 @@ pub(crate) fn pack(
 /// Gives every CARRY4 S input a LUT of its own in that bit's 6LUT: a LUT's
 /// O6 the first time it feeds an S, else a feed-through LUT1 (a constant
 /// LUT for a constant S).
+/// Moves each register the manifest asks for into its pin's I/O tile: the
+/// pad cell takes over the register's pins under the I/O tile's names
+/// (`D1`, `T1`, `Q1`; `OCLK`, `OCE`, `TCE`, `OSR` for the OLOGIC, `ICLK`,
+/// `ICE`, `ISR` for the ILOGIC), and the register cell goes. Returns
+/// `carries` renumbered.
+fn absorb_io_registers(
+    p: &mut Packer,
+    pins: &BTreeMap<String, crate::pnr::Pin>,
+    carries: Vec<CellId>,
+) -> Result<Vec<CellId>> {
+    let mut gone = vec![false; p.cells.len()];
+    let users = |p: &Packer, net: NetId| -> Vec<(usize, String)> {
+        p.cells
+            .iter()
+            .enumerate()
+            .flat_map(|(i, c)| {
+                c.pins
+                    .iter()
+                    .filter(move |(pin, n)| *n == net && !drives(&c.kind, pin))
+                    .map(move |(pin, _)| (i, pin.clone()))
+            })
+            .collect()
+    };
+    let driver = |p: &Packer, net: NetId| -> Option<usize> {
+        p.cells.iter().position(|c| {
+            c.pins
+                .iter()
+                .any(|(pin, n)| *n == net && drives(&c.kind, pin))
+        })
+    };
+    let io_ff = |c: &Cell, conf: &Conf| -> Option<IoFf> {
+        match (&c.kind, conf) {
+            (Kind::Ff(cs), Conf::Ff { init, srval }) => Some(IoFf {
+                init: *init,
+                srval: *srval,
+                sync: cs.sync,
+                clk_inv: cs.clk_inv,
+                ce: cs.ce.is_some(),
+                sr: cs.sr.is_some(),
+            }),
+            _ => None,
+        }
+    };
+    for pad in 0..p.cells.len() {
+        let Kind::Pad { port, .. } = &p.cells[pad].kind else {
+            continue;
+        };
+        let port = port.clone();
+        let Some(want) = pins.get(&port).map(|p| p.registers) else {
+            continue;
+        };
+        let mut regs = IoRegs::default();
+        // The OLOGIC's clock and SR, which its two registers share.
+        let mut ologic: Option<(NetId, bool, Option<NetId>)> = None;
+        for (wanted, pad_pin, d_pin, ce_pin) in [
+            (want.output, "I", "D1", "OCE"),
+            (want.output_enable, "T", "T1", "TCE"),
+        ] {
+            if !wanted {
+                continue;
+            }
+            let what = if pad_pin == "I" {
+                "output"
+            } else {
+                "output enable"
+            };
+            let net = p.cells[pad].net(pad_pin).with_context(|| {
+                format!("{port}: registers asks for an {what} register, but it has no {what}")
+            })?;
+            let ff = driver(p, net)
+                .filter(|&i| matches!(p.cells[i].kind, Kind::Ff(_)))
+                .with_context(|| format!("{port}: registers asks for an {what} register, but no register drives its {what}"))?;
+            let others: Vec<String> = users(p, net)
+                .into_iter()
+                .filter(|(i, _)| *i != pad)
+                .map(|(i, pin)| format!("{}.{pin}", p.cells[i].name))
+                .collect();
+            ensure!(
+                others.is_empty(),
+                "{port}: its {what} register {} also feeds {}; one in the I/O tile drives only its pin",
+                p.cells[ff].name,
+                others.join(", ")
+            );
+            let f = io_ff(&p.cells[ff], &p.conf[ff]).expect("a register");
+            let c = &p.cells[ff];
+            let (clk, sr) = (c.net("CK").expect("a clock"), c.net("SR"));
+            match ologic {
+                None => ologic = Some((clk, f.clk_inv, sr)),
+                Some((k, inv, s)) => {
+                    ensure!(
+                        k == clk && inv == f.clk_inv,
+                        "{port}: its output and output-enable registers must share a clock and its edge in the I/O tile"
+                    );
+                    ensure!(
+                        s.is_none() || sr.is_none() || s == sr,
+                        "{port}: its output and output-enable registers must share a set/reset in the I/O tile"
+                    );
+                    if s.is_none() {
+                        ologic = Some((k, inv, sr));
+                    }
+                }
+            }
+            let (d, ce) = (c.net("D").expect("a D"), c.net("CE"));
+            let pins = &mut p.cells[pad].pins;
+            pins.retain(|(pin, _)| pin != pad_pin);
+            pins.push((d_pin.into(), d));
+            if let Some(ce) = ce {
+                pins.push((ce_pin.into(), ce));
+            }
+            if pad_pin == "I" {
+                regs.output = Some(f);
+            } else {
+                regs.oe = Some(f);
+            }
+            gone[ff] = true;
+        }
+        // An I/O tile's SR reads 1 unrouted, so a register without a reset
+        // has it tied to GND, as Vivado ties it.
+        let gnd = p.gnd;
+        if let Some((clk, _, sr)) = ologic {
+            let pins = &mut p.cells[pad].pins;
+            pins.push(("OCLK".into(), clk));
+            pins.push(("OSR".into(), sr.unwrap_or(gnd)));
+        }
+        if want.input {
+            let net = p.cells[pad].net("O").with_context(|| {
+                format!("{port}: registers asks for an input register, but it isn't an input")
+            })?;
+            let ff = users(p, net)
+                .into_iter()
+                .find(|(i, pin)| !gone[*i] && pin == "D" && matches!(p.cells[*i].kind, Kind::Ff(_)))
+                .map(|(i, _)| i)
+                .with_context(|| format!("{port}: registers asks for an input register, but its input feeds no register"))?;
+            let f = io_ff(&p.cells[ff], &p.conf[ff]).expect("a register");
+            let c = &p.cells[ff];
+            let (clk, ce, sr, q) = (
+                c.net("CK").expect("a clock"),
+                c.net("CE"),
+                c.net("SR"),
+                c.net("Q"),
+            );
+            let only_user = users(p, net).len() == 1;
+            let pins = &mut p.cells[pad].pins;
+            if only_user {
+                pins.retain(|(pin, _)| pin != "O");
+            }
+            if let Some(q) = q {
+                pins.push(("Q1".into(), q));
+            }
+            pins.push(("ICLK".into(), clk));
+            if let Some(ce) = ce {
+                pins.push(("ICE".into(), ce));
+            }
+            pins.push(("ISR".into(), sr.unwrap_or(gnd)));
+            regs.input = Some(f);
+            gone[ff] = true;
+        }
+        if let Conf::Pad { regs: r, .. } = &mut p.conf[pad] {
+            *r = regs;
+        }
+    }
+    let mut new_id = Vec::with_capacity(gone.len());
+    let mut next = 0;
+    for &g in &gone {
+        new_id.push(next);
+        if !g {
+            next += 1;
+        }
+    }
+    let mut k = 0;
+    p.cells.retain(|_| {
+        k += 1;
+        !gone[k - 1]
+    });
+    let mut k = 0;
+    p.conf.retain(|_| {
+        k += 1;
+        !gone[k - 1]
+    });
+    Ok(carries.into_iter().map(|c| new_id[c as usize]).collect())
+}
+
 fn feed_throughs(p: &mut Packer, carries: &[CellId]) {
     let mut driver: HashMap<NetId, CellId> = HashMap::default();
     for (i, c) in p.cells.iter().enumerate() {

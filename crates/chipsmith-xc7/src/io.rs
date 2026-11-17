@@ -205,6 +205,23 @@ impl Settings {
     }
 }
 
+/// Which of a pin's registers go into its I/O tile (ILOGIC, OLOGIC), as
+/// Vivado's `IOB TRUE` asks: the register its input feeds, the one driving
+/// its output, and the one driving its output enable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Registers {
+    pub input: bool,
+    pub output: bool,
+    pub output_enable: bool,
+}
+
+/// A pin's settings in the manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct PinIo {
+    pub settings: Settings,
+    pub registers: Registers,
+}
+
 /// What a pad does with its IOB, from the netlist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Use {

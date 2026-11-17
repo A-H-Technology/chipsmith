@@ -499,7 +499,7 @@ pub fn plan_cyclone2(
 
 pub fn plan_xc7(
     manifest: &Manifest,
-    pins: &[PinAssignment<Clg400Pin, chipsmith_xc7::io::Settings>],
+    pins: &[PinAssignment<Clg400Pin, chipsmith_xc7::io::PinIo>],
     clocks: &[Clock],
     layout: &Layout,
 ) -> Plan {
@@ -518,7 +518,8 @@ pub fn plan_xc7(
             .map(|a| {
                 let pin = chipsmith_xc7::pnr::Pin {
                     ball: a.pin.to_string(),
-                    io: a.io,
+                    io: a.io.settings,
+                    registers: a.io.registers,
                 };
                 (a.port.to_string(), pin)
             })

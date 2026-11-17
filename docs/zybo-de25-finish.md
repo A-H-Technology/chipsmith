@@ -16,10 +16,12 @@ and the DE2's peripherals (README, Roadmap).
   Vivado's bitstream of the same settings at all five bank voltages
   (`bench/zybo-io/sweep.py`, but PUDC_B), and examples/zybo-io's pull-up,
   pull-down, keepers and LVTTL 24 mA loopback hold on the board.
-- [ ] **Z2 I/O-tile registers.** Input, output and OE registers packed into
-  ILOGIC/OLOGIC where the design allows (Vivado's `IOB TRUE`). Done when
-  the decoded bitstream co-simulates and Vivado's bitstream of the same
-  RTL decodes to the same ILOGIC/OLOGIC features, and a board design runs.
+- [x] **Z2 I/O-tile registers** (2026-11-17). `registers` in `[pins]`
+  moves a pin's input, output and output-enable registers into its
+  ILOGICE3/OLOGICE3, every slice register shape. Site features match
+  Vivado's on 34 of 34 pins (`bench/zybo-ioreg/sweep.py`), both
+  bitstreams co-simulate (`io_registers`), and examples/zybo-ioreg's two
+  pins read back 697,668 checks with 0 wrong on the board.
 - [ ] **Z3 Wide muxes and shift registers.** MUXF7/MUXF8 and SRL16E/SRLC32E
   from synthesis through pack, place, FASM and the decoder. Done when the
   co-simulation passes through the bitstream, LUT counts drop on
