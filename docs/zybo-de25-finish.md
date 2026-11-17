@@ -33,20 +33,8 @@ and the DE2's peripherals (README, Roadmap).
   design's own, resets and gate enables found in the front end's enable;
   Vivado's and chipsmith's bitstreams co-simulate, and examples/zybo-latch
   runs 60 million checks with 0 wrong on the board.
-- [ ] **Z5 DSP48E1 pre-adder and ALU modes.** (A+D)*B and multiply-
-  accumulate in the DSP, as Vivado infers them. Done when the shape bench
-  co-simulates through the bitstream and the board runs it.
-- [ ] **Z6 The PS7's other ports.** Timing arcs for every PS7 fabric port
-  Vivado times (GP1, the S_AXI_GP/HP/ACP ports, the fabric clocks and
-  resets), and an HP-port design on the board: the fabric writes DDR
-  through S_AXI_HP0 and Linux reads it back.
-- [ ] **Z7 Clock skew.** The STA takes each clock's insertion delay to
-  every sink (BUFG, the clock rows, the PS7's clock pin), against Vivado's
-  report on the same routing.
-- [ ] **Z8 LUT pin swapping while routing**, as Vivado's router does.
-  Done when sha256 gains by Vivado's timer over five seeds.
-- [ ] **Z9 The owed board runs.** The block RAM and multiplier shape
-  benches (README tables) run on the board through a JTAG selftest.
+Z5-Z9 and slice F7/F8 mapping moved to "Cool stuff to do eventually"
+(2026-11-17): the Zybo does what its designs need without them.
 
 ## DE25-Nano (A5EB013BB23BE4SCS)
 
@@ -64,3 +52,26 @@ and the DE2's peripherals (README, Roadmap).
   the check since faster routes leave a5pnr's tests.
 - [ ] **D6 Which phase 1 booted.** `flash --ssh` reads the board's HPS IO
   hash (or an equivalent) before loading, instead of trusting the manifest.
+
+## Cool stuff to do eventually
+
+Not needed to call a board finished; worth doing when a design wants it.
+
+- **Z5 DSP48E1 pre-adder and ALU modes.** (A+D)*B and multiply-
+  accumulate in the DSP, as Vivado infers them. Done when the shape bench
+  co-simulates through the bitstream and the board runs it.
+- **Z6 The PS7's other ports.** Timing arcs for every PS7 fabric port
+  Vivado times (GP1, the S_AXI_GP/HP/ACP ports, the fabric clocks and
+  resets), and an HP-port design on the board: the fabric writes DDR
+  through S_AXI_HP0 and Linux reads it back.
+- **Z7 Clock skew.** The STA takes each clock's insertion delay to
+  every sink (BUFG, the clock rows, the PS7's clock pin), against Vivado's
+  report on the same routing.
+- **Z8 LUT pin swapping while routing**, as Vivado's router does.
+  Done when sha256 gains by Vivado's timer over five seeds.
+- **Z9 The owed board runs.** The block RAM and multiplier shape
+  benches (README tables) run on the board through a JTAG selftest.
+- **Slice MUXF7/MUXF8 mapping**: a fifth of a 16:1-64:1 multiplexer's
+  LUTs and a LUT level (README, "7-series synthesis"), nothing on the
+  examples; needs a placement object of four LUTs and the muxes in one
+  slice.
