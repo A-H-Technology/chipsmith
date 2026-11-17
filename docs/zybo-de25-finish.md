@@ -22,10 +22,13 @@ and the DE2's peripherals (README, Roadmap).
   Vivado's on 34 of 34 pins (`bench/zybo-ioreg/sweep.py`), both
   bitstreams co-simulate (`io_registers`), and examples/zybo-ioreg's two
   pins read back 697,668 checks with 0 wrong on the board.
-- [ ] **Z3 Wide muxes and shift registers.** MUXF7/MUXF8 and SRL16E/SRLC32E
-  from synthesis through pack, place, FASM and the decoder. Done when the
-  co-simulation passes through the bitstream, LUT counts drop on
-  picorv32/sha256, and the board runs a design with both.
+- [x] **Z3 Wide muxes and shift registers** (2026-11-17). Shift
+  registers: SRLC32Es from synthesis through pack, place, FASM and the
+  decoder; Vivado's and chipsmith's bitstreams co-simulate, and
+  examples/zybo-srl runs 55 million checks with 0 wrong on the board.
+  Wide muxes: a design's own MUXF7/MUXF8 build (lowered to LUTs); slice
+  F7/F8 mapping measured at a fifth of a 16:1-64:1 multiplexer's LUTs and
+  nothing on the examples, left out until a design needs it (README).
 - [ ] **Z4 Latches.** LDCE/LDPE (a slice register in latch mode). Done like
   Z3.
 - [ ] **Z5 DSP48E1 pre-adder and ALU modes.** (A+D)*B and multiply-

@@ -18,6 +18,7 @@ mod ff;
 mod io;
 mod ram;
 mod replicate;
+mod srl;
 
 use anyhow::{bail, Context, Result};
 use chipsmith_netlist::{attr, is_set, CellKind, Design, Module, SigBit, State};
@@ -44,6 +45,10 @@ pub struct Stats {
     pub replicas: usize,
     pub carry4s: usize,
     pub ram32ms: usize,
+    /// Shift registers in SLICEM LUTs, and the registers they took (not
+    /// among `registers`).
+    pub srls: usize,
+    pub shifted: usize,
     /// Block RAM in RAMB18 halves (a RAMB36E1 is two).
     pub bram_halves: usize,
     pub dsps: usize,
@@ -61,6 +66,8 @@ pub struct Options {
     /// equivalence proof can't tie a copy to its original (induction leaves
     /// the copy free), so the proofs run without.
     pub register_copies: bool,
+    /// Chains of registers shifted in SLICEM LUTs ([`srl`]).
+    pub shift_registers: bool,
 }
 
 impl Default for Options {
@@ -69,6 +76,7 @@ impl Default for Options {
             distributed_ram: true,
             block_ram: true,
             register_copies: true,
+            shift_registers: true,
         }
     }
 }
@@ -182,12 +190,21 @@ fn run(m: &mut Module, options: Options, obs: &mut dyn Observer) -> Result<Stats
     opt::opt_seq(m, removable)?;
     obs.stage("gates", m);
 
+    let wide_muxes = lower_wide_muxes(m);
+    if wide_muxes > 0 {
+        opt::opt(m, removable);
+    }
     let registers = ff::map(m)?;
     io::pads(m)?;
     let lutmap = lutmap::map_module_k(m, LutSize::SIX)?;
     lut_cells(m);
     clean(m);
     obs.stage("luts", m);
+    let (srls, shifted) = if options.shift_registers {
+        srl::map(m)
+    } else {
+        (0, 0)
+    };
     let replicas = if options.register_copies {
         replicate::registers(m, replicate::MAX_FANOUT)
     } else {
@@ -200,7 +217,9 @@ fn run(m: &mut Module, options: Options, obs: &mut dyn Observer) -> Result<Stats
     clean::purge_wires(m);
     Ok(Stats {
         lutmap,
-        registers: registers + replicas,
+        registers: registers + replicas - shifted,
+        srls,
+        shifted,
         replicas,
         carry4s,
         ram32ms,
@@ -208,6 +227,40 @@ fn run(m: &mut Module, options: Options, obs: &mut dyn Observer) -> Result<Stats
         dsps,
         bufgs,
     })
+}
+
+/// A design's own MUXF7s and MUXF8s as 2:1 multiplexers, for the LUT
+/// mapper: `O = S ? I1 : I0`. chipsmith maps no slice F7/F8 muxes of its own
+/// (README, "7-series synthesis": on 16:1 to 64:1 multiplexers they would
+/// save a fifth of the LUTs and a LUT level, on the examples nothing).
+/// Returns how many it lowered.
+fn lower_wide_muxes(m: &mut Module) -> usize {
+    let mut subst = Subst::new(m);
+    let mut g = chipsmith_synth::rewrite::Gates::new(m, "muxf");
+    let cells = std::mem::take(&mut g.m.cells);
+    let mut lowered = 0;
+    for c in cells {
+        let CellKind::Other(gen) = &c.kind else {
+            g.m.cells.push(c);
+            continue;
+        };
+        if gen.ty != "MUXF7" && gen.ty != "MUXF8" {
+            g.m.cells.push(c);
+            continue;
+        }
+        let pin = |p: &str| {
+            gen.port(p)
+                .and_then(|p| p.sig.first().copied())
+                .unwrap_or(SigBit::X)
+        };
+        let o = g.mux(pin("I0"), pin("I1"), pin("S"));
+        if let Some(SigBit::Net(n)) = gen.port("O").and_then(|p| p.sig.first().copied()) {
+            subst.set(n, o);
+        }
+        lowered += 1;
+    }
+    subst.apply(m);
+    lowered
 }
 
 /// `$lut` cells as LUT1 to LUT6, constant inputs folded into the table; a

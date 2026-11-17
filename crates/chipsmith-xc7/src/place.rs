@@ -68,6 +68,11 @@ pub(crate) enum Kind {
     Lut {
         dram: bool,
     },
+    /// An SRLC32E in a SLICEM 6LUT: clocked by `CK` (falling with
+    /// `clk_inv`), shifting `D` in while `WE`, read at `A2..A6`.
+    Srl {
+        clk_inv: bool,
+    },
     Ff(ControlSet),
     Carry,
     /// A package pin's site (`IOB_X0Y78`) and its buffers, for the port
@@ -154,11 +159,19 @@ pub(crate) struct CarrySlice {
     pub ff: [Option<CellId>; 4],
 }
 
-/// A RAM32M: per bit, the RAMD32 in the 6LUT and the one in the 5LUT.
-#[derive(Debug, Clone)]
+/// A SLICEM's LUTs in RAM or shift-register mode, which share its clock
+/// and write enable: a RAM32M (per bit, the RAMD32 in the 6LUT and the one
+/// in the 5LUT) or up to four SRLC32Es in the 6LUTs.
+#[derive(Debug, Clone, Default)]
 pub(crate) struct Dram {
-    pub lut6: [CellId; 4],
-    pub lut5: [CellId; 4],
+    pub lut6: [Option<CellId>; 4],
+    pub lut5: [Option<CellId>; 4],
+}
+
+impl Dram {
+    pub fn cells(&self) -> impl Iterator<Item = CellId> + '_ {
+        self.lut6.iter().chain(&self.lut5).flatten().copied()
+    }
 }
 
 pub(crate) struct Design {
@@ -337,23 +350,41 @@ pub(crate) fn build(
     let mut rams: Vec<_> = rams.into_iter().collect();
     rams.sort_by(|a, b| a.0.cmp(b.0));
     for (ram, bits) in rams {
-        let mut dram = Dram {
-            lut6: [0; 4],
-            lut5: [0; 4],
-        };
+        let mut dram = Dram::default();
         for (k, bit) in bits.iter().enumerate() {
             match *bit {
                 [Some(l5), Some(l6)] => {
-                    dram.lut5[k] = l5;
-                    dram.lut6[k] = l6;
+                    dram.lut5[k] = Some(l5);
+                    dram.lut6[k] = Some(l6);
                 }
                 _ => anyhow::bail!("distributed RAM {ram} isn't a RAM32M"),
             }
         }
-        for c in dram.lut5.iter().chain(&dram.lut6) {
-            taken[*c as usize] = true;
+        for c in dram.cells() {
+            taken[c as usize] = true;
         }
         d.drams.push(dram);
+    }
+    // SRLs: four to a SLICEM, those of one clock, edge and write enable
+    // together.
+    let mut srls: std::collections::BTreeMap<(Option<NetId>, bool, Option<NetId>), Vec<CellId>> =
+        Default::default();
+    for (i, c) in d.cells.iter().enumerate() {
+        if let Kind::Srl { clk_inv } = c.kind {
+            srls.entry((c.net("CK"), clk_inv, c.net("WE")))
+                .or_default()
+                .push(i as CellId);
+        }
+    }
+    for group in srls.values() {
+        for four in group.chunks(4) {
+            let mut dram = Dram::default();
+            for (k, &c) in four.iter().enumerate() {
+                dram.lut6[k] = Some(c);
+                taken[c as usize] = true;
+            }
+            d.drams.push(dram);
+        }
     }
 
     // Paired LUTs (`crate::pack`): one BLE each pair, each LUT's register
@@ -531,7 +562,7 @@ impl Timing {
             }
         }
         for (r, ram) in d.drams.iter().enumerate() {
-            for &c in ram.lut6.iter().chain(&ram.lut5) {
+            for c in ram.cells() {
                 obj[c as usize] = Some((2, r as u32, 0));
             }
         }
@@ -682,6 +713,23 @@ impl Timing {
                                 g.set_setup(n, s + delays.clock_margin);
                             }
                             None => {}
+                        }
+                    }
+                }
+                // A shift register: O6 launches from the clock (stage A), or
+                // follows A like a LUT's output; D and WE capture.
+                Kind::Srl { .. } => {
+                    for &p in &ports {
+                        let n = node(&mut g, p);
+                        match p {
+                            "O6" => g.set_launch(n, delays.srl.clock_to_out),
+                            "D" => g.set_setup(n, delays.srl.setup_d + delays.clock_margin),
+                            "WE" => g.set_setup(n, delays.srl.setup_we + delays.clock_margin),
+                            a if a.starts_with('A') && ports.contains(&"O6") => {
+                                let o = node(&mut g, "O6");
+                                g.add_arc(n, o, delays.lut);
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -1262,10 +1310,7 @@ impl<'a> State<'a> {
                                 .chain(cs.ff.iter().flatten().copied())
                                 .collect()
                         }
-                        Obj::Dram(r) => {
-                            let r = &d.drams[r as usize];
-                            r.lut6.iter().chain(&r.lut5).copied().collect()
-                        }
+                        Obj::Dram(r) => d.drams[r as usize].cells().collect(),
                         Obj::Ble(_) | Obj::Hard(..) => unreachable!(),
                     };
                     for c in cells {
@@ -1322,10 +1367,7 @@ impl<'a> State<'a> {
                     out.extend(cs.lut6.iter().chain(&cs.lut5).chain(&cs.ff).flatten());
                 }
             }
-            Obj::Dram(r) => {
-                let r = &d.drams[r as usize];
-                out.extend(r.lut6.iter().chain(&r.lut5));
-            }
+            Obj::Dram(r) => out.extend(d.drams[r as usize].cells()),
             Obj::Hard(h, b) => {
                 out.push(d.hard[h as usize][b as usize]);
                 out.extend(d.upper(h, b));
@@ -1795,8 +1837,12 @@ fn sites(
     for (r, ram) in d.drams.iter().enumerate() {
         let slice = s.dram_slice[r];
         for k in 0..SLOTS {
-            out[ram.lut6[k] as usize] = Some((site(slice), Bel::Lut6(k)));
-            out[ram.lut5[k] as usize] = Some((site(slice), Bel::Lut5(k)));
+            if let Some(c) = ram.lut6[k] {
+                out[c as usize] = Some((site(slice), Bel::Lut6(k)));
+            }
+            if let Some(c) = ram.lut5[k] {
+                out[c as usize] = Some((site(slice), Bel::Lut5(k)));
+            }
         }
     }
     for h in Hard::ALL {
@@ -2115,7 +2161,7 @@ fn global<'a>(
     }
     for (r, ram) in d.drams.iter().enumerate() {
         let o = p.add_object(1, &[(0, SLOTS as f32 / full)]);
-        for &c in ram.lut6.iter().chain(&ram.lut5) {
+        for c in ram.cells() {
             obj_of[c as usize] = Some(o);
         }
         objects.push(Obj::Dram(r as u32));

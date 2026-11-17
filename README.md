@@ -670,6 +670,10 @@ The Zybo examples:
   ```
 
   With zybo-blinky loaded instead, the same read returns all zeros.
+- `examples/zybo-srl`: shift-register LUTs: delay lines of 100, 37 (with
+  a clock enable) and 20 (falling edge) stages and an SRLC32E at a sweeping
+  address, each checked against a reference and read over JTAG
+  (`cargo run --release -p chipsmith-jtag --example xc7_srl`).
 - `examples/zybo-ioreg`: I/O-tile registers on Pmod JE (input, output and
   output enable on each of two pins, rising and falling edge), checked
   every 8 us and read over JTAG
@@ -749,7 +753,15 @@ seven two-LUT cones of seven inputs on picorv32 (none on sha256) could
 trade a LUT level for an F7. Vivado's MUXF7s (28 on picorv32) come from
 its own synthesis, which keeps wide multiplexers as such; chipsmith's
 mapper has merged them into its LUTs by then. Vivado's lead in LUTs is
-elsewhere.
+elsewhere. Measured again on 2026-11-17 on bare registered multiplexers,
+where they would count: 16:1 maps to 5 LUTs (depth 2), 32:1 to 11 (depth
+3), 64:1 to 21 (depth 3); slice F7/F8 muxes would make those 4, 9 and 17
+at one LUT level fewer. That's a fifth of a wide multiplexer's LUTs, and
+nothing on any example (a register file in registers goes to RAM32Ms),
+against a placement object of its own (four LUTs and the muxes in one
+slice). So they stay out until a design needs them. A design's own
+MUXF7 and MUXF8 build: synthesis lowers them to 2:1 multiplexers before
+LUT mapping (`xc7_bitstream`, `wide_muxes`).
 
 Cell counts against `synth_xilinx -flatten -abc9 -arch xc7` on the same
 Verilog (`crates/chipsmith-xc7/tests/synth.rs`, which prints both):
@@ -988,10 +1000,27 @@ Zybo limits:
   anywhere else; a Vivado build of a larger GP0 design missed 125 MHz by
   0.2 ns. The PS7's other ports aren't timed yet (Vivado gives an arc only
   for a pin the design connects).
-- Cells: what synthesis makes ("7-series synthesis", above). No SRLs,
-  MUXF7/F8 or latches; no DSP48E1 ALU modes or pre-adder (a product, or a
-  cascaded pair's sum). A design's own IBUF, OBUF, OBUFT and IOBUF are its
-  pins' buffers (since 2026-11-17).
+- Cells: what synthesis makes ("7-series synthesis", above). No MUXF7/F8
+  or latches; no DSP48E1 ALU modes or pre-adder (a product, or a cascaded
+  pair's sum). A design's own IBUF, OBUF, OBUFT and IOBUF are its pins'
+  buffers (since 2026-11-17).
+- Shift registers (since 2026-11-17): a chain of four or more registers
+  with no reset, one clock, edge and clock enable, each read only by the
+  next, keeps its first and last register and shifts the rest in SRLC32Es
+  of up to 32 stages (`crates/chipsmith-xc7/src/synth/srl.rs`), Vivado's
+  default `srl_style`. A design's own SRLC32E takes any address, a
+  dynamic one included. Four SRLs of one clock, edge and enable share a
+  SLICEM, as RAM32Ms do. bench/zybo-srl/sweep.py builds delay lines of
+  every shape in Vivado; both Vivado's bitstreams (its SRL16E halves and
+  MC31 cascades too) and chipsmith's decode to netlists that co-simulate
+  against the RTL (`xc7_bitstream`, `shift_registers` and
+  `shift_register_primitives`, 27,000 output bits each). No Zybo example
+  had a delay line: each builds the same bytes. On the board
+  (examples/zybo-srl, 12 SRLC32Es for 275 register stages, read over
+  JTAG): a 100-stage line, a 37-stage one shifting every third cycle, a
+  20-stage one on the falling edge and an SRLC32E at a sweeping address,
+  each against a reference, 55 million checks with 0 wrong; with one
+  line's RTL shifted wrong, its count saturates.
 - I/O-tile registers (since 2026-11-17): a pin's `registers` in `[pins]`
   (`"input"`, `"output"`, `"output-enable"`, as on the DE2) moves the
   register its input feeds, the one driving it, or the one driving its

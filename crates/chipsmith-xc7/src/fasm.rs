@@ -276,6 +276,12 @@ pub(crate) fn write(
                 if let Some(init) = init {
                     line(format!("{p}.{l}LUT.INIT[63:0] = 64'b{init:064b}"));
                 }
+                if s.lut_srl[k] {
+                    if k < 3 {
+                        line(format!("{p}.{l}LUT.DI1MUX.{l}I"));
+                    }
+                    line(format!("{p}.{l}LUT.SRL"));
+                }
                 if s.lut_ram[k] {
                     if k < 3 {
                         line(format!("{p}.{l}LUT.DI1MUX.{l}I"));

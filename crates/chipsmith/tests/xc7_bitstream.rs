@@ -457,6 +457,12 @@ fn registers_and_arithmetic() {
     design_built("regs_arith.v", "regs_arith");
 }
 
+/// A design's own MUXF7s and MUXF8s, lowered to LUTs, through the bitstream.
+#[test]
+fn wide_muxes() {
+    design_built("muxf.v", "muxf");
+}
+
 /// RAM32Ms of every shape synthesis makes, through the bitstream.
 #[test]
 fn distributed_ram() {
@@ -512,33 +518,33 @@ fn dsp() {
     assert!(failures.is_empty(), "failed: {failures:?}");
 }
 
-/// Every register shape as a pin's input, output and output-enable
-/// register in its I/O tile (`chipsmith-xc7/tests/designs/ioreg`, from
-/// bench/zybo-ioreg/sweep.py), through the bitstream.
-/// `CHIPSMITH_XC7_IOREG_BIT=<.bit>` decodes that bitstream of the same
-/// design instead (Vivado's, from the sweep), to check the decoder.
-#[test]
-fn io_registers() {
-    let s = scratch("ioreg");
-    let src = Path::new(ROOT).join("crates/chipsmith-xc7/tests/designs/ioreg");
-    let dir = s.join("project");
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).unwrap();
+/// A test design with a manifest of its own
+/// (`chipsmith-xc7/tests/designs/<dir>`), built and co-simulated through
+/// the bitstream; `<VAR>=<.bit>` decodes that bitstream of the same design
+/// instead (Vivado's, from the design's bench sweep), to check the decoder.
+fn project_built(dir: &str, var: &str) {
+    let s = scratch(dir);
+    let src = Path::new(ROOT)
+        .join("crates/chipsmith-xc7/tests/designs")
+        .join(dir);
+    let project = s.join("project");
+    if project.exists() {
+        std::fs::remove_dir_all(&project).unwrap();
     }
-    copy_dir(&src, &dir);
-    let bit = match std::env::var("CHIPSMITH_XC7_IOREG_BIT") {
+    copy_dir(&src, &project);
+    let bit = match std::env::var(var) {
         Ok(b) => PathBuf::from(b),
         Err(_) => {
             let out = Command::new(env!("CARGO_BIN_EXE_chipsmith"))
                 .arg("-C")
-                .arg(&dir)
+                .arg(&project)
                 .arg("build")
                 .env("CHIPSMITH_CACHE", "0")
                 .output()
                 .unwrap();
             assert!(
                 out.status.success(),
-                "ioreg: build failed:\n{}",
+                "{dir}: build failed:\n{}",
                 String::from_utf8_lossy(&out.stderr)
             );
             let bit = PathBuf::from(String::from_utf8(out.stdout).unwrap().trim());
@@ -546,7 +552,31 @@ fn io_registers() {
             bit
         }
     };
-    check("ioreg", &example_at(&dir), &bit, &s, 3000);
+    check(dir, &example_at(&project), &bit, &s, 3000);
+}
+
+/// Every register shape as a pin's input, output and output-enable
+/// register in its I/O tile (bench/zybo-ioreg/sweep.py), through the
+/// bitstream; `CHIPSMITH_XC7_IOREG_BIT` decodes Vivado's instead.
+#[test]
+fn io_registers() {
+    project_built("ioreg", "CHIPSMITH_XC7_IOREG_BIT");
+}
+
+/// Delay lines of every shape as shift-register LUTs
+/// (bench/zybo-srl/sweep.py), through the bitstream;
+/// `CHIPSMITH_XC7_SRL_BIT` decodes another bitstream of it instead.
+#[test]
+fn shift_registers() {
+    project_built("srl", "CHIPSMITH_XC7_SRL_BIT");
+}
+
+/// The delay lines as SRLC32E instances, the dynamic tap on the address
+/// pins; `CHIPSMITH_XC7_SRL_PRIM_BIT` decodes Vivado's bitstream of it
+/// (bench/zybo-srl/sweep.py --primitives), which has no SRL16E halves.
+#[test]
+fn shift_register_primitives() {
+    project_built("srl_prim", "CHIPSMITH_XC7_SRL_PRIM_BIT");
 }
 
 /// `CHIPSMITH_XC7_BIT=<.bit> CHIPSMITH_XC7_EXAMPLE=<example>`: decode a

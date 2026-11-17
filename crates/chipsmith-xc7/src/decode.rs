@@ -236,6 +236,9 @@ fn site_in(db: &ChipDb, tile: u32, prefix: &str) -> Option<String> {
 struct Half {
     init: [u64; 4],
     ram: [bool; 4],
+    /// `<L>LUT.SRL` (`SMALL`: two 16-stage halves).
+    srl: [bool; 4],
+    small: [bool; 4],
     /// `<L>LUT.DI1MUX.<L>I`: the 6LUT's data from its own `<L>I` pin, not
     /// from the next LUT's (A from B's, B from C's, C from D's).
     di1_own: [bool; 4],
@@ -446,6 +449,16 @@ pub fn decode_routed(
                     ([lut, "RAM"], None) if lut.ends_with("LUT") => {
                         if let Some(k) = letter(lut) {
                             h.ram[k] = true;
+                        }
+                    }
+                    ([lut, "SRL"], None) if lut.ends_with("LUT") => {
+                        if let Some(k) = letter(lut) {
+                            h.srl[k] = true;
+                        }
+                    }
+                    ([lut, "SMALL"], None) if lut.ends_with("LUT") => {
+                        if let Some(k) = letter(lut) {
+                            h.small[k] = true;
                         }
                     }
                     ([lut, "DI1MUX", input], None) if lut.ends_with("LUT") && input.len() == 2 => {
@@ -872,7 +885,84 @@ pub fn decode_routed(
             d.m.add_cell(format!("{key}.ram"), ram.cell());
             continue;
         }
+        // Shift registers. A LUT is one 32-stage register (stage i on table
+        // bits 2i and 2i + 1, read on A2..A6), or with SMALL two 16-stage
+        // ones: the 6LUT half (bits 32-63) shifting from <L>X onto O6, the
+        // 5LUT half (bits 0-31) from DI1 onto O5, each read on A2..A5.
+        // DI1 is the letter's own <L>I (`DI1MUX.<L>I`; D's is DI) or else
+        // the next LUT's stage 31 (MC31), as Vivado's cascades have it
+        // (bench/zybo-srl/sweep.py).
+        let q31: [Option<SigBit>; 4] =
+            std::array::from_fn(|k| (h.srl[k] && !h.small[k]).then(|| SigBit::Net(d.m.new_net())));
+        for k in (0..4).filter(|&k| h.srl[k]) {
+            let l = LETTERS[k];
+            // A SMALL LUT's 5LUT half may be unused, its DI1 from nowhere:
+            // x, so a read of it shows in the co-simulation.
+            let di1 = if k == 3 {
+                pin(&d, "DI".into())?
+            } else if h.di1_own[k] {
+                pin(&d, format!("{l}I"))?
+            } else if let Some(q) = q31[k + 1] {
+                q
+            } else if h.small[k] {
+                SigBit::X
+            } else {
+                anyhow::bail!("{key}: {l}LUT shifts in from a LUT with no 32-stage register");
+            };
+            let clkinv = h.clkinv;
+            let ce = pin(&d, if h.we_ce { "CE" } else { "WE" }.into())?;
+            let stages = |lo: u32, n: u32| -> u32 {
+                (0..n).fold(0u32, |v, i| {
+                    v | ((h.init[k] >> (lo + 2 * i + 1) & 1) as u32) << i
+                })
+            };
+            if h.small[k] {
+                let mut addr: Vec<SigBit> = (2..=5)
+                    .map(|i| pin(&d, format!("{l}{i}")))
+                    .collect::<Result<_>>()?;
+                addr.push(SigBit::ZERO);
+                let unused = SigBit::Net(d.m.new_net());
+                d.m.add_cell(
+                    format!("{key}.{l}srl6"),
+                    cells::srlc32e(
+                        pin(&d, format!("{l}X"))?,
+                        clk,
+                        clkinv,
+                        ce,
+                        &addr,
+                        stages(32, 16),
+                        n.o6[k],
+                        unused,
+                    ),
+                );
+                let unused = SigBit::Net(d.m.new_net());
+                d.m.add_cell(
+                    format!("{key}.{l}srl5"),
+                    cells::srlc32e(di1, clk, clkinv, ce, &addr, stages(0, 16), n.o5[k], unused),
+                );
+            } else {
+                let addr: Vec<SigBit> = (2..=6)
+                    .map(|i| pin(&d, format!("{l}{i}")))
+                    .collect::<Result<_>>()?;
+                d.m.add_cell(
+                    format!("{key}.{l}srl"),
+                    cells::srlc32e(
+                        di1,
+                        clk,
+                        clkinv,
+                        ce,
+                        &addr,
+                        stages(0, 32),
+                        n.o6[k],
+                        q31[k].expect("a 32-stage SRL"),
+                    ),
+                );
+            }
+        }
         for k in 0..4 {
+            if h.srl[k] {
+                continue;
+            }
             let ins: Vec<SigBit> = (1..=6)
                 .map(|i| pin(&d, format!("{}{i}", LETTERS[k])))
                 .collect::<Result<_>>()?;

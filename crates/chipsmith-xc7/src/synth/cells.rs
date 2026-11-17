@@ -12,6 +12,7 @@ use crate::bram::{self, Size};
 
 pub const CARRY4: &str = "CARRY4";
 pub const RAM32M: &str = "RAM32M";
+pub const SRLC32E: &str = "SRLC32E";
 pub const RAMB18E1: &str = "RAMB18E1";
 pub const RAMB36E1: &str = "RAMB36E1";
 pub const DSP48E1: &str = "DSP48E1";
@@ -162,6 +163,74 @@ impl Fd {
             ],
         )
     }
+}
+
+/// One SRLC32E: `len` stages (1 to 32) from `d` to `q`, `init[i]` stage
+/// i's power-up value, shifted on enabled edges of `clk` (falling with
+/// `clk_inv`). Its address is the constant `len - 1`.
+pub struct Srl {
+    pub d: SigBit,
+    pub clk: SigBit,
+    pub clk_inv: bool,
+    pub ce: SigBit,
+    pub len: usize,
+    pub init: u32,
+    pub q: SigBit,
+}
+
+impl Srl {
+    pub fn cell(self) -> CellKind {
+        assert!(
+            (1..=32).contains(&self.len),
+            "an SRLC32E holds 1 to 32 stages"
+        );
+        let a = (0..5)
+            .map(|i| SigBit::Const(State::from((self.len - 1) >> i & 1 == 1)))
+            .collect();
+        generic(
+            SRLC32E,
+            BTreeMap::from([
+                ("INIT".to_string(), bits(self.init.into(), 32)),
+                ("IS_CLK_INVERTED".to_string(), bits(self.clk_inv.into(), 1)),
+            ]),
+            vec![
+                port("A", Dir::In, a),
+                port("CE", Dir::In, vec![self.ce]),
+                port("CLK", Dir::In, vec![self.clk]),
+                port("D", Dir::In, vec![self.d]),
+                port("Q", Dir::Out, vec![self.q]),
+            ],
+        )
+    }
+}
+
+/// An SRLC32E as the hardware has it: any address, and stage 31 on `q31`.
+#[allow(clippy::too_many_arguments)]
+pub fn srlc32e(
+    d: SigBit,
+    clk: SigBit,
+    clk_inv: bool,
+    ce: SigBit,
+    a: &[SigBit],
+    init: u32,
+    q: SigBit,
+    q31: SigBit,
+) -> CellKind {
+    generic(
+        SRLC32E,
+        BTreeMap::from([
+            ("INIT".to_string(), bits(init.into(), 32)),
+            ("IS_CLK_INVERTED".to_string(), bits(clk_inv.into(), 1)),
+        ]),
+        vec![
+            port("A", Dir::In, a.to_vec()),
+            port("CE", Dir::In, vec![ce]),
+            port("CLK", Dir::In, vec![clk]),
+            port("D", Dir::In, vec![d]),
+            port("Q", Dir::Out, vec![q]),
+            port("Q31", Dir::Out, vec![q31]),
+        ],
+    )
 }
 
 /// One CARRY4: per bit `CO = S ? carry : DI`, `O = S ^ carry`, the carry
@@ -417,7 +486,7 @@ mod tests {
     #[test]
     fn the_library_declares_every_cell_synthesis_makes() {
         for ty in LUTS.iter().chain(&FFS).chain(&[
-            CARRY4, RAM32M, RAMB18E1, RAMB36E1, IBUF, OBUF, OBUFT, IOBUF, BUFG,
+            CARRY4, RAM32M, SRLC32E, RAMB18E1, RAMB36E1, IBUF, OBUF, OBUFT, IOBUF, BUFG,
         ]) {
             assert!(is_device_cell(ty), "{ty}");
         }

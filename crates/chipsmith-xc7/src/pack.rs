@@ -68,6 +68,10 @@ pub(crate) enum Conf {
         init: u32,
         wclk_inv: bool,
     },
+    /// An SRLC32E: its 32 stages' power-up values, stage i in bit i.
+    Srl {
+        init: u32,
+    },
     /// A pin's IOB, with its buffer: pins `O` (to the fabric), `I` (to the
     /// pin), `T` (high releases it), as the buffer has them; its
     /// electrical settings, and the registers in its I/O tile
@@ -133,6 +137,7 @@ pub(crate) struct Packed {
 fn drives(kind: &Kind, pin: &str) -> bool {
     match kind {
         Kind::Lut { .. } => pin == "O6" || pin == "O5",
+        Kind::Srl { .. } => pin == "O6",
         Kind::Ff(_) => pin == "Q",
         Kind::Carry => pin.starts_with('O') || pin.starts_with("CO"),
         Kind::Pad { .. } => pin == "O" || pin == "Q1",
@@ -443,6 +448,38 @@ pub(crate) fn pack(
                         );
                     }
                 }
+            }
+            "SRLC32E" => {
+                let clk = match bit(g, "CLK", 0) {
+                    Some(SigBit::Net(n)) => p.net(n),
+                    _ => bail!("shift register {name} has no clock"),
+                };
+                // The enable on the SLICEM's WE, tied high when there is
+                // none: the slice's write enable isn't a register's CE that
+                // an unused mux turns on.
+                let we = p.sig(bit(g, "CE", 0).unwrap_or(SigBit::ONE));
+                let d = bit(g, "D", 0).with_context(|| format!("{name}: no D"))?;
+                let mut pins = vec![
+                    ("D".to_string(), p.sig(d)),
+                    ("CK".to_string(), clk),
+                    ("WE".to_string(), we),
+                ];
+                // Address A[i] on LUT pin A<i+2>: a 32-stage SRL reads A2..A6
+                // (its table duplicated over A1).
+                for i in 0..5 {
+                    let a = bit(g, "A", i).unwrap_or(SigBit::ZERO);
+                    pins.push((format!("A{}", i + 2), p.sig(a)));
+                }
+                if let Some(SigBit::Net(q)) = bit(g, "Q", 0) {
+                    pins.push(("O6".into(), p.net(q)));
+                }
+                ensure!(
+                    bit(g, "Q31", 0).and_then(SigBit::net).is_none(),
+                    "shift register {name}: Q31 isn't packed yet; read stage 31 at A = 31"
+                );
+                let clk_inv = param_bits(g, "IS_CLK_INVERTED") == 1;
+                let init = param_bits(g, "INIT") as u32;
+                p.push(name, Kind::Srl { clk_inv }, pins, Conf::Srl { init });
             }
             "RAMB18E1" | "RAMB36E1" => {
                 let r = crate::synth::cells::Ramb::from_generic(g)

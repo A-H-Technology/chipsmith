@@ -53,6 +53,8 @@ pub struct Report {
     pub registers: usize,
     pub carry4s: usize,
     pub ram32ms: usize,
+    /// SLICEMs holding shift registers.
+    pub srl_slices: usize,
     /// LUT6 sites in use (Vivado's "Slice LUTs"): a pair of LUTs on O6
     /// and O5 is one, as is a RAM32M's.
     pub lut_sites: usize,
@@ -154,6 +156,7 @@ pub fn run(
         let clock = match &c.kind {
             Kind::Ff(cs) => cs.clk,
             Kind::Lut { dram: true } => c.net("CLK"),
+            Kind::Srl { .. } => c.net("CK"),
             // A block RAM's pins are each on their port's clock.
             Kind::Bram { sdp, size, .. } => {
                 let pin_clock = |port: usize| -> Option<NetId> {
@@ -304,7 +307,16 @@ pub fn run(
         luts: count(&|k, _| *k == Kind::Lut { dram: false }),
         registers: count(&|k, _| matches!(k, Kind::Ff(_))),
         carry4s: count(&|k, _| *k == Kind::Carry),
-        ram32ms: d.drams.len(),
+        ram32ms: d
+            .drams
+            .iter()
+            .filter(|r| r.lut5.iter().any(Option::is_some))
+            .count(),
+        srl_slices: d
+            .drams
+            .iter()
+            .filter(|r| r.lut5.iter().all(Option::is_none))
+            .count(),
         lut_sites: ph
             .slices
             .values()

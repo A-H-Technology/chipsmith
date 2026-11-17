@@ -54,6 +54,14 @@ endmodule
   parameter [0:0] IS_C_INVERTED = 0;
 endmodule
 
+// A shift register of up to 32 stages in one SLICEM LUT: D shifts in at
+// stage 0 on each enabled clock edge, Q reads stage A, Q31 stage 31
+// (UG474, SRLC32E). INIT[i] is stage i's power-up value.
+(* blackbox *) module SRLC32E (output Q, Q31, input [4:0] A, input CE, CLK, D);
+  parameter [31:0] INIT = 0;
+  parameter [0:0] IS_CLK_INVERTED = 0;
+endmodule
+
 // Four 32 x 2 RAMs of one SLICEM, all written at ADDRD from DIA..DID,
 // each read at its own address, asynchronously.
 (* blackbox *) module RAM32M (output [1:0] DOA, DOB, DOC, DOD,

@@ -145,6 +145,7 @@ pub(super) fn clock_port(ty: &str, port: &str) -> bool {
         (ty, port),
         ("FDRE" | "FDSE" | "FDCE" | "FDPE", "C")
             | ("RAM32M", "WCLK")
+            | ("SRLC32E", "CLK")
             | ("RAMB18E1" | "RAMB36E1", "CLKARDCLK" | "CLKBWRCLK")
             | ("DSP48E1", "CLK")
     )

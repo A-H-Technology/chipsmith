@@ -608,27 +608,51 @@ module IOBUF (input I, input T, output O, inout IO);
 endmodule
 
 // Slice registers a design instantiates itself, for the RTL side as above.
+// Each edge its own process: `posedge (C ^ IS_C_INVERTED)` would clock
+// once more at time 0, where the inverted clock goes from x to 1.
 module FDRE #(parameter [0:0] INIT = 1'b0, parameter [0:0] IS_C_INVERTED = 1'b0)
   (input C, input CE, input R, input D, output reg Q);
   initial Q = INIT;
-  wire c = C ^ IS_C_INVERTED;
-  always @(posedge c) if (R) Q <= 1'b0; else if (CE) Q <= D;
+  always @(posedge C) if (!IS_C_INVERTED) begin if (R) Q <= 1'b0; else if (CE) Q <= D; end
+  always @(negedge C) if (IS_C_INVERTED) begin if (R) Q <= 1'b0; else if (CE) Q <= D; end
 endmodule
 module FDSE #(parameter [0:0] INIT = 1'b1, parameter [0:0] IS_C_INVERTED = 1'b0)
   (input C, input CE, input S, input D, output reg Q);
   initial Q = INIT;
-  wire c = C ^ IS_C_INVERTED;
-  always @(posedge c) if (S) Q <= 1'b1; else if (CE) Q <= D;
+  always @(posedge C) if (!IS_C_INVERTED) begin if (S) Q <= 1'b1; else if (CE) Q <= D; end
+  always @(negedge C) if (IS_C_INVERTED) begin if (S) Q <= 1'b1; else if (CE) Q <= D; end
 endmodule
 module FDCE #(parameter [0:0] INIT = 1'b0, parameter [0:0] IS_C_INVERTED = 1'b0)
   (input C, input CE, input CLR, input D, output reg Q);
   initial Q = INIT;
-  wire c = C ^ IS_C_INVERTED;
-  always @(posedge c, posedge CLR) if (CLR) Q <= 1'b0; else if (CE) Q <= D;
+  always @(posedge CLR) Q <= 1'b0;
+  always @(posedge C) if (!IS_C_INVERTED && !CLR && CE) Q <= D;
+  always @(negedge C) if (IS_C_INVERTED && !CLR && CE) Q <= D;
 endmodule
 module FDPE #(parameter [0:0] INIT = 1'b1, parameter [0:0] IS_C_INVERTED = 1'b0)
   (input C, input CE, input PRE, input D, output reg Q);
   initial Q = INIT;
-  wire c = C ^ IS_C_INVERTED;
-  always @(posedge c, posedge PRE) if (PRE) Q <= 1'b1; else if (CE) Q <= D;
+  always @(posedge PRE) Q <= 1'b1;
+  always @(posedge C) if (!IS_C_INVERTED && !PRE && CE) Q <= D;
+  always @(negedge C) if (IS_C_INVERTED && !PRE && CE) Q <= D;
+endmodule
+
+// A shift-register LUT a design instantiates itself, for the RTL side as
+// above.
+module SRLC32E #(parameter [31:0] INIT = 32'h0, parameter [0:0] IS_CLK_INVERTED = 1'b0)
+  (input CLK, input CE, input D, input [4:0] A, output Q, output Q31);
+  reg [31:0] r = INIT;
+  always @(posedge CLK) if (!IS_CLK_INVERTED && CE) r <= {r[30:0], D};
+  always @(negedge CLK) if (IS_CLK_INVERTED && CE) r <= {r[30:0], D};
+  assign Q = r[A];
+  assign Q31 = r[31];
+endmodule
+
+// A slice's wide multiplexers a design instantiates itself, for the RTL
+// side as above.
+module MUXF7 (input I0, input I1, input S, output O);
+  assign O = S ? I1 : I0;
+endmodule
+module MUXF8 (input I0, input I1, input S, output O);
+  assign O = S ? I1 : I0;
 endmodule

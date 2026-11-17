@@ -85,6 +85,8 @@ pub(crate) struct SliceConf {
     pub lut_init: [Option<u64>; 4],
     /// The LUT is two 32 x 1 RAMs (`RAM`, `SMALL`).
     pub lut_ram: [bool; 4],
+    /// The LUT is a 32-stage shift register (`SRL`).
+    pub lut_srl: [bool; 4],
     pub ff: [Option<FfConf>; 4],
     /// The 5LUTs' 32-bit tables, where a logic LUT is in one.
     pub lut5_init: [Option<u64>; 4],
@@ -459,6 +461,18 @@ impl Builder<'_> {
                     }
                 }
             }
+            // A shift register's data on DI1: the letter's own <L>I
+            // (`<L>LUT.DI1MUX.<L>I`), D's DI; its address on <L>2..<L>6.
+            (Kind::Srl { .. }, Bel::Lut6(k)) => match port {
+                "D" if k == 3 => pin("DI".into()),
+                "D" => pin(format!("{}I", LETTERS[k])),
+                "WE" => pin("WE".into()),
+                "CK" => pin("CLK".into()),
+                p => {
+                    let i = p.strip_prefix('A').context("a shift register's address")?;
+                    pin(format!("{}{i}", LETTERS[k]))
+                }
+            },
             (Kind::Ff(_), Bel::Ff5(k)) => match port {
                 "D" if self.driven_from(net, site, Bel::Lut5(k), "O6") => Ok(End::Internal),
                 "D" => pin(format!("{}X", LETTERS[k])),
@@ -537,7 +551,9 @@ impl Builder<'_> {
         let (site, bel) = self.at(c)?;
         let s = site.to_string();
         Ok(match (&cell.kind, bel) {
-            (Kind::Lut { .. }, Bel::Lut6(k)) => (s, LETTERS[k].to_string(), None),
+            (Kind::Lut { .. } | Kind::Srl { .. }, Bel::Lut6(k)) => {
+                (s, LETTERS[k].to_string(), None)
+            }
             (Kind::Lut { .. }, Bel::Lut5(k)) => (s, format!("{}MUX", LETTERS[k]), Some((k, "O5"))),
             (Kind::Ff(_), Bel::Ff5(k)) => (s, format!("{}MUX", LETTERS[k]), Some((k, "5Q"))),
             (Kind::Ff(_), Bel::Ff(k)) => (s, format!("{}Q", LETTERS[k]), None),
@@ -781,6 +797,21 @@ pub(crate) fn build(
                         Vec::new(),
                     ));
                 }
+            }
+            (Kind::Srl { clk_inv }, Conf::Srl { init }) => {
+                let (site, bel) = b.at(c)?;
+                let Bel::Lut6(k) = bel else {
+                    bail!("{}: a shift register in {bel:?}", cell.name);
+                };
+                slice(&mut slices, site)?;
+                let s = slices.get_mut(site).unwrap();
+                // Stage i on both table bits A1 picks between: the 32
+                // stages are read on A2..A6.
+                s.lut_init[k] = Some((0..32).fold(0u64, |t, i| {
+                    t | (u64::from((init >> i) & 1) * (0b11 << (2 * i)))
+                }));
+                s.lut_srl[k] = true;
+                s.clkinv = *clk_inv;
             }
             (Kind::Ff(cs), Conf::Ff { init, srval }) => {
                 let (site, bel) = b.at(c)?;

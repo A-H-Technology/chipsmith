@@ -53,6 +53,38 @@ pub struct Delays {
     pub bram: BramDelays,
     pub dsp: DspDelays,
     pub ioi: IoiDelays,
+    pub srl: SrlDelays,
+}
+
+/// A SLICEM 6LUT as a shift register (SRLC32E), from slicem.sdf's
+/// `LUT_OR_MEM6SHFREG`: clock to O6, setup on its data (DI1) and write
+/// enable; its address to O6 is a LUT's.
+#[derive(Debug, Clone, Default)]
+pub struct SrlDelays {
+    pub clock_to_out: Ps,
+    pub setup_d: Ps,
+    pub setup_we: Ps,
+}
+
+impl SrlDelays {
+    fn parse(sdf: &str) -> Result<Self> {
+        let sdf = read_sdf(sdf);
+        let get = |kind: &str, from: &str, to: &str| -> Result<Ps> {
+            sdf.get(&(
+                "LUT_OR_MEM6SHFREG".into(),
+                kind.into(),
+                from.into(),
+                to.into(),
+            ))
+            .copied()
+            .with_context(|| format!("slicem.sdf has no {kind} {from} {to} of a shift register"))
+        };
+        Ok(SrlDelays {
+            clock_to_out: get("IOPATH", "CLK", "O6")?,
+            setup_d: get("SETUP", "DI1", "")?,
+            setup_we: get("SETUP", "WE", "")?,
+        })
+    }
 }
 
 /// An I/O tile's registers (ILOGICE3's IFF, OLOGICE3's OUTFF and TFF):
@@ -355,6 +387,10 @@ impl Delays {
         d.bram = BramDelays::parse(&bram)?;
         d.dsp = DspDelays::parse(&dsp)?;
         d.ioi = IoiDelays::parse(&ioi)?;
+        let slicem_path = family.join("timings").join("slicem.sdf");
+        let slicem = std::fs::read_to_string(&slicem_path)
+            .with_context(|| format!("reading {}", slicem_path.display()))?;
+        d.srl = SrlDelays::parse(&slicem)?;
         Ok(d)
     }
 
@@ -404,6 +440,7 @@ impl Delays {
             bram: BramDelays::default(),
             dsp: DspDelays::default(),
             ioi: IoiDelays::default(),
+            srl: SrlDelays::default(),
         })
     }
 

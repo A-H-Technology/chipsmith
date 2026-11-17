@@ -360,6 +360,7 @@ fn distributed_ram() {
             distributed_ram: false,
             block_ram: false,
             register_copies: false,
+            shift_registers: false,
         },
     );
     prove("lutram_logic", &logic, &[]);
@@ -490,6 +491,7 @@ fn zybo_picorv32() {
             distributed_ram: false,
             block_ram: false,
             register_copies: false,
+            shift_registers: false,
         },
     );
     prove("zybo_picorv32_logic", &logic, &[]);
@@ -521,6 +523,7 @@ fn zybo_sha256() {
         &files,
         Options {
             register_copies: false,
+            shift_registers: false,
             ..Options::default()
         },
     );
