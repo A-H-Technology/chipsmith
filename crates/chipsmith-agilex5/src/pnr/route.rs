@@ -57,6 +57,7 @@ pub fn route(
     base_by_type: &[f32],
     crit: &[Vec<f32>],
     max_iter: usize,
+    astar: f32,
 ) -> Result<Routed> {
     let n = g.len();
     let mut occ = vec![0u16; n];
@@ -86,7 +87,7 @@ pub fn route(
             })
             .fold(f32::INFINITY, f32::min)
     };
-    let (hx, hy) = (2.0 * per('H').min(0.05), 2.0 * per('V').min(0.05));
+    let (hx, hy) = (astar * per('H').min(0.05), astar * per('V').min(0.05));
     let mut reroute = vec![true; nets.len()];
     // Criticality squared: only the most critical connections ignore
     // congestion (README (z8): the CPU 136 → 141 MHz register to register,
@@ -98,6 +99,9 @@ pub fn route(
     for iter in 1..=max_iter {
         let t_iter = std::time::Instant::now();
         let mut routed_n = 0;
+        // A* work this iteration: nodes expanded, sinks searched, and those
+        // the bounding box missed (searched again unbounded).
+        let (mut work, mut searched, mut unbounded) = (0usize, 0usize, 0usize);
         for (ni, net) in nets.iter().enumerate() {
             if !reroute[ni] {
                 continue;
@@ -170,6 +174,10 @@ pub fn route(
                     if found || (bounded && net.clock) {
                         continue;
                     }
+                    searched += 1;
+                    if !bounded && !net.clock {
+                        unbounded += 1;
+                    }
                     stamp_now += 1;
                     let mut heap = BinaryHeap::new();
                     // Seed with the tree's nodes near the sink only: big
@@ -201,7 +209,14 @@ pub fn route(
                             continue;
                         }
                         expanded += 1;
-                        if expanded > 4_000_000 {
+                        // A budget, not a verdict: a congested sink's
+                        // search floods millions of nodes before paying
+                        // its history cost (de25-f2sdram at A* weight 5:
+                        // 3.6M expansions to f2s_rdata[226]'s pin, then a
+                        // false "no path" at 4M). With reopenings counted,
+                        // the graph's size twice over only stops a search
+                        // that has seen everything.
+                        if expanded > 2 * n {
                             break;
                         }
                         // LAB_RE pins are cell ports: never pass through one.
@@ -239,6 +254,7 @@ pub fn route(
                             }
                         }
                     }
+                    work += expanded;
                 }
                 if !found {
                     bail!(
@@ -264,7 +280,7 @@ pub fn route(
         }
         let over: Vec<usize> = (0..n).filter(|&k| occ[k] > 1).collect();
         eprintln!(
-            "route: iteration {iter}: {routed_n} nets routed, {} overused nodes, {:.1} s",
+            "route: iteration {iter}: {routed_n} nets routed, {} overused nodes, {work} nodes expanded over {searched} searches ({unbounded} unbounded), {:.1} s",
             over.len(),
             t_iter.elapsed().as_secs_f64()
         );

@@ -1511,7 +1511,7 @@ fn a5_pnr(
         top,
         &s(pins)?,
         &s(design)?,
-        &chipsmith_agilex5::pnr::Options::default(),
+        &a5_options()?,
     )?;
     let timed: Vec<(String, Option<Frequency>, f32)> = r
         .clocks
@@ -1565,6 +1565,18 @@ fn report_clocks<'a>(clocks: impl Iterator<Item = (&'a str, Option<f64>, f64)>) 
     Ok(())
 }
 
+/// Place and route's options; `CHIPSMITH_A5_ASTAR` sets the router's A*
+/// weight, for benchmarks (bench/de25-astar.sh).
+fn a5_options() -> Result<chipsmith_agilex5::pnr::Options> {
+    let mut o = chipsmith_agilex5::pnr::Options::default();
+    if let Ok(v) = std::env::var("CHIPSMITH_A5_ASTAR") {
+        o.astar = v
+            .parse()
+            .with_context(|| format!("CHIPSMITH_A5_ASTAR = {v:?} is not a number"))?;
+    }
+    Ok(o)
+}
+
 /// Place and route's design file with the board's HPS shell after it.
 fn a5_assemble(design: &Path, hps: &HpsFirst, sof: &Path, core: &Path) -> Result<()> {
     let read =
@@ -1585,7 +1597,6 @@ const BOARD_PHASE1_HASH: &str = "/etc/fpga/phase1/hps_io_hash";
 /// The SDM wedges on a core for another phase 1 (agilex5-re README), so the
 /// hash is checked here, before anything reaches the board: the core's
 /// against the manifest's, then against the board's own.
-
 fn a5_load_ssh(core: &Path, host: &str, hps_io_hash: &[u8; 32]) -> Result<()> {
     let file = std::fs::read(core).with_context(|| format!("reading {}", core.display()))?;
     ensure!(

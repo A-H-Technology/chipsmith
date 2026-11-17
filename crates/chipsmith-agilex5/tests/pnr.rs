@@ -51,7 +51,7 @@ fn designs_place_and_route_as_a5pnr_did() {
             name,
             &s(&refs.join(format!("{name}.pins"))),
             &s(&design),
-            &pnr::Options::default(),
+            &pnr::Options::a5pnr(),
         )
         .unwrap();
         let read = |p: PathBuf| std::fs::read_to_string(p).unwrap();

@@ -38,6 +38,19 @@ pub struct Options {
     pub pack: pack::PackMode,
     /// Let the router move a LUT input to another pin of its LUT.
     pub swap_pins: bool,
+    /// The A* search's weight on its distance estimate, times the fastest
+    /// wire's delay per tile (VPR's astar_fac): higher is greedier.
+    pub astar: f32,
+}
+
+impl Options {
+    /// a5pnr's settings, whose results `tests/pnr.rs` reproduces.
+    pub fn a5pnr() -> Options {
+        Options {
+            astar: 2.0,
+            ..Options::default()
+        }
+    }
 }
 
 impl Default for Options {
@@ -48,6 +61,11 @@ impl Default for Options {
             timing_driven: true,
             pack: pack::PackMode::Pairs,
             swap_pins: true,
+            // bench/de25-astar.sh over six designs: hello routes in 7 s
+            // (31 at a5pnr's 2.0), de25-f2sdram in 6 (277), for a delay-
+            // model critical path 2-12% longer; 4 and 5 are slower, 8 slower
+            // on hello and longer on every path.
+            astar: 6.0,
         }
     }
 }
@@ -723,7 +741,7 @@ pub fn run(
                 }
             }
         }
-        let routed = match route::route(&g, &rnets, &base, &crit, 80) {
+        let routed = match route::route(&g, &rnets, &base, &crit, 80, opts.astar) {
             Ok(r) => r,
             Err(e) if attempts < 3 && e.to_string().contains("did not converge") => {
                 attempts += 1;

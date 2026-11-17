@@ -61,8 +61,13 @@ Z5-Z9 and slice F7/F8 mapping moved to "Cool stuff to do eventually"
   back, all DECERR; left is the bridge's enable handshake, which nothing
   runs on an HPS-first boot (a kernel or secure-firmware step in
   nixos-fpga). FPGA-to-HPS needs a phase 1 that has it.
-- [ ] **D5 Router speed.** facet-hdl's hello under 31 s, with the board as
-  the check since faster routes leave a5pnr's tests.
+- [x] **D5 Router speed** (2026-11-17). The A* weight 2 → 6, chosen over
+  4, 5, 6 and 8 on six designs (`bench/de25-astar.sh`): facet-hdl's hello
+  routes in 7 s (31), de25-f2sdram in 5.8 (277), critical paths 1.6-12%
+  longer by the delay model. de25-burst and de25-h2f built at 6 get
+  every word right on mercury; a5pnr's tests pass at its own 2.0. The
+  search's 4M-expansion cap, which failed a reachable pin at weight 5, is
+  now twice the graph.
 - [x] **D6 Which phase 1 booted** (2026-11-17). nixos-fpga installs the
   booted phase 1's HPS IO hash at `/etc/fpga/phase1/hps_io_hash`, and
   `flash --ssh` reads it before loading: on mercury de25-burst loads, a

@@ -2297,8 +2297,16 @@ Next devices:
   million A* expansions an iteration at ~1.2 us each. Packing the
   router's per-node arrays into one record (fewer cache misses, the same
   routes) measured no faster, 31.8 s against 30.9 over three alternating
-  runs each; a faster search means routes a5pnr's tests don't pin, so it
-  waits for the board. Also
+  runs each. Since 2026-11-17 the router's A* weight is 6 (a5pnr's 2 stays
+  `Options::a5pnr()`, which its tests use): over six designs
+  (`bench/de25-astar.sh`) hello routes in 7 s, de25-h2f in 3.1 (16.7),
+  de25-f2sdram in 5.8 (277), for a delay-model critical path 1.6% to 12%
+  longer (h2f 2.85 to 3.20 ns, at 50 MHz 16.8 ns of slack), and
+  de25-burst's and de25-h2f's cores built at 6 get every word right on the
+  board. Weights 4 and 5 are slower, 8 is slower on hello and longer on
+  every path. A search now gives up only after twice the graph's nodes:
+  at weight 5 a congested pin of de25-f2sdram's took 3.6 million
+  expansions, and the old cap of 4 million failed it as "no path". Also
   2026-11-12: the board's QSPI holds that HPS-first phase 1 (Quartus'
   `.jic`, factory image backed up first), so after a power cycle the HPS
   boots Linux with no JTAG and no fabric, and `flash --ssh` loads
