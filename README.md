@@ -2356,11 +2356,10 @@ Next devices:
   data, the `SM_SOC_MPFE` atom's; agilex5-re `f2sdram.tsv`) builds and
   routes: examples/de25-f2sdram, a master driven from Linux over the
   lightweight bridge, gets every read beat back, but every response is
-  DECERR, at every address and AxPROT/AxCACHE. No bridge driver runs on
-  mercury (no `/sys/class/fpga_bridge`) and every bridge is out of reset,
-  so the open step is F2SDRAM's enable handshake (the idle/flush
-  handshake `bridge enable` does in U-Boot, secure firmware's on Agilex
-  5), which nothing does on an HPS-first boot. FPGA-to-HPS isn't in the
+  DECERR, at every address and AxPROT/AxCACHE. Setting the bridge's
+  enable by hand changes nothing, and the core sets nothing on the path
+  (agilex5-re README, "FPGA-to-SDRAM on the board"); it's parked
+  (2026-11-18) until a design needs it. FPGA-to-HPS isn't in the
   board's phase 1.
 
 ## Manifest
