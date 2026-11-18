@@ -2372,7 +2372,8 @@ Next devices:
   through the SMMU under the master's AxMMUSID: nixos-fpga's
   `fpga2hpsStream` keeps stream 11 in an identity domain, and any other
   stream answers SLVERR. That phase 1 is in the board's QSPI since
-  2026-11-18 (booted from JTAG so far; a power-on from it is owed).
+  2026-11-18: after a power cycle the board boots it and de25-f2h gets
+  every word right.
 
 ## Manifest
 
