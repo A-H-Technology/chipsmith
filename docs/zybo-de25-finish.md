@@ -104,8 +104,9 @@ Not needed to call a board finished; worth doing when a design wants it.
   report on the same routing.
 - **Z8 LUT pin swapping while routing**, as Vivado's router does.
   Done when sha256 gains by Vivado's timer over five seeds.
-- **Z9 The owed board runs.** The block RAM and multiplier shape
-  benches (README tables) run on the board through a JTAG selftest.
+- **Z9 The owed board runs.** Done 2026-11-18: examples/zybo-shapes
+  runs all 14 block RAM and 6 multiplier shapes on the board, each
+  signature equal to Verilator's on 14 of 14 loads (`run.sh`).
 - **Slice MUXF7/MUXF8 mapping**: a fifth of a 16:1-64:1 multiplexer's
   LUTs and a LUT level (README, "7-series synthesis"), nothing on the
   examples; needs a placement object of four LUTs and the muxes in one

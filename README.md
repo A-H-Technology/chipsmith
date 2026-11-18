@@ -891,7 +891,17 @@ Checked (ADR-0014):
 | tiny | 64 x 8 | 520 FFs, 232 LUTs | 12 LUTs as memory, 8 FFs | 68,696 | | (LUT RAM) |
 
 The bit counts are output bits the RTL defines, compared every cycle;
-`deep` reads mostly unwritten words. On the board: owed.
+`deep` reads mostly unwritten words. **On the board** (2026-11-18,
+examples/zybo-shapes): every shape here and below in one design at 125 MHz,
+each fed 2^20 cycles of its own xorshift128 stream, its outputs folded into
+a 32-bit signature read back over USER1; all 20 match Verilator's run of
+the same RTL (two-state, memories starting at 0 as the blocks' INIT does),
+on 14 of 14 loads (`run.sh`). tdp's signature changes if port A's write wins
+instead, so its stream hits same-word collisions and the silicon resolves
+them as the RTL does. dualclock's two clocks are the same clock there. The
+harness's own start needed one flop gating it 256 cycles after
+configuration: started straight off GSR, its streams and signatures began a
+cycle apart on 2 of 8 loads (the same wrong signature twice).
 
 #### 7-series multipliers
 
@@ -938,7 +948,9 @@ left sums in carry chains. A pair cascades where both DSPs have the same
 operand registers and neither M nor P, and a cascade is two DSPs: Vivado
 also takes mul_split's product register into the upper DSP's P, 31 FFs
 fewer. Vivado also builds a 7 x 5 product in LUTs;
-chipsmith takes every product to DSPs. On the board: owed.
+chipsmith takes every product to DSPs. On the board (2026-11-18): every
+shape's signature right, with the block RAM shapes above
+(examples/zybo-shapes).
 
 Zybo limits:
 

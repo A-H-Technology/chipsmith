@@ -1,0 +1,25 @@
+# The block RAM and multiplier shape benches (README, "7-series block RAM"
+# and "7-series multipliers") on the board: every shape fed from its own
+# pseudo-random stream for 2^20 cycles, its outputs folded into a signature,
+# all read back in USER1 and compared with Verilator's run of the same RTL
+# (run.sh).
+[project]
+name = "shapes"
+top = "top"
+sources = [
+    "src/*.v",
+    "../../crates/chipsmith-xc7/tests/designs/bram/*.v",
+    "../../crates/chipsmith-xc7/tests/designs/dsp/*.v",
+]
+
+[target]
+device = "xc7z010clg400-1"
+
+# Original Zybo (now "Zybo (legacy)"), Digilent Zybo-Master.xdc.
+[pins]
+clk = "L16"
+led = ["M14", "M15", "G14", "D18"]
+
+# The Zybo's 125 MHz clock on L16.
+[clocks]
+clk = "125 MHz"
