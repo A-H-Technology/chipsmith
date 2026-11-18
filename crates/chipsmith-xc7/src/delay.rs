@@ -164,6 +164,18 @@ const VIVADO_REGISTER: [Ps; 4] = [456.0, -31.0, 205.0, 600.0];
 /// after pessimism removal, 140 in all at the median over chipsmith's
 /// builds (bench/zybo-timing.py: requirement - slack - data path - setup,
 /// per endpoint), where chipsmith's clocks arrive everywhere at once.
+///
+/// Flat on purpose (2026-11-18, zybo-sha256 and zybo-gp0 on chipsmith's
+/// routing): Vivado's skew there runs -0.25 to -0.01 ns (p5 to p95, median
+/// -0.14), and it isn't where a register sits on the tree: its leaves'
+/// nominal clock delays are within ~20 ps of each other (4.856-4.875 ns),
+/// and the PS7's clock pin falls in the same range. It is the late launch
+/// clock against the early capture clock, less the pessimism given back on
+/// the clock path two registers share: about 0 on one leaf, -0.19 to -0.26
+/// across a clock region boundary. Modelling that is pairwise (where two
+/// clock paths split), which the STA's per-node path ends can't hold;
+/// per-sink insertion delays add nothing (the router's balanced tree gives
+/// every leaf one delay) and get the PS7's clock pin wrong by 3 ns.
 const CLOCK_MARGIN: Ps = 140.0;
 
 /// A DSP48E1 multiplying A by B (no D port, no pattern detect), from

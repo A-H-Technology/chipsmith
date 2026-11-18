@@ -102,9 +102,16 @@ Not needed to call a board finished; worth doing when a design wants it.
   Vivado times (GP1, the S_AXI_GP/HP/ACP ports, the fabric clocks and
   resets), and an HP-port design on the board: the fabric writes DDR
   through S_AXI_HP0 and Linux reads it back.
-- **Z7 Clock skew.** The STA takes each clock's insertion delay to
-  every sink (BUFG, the clock rows, the PS7's clock pin), against Vivado's
-  report on the same routing.
+- **Z7 Clock skew.** Measured 2026-11-18 (bench/zybo-timing.py, which now
+  prints Vivado's skew; xc7-re import.sh dumps each path's clock delays):
+  per-sink insertion delays are the wrong model. Vivado's skew on
+  chipsmith's routing is its on-chip-variation derating less common-path
+  pessimism removal, -0.25 to -0.01 ns (median -0.14, which the flat
+  CLOCK_MARGIN already takes), about 0 within one clock leaf and -0.2 to
+  -0.26 across a clock region boundary; its leaves' nominal delays agree
+  within ~20 ps. What's left: a pairwise term by where two registers'
+  clock paths split, worth +-0.12 ns, which needs path ends that know
+  their partner in the STA.
 - **Z8 LUT pin swapping while routing**, as Vivado's router does.
   Done when sha256 gains by Vivado's timer over five seeds.
 - **Z9 The owed board runs.** Done 2026-11-18: examples/zybo-shapes
