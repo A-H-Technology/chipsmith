@@ -261,6 +261,68 @@ pub static HPS_SIGNALS: &[HpsSignalDef] = hps_signals! {
     "f2sdram_ruser" "F2SDRAM_RUSER" 8 FromHps;
     "f2sdram_rvalid" "F2SDRAM_RVALID" 1 FromHps;
     "f2sdram_rready" "F2SDRAM_RREADY" 1 IntoHps;
+    // The FPGA-to-HPS bridge (the SM_SOC_MPFE atom's F2SOC_*; ACE5-Lite into
+    // the CCU, so coherent with the CPUs' caches): 256-bit data, 32-bit
+    // addresses (the atom has 40), its clock from the fabric. Phase 1 must
+    // have it (agilex5-re designs/hpsf, ENABLE_FPGA2HPS).
+    "fpga2hps_clk" "F2SOC_CLK" 1 IntoHps;
+    "fpga2hps_awid" "F2SOC_AWID" 5 IntoHps;
+    "fpga2hps_awaddr" "F2SOC_AWADDR" 32 IntoHps;
+    "fpga2hps_awregion" "F2SOC_AWREGION" 4 IntoHps;
+    "fpga2hps_awdomain" "F2SOC_AWDOMAIN" 2 IntoHps;
+    "fpga2hps_awsnoop" "F2SOC_AWSNOOP" 4 IntoHps;
+    "fpga2hps_awlen" "F2SOC_AWLEN" 8 IntoHps;
+    "fpga2hps_awsize" "F2SOC_AWSIZE" 3 IntoHps;
+    "fpga2hps_arsize" "F2SOC_ARSIZE" 3 IntoHps;
+    "fpga2hps_awburst" "F2SOC_AWBURST" 2 IntoHps;
+    "fpga2hps_awlock" "F2SOC_AWLOCK" 1 IntoHps;
+    "fpga2hps_awcache" "F2SOC_AWCACHE" 4 IntoHps;
+    "fpga2hps_awprot" "F2SOC_AWPROT" 3 IntoHps;
+    "fpga2hps_awqos" "F2SOC_AWQOS" 4 IntoHps;
+    "fpga2hps_awuser" "F2SOC_AWUSER" 8 IntoHps;
+    "fpga2hps_awstashnid" "F2SOC_AWSTASHNID" 11 IntoHps;
+    "fpga2hps_awstashniden" "F2SOC_AWSTASHNIDEN" 1 IntoHps;
+    "fpga2hps_awstashlpid" "F2SOC_AWSTASHLPID" 5 IntoHps;
+    "fpga2hps_awstashlpiden" "F2SOC_AWSTASHLPIDEN" 1 IntoHps;
+    "fpga2hps_awatop" "F2SOC_AWATOP" 6 IntoHps;
+    "fpga2hps_awmmusecsid" "F2SOC_AWMMUSECSID" 1 IntoHps;
+    "fpga2hps_awmmusid" "F2SOC_AWMMUSID" 16 IntoHps;
+    "fpga2hps_awvalid" "F2SOC_AWVALID" 1 IntoHps;
+    "fpga2hps_awready" "F2SOC_AWREADY" 1 FromHps;
+    "fpga2hps_wdata" "F2SOC_WDATA" 256 IntoHps;
+    "fpga2hps_wstrb" "F2SOC_WSTRB" 32 IntoHps;
+    "fpga2hps_wlast" "F2SOC_WLAST" 1 IntoHps;
+    "fpga2hps_wuser" "F2SOC_WUSER" 8 IntoHps;
+    "fpga2hps_wvalid" "F2SOC_WVALID" 1 IntoHps;
+    "fpga2hps_wready" "F2SOC_WREADY" 1 FromHps;
+    "fpga2hps_bid" "F2SOC_BID" 5 FromHps;
+    "fpga2hps_bresp" "F2SOC_BRESP" 2 FromHps;
+    "fpga2hps_buser" "F2SOC_BUSER" 8 FromHps;
+    "fpga2hps_bvalid" "F2SOC_BVALID" 1 FromHps;
+    "fpga2hps_bready" "F2SOC_BREADY" 1 IntoHps;
+    "fpga2hps_arid" "F2SOC_ARID" 5 IntoHps;
+    "fpga2hps_araddr" "F2SOC_ARADDR" 32 IntoHps;
+    "fpga2hps_arregion" "F2SOC_ARREGION" 4 IntoHps;
+    "fpga2hps_ardomain" "F2SOC_ARDOMAIN" 2 IntoHps;
+    "fpga2hps_arsnoop" "F2SOC_ARSNOOP" 4 IntoHps;
+    "fpga2hps_arlen" "F2SOC_ARLEN" 8 IntoHps;
+    "fpga2hps_arburst" "F2SOC_ARBURST" 2 IntoHps;
+    "fpga2hps_arlock" "F2SOC_ARLOCK" 1 IntoHps;
+    "fpga2hps_arcache" "F2SOC_ARCACHE" 4 IntoHps;
+    "fpga2hps_arprot" "F2SOC_ARPROT" 3 IntoHps;
+    "fpga2hps_arqos" "F2SOC_ARQOS" 4 IntoHps;
+    "fpga2hps_aruser" "F2SOC_ARUSER" 8 IntoHps;
+    "fpga2hps_armmusecsid" "F2SOC_ARMMUSECSID" 1 IntoHps;
+    "fpga2hps_armmusid" "F2SOC_ARMMUSID" 16 IntoHps;
+    "fpga2hps_arvalid" "F2SOC_ARVALID" 1 IntoHps;
+    "fpga2hps_arready" "F2SOC_ARREADY" 1 FromHps;
+    "fpga2hps_rid" "F2SOC_RID" 5 FromHps;
+    "fpga2hps_rdata" "F2SOC_RDATA" 256 FromHps;
+    "fpga2hps_rresp" "F2SOC_RRESP" 2 FromHps;
+    "fpga2hps_rlast" "F2SOC_RLAST" 1 FromHps;
+    "fpga2hps_ruser" "F2SOC_RUSER" 8 FromHps;
+    "fpga2hps_rvalid" "F2SOC_RVALID" 1 FromHps;
+    "fpga2hps_rready" "F2SOC_RREADY" 1 IntoHps;
 };
 
 /// One bit of an HPS signal; the bit is below the signal's width.
@@ -347,7 +409,7 @@ impl A5Site {
             pin: s.to_string(),
             device: Device::A5eb013bb23be4scs,
             expected:
-                "pins are package balls like V16, or HPS signals: f2h_irq0[k], the bridges' lwhps2fpga_*, hps2fpga_* and f2sdram_* (a whole one, or [bit])",
+                "pins are package balls like V16, or HPS signals: f2h_irq0[k], the bridges' lwhps2fpga_*, hps2fpga_*, f2sdram_* and fpga2hps_* (a whole one, or [bit])",
         })
     }
 }

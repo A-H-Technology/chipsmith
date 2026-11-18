@@ -53,11 +53,14 @@ Z5-Z9 and slice F7/F8 mapping moved to "Cool stuff to do eventually"
   D1's input register in hvio_3_1. Owed: its board run, which needs a
   jumper on GPIO0 header pins 1 and 2 (load it, then `devmem 0x20000004`
   good, `0x20000008` bad).
-- [ ] **D4 The other bridges.** HPS-to-FPGA done (2026-11-17):
+- [x] **D4 The other bridges** (2026-11-18). HPS-to-FPGA (2026-11-17):
   `hps2fpga_*` from agilex5-re's new route-dump table, examples/de25-h2f
   every word right from Linux (single beats; a device mapping gives no
-  bursts on a 128-bit bridge). FPGA-to-HPS needs a phase 1 that has it.
-  FPGA-to-SDRAM moved to "Cool stuff to do eventually" (2026-11-18).
+  bursts on a 128-bit bridge). FPGA-to-HPS: the board's phase 1 has it,
+  `fpga2hps_*` from agilex5-re's `fpga2hps.tsv`, examples/de25-f2h writes
+  and reads a Linux process's memory coherently, every word right both
+  ways (nixos-fpga's stream 11 in an identity SMMU domain). FPGA-to-SDRAM
+  moved to "Cool stuff to do eventually".
 - [x] **D5 Router speed** (2026-11-17). The A* weight 2 → 6, chosen over
   4, 5, 6 and 8 on six designs (`bench/de25-astar.sh`): facet-hdl's hello
   routes in 7 s (31), de25-f2sdram in 5.8 (277), critical paths 1.6-12%
@@ -84,8 +87,11 @@ Not needed to call a board finished; worth doing when a design wants it.
   the same master differs from phase 1's only in fabric logic), and the
   SMMU records nothing for stream IDs 0 and 11-63 (agilex5-re README,
   "FPGA-to-SDRAM on the board"). Next: the Quartus oracle
-  (`HPSF_F2STEST`) past its lightweight-bridge hang, or the master's
-  stream ID above 63.
+  (`HPSF_F2STEST`) past its lightweight-bridge hang, or, the likelier
+  lead since FPGA-to-HPS (2026-11-18): F2SDRAM's stream ID rides in
+  AxUSER, which de25-f2sdram drives 0, and FPGA-to-HPS answered SLVERR
+  until its stream had an identity domain; put nixos-fpga's stream 11 in
+  AxUSER.
 - **Z5 DSP48E1 pre-adder and ALU modes.** (A+D)*B and multiply-
   accumulate in the DSP, as Vivado infers them. Done when the shape bench
   co-simulates through the bitstream and the board runs it.

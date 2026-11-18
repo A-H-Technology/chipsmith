@@ -2359,8 +2359,20 @@ Next devices:
   DECERR, at every address and AxPROT/AxCACHE. Setting the bridge's
   enable by hand changes nothing, and the core sets nothing on the path
   (agilex5-re README, "FPGA-to-SDRAM on the board"); it's parked
-  (2026-11-18) until a design needs it. FPGA-to-HPS isn't in the
-  board's phase 1.
+  (2026-11-18) until a design needs it. Since 2026-11-18 the board's
+  phase 1 has the FPGA-to-HPS bridge (`fpga2hps_*`, ACE5-Lite, 256-bit
+  data, the `SM_SOC_MPFE` atom's `F2SOC_*`; agilex5-re `fpga2hps.tsv`,
+  same HPS IO hash, a shell with the bridge's inputs tied off, so DE25
+  cores are rebuilt). examples/de25-f2h, the same master with the
+  ACE5-Lite fields, goes through the CCU into the HPS's memory: the
+  fabric writes 16 pages of a Linux process's buffer and the CPU reads
+  them through its cached mapping, and the reverse, every word right
+  with no cache maintenance (`f2htest.c`; AxDOMAIN shareable and AxCACHE
+  write-back; non-shareable reads stale lines). Every access goes
+  through the SMMU under the master's AxMMUSID: nixos-fpga's
+  `fpga2hpsStream` keeps stream 11 in an identity domain, and any other
+  stream answers SLVERR. That phase 1 is in the board's QSPI since
+  2026-11-18 (booted from JTAG so far; a power-on from it is owed).
 
 ## Manifest
 
