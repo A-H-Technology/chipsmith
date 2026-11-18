@@ -87,11 +87,14 @@ Not needed to call a board finished; worth doing when a design wants it.
   the same master differs from phase 1's only in fabric logic), and the
   SMMU records nothing for stream IDs 0 and 11-63 (agilex5-re README,
   "FPGA-to-SDRAM on the board"). Next: the Quartus oracle
-  (`HPSF_F2STEST`) past its lightweight-bridge hang, or, the likelier
-  lead since FPGA-to-HPS (2026-11-18): F2SDRAM's stream ID rides in
-  AxUSER, which de25-f2sdram drives 0, and FPGA-to-HPS answered SLVERR
-  until its stream had an identity domain; put nixos-fpga's stream 11 in
-  AxUSER.
+  (`HPSF_F2STEST`) past its lightweight-bridge hang. Ruled out
+  2026-11-18: the SMMU stream (AxUSER, now settable at 0x2C, with stream
+  11 in its low bits, at bits 24:9 with and without SECSID, and at three
+  other offsets, still DECERR and the SMMU logs nothing, where
+  FPGA-to-HPS's wrong streams log faults: F2SDRAM's requests are refused
+  before the TBU), and the bridge reset pulse ATF's Agilex 5 enable ends
+  with (`BRGMODRST` bit 3 set and cleared with a core loaded, still
+  DECERR).
 - **Z5 DSP48E1 pre-adder and ALU modes.** (A+D)*B and multiply-
   accumulate in the DSP, as Vivado infers them. Done when the shape bench
   co-simulates through the bitstream and the board runs it.

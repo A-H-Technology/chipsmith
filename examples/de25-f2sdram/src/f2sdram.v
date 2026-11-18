@@ -14,6 +14,7 @@
 //   0x18  read: beats that read back wrong
 //   0x1C  read: write responses that weren't OKAY, read responses that weren't
 //   0x20  read/write: AxPROT (bits 2:0), AxCACHE (bits 7:4)
+//   0x2C  read/write: AxUSER (bits 24:0), which carries the SMMU stream
 //
 // The pattern's 32-bit lane k of beat i is seed + 8 i + k. Bursts are 16
 // beats (512 bytes), INCR, all strobes; one write burst in flight at a time,
@@ -111,6 +112,7 @@ module f2sdram (
     // Control registers.
     reg [31:0] base = 32'd0, len = 32'd0, seed = 32'd0;
     reg [7:0]  attr = 8'h00;
+    reg [24:0] user = 25'd0;
     reg [31:0] written = 0, readn = 0, wrong = 0;
     reg [15:0] bad_b = 0, bad_r = 0;
     reg [15:0] last_b = 0, last_r = 0;  // the last bad response: {user, resp}
@@ -127,7 +129,7 @@ module f2sdram (
     assign f2s_awcache = attr[7:4]; assign f2s_arcache = attr[7:4];
     assign f2s_awprot = attr[2:0];  assign f2s_arprot = attr[2:0];
     assign f2s_awqos = 4'd0;    assign f2s_arqos = 4'd0;
-    assign f2s_awuser = 25'd0;  assign f2s_aruser = 25'd0;
+    assign f2s_awuser = user;   assign f2s_aruser = user;
     assign f2s_wuser = 8'd0;
     assign f2s_wstrb = 32'hFFFF_FFFF;
     assign f2s_bready = 1'b1;
@@ -219,6 +221,7 @@ module f2sdram (
                 4'd3: seed <= wdata;
                 4'd4: begin go_w <= wdata == 32'd1 && !busy; go_r <= wdata == 32'd2 && !busy; end
                 4'd8: attr <= wdata[7:0];
+                4'd11: user <= wdata[24:0];
                 default: ;
             endcase
             if (wlast) begin
@@ -246,6 +249,7 @@ module f2sdram (
             4'd8: rdata = {24'd0, attr};
             4'd9: rdata = readn;
             4'd10: rdata = {last_b, last_r};
+            4'd11: rdata = {7'd0, user};
             default: rdata = 32'd0;
         endcase
     always @(posedge clk) begin
