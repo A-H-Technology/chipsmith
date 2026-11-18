@@ -1006,16 +1006,22 @@ Zybo limits:
   are fed from interconnect around 20 columns from the PS7's own tile, so
   the router grows a net's region to take in the far feeders of its sinks
   (`chipsmith-route`, `far_entries`); a slice input's feeders are its own
-  tile's, so other designs route as before. M_AXI_GP0's pins are timed
-  as Vivado times them (`crates/chipsmith-xc7/src/ps7_timing.tsv`, from
-  `get_timing_arcs` on a synthesized PS7): each output launches 0.36-1.45 ns
-  after MAXIGP0ACLK, each input wants 0.52-0.78 ns of setup, on whatever
-  clock drives MAXIGP0ACLK. zybo-gp0's critical path now starts at the PS7
+  tile's, so other designs route as before. The PS7's clocked pins are
+  timed as Vivado's timer charges them (`crates/chipsmith-xc7/src/ps7_timing.tsv`,
+  since 2026-11-18 every port: GP0/GP1, the S_AXI GP, HP and ACP ports,
+  DMA, EMIO Ethernet and SDIO, 2,608 pins, `bench/ps7-arcs/gen.py`, from
+  report_timing on a routed PS7 with all of them connected): M_AXI_GP0's
+  outputs launch 1.29-1.45 ns after MAXIGP0ACLK and its inputs want
+  0.48-0.88 ns of setup, S_AXI_HP0's 1.14-1.51 ns and 0.65-1.17 ns, each on
+  whatever clock drives the port's clock pin. Not the arcs' DELAY_*
+  properties, which read 0.175 ns over the timer's setups; a few setups move
+  with the design (MAXIGP0BID: 0.57 ns built alone, 0.74 ns with every
+  port). EMIO PJTAG's and trace's inputs aren't timed, nor hold (negative on
+  every AXI port, up to 0.325 ns on EMIO SDIO inputs). zybo-gp0's critical path now starts at the PS7
   (WSTRB[1] through two LUTs to a clock enable, 4.0 ns). Clock skew isn't
   modelled, between the PS7's clock pin and the fabric's registers or
   anywhere else; a Vivado build of a larger GP0 design missed 125 MHz by
-  0.2 ns. The PS7's other ports aren't timed yet (Vivado gives an arc only
-  for a pin the design connects).
+  0.2 ns.
 - Cells: what synthesis makes ("7-series synthesis", above). No slice
   MUXF7/F8 of its own; no DSP48E1 ALU modes or pre-adder (a product, or a
   cascaded pair's sum). A design's own IBUF, OBUF, OBUFT and IOBUF are its pins'
